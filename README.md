@@ -4,4 +4,4 @@ __Interpretable, similarity-driven multi-view embeddings from high-dimensional b
 
 ## Bibliography
 
-* (Avants et al., Similarity-driven multi-view embeddings from high-dimensional biomedical data.  Nat Comput Sci.  (2):143-152, Feb 2021)[https://pubmed.ncbi.nlm.nih.gov/33796865/]
+* [Avants et al., Similarity-driven multi-view embeddings from high-dimensional biomedical data.  Nat Comput Sci.  (2):143-152, Feb 2021](https://pubmed.ncbi.nlm.nih.gov/33796865/)
