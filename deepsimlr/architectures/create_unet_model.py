@@ -95,11 +95,10 @@ class create_unet_model_2d(nn.Module):
             self.decoding_convolution_tranpose_layers.append(deconv)
 
             conv = nn.Conv2d(in_channels=number_of_filters[number_of_layers-i],
-                              out_channels=number_of_filters[number_of_layers-i-1],
-                              kernel_size=deconvolution_kernel_size,
-                              padding="same")
-            self.encoding_convolution_layers.append(nn.Sequential(
-              conv, nn.ReLU(), conv, nn.ReLU()))
+                             out_channels=number_of_filters[number_of_layers-i-1],
+                             kernel_size=deconvolution_kernel_size,
+                             padding="same")
+            self.encoding_convolution_layers.append(nn.Sequential(conv, nn.ReLU(), conv, nn.ReLU()))
 
         conv = nn.Conv2d(in_channels=number_of_filters[0],
                          out_channels=number_of_outputs,
