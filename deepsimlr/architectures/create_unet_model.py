@@ -101,17 +101,17 @@ class create_unet_model_2d(nn.Module):
             self.encoding_convolution_layers.append(nn.Sequential(
               conv, nn.ReLU(), conv, nn.ReLU()))
 
-        conv = nn.Conv2D(in_channels=number_of_filters[0],
+        conv = nn.Conv2d(in_channels=number_of_filters[0],
                          out_channels=number_of_outputs,
                          kernel_size=1,
                          padding='same')
 
         if mode == 'sigmoid':
-            self.output = nn.Sequential(conv1, nn.Sigmoid())
+            self.output = nn.Sequential(conv, nn.Sigmoid())
         elif mode == 'classification':
-            self.output = nn.Sequential(conv1, nn.Softmax(dim=1))
+            self.output = nn.Sequential(conv, nn.Softmax(dim=1))
         elif mode == 'regression':
-            self.output = nn.Sequential(conv1, nn.Linear())
+            self.output = nn.Sequential(conv, nn.Linear())
         else:
             raise ValueError('mode must be either `classification`, `regression` or `sigmoid`.')
 
