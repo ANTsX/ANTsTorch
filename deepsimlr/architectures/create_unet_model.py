@@ -17,17 +17,21 @@ class create_unet_model_2d(nn.Module):
 
         super(create_unet_model_2d, self).__init__()
 
+        def nn_unet_activation_2d(number_of_features):
+            x = nn.Sequential(nn.InstanceNorm2d(number_of_features), nn.LeakyReLU(0.01))
+            return x
+
         initial_convolution_kernel_size = convolution_kernel_size
-        self.add_attention_gating = False
-        self.nn_unet_activation_style = False
+        add_attention_gating = False
+        nn_unet_activation_style = False
 
         if additional_options is not None:
 
             if "attentionGating" in additional_options:
-                self.add_attention_gating = True
+                add_attention_gating = True
 
             if "nnUnetActivationStyle" in additional_options:
-                self.nn_unet_activation_style = True
+                nn_unet_activation_style = True
 
             option = [o for o in additional_options if o.startswith('initialConvolutionKernelSize')]
             if not not option:
@@ -49,8 +53,6 @@ class create_unet_model_2d(nn.Module):
         # Encoding path
 
         self.pool = nn.MaxPool2d(kernel_size=pool_size, stride=strides)
-
-        self.activation = nn.RelU()
 
         self.encoding_convolution_layers = []
         for i in range(number_of_layers):
@@ -79,7 +81,11 @@ class create_unet_model_2d(nn.Module):
                                   kernel_size=initial_convolution_kernel_size,
                                   padding='same')
 
-            self.encoding_convolution_layers.append(nn.Sequential(conv1, nn.ReLU(), conv2, nn.ReLU()))
+            if nn_unet_activation_style:
+                self.encoding_convolution_layers.append(nn.Sequential(conv1, nn_unet_activation_2d(number_of_filters[i]),
+                                                                      conv2, nn_unet_activation_2d(number_of_filters[i]))
+            else:
+                self.encoding_convolution_layers.append(nn.Sequential(conv1, nn.ReLU(), conv2, nn.ReLU()))
 
         # Decoding path
 
@@ -92,13 +98,22 @@ class create_unet_model_2d(nn.Module):
                                         out_channels=number_of_filters[number_of_layers-i-1],
                                         kernel_size=deconvolution_kernel_size,
                                         padding="same")
-            self.decoding_convolution_tranpose_layers.append(deconv)
+            if nn_unet_activation_style:
+                self.decoding_convolution_tranpose_layers.append(
+                    nn.Sequential(deconv, nn_unet_activation_2d(number_of_filters[number_of_layers-i-1])))
+            else:
+                self.decoding_convolution_tranpose_layers.append(deconv)
 
             conv = nn.Conv2d(in_channels=number_of_filters[number_of_layers-i],
                              out_channels=number_of_filters[number_of_layers-i-1],
                              kernel_size=deconvolution_kernel_size,
                              padding="same")
-            self.encoding_convolution_layers.append(nn.Sequential(conv, nn.ReLU(), conv, nn.ReLU()))
+
+            if nn_unet_activation_style:
+                self.decoding_convolution_layers.append(nn.Sequential(conv, nn_unet_activation_2d(number_of_filters[number_of_layers-i-1]),
+                                                                      conv, nn_unet_activation_2d(number_of_filters[number_of_layers-i-1])))
+            else:
+                self.encoding_convolution_layers.append(nn.Sequential(conv, nn.ReLU(), conv, nn.ReLU()))
 
         conv = nn.Conv2d(in_channels=number_of_filters[0],
                          out_channels=number_of_outputs,
