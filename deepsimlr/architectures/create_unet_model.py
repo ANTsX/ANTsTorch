@@ -83,7 +83,7 @@ class create_unet_model_2d(nn.Module):
 
             if nn_unet_activation_style:
                 self.encoding_convolution_layers.append(nn.Sequential(conv1, nn_unet_activation_2d(number_of_filters[i]),
-                                                                      conv2, nn_unet_activation_2d(number_of_filters[i]))
+                                                                      conv2, nn_unet_activation_2d(number_of_filters[i])))
             else:
                 self.encoding_convolution_layers.append(nn.Sequential(conv1, nn.ReLU(), conv2, nn.ReLU()))
 
