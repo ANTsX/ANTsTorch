@@ -1,5 +1,58 @@
 import torch
 import torch.nn as nn
+from torch.nn import functional as F
+import numpy as np
+
+def deconv_output_length(
+    input_length,
+    filter_size,
+    padding,
+    output_padding=None,
+    stride=0,
+    dilation=1,
+):
+    """Determines output length of a transposed convolution given input length.
+
+    Args:
+        input_length: Integer.
+        filter_size: Integer.
+        padding: one of `"same"`, `"valid"`, `"full"`.
+        output_padding: Integer, amount of padding along the output dimension.
+          Can be set to `None` in which case the output length is inferred.
+        stride: Integer.
+        dilation: Integer.
+
+    Returns:
+        The output length (integer).
+    """
+    assert padding in {"same", "valid", "full"}
+    if input_length is None:
+        return None
+
+    # Get the dilated kernel size
+    filter_size = filter_size + (filter_size - 1) * (dilation - 1)
+
+    # Infer length if output padding is None, else compute the exact length
+    if output_padding is None:
+        if padding == "valid":
+            length = input_length * stride + max(filter_size - stride, 0)
+        elif padding == "full":
+            length = input_length * stride - (stride + filter_size - 2)
+        elif padding == "same":
+            length = input_length * stride
+
+    else:
+        if padding == "same":
+            pad = filter_size // 2
+        elif padding == "valid":
+            pad = 0
+        elif padding == "full":
+            pad = filter_size - 1
+
+        length = (
+            (input_length - 1) * stride + filter_size - 2 * pad + output_padding
+        )
+    return length
 
 class create_unet_model_2d(nn.Module):
     def __init__(self, input_number_of_channels,
@@ -49,7 +102,6 @@ class create_unet_model_2d(nn.Module):
             number_of_filters = list()
             for i in range(number_of_layers):
                 number_of_filters.append(number_of_filters_at_base_layer * 2**i)
-        print(number_of_filters)
 
         # Encoding path
 
@@ -57,8 +109,6 @@ class create_unet_model_2d(nn.Module):
 
         self.encoding_convolution_layers = nn.ModuleList()
         for i in range(number_of_layers):
-
-            print("i = " + str(i))
 
             conv1 = None
             if i == 0:
@@ -100,23 +150,27 @@ class create_unet_model_2d(nn.Module):
             deconv = nn.ConvTranspose2d(in_channels=number_of_filters[number_of_layers-i],
                                         out_channels=number_of_filters[number_of_layers-i-1],
                                         kernel_size=deconvolution_kernel_size,
-                                        padding=0)
+                                        padding=1)
             if nn_unet_activation_style:
                 self.decoding_convolution_transpose_layers.append(
                     nn.Sequential(deconv, nn_unet_activation_2d(number_of_filters[number_of_layers-i-1])))
             else:
                 self.decoding_convolution_transpose_layers.append(deconv)
 
-            conv = nn.Conv2d(in_channels=number_of_filters[number_of_layers-i-1],
-                             out_channels=number_of_filters[number_of_layers-i-1],
-                             kernel_size=deconvolution_kernel_size,
-                             padding="same")
+            conv1 = nn.Conv2d(in_channels=number_of_filters[number_of_layers-i],
+                              out_channels=number_of_filters[number_of_layers-i-1],
+                              kernel_size=convolution_kernel_size,
+                              padding="same")
+            conv2 = nn.Conv2d(in_channels=number_of_filters[number_of_layers-i-1],
+                              out_channels=number_of_filters[number_of_layers-i-1],
+                              kernel_size=convolution_kernel_size,
+                              padding="same")
 
             if nn_unet_activation_style:
-                self.decoding_convolution_layers.append(nn.Sequential(conv, nn_unet_activation_2d(number_of_filters[number_of_layers-i-1]),
-                                                                      conv, nn_unet_activation_2d(number_of_filters[number_of_layers-i-1])))
+                self.decoding_convolution_layers.append(nn.Sequential(conv1, nn_unet_activation_2d(number_of_filters[number_of_layers-i-1]),
+                                                                      conv2, nn_unet_activation_2d(number_of_filters[number_of_layers-i-1])))
             else:
-                self.decoding_convolution_layers.append(nn.Sequential(conv, nn.ReLU(), conv, nn.ReLU()))
+                self.decoding_convolution_layers.append(nn.Sequential(conv1, nn.ReLU(), conv2, nn.ReLU()))
 
         conv = nn.Conv2d(in_channels=number_of_filters[0],
                          out_channels=number_of_outputs,
@@ -141,25 +195,29 @@ class create_unet_model_2d(nn.Module):
         encoding_path = x
         encoding_tensor_layers = list()
         for i in range(number_of_layers):
-            print("i = " + str(i))
             encoding_path = self.encoding_convolution_layers[i](encoding_path)
-            print(encoding_path.size())
-            encoding_path = self.pool(encoding_path)
-            print(encoding_path.size())
             encoding_tensor_layers.append(encoding_path)
+            if i < number_of_layers - 1:
+                encoding_path = self.pool(encoding_path)
 
         # Decoding path
-        output = encoding_path
+        decoding_path = encoding_tensor_layers[number_of_layers-1]
         for i in range(1, number_of_layers):
-            print("ii = " + str(i))
-            print(output.size())
-            output = self.decoding_convolution_transpose_layers[i-1](output, output.size())
-            print(output.size())
-            output = self.upsample(output)
-            print(output.size())
-            output = torch.cat([output, encoding_tensor_layers[number_of_layers-i-1]], 1)
-            output = self.decoding_convolution_layers[i-1](output)
+            input_size = np.array(decoding_path.size()[2:])
+            decoding_path = self.decoding_convolution_transpose_layers[i-1](decoding_path)
 
-        output = self.output(output)
+            size_difference = input_size - np.array(decoding_path.size()[2:])
+            padding = list()
+            padding.append(size_difference[0] // 2)
+            padding.append(size_difference[0] - padding[-1])
+            padding.append(size_difference[1] // 2)
+            padding.append(size_difference[1] - padding[-1])
+            decoding_path = F.pad(decoding_path, padding, "constant", 0)
+
+            decoding_path = self.upsample(decoding_path)
+            decoding_path = torch.cat([decoding_path, encoding_tensor_layers[number_of_layers-i-1]], 1)
+            decoding_path = self.decoding_convolution_layers[i-1](decoding_path)
+
+        output = self.output(decoding_path)
 
         return output
