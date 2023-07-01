@@ -3,14 +3,75 @@ import torch.nn as nn
 from torch.nn import functional as F
 import numpy as np
 
-# The architectural variants are (or should be) mostly identical to the
-# ANTsXNet u-net implementation.  However, some differences can be induced
-# by:
-#  * using nnUnetActivationStyle as the instance normalization layer
-#    implementations are different between Keras and PyTorch.
-#  *
 
 class create_unet_model_2d(nn.Module):
+    """
+    2-D implementation of the U-net deep learning architecture.
+
+    Creates a Pytorch model of the U-net deep learning architecture for image
+    segmentation and regression based on our ANTsPyNet Keras implementation:
+
+            https://github.com/ANTsX/ANTsPyNet/blob/master/antspynet/architectures/create_unet_model.py
+
+    The architectural variants are (or should be) mostly identical to the
+    ANTsXNet u-net Keras implementation.  However, some differences can be induced
+    by:
+      * using nnUnetActivationStyle as the instance normalization layer
+        implementations are different between Keras and PyTorch.
+
+    Arguments
+    ---------
+    input_channel_size : integer
+        Used for specifying the input tensor shape.
+
+    number_of_outputs : integer
+        Meaning depends on the mode.  For `classification` this is the number of
+        segmentation labels.  For `regression` this is the number of outputs.
+
+    number_of_layers : integer
+        number of encoding/decoding layers.
+
+    number_of_filters_at_base_layer : integer
+        number of filters at the beginning and end of the `U`.  Doubles at each
+        descending/ascending layer.
+
+    number_of_filters : tuple
+        tuple explicitly setting the number of filters at each layer.  One can
+        either set this or number_of_layers and  number_of_filters_at_base_layer.
+        Default = None.
+
+    convolution_kernel_size : tuple of length 2
+        Defines the kernel size during the encoding.
+
+    deconvolution_kernel_size : tuple of length 2
+        Defines the kernel size during the decoding.
+
+    pool_size : tuple of length 2
+        Defines the region for each pooling layer.
+
+    strides : tuple of length 2
+        Strides for the convolutional layers.
+
+    mode :  string
+        `classification`, `regression`, or `sigmoid`.  Default = `classification`.
+
+    additional_options : string or tuple of strings
+        specific configuration add-ons/tweaks:
+            * "attentionGating" -- attention-unet variant in https://pubmed.ncbi.nlm.nih.gov/33288961/
+            * "nnUnetActivationStyle" -- U-net activation explained in https://pubmed.ncbi.nlm.nih.gov/33288961/
+            * "initialConvolutionalKernelSize[X]" -- Set the first two convolutional layer kernel sizes to X.
+
+    Returns
+    -------
+    PyTorch model
+        A 2-D PyTorch model defining the U-net network.
+
+    Example
+    -------
+    >>> model = deepsimlr.create_unet_model_2d(input_channel_size=3)
+    >>> torchinfo.summary(model, input_size=(1, 3, 128, 128))
+    """
+
     def __init__(self, input_number_of_channels,
                        number_of_outputs=2,
                        number_of_layers=4,
@@ -217,17 +278,74 @@ class create_unet_model_2d(nn.Module):
         return output
 
 
-
-
-
-
-
-
-
-
-
-
 class create_unet_model_3d(nn.Module):
+    """
+    3-D implementation of the U-net deep learning architecture.
+
+    Creates a Pytorch model of the U-net deep learning architecture for image
+    segmentation and regression based on our ANTsPyNet Keras implementation:
+
+            https://github.com/ANTsX/ANTsPyNet/blob/master/antspynet/architectures/create_unet_model.py
+
+    The architectural variants are (or should be) mostly identical to the
+    ANTsXNet u-net Keras implementation.  However, some differences can be induced
+    by:
+      * using nnUnetActivationStyle as the instance normalization layer
+        implementations are different between Keras and PyTorch.
+
+    Arguments
+    ---------
+    input_channel_size : integer
+        Used for specifying the input tensor shape.
+
+    number_of_outputs : integer
+        Meaning depends on the mode.  For `classification` this is the number of
+        segmentation labels.  For `regression` this is the number of outputs.
+
+    number_of_layers : integer
+        number of encoding/decoding layers.
+
+    number_of_filters_at_base_layer : integer
+        number of filters at the beginning and end of the `U`.  Doubles at each
+        descending/ascending layer.
+
+    number_of_filters : tuple
+        tuple explicitly setting the number of filters at each layer.  One can
+        either set this or number_of_layers and  number_of_filters_at_base_layer.
+        Default = None.
+
+    convolution_kernel_size : tuple of length 3
+        Defines the kernel size during the encoding.
+
+    deconvolution_kernel_size : tuple of length 3
+        Defines the kernel size during the decoding.
+
+    pool_size : tuple of length 3
+        Defines the region for each pooling layer.
+
+    strides : tuple of length 3
+        Strides for the convolutional layers.
+
+    mode :  string
+        `classification`, `regression`, or `sigmoid`.  Default = `classification`.
+
+    additional_options : string or tuple of strings
+        specific configuration add-ons/tweaks:
+            * "attentionGating" -- attention-unet variant in https://pubmed.ncbi.nlm.nih.gov/33288961/
+            * "nnUnetActivationStyle" -- U-net activation explained in https://pubmed.ncbi.nlm.nih.gov/33288961/
+            * "initialConvolutionalKernelSize[X]" -- Set the first two convolutional layer kernel sizes to X.
+
+    Returns
+    -------
+    PyTorch model
+        A 3-D PyTorch model defining the U-net network.
+
+    Example
+    -------
+    >>> model = deepsimlr.create_unet_model_3d(input_channel_size=3)
+    >>> torchinfo.summary(model, input_size=(1, 3, 128, 128, 128))
+    """
+
     def __init__(self, input_number_of_channels,
                        number_of_outputs=2,
                        number_of_layers=4,
