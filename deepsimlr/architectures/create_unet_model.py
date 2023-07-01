@@ -52,6 +52,9 @@ class create_unet_model_2d(nn.Module):
     strides : tuple of length 2
         Strides for the convolutional layers.
 
+    dropout_rate : scalar
+        Float between 0 and 1 to use between dense layers.
+
     mode :  string
         `classification`, `regression`, or `sigmoid`.  Default = `classification`.
 
@@ -81,6 +84,7 @@ class create_unet_model_2d(nn.Module):
                        deconvolution_kernel_size=(2, 2),
                        pool_size=(2, 2),
                        strides=(2, 2),
+                       dropout_rate=0.0,
                        mode='classification',
                        additional_options=None
                       ):
@@ -180,10 +184,24 @@ class create_unet_model_2d(nn.Module):
                                   padding='same')
 
             if nn_unet_activation_style:
-                self.encoding_convolution_layers.append(nn.Sequential(conv1, nn_unet_activation_2d(number_of_filters[i]),
-                                                                      conv2, nn_unet_activation_2d(number_of_filters[i])))
+                if dropout_rate > 0.0:
+                   self.encoding_convolution_layers.append(
+                       nn.Sequential(conv1, nn_unet_activation_2d(number_of_filters[i]),
+                                     nn.Dropout(dropout_rate),
+                                     conv2, nn_unet_activation_2d(number_of_filters[i])))
+                else:
+                   self.encoding_convolution_layers.append(
+                       nn.Sequential(conv1, nn_unet_activation_2d(number_of_filters[i]),
+                                     conv2, nn_unet_activation_2d(number_of_filters[i])))
             else:
-                self.encoding_convolution_layers.append(nn.Sequential(conv1, nn.ReLU(), conv2, nn.ReLU()))
+                if dropout_rate > 0.0:
+                    self.encoding_convolution_layers.append(
+                        nn.Sequential(conv1, nn.ReLU(), conv2,
+                                      nn.Dropout(dropout_rate),
+                                      nn.ReLU()))
+                else:
+                    self.encoding_convolution_layers.append(
+                        nn.Sequential(conv1, nn.ReLU(), conv2, nn.ReLU()))
 
         # Decoding path
 
@@ -218,10 +236,24 @@ class create_unet_model_2d(nn.Module):
                               padding="same")
 
             if nn_unet_activation_style:
-                self.decoding_convolution_layers.append(nn.Sequential(conv1, nn_unet_activation_2d(number_of_filters[number_of_layers-i-1]),
-                                                                      conv2, nn_unet_activation_2d(number_of_filters[number_of_layers-i-1])))
+                if dropout_rate > 0.0:
+                   self.decoding_convolution_layers.append(
+                       nn.Sequential(conv1, nn_unet_activation_2d(number_of_filters[number_of_layers-i-1]),
+                                     nn.Dropout(dropout_rate),
+                                     conv2, nn_unet_activation_2d(number_of_filters[number_of_layers-i-1])))
+                else:
+                   self.decoding_convolution_layers.append(
+                       nn.Sequential(conv1, nn_unet_activation_2d(number_of_filters[number_of_layers-i-1]),
+                                     conv2, nn_unet_activation_2d(number_of_filters[number_of_layers-i-1])))
             else:
-                self.decoding_convolution_layers.append(nn.Sequential(conv1, nn.ReLU(), conv2, nn.ReLU()))
+                if dropout_rate > 0.0:
+                    self.decoding_convolution_layers.append(
+                        nn.Sequential(conv1, nn.ReLU(), conv2,
+                                      nn.Dropout(dropout_rate),
+                                      nn.ReLU()))
+                else:
+                    self.decoding_convolution_layers.append(
+                        nn.Sequential(conv1, nn.ReLU(), conv2, nn.ReLU()))
 
         conv = nn.Conv2d(in_channels=number_of_filters[0],
                          out_channels=number_of_outputs,
@@ -326,6 +358,9 @@ class create_unet_model_3d(nn.Module):
     strides : tuple of length 3
         Strides for the convolutional layers.
 
+    dropout_rate : scalar
+        Float between 0 and 1 to use between dense layers.
+
     mode :  string
         `classification`, `regression`, or `sigmoid`.  Default = `classification`.
 
@@ -355,6 +390,7 @@ class create_unet_model_3d(nn.Module):
                        deconvolution_kernel_size=(2, 2, 2),
                        pool_size=(2, 2, 2),
                        strides=(2, 2, 2),
+                       dropout_rate=0.5,
                        mode='classification',
                        additional_options=None
                       ):
@@ -454,10 +490,24 @@ class create_unet_model_3d(nn.Module):
                                   padding='same')
 
             if nn_unet_activation_style:
-                self.encoding_convolution_layers.append(nn.Sequential(conv1, nn_unet_activation_3d(number_of_filters[i]),
-                                                                      conv2, nn_unet_activation_3d(number_of_filters[i])))
+                if dropout_rate > 0.0:
+                   self.encoding_convolution_layers.append(
+                       nn.Sequential(conv1, nn_unet_activation_3d(number_of_filters[i]),
+                                     nn.Dropout(dropout_rate),
+                                     conv2, nn_unet_activation_3d(number_of_filters[i])))
+                else:
+                   self.encoding_convolution_layers.append(
+                       nn.Sequential(conv1, nn_unet_activation_3d(number_of_filters[i]),
+                                     conv2, nn_unet_activation_3d(number_of_filters[i])))
             else:
-                self.encoding_convolution_layers.append(nn.Sequential(conv1, nn.ReLU(), conv2, nn.ReLU()))
+                if dropout_rate > 0.0:
+                    self.encoding_convolution_layers.append(
+                        nn.Sequential(conv1, nn.ReLU(), conv2,
+                                      nn.Dropout(dropout_rate),
+                                      nn.ReLU()))
+                else:
+                    self.encoding_convolution_layers.append(
+                        nn.Sequential(conv1, nn.ReLU(), conv2, nn.ReLU()))
 
         # Decoding path
 
@@ -492,10 +542,24 @@ class create_unet_model_3d(nn.Module):
                               padding="same")
 
             if nn_unet_activation_style:
-                self.decoding_convolution_layers.append(nn.Sequential(conv1, nn_unet_activation_3d(number_of_filters[number_of_layers-i-1]),
-                                                                      conv2, nn_unet_activation_3d(number_of_filters[number_of_layers-i-1])))
+                if dropout_rate > 0.0:
+                   self.decoding_convolution_layers.append(
+                       nn.Sequential(conv1, nn_unet_activation_3d(number_of_filters[number_of_layers-i-1]),
+                                     nn.Dropout(dropout_rate),
+                                     conv2, nn_unet_activation_3d(number_of_filters[number_of_layers-i-1])))
+                else:
+                   self.decoding_convolution_layers.append(
+                       nn.Sequential(conv1, nn_unet_activation_3d(number_of_filters[number_of_layers-i-1]),
+                                     conv2, nn_unet_activation_3d(number_of_filters[number_of_layers-i-1])))
             else:
-                self.decoding_convolution_layers.append(nn.Sequential(conv1, nn.ReLU(), conv2, nn.ReLU()))
+                if dropout_rate > 0.0:
+                    self.decoding_convolution_layers.append(
+                        nn.Sequential(conv1, nn.ReLU(), conv2,
+                                      nn.Dropout(dropout_rate),
+                                      nn.ReLU()))
+                else:
+                    self.decoding_convolution_layers.append(
+                        nn.Sequential(conv1, nn.ReLU(), conv2, nn.ReLU()))
 
         conv = nn.Conv3d(in_channels=number_of_filters[0],
                          out_channels=number_of_outputs,
