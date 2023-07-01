@@ -11,13 +11,18 @@ class create_unet_model_2d(nn.Module):
     Creates a Pytorch model of the U-net deep learning architecture for image
     segmentation and regression based on our ANTsPyNet Keras implementation:
 
-            https://github.com/ANTsX/ANTsPyNet/blob/master/antspynet/architectures/create_unet_model.py
+        https://github.com/ANTsX/ANTsPyNet/blob/master/antspynet/architectures/create_unet_model.py
 
     The architectural variants are (or should be) mostly identical to the
-    ANTsXNet u-net Keras implementation.  However, some differences can be induced
-    by:
+    ANTsXNet u-net Keras implementation.  However, some differences exist:
       * using nnUnetActivationStyle as the instance normalization layer
         implementations are different between Keras and PyTorch.
+      * the weight_decay parameter used in the Keras implementation for
+        l2 regularization is not implemented  in PyTorch.  Rather it is
+        typically added onto the loss during optimization as explained
+        here:
+
+        https://discuss.pytorch.org/t/pytorch-equivalent-for-kernel-regulariser-in-tensorflow/142909
 
     Arguments
     ---------
@@ -317,13 +322,19 @@ class create_unet_model_3d(nn.Module):
     Creates a Pytorch model of the U-net deep learning architecture for image
     segmentation and regression based on our ANTsPyNet Keras implementation:
 
-            https://github.com/ANTsX/ANTsPyNet/blob/master/antspynet/architectures/create_unet_model.py
+        https://github.com/ANTsX/ANTsPyNet/blob/master/antspynet/architectures/create_unet_model.py
 
     The architectural variants are (or should be) mostly identical to the
     ANTsXNet u-net Keras implementation.  However, some differences can be induced
     by:
       * using nnUnetActivationStyle as the instance normalization layer
         implementations are different between Keras and PyTorch.
+      * the weight_decay parameter used in the Keras implementation for
+        l2 regularization is not implemented  in PyTorch.  Rather it is
+        typically added onto the loss during optimization as explained
+        here:
+
+        https://discuss.pytorch.org/t/pytorch-equivalent-for-kernel-regulariser-in-tensorflow/142909
 
     Arguments
     ---------
