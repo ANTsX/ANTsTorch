@@ -294,6 +294,8 @@ class create_unet_model_2d(nn.Module):
             input_size = np.array(decoding_path.size()[2:])
             decoding_path = self.decoding_convolution_transpose_layers[i-1](decoding_path)
 
+            # This code is necessary because "padding=same" doesn't
+            # exist for conv transpose layers in PyTorch.
             size_difference = input_size - np.array(decoding_path.size()[2:])
             padding = list()
             padding.append(size_difference[0] // 2)
@@ -606,6 +608,8 @@ class create_unet_model_3d(nn.Module):
             input_size = np.array(decoding_path.size()[2:])
             decoding_path = self.decoding_convolution_transpose_layers[i-1](decoding_path)
 
+            # This code is necessary because "padding=same" doesn't
+            # exist for conv transpose layers in PyTorch.
             size_difference = input_size - np.array(decoding_path.size()[2:])
             padding = list()
             padding.append(size_difference[0] // 2)
