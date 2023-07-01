@@ -80,7 +80,7 @@ class create_unet_model_2d(nn.Module):
     >>> torchinfo.summary(model, input_size=(1, 3, 128, 128))
     """
 
-    def __init__(self, input_number_of_channels,
+    def __init__(self, input_channel_size,
                        number_of_outputs=2,
                        number_of_layers=4,
                        number_of_filters_at_base_layer=32,
@@ -166,7 +166,7 @@ class create_unet_model_2d(nn.Module):
 
             conv1 = None
             if i == 0:
-                conv1 = nn.Conv2d(in_channels=input_number_of_channels,
+                conv1 = nn.Conv2d(in_channels=input_channel_size,
                                   out_channels=number_of_filters[i],
                                   kernel_size=initial_convolution_kernel_size,
                                   padding='same')
@@ -394,7 +394,7 @@ class create_unet_model_3d(nn.Module):
     >>> torchinfo.summary(model, input_size=(1, 3, 128, 128, 128))
     """
 
-    def __init__(self, input_number_of_channels,
+    def __init__(self, input_channel_size,
                        number_of_outputs=2,
                        number_of_layers=4,
                        number_of_filters_at_base_layer=32,
@@ -480,7 +480,7 @@ class create_unet_model_3d(nn.Module):
 
             conv1 = None
             if i == 0:
-                conv1 = nn.Conv3d(in_channels=input_number_of_channels,
+                conv1 = nn.Conv3d(in_channels=input_channel_size,
                                   out_channels=number_of_filters[i],
                                   kernel_size=initial_convolution_kernel_size,
                                   padding='same')
