@@ -30,6 +30,34 @@ class create_unet_model_2d(nn.Module):
             x = nn.Sequential(nn.InstanceNorm2d(number_of_features, affine=True), nn.LeakyReLU(0.01))
             return x
 
+        class attention_gate_2d(nn.Module):
+            def __init__(self, in_channels, out_channels):
+                super().__init__()
+                self.x_conv = nn.Conv2d(in_channels=in_channels,
+                                         out_channels=out_channels,
+                                         kernel_size=(1, 1),
+                                         stride=(1, 1),
+                                         padding="valid")
+                self.g_conv = nn.Conv2d(in_channels=in_channels,
+                                       out_channels=out_channels,
+                                       kernel_size=(1, 1),
+                                       stride=(1, 1),
+                                       padding="valid")
+                self.f_conv = nn.Sequential(nn.ReLU(),
+                                            nn.Conv2d(in_channels=out_channels,
+                                                      out_channels=1,
+                                                      kernel_size=(1, 1),
+                                                      stride=(1, 1),
+                                                      padding="valid"),
+                                            nn.Sigmoid())
+            def forward(self, x, g):
+                x_theta = self.x_conv(x)
+                g_phi = self.g_conv(g)
+                f = torch.add(x_theta, g_phi)
+                f_psi = self.f_conv(f)
+                attention = torch.multiply(x, f_psi)
+                return attention
+
         initial_convolution_kernel_size = convolution_kernel_size
         add_attention_gating = False
         nn_unet_activation_style = False
@@ -102,6 +130,7 @@ class create_unet_model_2d(nn.Module):
 
         self.decoding_convolution_transpose_layers = nn.ModuleList()
         self.decoding_convolution_layers = nn.ModuleList()
+        self.decoding_attention_gating_layers = nn.ModuleList()
         for i in range(1, number_of_layers):
             deconv = nn.ConvTranspose2d(in_channels=number_of_filters[number_of_layers-i],
                                         out_channels=number_of_filters[number_of_layers-i-1],
@@ -112,6 +141,11 @@ class create_unet_model_2d(nn.Module):
                     nn.Sequential(deconv, nn_unet_activation_2d(number_of_filters[number_of_layers-i-1])))
             else:
                 self.decoding_convolution_transpose_layers.append(deconv)
+
+            if add_attention_gating:
+                self.decoding_attention_gating_layers.append(
+                     attention_gate_2d(number_of_filters[number_of_layers-i-1],
+                                       number_of_filters[number_of_layers-i-1] // 4))
 
             conv1 = nn.Conv2d(in_channels=number_of_filters[number_of_layers-i],
                               out_channels=number_of_filters[number_of_layers-i-1],
@@ -171,7 +205,11 @@ class create_unet_model_2d(nn.Module):
             decoding_path = F.pad(decoding_path, padding, "constant", 0)
 
             decoding_path = self.upsample(decoding_path)
-            decoding_path = torch.cat([decoding_path, encoding_tensor_layers[number_of_layers-i-1]], 1)
+            if len(self.decoding_attention_gating_layers) > 0:
+                attention = self.decoding_attention_gating_layers[i-1](decoding_path, encoding_tensor_layers[number_of_layers-i-1])
+                decoding_path = torch.cat([decoding_path, attention], 1)
+            else:
+                decoding_path = torch.cat([decoding_path, encoding_tensor_layers[number_of_layers-i-1]], 1)
             decoding_path = self.decoding_convolution_layers[i-1](decoding_path)
 
         output = self.output(decoding_path)
