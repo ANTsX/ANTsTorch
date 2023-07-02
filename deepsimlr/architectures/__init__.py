@@ -1,2 +1,5 @@
 from .create_unet_model import create_unet_model_2d
 from .create_unet_model import create_unet_model_3d
+
+from .create_resnet_model import create_resnet_model_2d
+from .create_resnet_model import create_resnet_model_3d
