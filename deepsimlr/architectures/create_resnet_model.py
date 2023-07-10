@@ -264,7 +264,7 @@ class create_resnet_model_2d(nn.Module):
             self.dense = nn.Sequential(
                 nn.Linear(in_features=n_filters_out,
                           out_features=number_of_classification_labels),
-                nn.Softmax(dim=0))
+                nn.Softmax(dim=1))
         elif mode == 'regression':
             self.dense = nn.Linear(in_features=n_filters_out,
                           out_features=number_of_classification_labels)
@@ -543,7 +543,7 @@ class create_resnet_model_3d(nn.Module):
             self.dense = nn.Sequential(
                 nn.Linear(in_features=n_filters_out,
                           out_features=number_of_classification_labels),
-                nn.Softmax(dim=0))
+                nn.Softmax(dim=1))
         elif mode == 'regression':
             self.dense = nn.Linear(in_features=n_filters_out,
                           out_features=number_of_classification_labels)
