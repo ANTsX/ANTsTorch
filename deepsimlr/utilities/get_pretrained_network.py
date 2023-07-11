@@ -52,7 +52,7 @@ def get_pretrained_network(file_id=None,
 
     url = switch_networks(file_id)
 
-    if target_file_name == None:
+    if target_file_name is None:
         target_file_name = file_id + ".h5"
 
     if deepsimlr_cache_directory is None:

@@ -54,7 +54,7 @@ def get_deepsimlr_data(file_id=None,
 
     url = switch_data(file_id)
 
-    if target_file_name == None:
+    if target_file_name is None:
         target_file_name = file_id + ".nii.gz"
 
     if deepsimlr_cache_directory is None:
