@@ -59,7 +59,7 @@ def get_deepsimlr_data(file_id=None,
 
     if deepsimlr_cache_directory is None:
         deepsimlr_cache_directory = os.path.join(os.path.expanduser('~'), '.deepsimlr/')
-    target_file_name_path = deepsimlr_cache_directory + target_file_name
+    target_file_name_path = os.path.join(deepsimlr_cache_directory, target_file_name)
 
     if not os.path.exists(target_file_name_path):
         torchvision.datasets.utils.download_url(url,
