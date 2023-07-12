@@ -1,4 +1,5 @@
 antspyx
+antspynet
 torch
 torchvision
 

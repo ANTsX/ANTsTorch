@@ -34,16 +34,14 @@ def get_deepsimlr_data(file_id=None,
 
     def switch_data(argument):
         switcher = {
-            "biobank": "https://ndownloader.figshare.com/files/22429242",
-            "croppedMni152": "https://ndownloader.figshare.com/files/22933754"
+            "kirby": "https://ndownloader.figshare.com/files/25620107"
         }
         return(switcher.get(argument, "Invalid argument."))
 
     if file_id == None:
         raise ValueError("Missing file id.")
 
-    valid_list = ("biobank",
-                  "croppedMni152",
+    valid_list = ("kirby",
                   "show")
 
     if not file_id in valid_list:

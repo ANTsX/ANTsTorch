@@ -34,14 +34,14 @@ def get_pretrained_network(file_id=None,
 
     def switch_networks(argument):
         switcher = {
-            "not_yet": "https://ndownloader.figshare.com/files/28914441"
+            "mriModalityClassification": ""
         }
         return(switcher.get(argument, "Invalid argument."))
 
     if file_id == None:
         raise ValueError("Missing file id.")
 
-    valid_list = ("not_yet"
+    valid_list = ("mriModalityClassification",
                   "show")
 
     if not file_id in valid_list:
