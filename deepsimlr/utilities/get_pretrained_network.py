@@ -34,7 +34,7 @@ def get_pretrained_network(file_id=None,
 
     def switch_networks(argument):
         switcher = {
-            "mriModalityClassification": ""
+            "mriModalityClassification": "https://figshare.com/ndownloader/files/41539521"
         }
         return(switcher.get(argument, "Invalid argument."))
 
