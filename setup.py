@@ -11,5 +11,5 @@ setup(name='deepsimlr',
       author='Brian B. Avants and Nicholas J. Tustison',
       author_email='ntustison@gmail.com',
       packages=['deepsimlr','deepsimlr/architectures','deepsimlr/utilities'],
-      install_requires=['antspyx','torch','scikit-learn','numpy','requests','statsmodels','matplotlib','jax','jaxopt'],
+      install_requires=['antspyx','torch','scikit-learn','numpy','requests','statsmodels','matplotlib','jax','optax'],
       zip_safe=False)

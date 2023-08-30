@@ -54,3 +54,17 @@ for LEARNING_RATE in lrlist:
     for _ in range(99):
         params = update(params,LEARNING_RATE)
         print( deepsimlr.simlr_canonical_correlation_loss_pj( [x0,x1,x2], params )  )
+
+
+# now use optax to take advantage of adam
+import optax
+tx = optax.adam(learning_rate=0.001)
+opt_state = tx.init(params)
+loss_grad_fn = jax.value_and_grad(parfun)
+
+for i in range(101):
+  loss_val, grads = loss_grad_fn(params)
+  updates, opt_state = tx.update(grads, opt_state)
+  params = optax.apply_updates(params, updates)
+  if i % 10 == 0:
+    print('Loss step {}: '.format(i), loss_val)
