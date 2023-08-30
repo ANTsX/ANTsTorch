@@ -44,6 +44,7 @@ print( simlrgrad[0].shape )
 # https://github.com/google/flax
 # https://flax.readthedocs.io/en/latest/guides/flax_basics.html
 # https://raw.githubusercontent.com/tuananhle7/ica/main/ica.py
+# https://jax.readthedocs.io/en/latest/notebooks/Neural_Network_and_Data_Loading.html
 
 @jax.jit
 def update(params,lr):
