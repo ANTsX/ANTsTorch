@@ -41,6 +41,7 @@ print( simlrgrad[0].shape )
 # https://jax.readthedocs.io/en/latest/jax-101/05.1-pytrees.html
 # https://jax.readthedocs.io/en/latest/jax-101/04-advanced-autodiff.html
 # https://github.com/google/flax
+# https://flax.readthedocs.io/en/latest/guides/flax_basics.html
 
 @jax.jit
 def update(params,lr):
