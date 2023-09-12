@@ -5,6 +5,7 @@ import functools
 from sklearn.decomposition import FastICA
 from sklearn.decomposition import PCA
 import numpy as jnp
+import sys
 n=10
 nev=2
 x0 = random.normal(random.PRNGKey(0), (n,34))
@@ -32,12 +33,13 @@ for k in range(len(xx)):
   cor1[ cor1 < 0.5 ] = 0
   corl.append( cor1 )
 
+qlist=[0.5,0.5,0.5]
 print( deepsimlr.simlr_low_rank_frobenius_norm_loss_pj( xx, [v0,v1,v2] )  )
 myf = deepsimlr.simlr_low_rank_frobenius_norm_loss_pj
 myf = deepsimlr.simlr_canonical_correlation_loss_pj
 myf = deepsimlr.simlr_low_rank_frobenius_norm_loss_reg_sparse
-myf = deepsimlr.simlr_canonical_correlation_loss_reg_sparse
-parfun = jax.tree_util.Partial( myf, xx, corl, [0.5,0.5,0.5] )
+# myf = deepsimlr.simlr_canonical_correlation_loss_reg_sparse
+parfun = jax.tree_util.Partial( myf, xx, corl, qlist )
 myfg = jax.grad( parfun )
 print('testgrad with respect to v parameters')
 params = [v0,v1,v2]
@@ -51,14 +53,19 @@ tx = optax.adam(learning_rate=0.001)
 opt_state = tx.init(params)
 loss_grad_fn = jax.value_and_grad(parfun)
 
-for i in range(1010):
+for i in range(200):
   loss_val, grads = loss_grad_fn(params)
   updates, opt_state = tx.update(grads, opt_state)
   params = optax.apply_updates(params, updates)
+  for k in range(len(params)):
+    params[k] = deepsimlr.orthogonalize_and_q_sparsify( params[k], qlist[k], 
+      positivity='positive' )
+    print( str(k) + " min " + str(params[k].min()) + " max " + str( params[k].max()))
   if i % 10 == 0:
     print('Loss step {}: '.format(i), loss_val)
 
-import sys
+print("done")
+derka
 sys.exit(0)
 # see also 
 # https://jax.readthedocs.io/en/latest/notebooks/Common_Gotchas_in_JAX.html
