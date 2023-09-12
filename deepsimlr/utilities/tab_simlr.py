@@ -4,6 +4,133 @@ import numpy as np
 from sklearn.decomposition import FastICA
 from sklearn.decomposition import PCA
 import jax
+import numpy as np
+from sklearn.decomposition import NMF
+
+def orthogonalize_and_q_sparsify(v, sparseness_quantile=0.5, positivity='positive',
+                                 orthogonalize=False, soft_thresholding=True, unit_norm=False):
+
+    if sparseness_quantile == 0:
+        return v
+
+    eps_val = 0.0
+    for vv in range(v.shape[1]):
+        if np.var(v[:, vv]) > eps_val:
+            if vv > 0 and orthogonalize:
+                for vk in range(vv):
+                    temp = v[:, vk]
+                    denom = jnp.sum(temp * temp)
+                    if denom > eps_val:
+                        ip = jnp.sum(temp * v[:, vv]) / denom
+                    else:
+                        ip = 1
+                    v[:, vv] = v[:, vv] - temp * ip
+
+            local_v = v[:, vv].copy()
+            do_flip = False
+
+            if jnp.sum(local_v > 0) < jnp.sum(local_v < 0):
+                local_v = -local_v
+                do_flip = True
+
+            my_quant = jnp.quantile(local_v, sparseness_quantile)
+            if not soft_thresholding:
+                if positivity == 'positive':
+                    local_v[local_v <= my_quant] = 0
+                elif positivity == 'negative':
+                    local_v[local_v > my_quant] = 0
+                elif positivity == 'either':
+                    abs_local_v = jnp.abs(local_v)
+                    my_quant = jnp.quantile(abs_local_v, sparseness_quantile)
+                    local_v[abs_local_v < my_quant] = 0
+            else:
+                if positivity == 'positive':
+                    local_v[local_v < 0] = 0
+                my_sign = jnp.sign(local_v)
+                my_quant = jnp.quantile(jnp.abs(local_v), sparseness_quantile)
+                temp = jnp.abs(local_v) - my_quant
+                temp[temp < 0] = 0
+                local_v = my_sign * temp
+
+            if do_flip:
+                v[:, vv] = -local_v
+            else:
+                v[:, vv] = local_v
+
+    if unit_norm:
+        v /= jnp.linalg.norm(v, axis=0)
+
+    return v
+
+
+def simlr_low_rank_frobenius_norm_loss_reg_sparse( xlist, reglist, qlist, vlist ):
+    """
+    implements a low-rank loss function (error) for simlr (pure jax)
+
+    xlist : list of data matrices  ( nsamples by nfeatures )
+
+    reglist : list of regularization matrices
+
+    qlist : list of sparseness quantiles
+
+    vlist : list of current solution vectors ( nev by nfeatures )
+    """
+    loss_sum = 0.0
+    ulist = []
+    nev = vlist[0].shape[0]
+    for k in range(len(vlist)):
+        # regularize vlist[k]
+        vlist[k] = jnp.dot( vlist[k], reglist[k]  )
+        # make sparse
+        # vlist[k] = orthogonalize_and_q_sparsify( vlist[k], qlist[k] )
+        ulist.append( jnp.dot( xlist[k], vlist[k].T ) )    
+    for k in range(len(vlist)):
+        uconcat = []
+        for j in range(len(vlist)):
+            if k != j :
+                uconcat.append( ulist[j] )
+        uconcat = jnp.concatenate( uconcat, axis=1 )
+        p1 = jax.numpy.linalg.svd( uconcat, full_matrices=False )[0][:,0:nev]
+        p0 = jnp.dot( xlist[k], vlist[k].T )
+        loss_sum = loss_sum + jax.numpy.linalg.norm(  p0 - p1 )
+    return loss_sum
+
+
+def simlr_canonical_correlation_loss_reg_sparse( xlist, reglist, qlist, vlist ):
+    """
+    implements a low-rank CCA-like loss function (error) for simlr (pure jax)
+
+    xlist : list of data matrices  ( nsamples by nfeatures )
+
+    reglist : list of regularization matrices
+
+    qlist : list of sparseness quantiles
+
+    vlist : list of current solution vectors ( nev by nfeatures )
+    """
+    loss_sum = 0.0
+    ulist = []
+    nev = vlist[0].shape[0]
+    for k in range(len(vlist)):
+        # regularize vlist[k]
+        vlist[k] = jnp.dot( vlist[k], reglist[k]  )
+        # make sparse
+        # vlist[k] = orthogonalize_and_q_sparsify( vlist[k], qlist[k] )
+        ulist.append( jnp.dot( xlist[k], vlist[k].T ) )    
+    for k in range(len(vlist)):
+        uconcat = []
+        for j in range(len(vlist)):
+            if k != j :
+                uconcat.append( ulist[j] )
+        uconcat = jnp.concatenate( uconcat, axis=1 )
+        p1 = jax.numpy.linalg.svd( uconcat, full_matrices=False )[0][:,0:nev]
+        p0 = jnp.dot( xlist[k], vlist[k].T )
+        mydot0 = jnp.dot( p0.T, p0 )
+        mydot1 = jnp.dot( p1.T, p1 )
+        normer = jnp.mean( jnp.diagonal( mydot0 ) ) * jnp.mean( jnp.diagonal( mydot1 ) )
+        mydot = jnp.dot( p0.T, p1 )/jnp.sqrt(normer)
+        loss_sum = loss_sum - jnp.mean( jnp.diagonal( mydot ) )
+    return loss_sum
 
 def simlr_low_rank_frobenius_norm_loss_pj( xlist, vlist ):
     """

@@ -24,12 +24,20 @@ print( deepsimlr.simlr_low_rank_frobenius_norm_loss( [x0,x1,x2], [v0,v1,v2], ica
 print( deepsimlr.simlr_low_rank_frobenius_norm_loss( [x0,x1,x2], [v0,v1,v2], pca )  )
 print( deepsimlr.simlr_canonical_correlation_loss( [x0,x1,x2], [v0,v1,v2], icatx )  )
 print( deepsimlr.simlr_canonical_correlation_loss( [x0,x1,x2], [v0,v1,v2], pca )  )
+###############
+xx = [x0,x1,x2]
+corl = []
+for k in range(len(xx)):
+  cor1 = jnp.corrcoef( xx[k].T )
+  cor1[ cor1 < 0.5 ] = 0
+  corl.append( cor1 )
 
-
-print( deepsimlr.simlr_low_rank_frobenius_norm_loss_pj( [x0,x1,x2], [v0,v1,v2] )  )
+print( deepsimlr.simlr_low_rank_frobenius_norm_loss_pj( xx, [v0,v1,v2] )  )
 myf = deepsimlr.simlr_low_rank_frobenius_norm_loss_pj
 myf = deepsimlr.simlr_canonical_correlation_loss_pj
-parfun = jax.tree_util.Partial( myf, [x0,x1,x2] )
+myf = deepsimlr.simlr_low_rank_frobenius_norm_loss_reg_sparse
+myf = deepsimlr.simlr_canonical_correlation_loss_reg_sparse
+parfun = jax.tree_util.Partial( myf, xx, corl, [0.5,0.5,0.5] )
 myfg = jax.grad( parfun )
 print('testgrad with respect to v parameters')
 params = [v0,v1,v2]
@@ -37,6 +45,22 @@ simlrgrad = myfg(  params )
 print( simlrgrad[0].shape )
 
 
+# now use optax to take advantage of adam
+import optax
+tx = optax.adam(learning_rate=0.001)
+opt_state = tx.init(params)
+loss_grad_fn = jax.value_and_grad(parfun)
+
+for i in range(1010):
+  loss_val, grads = loss_grad_fn(params)
+  updates, opt_state = tx.update(grads, opt_state)
+  params = optax.apply_updates(params, updates)
+  if i % 10 == 0:
+    print('Loss step {}: '.format(i), loss_val)
+
+import sys
+derka2
+sys.exit(0)
 # see also 
 # https://jax.readthedocs.io/en/latest/notebooks/Common_Gotchas_in_JAX.html
 # https://jax.readthedocs.io/en/latest/jax-101/05.1-pytrees.html
@@ -59,15 +83,3 @@ for LEARNING_RATE in lrlist:
         print( deepsimlr.simlr_canonical_correlation_loss_pj( [x0,x1,x2], params )  )
 
 
-# now use optax to take advantage of adam
-import optax
-tx = optax.adam(learning_rate=0.001)
-opt_state = tx.init(params)
-loss_grad_fn = jax.value_and_grad(parfun)
-
-for i in range(101):
-  loss_val, grads = loss_grad_fn(params)
-  updates, opt_state = tx.update(grads, opt_state)
-  params = optax.apply_updates(params, updates)
-  if i % 10 == 0:
-    print('Loss step {}: '.format(i), loss_val)
