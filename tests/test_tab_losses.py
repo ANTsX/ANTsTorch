@@ -59,7 +59,6 @@ for i in range(1010):
     print('Loss step {}: '.format(i), loss_val)
 
 import sys
-derka2
 sys.exit(0)
 # see also 
 # https://jax.readthedocs.io/en/latest/notebooks/Common_Gotchas_in_JAX.html
