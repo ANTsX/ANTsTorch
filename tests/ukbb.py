@@ -18,7 +18,7 @@ mysim = deepsimlr.tab_simlr(
   sparseness,   
   deepsimlr.simlr_canonical_correlation_loss_reg_sparse, 
 #  deepsimlr.simlr_low_rank_frobenius_norm_loss_reg_sparse, 
-  nev=10, learning_rate=0.1, max_iterations=1001 )
+  nev=10, learning_rate=0.1, max_iterations=5001 )
 
 # write the features out
 pd.DataFrame(mysim[0]).to_csv("/tmp/ukt1ev.csv")

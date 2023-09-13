@@ -5,6 +5,15 @@ if ( ! exists("dd") ) {
     dd=read.csv(ukbfn)
     dd=dd[ fs( dd$T1Hier_resnetGrade > 1 ), ]
     dd=dd[ !is.na(dd$DTI_dti_FD_mean) & !is.na( dd$rsfMRI_rsf_FD_mean ),  ]
+    dd$subjectAge_BL=dd$age_MRI
+    usubs = table( dd[,'eid']  )
+    longsubs=usubs[usubs>1]
+    for ( u in names(longsubs) ) {
+        usel=dd[,'eid'] == u
+        dd$subjectAge_BL[usel]=min(dd$age_MRI[usel])
+        }
+    dd$Years.bl=dd$age_MRI-dd$subjectAge_BL
+    dd$DX='CN'
 }
 subct=table( dd$eid )
 crosssubs=names(subct[subct==1])
@@ -66,6 +75,7 @@ mf=paste("fluid_intelligence_score_f20016~(1|eid)+age_MRI+sex_f31_0_0+",simnames
 summary(lmer(mf,data=ee))
 
 
+
 # some clustering
 #
 pt1=data.frame(data.matrix(t1dd[xsel,]) %*% t(data.matrix(ev0)))
@@ -97,6 +107,7 @@ fff = predictSubtypeClusterMulti(
        clustername = "KMC",
        'eid' )
      
-
+#
+fff$age_MRI_round = round( fff$Years.bl)
 plotSubtypeChange( fff, idvar='eid', measurement='age_MRI', 
-    subtype='KMC', vizname= )
+    subtype='KMC', vizname='age_MRI_round' )
