@@ -7,10 +7,22 @@ from sklearn.decomposition import PCA
 import numpy as jnp
 import sys
 n=10
-nev=2
+nev=3
 x0 = random.normal(random.PRNGKey(0), (n,34))
 x1 = random.normal(random.PRNGKey(1), (n,49))
 x2 = random.normal(random.PRNGKey(3), (n,12))
+
+
+# def tab_simlr( matrix_list, correlation_threshold_list, quantile_list, loss_function, nev=2, learning_rate=1.e-4, max_iterations=5000, verbose=True ):
+regmats = deepsimlr.correlation_regularization_matrices( [x0,x1,x2], [0.5,0.5,0.5] )
+mysim = deepsimlr.tab_simlr( [x0,x1,x2], regmats, [0.9,0.9,0.9],   
+  deepsimlr.simlr_low_rank_frobenius_norm_loss_reg_sparse, 
+  nev=5, learning_rate=1, max_iterations=33 )
+
+mysimcc = deepsimlr.tab_simlr( [x0,x1,x2], regmats, [0.9,0.9,0.9],   
+  deepsimlr.simlr_canonical_correlation_loss_reg_sparse, 
+  nev=5, learning_rate=0.0005, max_iterations=33 )
+
 
 # initial solution
 u = random.normal(random.PRNGKey(n), (n,nev))
@@ -25,48 +37,11 @@ print( deepsimlr.simlr_low_rank_frobenius_norm_loss( [x0,x1,x2], [v0,v1,v2], ica
 print( deepsimlr.simlr_low_rank_frobenius_norm_loss( [x0,x1,x2], [v0,v1,v2], pca )  )
 print( deepsimlr.simlr_canonical_correlation_loss( [x0,x1,x2], [v0,v1,v2], icatx )  )
 print( deepsimlr.simlr_canonical_correlation_loss( [x0,x1,x2], [v0,v1,v2], pca )  )
-###############
-xx = [x0,x1,x2]
-corl = []
-for k in range(len(xx)):
-  cor1 = jnp.corrcoef( xx[k].T )
-  cor1[ cor1 < 0.5 ] = 0
-  corl.append( cor1 )
 
-qlist=[0.5,0.5,0.5]
-print( deepsimlr.simlr_low_rank_frobenius_norm_loss_pj( xx, [v0,v1,v2] )  )
-myf = deepsimlr.simlr_low_rank_frobenius_norm_loss_pj
-myf = deepsimlr.simlr_canonical_correlation_loss_pj
-myf = deepsimlr.simlr_low_rank_frobenius_norm_loss_reg_sparse
-# myf = deepsimlr.simlr_canonical_correlation_loss_reg_sparse
-parfun = jax.tree_util.Partial( myf, xx, corl, qlist )
-myfg = jax.grad( parfun )
-print('testgrad with respect to v parameters')
-params = [v0,v1,v2]
-simlrgrad = myfg(  params )
-print( simlrgrad[0].shape )
-
-
-# now use optax to take advantage of adam
-import optax
-tx = optax.adam(learning_rate=0.001)
-opt_state = tx.init(params)
-loss_grad_fn = jax.value_and_grad(parfun)
-
-for i in range(200):
-  loss_val, grads = loss_grad_fn(params)
-  updates, opt_state = tx.update(grads, opt_state)
-  params = optax.apply_updates(params, updates)
-  for k in range(len(params)):
-    params[k] = deepsimlr.orthogonalize_and_q_sparsify( params[k], qlist[k], 
-      positivity='positive' )
-    print( str(k) + " min " + str(params[k].min()) + " max " + str( params[k].max()))
-  if i % 10 == 0:
-    print('Loss step {}: '.format(i), loss_val)
-
-print("done")
 derka
 sys.exit(0)
+derka
+
 # see also 
 # https://jax.readthedocs.io/en/latest/notebooks/Common_Gotchas_in_JAX.html
 # https://jax.readthedocs.io/en/latest/jax-101/05.1-pytrees.html

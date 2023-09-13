@@ -11,4 +11,7 @@ from .tab_simlr import simlr_canonical_correlation_loss_pj
 from .tab_simlr import simlr_low_rank_frobenius_norm_loss_reg_sparse
 from .tab_simlr import simlr_canonical_correlation_loss_reg_sparse
 from .tab_simlr import orthogonalize_and_q_sparsify
+from .tab_simlr import basic_q_sparsify
+from .tab_simlr import correlation_regularization_matrices
+from .tab_simlr import correlation_regularization_matrices
 

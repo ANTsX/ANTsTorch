@@ -8,7 +8,8 @@ import numpy as np
 from sklearn.decomposition import NMF
 
 def orthogonalize_and_q_sparsify(v, sparseness_quantile=0.5, positivity='positive',
-                                 orthogonalize=False, soft_thresholding=True, unit_norm=False):
+                                 orthogonalize=False, soft_thresholding=True, 
+                                 unit_norm=False):
 
     if sparseness_quantile == 0:
         return v
@@ -24,12 +25,12 @@ def orthogonalize_and_q_sparsify(v, sparseness_quantile=0.5, positivity='positiv
                         ip = jnp.sum(temp * v[vv,:]) / denom
                     else:
                         ip = 1
-                    v[vv,:] = v[vv,:] - temp * ip
+                    v = v.at[vv,:].add( - temp * ip )
 
             local_v = v[vv,:]
             do_flip = False
 
-            if jnp.sum(local_v > 0) < jnp.sum(local_v < 0):
+            if jnp.quantile(local_v, 0.5) < 0:
                 do_flip = True
 
             if do_flip:
@@ -49,8 +50,33 @@ def orthogonalize_and_q_sparsify(v, sparseness_quantile=0.5, positivity='positiv
             v = v.at[vv,:].set(local_v)
 
     if unit_norm:
-        v /= jnp.linalg.norm(v, axis=0)
+        mynorm = jnp.linalg.norm(v)
+        if mynorm > 0:
+            v = jnp.divide( v, mynorm + eps_val )
 
+    return v
+
+def basic_q_sparsify(v, sparseness_quantile=0.5 ):
+
+    if sparseness_quantile == 0:
+        return v
+
+    eps_val = 1.0e-16
+    for vv in range(v.shape[0]):
+        if np.var(v[vv, :]) > eps_val:
+            local_v = v[vv,:]
+            do_flip = False
+            if jnp.quantile(local_v, 0.5) < 0:
+                do_flip = True
+            if do_flip:
+                local_v = -local_v
+ 
+            my_quant = jnp.quantile(local_v, sparseness_quantile)
+            local_v = local_v - my_quant
+            local_v = jnp.maximum(0, local_v )
+            if do_flip:
+               local_v = -local_v
+            v = v.at[vv,:].set(local_v)
     return v
 
 
@@ -73,7 +99,7 @@ def simlr_low_rank_frobenius_norm_loss_reg_sparse( xlist, reglist, qlist, vlist 
         # regularize vlist[k]
         vlist[k] = jnp.dot( vlist[k], reglist[k]  )
         # make sparse
-        vlist[k] = orthogonalize_and_q_sparsify( vlist[k], qlist[k] )
+        vlist[k] = basic_q_sparsify( vlist[k], qlist[k] )
         ulist.append( jnp.dot( xlist[k], vlist[k].T ) )    
     for k in range(len(vlist)):
         uconcat = []
@@ -106,7 +132,7 @@ def simlr_canonical_correlation_loss_reg_sparse( xlist, reglist, qlist, vlist ):
         # regularize vlist[k]
         vlist[k] = jnp.dot( vlist[k], reglist[k]  )
         # make sparse
-        vlist[k] = orthogonalize_and_q_sparsify( vlist[k], qlist[k] )
+        vlist[k] = basic_q_sparsify( vlist[k], qlist[k] )
         ulist.append( jnp.dot( xlist[k], vlist[k].T ) )    
     for k in range(len(vlist)):
         uconcat = []
@@ -226,7 +252,81 @@ def simlr_canonical_correlation_loss( xlist, vlist, simlrtransformer ):
         loss_sum = loss_sum - jnp.mean( jnp.diagonal( mydot ) )
     return loss_sum
 
+def correlation_regularization_matrices( matrix_list, correlation_threshold_list ):
+    """
+    matrix_list : list of matrices
 
+    correlation_threshold_list : list of correlation values; regularization will be constructed from this
+    """
+    corl = []
+    for k in range(len(matrix_list)):
+        cor1 = jnp.corrcoef( matrix_list[k].T )
+        cor1 = jnp.add( cor1, -correlation_threshold_list[k] )
+        cor1 = jnp.maximum(0, cor1 )
+        cor1sum = jnp.sum( cor1, axis=1 )
+        for j in range( cor1.shape[0] ):
+            if cor1sum[j] > 0:
+                cor1 = cor1.at[j,:].divide( cor1sum[j] )
+        corl.append( jax.numpy.asarray( cor1 ) )
+    return corl
+
+def tab_simlr( matrix_list, regularization_matrices, quantile_list, loss_function, nev=2, learning_rate=1.e-4, max_iterations=5000, verbose=True ):
+    """
+    matrix_list : list of matrices
+
+    regularization_matrices : list of regularization matrices
+
+    quantile_list : list of quantiles that determine sparseness level
+
+    loss_function : a deep_simlr loss function
+
+    learning_rate : initial learning_rate for the optimizer
+
+    nev : number of solution vectors per modality
+
+    max_iterations : maximum number of optimization steps
+
+    verbose: boolean
+
+    returns:
+        sparse solution parameters in form of a list (the v)
+    """
+    from jax import random
+    parfun = jax.tree_util.Partial( loss_function, matrix_list, regularization_matrices, quantile_list )
+    myfg = jax.grad( parfun )
+
+    # FIXME - make these
+    params = None
+    if params is None:
+        # initial solution
+        n = matrix_list[0].shape[0]
+        u = random.normal(random.PRNGKey(0), (n,nev))
+        params = []
+        for k in range(len(matrix_list)):
+            params.append(  jax.numpy.asarray( jnp.dot( u.T, matrix_list[k] ) ) )
+
+    # now use optax to take advantage of adam
+    import optax
+    tx = optax.adam(learning_rate=learning_rate)
+    opt_state = tx.init(params)
+    loss_grad_fn = jax.value_and_grad(parfun)
+    for i in range(max_iterations):
+        loss_val, grads = loss_grad_fn(params)
+        updates, opt_state = tx.update(grads, opt_state)
+        params = optax.apply_updates(params, updates)
+        if i % 10 == 0 and verbose:
+            print('Loss step {}: '.format(i), loss_val)
+
+    for k in range(len(params)):
+        params[k] = jnp.dot( params[k], regularization_matrices[k]  )
+        params[k] = basic_q_sparsify( params[k], quantile_list[k] )
+
+    if verbose:
+        for k in range(len(params)):
+            temp = jnp.dot( matrix_list[k], params[k].T )
+            print(jnp.corrcoef(temp.T))
+
+    return params
 
 from absl import app
 from absl import flags
@@ -330,7 +430,7 @@ def mainer(argv):
   tab_simlr(x0, x1, v0, v1, maxiter=300)
 
 
-def tab_simlr( x ):
+def tab_simlr_old( x ):
     """
     linear alebraic simlr for tabular data
 
