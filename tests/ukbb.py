@@ -14,14 +14,13 @@ simlrdata = [jnp.asarray( x0 ), jnp.asarray( x1 ), jnp.asarray( x2 ) ]
 regmats = deepsimlr.correlation_regularization_matrices( simlrdata, [qq,qq,qq] )
 mysim = deepsimlr.tab_simlr( 
   simlrdata, 
-  regmats, 
+  regmats,
   sparseness,   
-  deepsimlr.simlr_low_rank_frobenius_norm_loss_reg_sparse, 
-  nev=10, learning_rate=1, max_iterations=5000 )
-
-# mysimcc = deepsimlr.tab_simlr( [x0,x1,x2], regmats, [0.9,0.9,0.9],   
-#   deepsimlr.simlr_canonical_correlation_loss_reg_sparse, 
-#  nev=5, learning_rate=0.0005, max_iterations=33 )
-
+  deepsimlr.simlr_canonical_correlation_loss_reg_sparse, 
+#  deepsimlr.simlr_low_rank_frobenius_norm_loss_reg_sparse, 
+  nev=10, learning_rate=0.1, max_iterations=1001 )
 
 # write the features out
+pd.DataFrame(mysim[0]).to_csv("/tmp/ukt1ev.csv")
+pd.DataFrame(mysim[1]).to_csv("/tmp/ukdtiev.csv")
+pd.DataFrame(mysim[2]).to_csv("/tmp/ukrsfev.csv")
