@@ -34,12 +34,12 @@ if ( ! exists("dd") ) {
     write.csv( rsfdd[xsel,], "/tmp/ukrsfx.csv", row.names=FALSE)
     write.csv( dtidd[xsel,], "/tmp/ukdtix.csv", row.names=FALSE)
     write.csv( t1dd[xsel,], "/tmp/ukt1x.csv", row.names=FALSE)
-}
-#### longitudinal
-lsel = dd$eid %in% longsubs
-write.csv( rsfdd[lsel,], "/tmp/ukrsfl.csv", row.names=FALSE)
-write.csv( dtidd[lsel,], "/tmp/ukdtil.csv", row.names=FALSE)
-write.csv( t1dd[lsel,], "/tmp/ukt1l.csv", row.names=FALSE)
+    #### longitudinal
+    lsel = dd$eid %in% longsubs
+    write.csv( rsfdd[lsel,], "/tmp/ukrsfl.csv", row.names=FALSE)
+    write.csv( dtidd[lsel,], "/tmp/ukdtil.csv", row.names=FALSE)
+    write.csv( t1dd[lsel,], "/tmp/ukt1l.csv", row.names=FALSE)
+    }
 
 ev0=read.csv("/tmp/ukt1ev.csv")[,-1]
 ev1=read.csv("/tmp/ukdtiev.csv")[,-1]
@@ -47,23 +47,26 @@ ev2=read.csv("/tmp/ukrsfev.csv")[,-1]
 
 #
 pt1=data.frame(data.matrix(t1dd[lsel,]) %*% t(data.matrix(ev0)))
-colnames(pt1)=paste0("t1",1:ncol(pt1))
+colnames(pt1)=paste0("simlrt1",1:ncol(pt1))
 pdti=data.frame(data.matrix(dtidd[lsel,]) %*% t(data.matrix(ev1)))
-colnames(pdti)=paste0("dti",1:ncol(pt1))
+colnames(pdti)=paste0("simlrdti",1:ncol(pt1))
 prsf=data.frame(data.matrix(rsfdd[lsel,]) %*% t(data.matrix(ev2)))
-colnames(prsf)=paste0("rsf",1:ncol(pt1))
+colnames(prsf)=paste0("simlrrsf",1:ncol(pt1))
 
 
 library(lmerTest)
 ee=cbind(dd[lsel,],pt1,pdti,prsf)
 nsim=ncol(pt1)
+nsim=10
+gpca=paste(getNamesFromDataframe("genetic_principal_components",dd)[1:10]
+,collapse="+")
 simnames=paste(
-    paste0(paste0("t1",1:nsim),collapse='+'), "+",
-    paste0(paste0("dti",1:nsim),collapse='+'),"+",
-    paste0(paste0("rsf",1:nsim),collapse='+')
+    paste0(paste0("simlrt1",1:nsim),collapse='+'), "+",
+    paste0(paste0("simlrdti",1:nsim),collapse='+'),"+",
+    paste0(paste0("simlrrsf",1:nsim),collapse='+')
 )
-mf=paste("age_MRI~(1|eid)+sex_f31_0_0+",simnames)
-print(summary(lmer(mf,data=ee)))
+mf=paste("age_MRI~(1|eid)+sex_f31_0_0+",simnames,"+",gpca)
+print(summary(lmer(mf,data=dd)))
 
 
 intnames=getNamesFromDataframe("luid",dd)
@@ -72,36 +75,50 @@ for ( i in intnames) {
     print( table( !is.na( ee[,i]) ))
 }
 
-mf=paste("fluid_intelligence_score_f20016~(1|eid)+age_MRI+sex_f31_0_0+",simnames)
-print(summary(lmer(mf,data=ee)))
+for ( p in c("townsend_deprivation_index_at_recruitment_f22189_0_0","fluid_intelligence_score_f20016")) {
+    mf=paste(p,"~age_MRI+sex_f31_0_0+",simnames,"+",gpca)
+    print(summary(lm(mf,data=ee)))
+    print( p )
+}
 
 
 # some clustering
 #
 pt1=data.frame(data.matrix(t1dd[xsel,]) %*% t(data.matrix(ev0)))
-colnames(pt1)=paste0("t1",1:nsim)
+colnames(pt1)=paste0("simlrt1",1:nsim)
 pdti=data.frame(data.matrix(dtidd[xsel,]) %*% t(data.matrix(ev1)))
-colnames(pdti)=paste0("dti",1:nsim)
+colnames(pdti)=paste0("simlrdti",1:nsim)
 prsf=data.frame(data.matrix(rsfdd[xsel,]) %*% t(data.matrix(ev2)))
-colnames(prsf)=paste0("rsf",1:nsim)
-nsimu=3
+colnames(prsf)=paste0("simlrrsf",1:nsim)
+nsimu=10
 extras=cbind(pt1[,1:nsimu],pdti[,1:nsimu],prsf[,1:nsimu])
 ee=cbind(dd[xsel,],extras)
-nclust = 4
-#
+nclust = 8
+ctype='angle'
 myclust = trainSubtypeClusterMulti(
        ee,
        measureColumns=colnames(extras),
-       method = "kmeansflex",
+       method = ctype,
        nclust  )
+################
+eee = predictSubtypeClusterMulti(
+       ee,
+       measureColumns=colnames(extras),
+       myclust,
+       clustername = "KMC",
+       'eid', 'Years.bl', 0 )
+     
 
+print("ARGER")
+mf=paste("fluid_intelligence_score_f20016~(age_MRI+sex_f31_0_0)*KMC")
+print(summary(lm(mf,data=eee)))
 
 pt1l=data.frame(data.matrix(t1dd[lsel,]) %*% t(data.matrix(ev0)))
-colnames(pt1l)=paste0("t1",1:ncol(pt1))
+colnames(pt1l)=paste0("simlrt1",1:ncol(pt1))
 pdtil=data.frame(data.matrix(dtidd[lsel,]) %*% t(data.matrix(ev1)))
-colnames(pdtil)=paste0("dti",1:ncol(pt1))
+colnames(pdtil)=paste0("simlrdti",1:ncol(pt1))
 prsfl=data.frame(data.matrix(rsfdd[lsel,]) %*% t(data.matrix(ev2)))
-colnames(prsfl)=paste0("rsf",1:ncol(pt1))
+colnames(prsfl)=paste0("simlrrsf",1:ncol(pt1))
 ff=cbind(dd[lsel,],pt1l,pdtil,prsfl)
 
 fff = predictSubtypeClusterMulti(
@@ -113,7 +130,7 @@ fff = predictSubtypeClusterMulti(
      
 #
 
-pp=getNamesFromDataframe( "", fff, exclusions=c("T1Hier","rsfMRI","DTI","mean_fa","mean_mo","mean_l2","T1w","mean_l3","mean_l1") )
+pp=getNamesFromDataframe( "", fff, exclusions=c("T1Hier","rsfMRI","DTI","mean_fa","mean_mo","mean_l2","T1w","mean_l3","mean_l1","simlr","bold_effect","brain_position","groupdefined_mask","Years.bl") )
 
 isbl = fff$Years.bl==0
 for ( x in sample(pp) ) {
@@ -123,14 +140,15 @@ for ( x in sample(pp) ) {
         if ( length(usesubs)  > 1000 ) {
             # check for change
             ischange=FALSE
-            for ( k in 1:100 )
+            for ( k in 1:10 )
                 ischange = ischange | var( zzz[ zzz$eid == usesubs[k], x ] > 0 )
             if ( ischange ) {
                 zzz=zzz[zzz$eid %in% usesubs, ]
                 print(x)
                 zzz$yblr = round( zzz$Years.bl*2)
                 tsel = table( zzz$yblr )
-                tsel = names(tsel[tsel > 50])
+                print( tsel )
+                tsel = names(tsel[tsel > 400])
                 plotSubtypeChange( zzz[zzz$yblr %in% tsel,], idvar='eid',
                     measurement=x, 
                     subtype='KMC', vizname='yblr' ) %>% print() 

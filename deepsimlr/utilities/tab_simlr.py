@@ -4,8 +4,37 @@ import numpy as np
 from sklearn.decomposition import FastICA
 from sklearn.decomposition import PCA
 import jax
-import numpy as np
 from sklearn.decomposition import NMF
+
+
+def whiten_slow(x, k=None):
+    if x.size == 0:
+        print("Usage: x_whitened = whiten(x)")
+        return
+    if k is None:
+        k = min( x.shape )
+    n, p = x.shape
+    u, s, vh = jax.scipy.linalg.svd(jnp.dot(x, x.T), full_matrices=False)
+    dd = 1.0 / jnp.sqrt(s)[:k]
+    xw = jnp.dot(jnp.dot(u[:, :k], jnp.diag(dd)), vh[:k, :])
+    xw = jnp.dot(xw, x)
+    return xw
+
+def whiten(X,fudge=1E-18):
+   # the matrix X should be observations-by-components
+   # get the covariance matrix
+   Xcov = jnp.dot(X.T,X)
+   # eigenvalue decomposition of the covariance matrix
+   d, V = jnp.linalg.eigh(Xcov)
+   # a fudge factor can be used so that eigenvectors associated with
+   # small eigenvalues do not get overamplified.
+   d = jnp.maximum(fudge, d )
+   D = jnp.diag(1. / jnp.sqrt(d))
+   # whitening matrix
+   W = jnp.dot(jnp.dot(V, D), V.T)
+   # multiply by the whitening matrix
+   X_white = jnp.dot(X, W)
+   return X_white
 
 def orthogonalize_and_q_sparsify(v, sparseness_quantile=0.5, positivity='positive',
                                  orthogonalize=False, soft_thresholding=True, 
@@ -111,7 +140,6 @@ def simlr_low_rank_frobenius_norm_loss_reg_sparse( xlist, reglist, qlist, vlist 
         p0 = jnp.dot( xlist[k], vlist[k].T )
         loss_sum = loss_sum + jax.numpy.linalg.norm(  p0 - p1 )
     return loss_sum
-
 
 def simlr_canonical_correlation_loss_reg_sparse( xlist, reglist, qlist, vlist ):
     """
