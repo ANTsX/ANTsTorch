@@ -322,8 +322,6 @@ def tab_simlr( matrix_list, regularization_matrices, quantile_list, loss_functio
     from jax import random
     parfun = jax.tree_util.Partial( loss_function, matrix_list, regularization_matrices, quantile_list )
     myfg = jax.grad( parfun )
-
-    # FIXME - make these
     params = None
     if params is None:
         # initial solution

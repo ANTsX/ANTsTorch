@@ -27,7 +27,7 @@ regmats = deepsimlr.correlation_regularization_matrices( simlrdata, [qq,qq,qq] )
 mysim = deepsimlr.tab_simlr( 
   simlrdata, 
   regmats,
-  sparseness,   
+  sparseness,
   deepsimlr.simlr_canonical_correlation_loss_reg_sparse, 
 #   deepsimlr.simlr_low_rank_frobenius_norm_loss_reg_sparse,
   simlr_optimizer=optax.sgd( 0.1, momentum=0.8, nesterov=True ),
