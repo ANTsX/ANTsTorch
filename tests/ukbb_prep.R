@@ -1,5 +1,6 @@
 library( subtyper )
 library( ANTsR )
+library( rsq )
 ukbfn = "data/allcsvs/ukb672504_imaging_long.csv"
 if ( ! exists("dd") ) {
     dd=read.csv(ukbfn)
@@ -56,8 +57,7 @@ colnames(prsf)=paste0("simlrrsf",1:ncol(pt1))
 
 library(lmerTest)
 ee=cbind(dd[lsel,],pt1,pdti,prsf)
-nsim=ncol(pt1)
-nsim=10
+nsim=nsimu=5# ncol(pt1)
 gpca=paste(getNamesFromDataframe("genetic_principal_components",dd)[1:10]
 ,collapse="+")
 simnames=paste(
@@ -66,7 +66,7 @@ simnames=paste(
     paste0(paste0("simlrrsf",1:nsim),collapse='+')
 )
 mf=paste("age_MRI~(1|eid)+sex_f31_0_0+",simnames,"+",gpca)
-print(summary(lmer(mf,data=dd)))
+print(summary(lmer(mf,data=ee)))
 
 
 intnames=getNamesFromDataframe("luid",dd)
@@ -76,9 +76,12 @@ for ( i in intnames) {
 }
 
 for ( p in c("townsend_deprivation_index_at_recruitment_f22189_0_0","fluid_intelligence_score_f20016")) {
+    mf0=paste(p,"~age_MRI+sex_f31_0_0+",gpca)
     mf=paste(p,"~age_MRI+sex_f31_0_0+",simnames,"+",gpca)
-    print(summary(lm(mf,data=ee)))
-    print( p )
+    bmdl=lm(mf0,data=ee)
+    mdl=lm(mf,data=ee)
+    print(summary(mdl))
+    print( paste( p, rsq(bmdl), rsq(mdl) ))
 }
 
 
@@ -90,10 +93,9 @@ pdti=data.frame(data.matrix(dtidd[xsel,]) %*% t(data.matrix(ev1)))
 colnames(pdti)=paste0("simlrdti",1:nsim)
 prsf=data.frame(data.matrix(rsfdd[xsel,]) %*% t(data.matrix(ev2)))
 colnames(prsf)=paste0("simlrrsf",1:nsim)
-nsimu=10
 extras=cbind(pt1[,1:nsimu],pdti[,1:nsimu],prsf[,1:nsimu])
 ee=cbind(dd[xsel,],extras)
-nclust = 8
+nclust = 4
 ctype='angle'
 myclust = trainSubtypeClusterMulti(
        ee,
@@ -150,8 +152,10 @@ for ( x in sample(pp) ) {
                 print( tsel )
                 tsel = names(tsel[tsel > 400])
                 plotSubtypeChange( zzz[zzz$yblr %in% tsel,], idvar='eid',
-                    measurement=x, 
+                    measurement=x, whiskervar='se',
                     subtype='KMC', vizname='yblr' ) %>% print() 
+                myform = paste(x,"~(1|eid)+(age_MRI+sex_f31_0_0)*KMC")
+                print(summary( lmer( myform,data=zzz)))
             }
         }
     }

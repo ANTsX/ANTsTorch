@@ -298,7 +298,7 @@ def correlation_regularization_matrices( matrix_list, correlation_threshold_list
         corl.append( jax.numpy.asarray( cor1 ) )
     return corl
 
-def tab_simlr( matrix_list, regularization_matrices, quantile_list, loss_function, nev=2, learning_rate=1.e-4, max_iterations=5000, verbose=True ):
+def tab_simlr( matrix_list, regularization_matrices, quantile_list, loss_function, simlr_optimizer, nev=2, max_iterations=5000, verbose=True ):
     """
     matrix_list : list of matrices
 
@@ -308,7 +308,7 @@ def tab_simlr( matrix_list, regularization_matrices, quantile_list, loss_functio
 
     loss_function : a deep_simlr loss function
 
-    learning_rate : initial learning_rate for the optimizer
+    simlr_optimizer : optax optimizer to use with simlr (initialized with relevant parameters)
 
     nev : number of solution vectors per modality
 
@@ -333,18 +333,23 @@ def tab_simlr( matrix_list, regularization_matrices, quantile_list, loss_functio
         for k in range(len(matrix_list)):
             params.append(  jax.numpy.asarray( jnp.dot( u.T, matrix_list[k] ) ) )
 
-    # now use optax to take advantage of adam
+    import math
+    best_params = params
+    best_e = math.inf
     import optax
-    tx = optax.adam(learning_rate=learning_rate)
-    opt_state = tx.init(params)
+    opt_state = simlr_optimizer.init(params)
     loss_grad_fn = jax.value_and_grad(parfun)
     for i in range(max_iterations):
         loss_val, grads = loss_grad_fn(params)
-        updates, opt_state = tx.update(grads, opt_state)
+        if loss_val < best_e:
+            best_params = params
+            best_e = loss_val
+        updates, opt_state = simlr_optimizer.update(grads, opt_state, params=params )
         params = optax.apply_updates(params, updates)
         if i % 10 == 0 and verbose:
             print('Loss step {}: '.format(i), loss_val)
 
+    params = best_params
     for k in range(len(params)):
         params[k] = jnp.dot( params[k], regularization_matrices[k]  )
         params[k] = basic_q_sparsify( params[k], quantile_list[k] )
