@@ -421,8 +421,7 @@ def tab_simlr( matrix_list, regularization_matrices, quantile_list, loss_functio
             temp = temp/jnp.linalg.norm(temp)
             for j in range(k+1,len(params)):
                 temp2 = jnp.dot( matrix_list[j], params[j].T )
-                mydot = jnp.dot( temp,
-                    temp2/jnp.linalg.norm(temp2) )
+                mydot = jnp.dot( temp.T, temp2/jnp.linalg.norm(temp2) )
                 print( jnp.trace( jnp.abs( mydot ) )/nev )
 
     return params
