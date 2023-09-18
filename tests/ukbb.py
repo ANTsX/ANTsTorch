@@ -49,7 +49,7 @@ regmats = deepsimlr.correlation_regularization_matrices( simlrdata, [qq,qq,qq] )
 lr=10.0
 parfun = jax.tree_util.Partial( 
   deepsimlr.simlr_absolute_canonical_covariance, 
-  simlrdata, regmats, sparseness, True, 1e-6 )
+  simlrdata, regmats, sparseness, True, 0.5 )
 
 # lion and rmsprop looks best for this
 lr=0.01
@@ -78,12 +78,12 @@ for k in range(len(mysim)):
   temp = jnp.dot( simlrdata[k], mysim[k].T )
   for j in range(k+1,len(mysim)):
     temp2 = jnp.dot( simlrdata[j], mysim[j].T )
-    print( jnp.diag(corr2_coeff(temp.T,temp2.T)) )
+    print( jnp.diag(deepsimlr.corr2_coeff(temp.T,temp2.T)) )
 
 k=0
-j=1
+j=0
 temp = jnp.dot( simlrdata[k], mysim[k].T )
 temp2 = jnp.dot( simlrdata[j], mysim[j].T )
-jnp.diag(corr2_coeff(temp.T,temp2.T))
+deepsimlr.corr2_coeff(temp.T,temp2.T)
 # print( jnp.trace( jnp.abs( mydot ) )/nev )
 

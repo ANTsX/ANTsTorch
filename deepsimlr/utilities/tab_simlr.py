@@ -232,10 +232,11 @@ def simlr_absolute_canonical_covariance( xlist, reglist, qlist, positivity, nond
         intramodalityCor = corr2_coeff( p0.T, p0.T )
         intermodalityCor = corr2_coeff( p0.T, p1.T )
         offdiag = 0.0
+        offdiagcount = ( nev * nev - nev ) / 2
         for q0 in range(1,intramodalityCor.shape[0]):
             for q1 in range(q0+1,intramodalityCor.shape[1]):
                 lcov = intramodalityCor.at[q0,q1].get()
-                offdiag = offdiag + lcov*lcov/nev
+                offdiag = offdiag + jnp.abs(lcov)/offdiagcount
         mycorr = jnp.trace( jnp.abs( intermodalityCor ) )/nev
         loss_sum = loss_sum - mycorr + offdiag * nondiag_weight
     return loss_sum
@@ -422,16 +423,14 @@ def tab_simlr( matrix_list, regularization_matrices, quantile_list, loss_functio
         print("Within modality")
         for k in range(len(params)):
             temp = jnp.dot( matrix_list[k], params[k].T )
-            print(jnp.corrcoef(temp.T))
+            print(corr2_coeff( temp.T, temp.T ))
 
         print("Between modality")
         for k in range(len(params)):
             temp = jnp.dot( matrix_list[k], params[k].T )
-            temp = temp/jnp.linalg.norm(temp)
             for j in range(k+1,len(params)):
                 temp2 = jnp.dot( matrix_list[j], params[j].T )
-                mydot = jnp.dot( temp.T, temp2/jnp.linalg.norm(temp2) )
-                print( jnp.trace( jnp.abs( mydot ) )/nev )
+                print( jnp.diag( corr2_coeff( temp.T, temp2.T )) )
 
     return params
 
