@@ -143,7 +143,7 @@ def simlr_low_rank_frobenius_norm_loss_reg_sparse( xlist, reglist, qlist, positi
         loss_sum = loss_sum + jax.numpy.linalg.norm(  p0 - p1 )
     return loss_sum
 
-def simlr_canonical_correlation_loss_reg_sparse( xlist, reglist, qlist, positivity, vlist ):
+def simlr_canonical_correlation_loss_reg_sparse( xlist, reglist, qlist, positivity, nondiag_weight, vlist ):
     """
     implements a low-rank CCA-like loss function (error) for simlr (pure jax)
 
@@ -155,9 +155,10 @@ def simlr_canonical_correlation_loss_reg_sparse( xlist, reglist, qlist, positivi
 
     positivity : boolean
 
+    nondiag_weight : scalar parameter penalizing offdiagonal correlations within a given modality
+
     vlist : list of current solution vectors ( nev by nfeatures )
     """
-    nondiag_weight = 1.e-2
     loss_sum = 0.0
     ulist = []
     nev = vlist[0].shape[0]
@@ -177,11 +178,57 @@ def simlr_canonical_correlation_loss_reg_sparse( xlist, reglist, qlist, positivi
         p0 = jnp.dot( xlist[k], vlist[k].T )
         mydot0 = jnp.dot( p0.T, p0 )
         mydot1 = jnp.dot( p1.T, p1 )
-        normer =  jnp.linalg.norm( mydot0 ) * jnp.linalg.norm( mydot1 )
+        normer =  jnp.sqrt( jnp.linalg.norm( mydot0 ) * jnp.linalg.norm( mydot1 ))
         mydot = jnp.dot( p0.T, p1 )/normer
         offdiag = jnp.linalg.norm( jnp.eye(mydot.shape[0]) - mydot ) * nondiag_weight
         mycorr = jnp.mean( jnp.diagonal( mydot ) )
         loss_sum = loss_sum - mycorr + offdiag 
+    return loss_sum
+
+def simlr_absolute_canonical_covariance( xlist, reglist, qlist, positivity, nondiag_weight, vlist ):
+    """
+    implements a low-rank CCA-like loss function (error) for simlr (pure jax)
+
+    xlist : list of data matrices  ( nsamples by nfeatures )
+
+    reglist : list of regularization matrices
+
+    qlist : list of sparseness quantiles
+
+    positivity : boolean
+
+    nondiag_weight : scalar parameter penalizing offdiagonal correlations within a given modality
+
+    vlist : list of current solution vectors ( nev by nfeatures )
+    """
+    loss_sum = 0.0
+    ulist = []
+    nev = vlist[0].shape[0]
+    for k in range(len(vlist)):
+        # regularize vlist[k]
+        vlist[k] = jnp.dot( vlist[k], reglist[k]  )
+        # make sparse
+        vlist[k] = orthogonalize_and_q_sparsify( vlist[k], qlist[k],positivity=positivity )
+        ulist.append( jnp.dot( xlist[k], vlist[k].T ) )    
+    for k in range(len(vlist)):
+        uconcat = []
+        for j in range(len(vlist)):
+            if k != j :
+                uconcat.append( ulist[j] )
+        uconcat = jnp.concatenate( uconcat, axis=1 )
+        p1 = jax.numpy.linalg.svd( uconcat, full_matrices=False )[0][:,0:nev]
+        p0 = jnp.dot( xlist[k], vlist[k].T )
+        p0 = p0 / jnp.linalg.norm( p0 )
+        p1 = p1 / jnp.linalg.norm( p1 )
+        intramodalityCov = jnp.dot( p0.T, p0 )
+        intermodalityCov = jnp.dot( p0.T, p1 )
+        offdiag = 0.0
+        for q0 in range(1,intramodalityCov.shape[0]):
+            for q1 in range(q0+1,intramodalityCov.shape[1]):
+                lcov = intramodalityCov.at[q0,q1].get()
+                offdiag = offdiag + lcov*lcov
+        mycorr = jnp.trace( jnp.abs( intermodalityCov ) )
+        loss_sum = loss_sum - mycorr + offdiag * nondiag_weight
     return loss_sum
 
 def simlr_low_rank_frobenius_norm_loss_pj( xlist, vlist ):
@@ -205,6 +252,8 @@ def simlr_low_rank_frobenius_norm_loss_pj( xlist, vlist ):
         uconcat = jnp.concatenate( uconcat, axis=1 )
         p1 = jax.numpy.linalg.svd( uconcat, full_matrices=False )[0][:,0:nev]
         p0 = jnp.dot( xlist[k], vlist[k].T )
+        p0 = p0 / jnp.linalg.norm( p0 )
+        p1 = p1 / jnp.linalg.norm( p1 )
         loss_sum = loss_sum + jax.numpy.linalg.norm(  p0 - p1 )
     return loss_sum
 
@@ -313,7 +362,7 @@ def tab_simlr( matrix_list, regularization_matrices, quantile_list, loss_functio
 
     quantile_list : list of quantiles that determine sparseness level
 
-    loss_function : a deep_simlr loss function
+    loss_function : a partial deep_simlr loss function where its only parameter is the current solution value (params)
 
     simlr_optimizer : optax optimizer to use with simlr (initialized with relevant parameters)
 
@@ -329,8 +378,7 @@ def tab_simlr( matrix_list, regularization_matrices, quantile_list, loss_functio
         sparse solution parameters in form of a list (the v)
     """
     from jax import random
-    parfun = jax.tree_util.Partial( loss_function, matrix_list, regularization_matrices, quantile_list, positivity )
-    myfg = jax.grad( parfun )
+    myfg = jax.grad( loss_function )
     params = None
     if params is None:
         # initial solution
@@ -345,7 +393,7 @@ def tab_simlr( matrix_list, regularization_matrices, quantile_list, loss_functio
     best_e = math.inf
     import optax
     opt_state = simlr_optimizer.init(params)
-    loss_grad_fn = jax.value_and_grad(parfun)
+    loss_grad_fn = jax.value_and_grad(loss_function)
     for i in range(max_iterations):
         loss_val, grads = loss_grad_fn(params)
         if loss_val < best_e:
@@ -362,9 +410,18 @@ def tab_simlr( matrix_list, regularization_matrices, quantile_list, loss_functio
         params[k] = orthogonalize_and_q_sparsify( params[k], quantile_list[k],positivity=positivity )
 
     if verbose:
+        print("Within modality")
         for k in range(len(params)):
             temp = jnp.dot( matrix_list[k], params[k].T )
             print(jnp.corrcoef(temp.T))
+
+        print("Between modality")
+        for k in range(len(params)):
+            temp = jnp.dot( matrix_list[k], params[k].T )
+            for j in range(k+1,len(params)):
+                temp2 = jnp.dot( matrix_list[j], params[j].T )
+                mydot = jnp.dot( temp.T, temp2 )
+                print( jnp.trace( jnp.abs( mydot ) ) )
 
     return params
 
