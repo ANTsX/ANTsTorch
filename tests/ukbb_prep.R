@@ -46,6 +46,10 @@ ev0=read.csv("/tmp/ukt1ev.csv")[,-1]
 ev1=read.csv("/tmp/ukdtiev.csv")[,-1]
 ev2=read.csv("/tmp/ukrsfev.csv")[,-1]
 
+ev0=read.csv("/tmp/ukt1ev_b.csv")[,-1]
+ev1=read.csv("/tmp/ukdtiev_b.csv")[,-1]
+ev2=read.csv("/tmp/ukrsfev_b.csv")[,-1]
+
 #
 pt1=data.frame(data.matrix(t1dd[lsel,]) %*% t(data.matrix(ev0)))
 colnames(pt1)=paste0("simlrt1",1:ncol(pt1))
@@ -57,7 +61,7 @@ colnames(prsf)=paste0("simlrrsf",1:ncol(pt1))
 
 library(lmerTest)
 ee=cbind(dd[lsel,],pt1,pdti,prsf)
-nsim=nsimu=5# ncol(pt1)
+nsim=nsimu=ncol(pt1)
 gpca=paste(getNamesFromDataframe("genetic_principal_components",dd)[1:10]
 ,collapse="+")
 simnames=paste(
@@ -76,8 +80,8 @@ for ( i in intnames) {
 }
 
 for ( p in c("townsend_deprivation_index_at_recruitment_f22189_0_0","fluid_intelligence_score_f20016")) {
-    mf0=paste(p,"~age_MRI+sex_f31_0_0+",gpca)
-    mf=paste(p,"~age_MRI+sex_f31_0_0+",simnames,"+",gpca)
+    mf0=paste(p,"~subjectAge_BL+sex_f31_0_0+",gpca)
+    mf=paste(p,"~subjectAge_BL+sex_f31_0_0+",simnames,"+",gpca)
     bmdl=lm(mf0,data=ee)
     mdl=lm(mf,data=ee)
     print(summary(mdl))
@@ -95,7 +99,7 @@ prsf=data.frame(data.matrix(rsfdd[xsel,]) %*% t(data.matrix(ev2)))
 colnames(prsf)=paste0("simlrrsf",1:nsim)
 extras=cbind(pt1[,1:nsimu],pdti[,1:nsimu],prsf[,1:nsimu])
 ee=cbind(dd[xsel,],extras)
-nclust = 6
+nclust = 8
 ctype='ejaccard'
 myclust = trainSubtypeClusterMulti(
        ee,
@@ -105,7 +109,7 @@ myclust = trainSubtypeClusterMulti(
 ################
 ########################################################################### 
 ########################################################################### 
-eee = predictSubtypeClusterMulti(
+ee = predictSubtypeClusterMulti(
        ee,
        measureColumns=colnames(extras),
        myclust,
@@ -114,15 +118,15 @@ eee = predictSubtypeClusterMulti(
 ########################################################################### 
 ########################################################################### 
 print("ARGER")
-mf=paste("fluid_intelligence_score_f20016~(age_MRI+sex_f31_0_0)*KMC+",gpca)
+mf=paste("fluid_intelligence_score_f20016~(subjectAge_BL+sex_f31_0_0)*KMC+",gpca)
 print(summary(lm(mf,data=eee)))
-pt1l=data.frame(data.matrix(t1dd[lsel,]) %*% t(data.matrix(ev0)))
+pt1l=data.frame(data.matrix(t1dd[,]) %*% t(data.matrix(ev0)))
 colnames(pt1l)=paste0("simlrt1",1:ncol(pt1))
-pdtil=data.frame(data.matrix(dtidd[lsel,]) %*% t(data.matrix(ev1)))
+pdtil=data.frame(data.matrix(dtidd[,]) %*% t(data.matrix(ev1)))
 colnames(pdtil)=paste0("simlrdti",1:ncol(pt1))
-prsfl=data.frame(data.matrix(rsfdd[lsel,]) %*% t(data.matrix(ev2)))
+prsfl=data.frame(data.matrix(rsfdd[,]) %*% t(data.matrix(ev2)))
 colnames(prsfl)=paste0("simlrrsf",1:ncol(pt1))
-ff=cbind(dd[lsel,],pt1l,pdtil,prsfl)
+ff=cbind(dd[,],pt1l,pdtil,prsfl)
 ###########################################################################
 fff = predictSubtypeClusterMulti(
        ff,
@@ -131,19 +135,24 @@ fff = predictSubtypeClusterMulti(
        clustername = "KMC",
        'eid', 'Years.bl', 0 )
 #######################################
-pp=getNamesFromDataframe( "", fff, exclusions=c("T1Hier","rsfMRI","DTI","mean_fa","mean_mo","mean_l2","T1w","mean_l3","mean_l1","simlr","bold_effect","brain_position","groupdefined_mask","Years.bl","mean_md_","volume_of_grey_matter",'fa_skel',"genetic_principal_components","weightedmean_isovf","median_t2star","weightedmean_od","t1_brain") )
+pp=getNamesFromDataframe( "", fff, exclusions=c("T1Hier","rsfMRI","DTI","mean_fa","mean_mo","mean_l2","T1w","mean_l3","mean_l1","simlr","bold_effect","brain_position","groupdefined_mask","Years.bl","mean_md_","volume_of_grey_matter",'fa_skel',"genetic_principal_components","weightedmean_isovf","median_t2star","weightedmean_od","t1_brain","_in_tract","in_t1_","fmri_","percentile_of_zstatistic","_SNR","to_standard_space","_mass","_fat","_evr","faceshapes","job_coding",
+"time_to_press","triplet_entered","triplet") )
 
 isbl = fff$Years.bl==0
 for ( x in sample(pp) ) {
-    if ( class(fff[,x]) == 'numeric' ) {
+    if ( class(fff[,x]) == 'numeric' | class(fff[,x]) == 'integer' ) {
         zzz=fff[!is.na(fff[,x]),]
         usesubs=intersect( zzz$eid[isbl], zzz$eid[ !isbl ])
-        # usesubs=unique( zzz$eid[isbl] )
-        if ( length(usesubs)  > 1000 ) {
+#        usesubs=unique( zzz$eid[isbl] )
+        if ( length(usesubs)  > 100 ) {
             # check for change
             ischange=FALSE
-            for ( k in 1:10 )
-                ischange = ischange | ( var( zzz[ zzz$eid == usesubs[k], x ] ) > 0 )
+            for ( k in sample(1:nrow(zzz),44) ) {
+                selsub = (zzz$eid == usesubs[k])
+                if ( sum(selsub,na.rm=T) > 1 )
+                    ischange = ischange | ( var( zzz[ selsub , x ], na.rm=T ) > 0 )
+                if ( ischange ) break
+                }
             if ( ischange  ) {
                 zzz=zzz[zzz$eid %in% usesubs, ]
                 zzz$yblr = round( zzz$Years.bl)
@@ -153,9 +162,13 @@ for ( x in sample(pp) ) {
                 plotSubtypeChange( zzz[zzz$yblr %in% tsel,], idvar='eid',
                     measurement=x, whiskervar='se',
                     subtype='KMC', vizname='yblr' ) %>% print() 
-                myform = paste(x,"~(1|eid)+(age_MRI+sex_f31_0_0)+KMC")
-                print(coefficients(summary( lmer( myform,data=zzz)))[,-c(1:2)])
+                myform = paste(x,"~(1|eid)+(subjectAge_BL+sex_f31_0_0)+(", 
+                    simnames, ")*Years.bl")
+                myform = paste(x,"~(1|eid)+(subjectAge_BL+sex_f31_0_0)+KMC*Years.bl")
+                mdl =lmer( myform,data=zzz)
+                print(coefficients(summary( mdl))[,-c(1:2)])
                 print(x)
+#                visreg::visreg(mdl,'Years.bl',by='KMC')
             }
         }
     }

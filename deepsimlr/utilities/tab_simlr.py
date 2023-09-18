@@ -36,7 +36,7 @@ def whiten(X,fudge=1E-18):
    X_white = jnp.dot(X, W)
    return X_white
 
-def orthogonalize_and_q_sparsify(v, sparseness_quantile=0.5, positivity='positive',
+def orthogonalize_and_q_sparsify(v, sparseness_quantile=0.5, positivity=False,
                                  orthogonalize=False, soft_thresholding=True, 
                                  unit_norm=False):
 
@@ -66,7 +66,7 @@ def orthogonalize_and_q_sparsify(v, sparseness_quantile=0.5, positivity='positiv
                local_v = -local_v
  
             my_quant = jnp.quantile(local_v, sparseness_quantile)
-            if positivity == 'positive':
+            if positivity:
                 local_v = jnp.maximum(0, local_v )
             my_sign = jnp.sign(local_v)
             my_quant = jnp.quantile(jnp.abs(local_v), sparseness_quantile)
@@ -109,7 +109,7 @@ def basic_q_sparsify(v, sparseness_quantile=0.5 ):
     return v
 
 
-def simlr_low_rank_frobenius_norm_loss_reg_sparse( xlist, reglist, qlist, vlist ):
+def simlr_low_rank_frobenius_norm_loss_reg_sparse( xlist, reglist, qlist, positivity, vlist ):
     """
     implements a low-rank loss function (error) for simlr (pure jax)
 
@@ -118,6 +118,8 @@ def simlr_low_rank_frobenius_norm_loss_reg_sparse( xlist, reglist, qlist, vlist 
     reglist : list of regularization matrices
 
     qlist : list of sparseness quantiles
+
+    positivity : boolean
 
     vlist : list of current solution vectors ( nev by nfeatures )
     """
@@ -128,7 +130,7 @@ def simlr_low_rank_frobenius_norm_loss_reg_sparse( xlist, reglist, qlist, vlist 
         # regularize vlist[k]
         vlist[k] = jnp.dot( vlist[k], reglist[k]  )
         # make sparse
-        vlist[k] = basic_q_sparsify( vlist[k], qlist[k] )
+        vlist[k] = orthogonalize_and_q_sparsify( vlist[k], qlist[k], positivity=positivity )
         ulist.append( jnp.dot( xlist[k], vlist[k].T ) )    
     for k in range(len(vlist)):
         uconcat = []
@@ -141,7 +143,7 @@ def simlr_low_rank_frobenius_norm_loss_reg_sparse( xlist, reglist, qlist, vlist 
         loss_sum = loss_sum + jax.numpy.linalg.norm(  p0 - p1 )
     return loss_sum
 
-def simlr_canonical_correlation_loss_reg_sparse( xlist, reglist, qlist, vlist ):
+def simlr_canonical_correlation_loss_reg_sparse( xlist, reglist, qlist, positivity, vlist ):
     """
     implements a low-rank CCA-like loss function (error) for simlr (pure jax)
 
@@ -151,8 +153,11 @@ def simlr_canonical_correlation_loss_reg_sparse( xlist, reglist, qlist, vlist ):
 
     qlist : list of sparseness quantiles
 
+    positivity : boolean
+
     vlist : list of current solution vectors ( nev by nfeatures )
     """
+    nondiag_weight = 1.e-2
     loss_sum = 0.0
     ulist = []
     nev = vlist[0].shape[0]
@@ -160,7 +165,7 @@ def simlr_canonical_correlation_loss_reg_sparse( xlist, reglist, qlist, vlist ):
         # regularize vlist[k]
         vlist[k] = jnp.dot( vlist[k], reglist[k]  )
         # make sparse
-        vlist[k] = basic_q_sparsify( vlist[k], qlist[k] )
+        vlist[k] = orthogonalize_and_q_sparsify( vlist[k], qlist[k],positivity=positivity )
         ulist.append( jnp.dot( xlist[k], vlist[k].T ) )    
     for k in range(len(vlist)):
         uconcat = []
@@ -172,9 +177,11 @@ def simlr_canonical_correlation_loss_reg_sparse( xlist, reglist, qlist, vlist ):
         p0 = jnp.dot( xlist[k], vlist[k].T )
         mydot0 = jnp.dot( p0.T, p0 )
         mydot1 = jnp.dot( p1.T, p1 )
-        normer = jnp.mean( jnp.diagonal( mydot0 ) ) * jnp.mean( jnp.diagonal( mydot1 ) )
-        mydot = jnp.dot( p0.T, p1 )/jnp.sqrt(normer)
-        loss_sum = loss_sum - jnp.mean( jnp.diagonal( mydot ) )
+        normer =  jnp.linalg.norm( mydot0 ) * jnp.linalg.norm( mydot1 )
+        mydot = jnp.dot( p0.T, p1 )/normer
+        offdiag = jnp.linalg.norm( jnp.eye(mydot.shape[0]) - mydot ) * nondiag_weight
+        mycorr = jnp.mean( jnp.diagonal( mydot ) )
+        loss_sum = loss_sum - mycorr + offdiag 
     return loss_sum
 
 def simlr_low_rank_frobenius_norm_loss_pj( xlist, vlist ):
@@ -298,7 +305,7 @@ def correlation_regularization_matrices( matrix_list, correlation_threshold_list
         corl.append( jax.numpy.asarray( cor1 ) )
     return corl
 
-def tab_simlr( matrix_list, regularization_matrices, quantile_list, loss_function, simlr_optimizer, nev=2, max_iterations=5000, verbose=True ):
+def tab_simlr( matrix_list, regularization_matrices, quantile_list, loss_function, simlr_optimizer, nev=2, max_iterations=5000, positivity=False, verbose=True ):
     """
     matrix_list : list of matrices
 
@@ -314,13 +321,15 @@ def tab_simlr( matrix_list, regularization_matrices, quantile_list, loss_functio
 
     max_iterations : maximum number of optimization steps
 
+    positivity : constrains solution to be positive if set to True
+
     verbose: boolean
 
     returns:
         sparse solution parameters in form of a list (the v)
     """
     from jax import random
-    parfun = jax.tree_util.Partial( loss_function, matrix_list, regularization_matrices, quantile_list )
+    parfun = jax.tree_util.Partial( loss_function, matrix_list, regularization_matrices, quantile_list, positivity )
     myfg = jax.grad( parfun )
     params = None
     if params is None:
@@ -350,7 +359,7 @@ def tab_simlr( matrix_list, regularization_matrices, quantile_list, loss_functio
     params = best_params
     for k in range(len(params)):
         params[k] = jnp.dot( params[k], regularization_matrices[k]  )
-        params[k] = basic_q_sparsify( params[k], quantile_list[k] )
+        params[k] = orthogonalize_and_q_sparsify( params[k], quantile_list[k],positivity=positivity )
 
     if verbose:
         for k in range(len(params)):
