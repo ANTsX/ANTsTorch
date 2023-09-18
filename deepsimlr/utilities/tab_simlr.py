@@ -6,6 +6,17 @@ from sklearn.decomposition import PCA
 import jax
 from sklearn.decomposition import NMF
 
+def corr2_coeff(A, B):
+    # from stack overflow
+    # Rowwise mean of input arrays & subtract from input arrays themselves
+    A_mA = A - A.mean(1)[:, None]
+    B_mB = B - B.mean(1)[:, None]
+    # Sum of squares across rows
+    ssA = (A_mA**2).sum(1)
+    ssB = (B_mB**2).sum(1)
+    # Finally get corr coeff
+    return jnp.dot(A_mA, B_mB.T) / jnp.sqrt(jnp.dot(ssA[:, None],ssB[None]))
+
 
 def whiten_slow(x, k=None):
     if x.size == 0:
@@ -218,16 +229,14 @@ def simlr_absolute_canonical_covariance( xlist, reglist, qlist, positivity, nond
         uconcat = jnp.concatenate( uconcat, axis=1 )
         p1 = jax.numpy.linalg.svd( uconcat, full_matrices=False )[0][:,0:nev]
         p0 = jnp.dot( xlist[k], vlist[k].T )
-        p0 = p0 / jnp.linalg.norm( p0 )
-        p1 = p1 / jnp.linalg.norm( p1 )
-        intramodalityCov = jnp.dot( p0.T, p0 )
-        intermodalityCov = jnp.dot( p0.T, p1 )
+        intramodalityCor = corr2_coeff( p0.T, p0.T )
+        intermodalityCor = corr2_coeff( p0.T, p1.T )
         offdiag = 0.0
-        for q0 in range(1,intramodalityCov.shape[0]):
-            for q1 in range(q0+1,intramodalityCov.shape[1]):
-                lcov = intramodalityCov.at[q0,q1].get()
+        for q0 in range(1,intramodalityCor.shape[0]):
+            for q1 in range(q0+1,intramodalityCor.shape[1]):
+                lcov = intramodalityCor.at[q0,q1].get()
                 offdiag = offdiag + lcov*lcov/nev
-        mycorr = jnp.trace( jnp.abs( intermodalityCov ) )/nev
+        mycorr = jnp.trace( jnp.abs( intermodalityCor ) )/nev
         loss_sum = loss_sum - mycorr + offdiag * nondiag_weight
     return loss_sum
 
