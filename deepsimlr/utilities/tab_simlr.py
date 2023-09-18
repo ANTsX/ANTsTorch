@@ -226,8 +226,8 @@ def simlr_absolute_canonical_covariance( xlist, reglist, qlist, positivity, nond
         for q0 in range(1,intramodalityCov.shape[0]):
             for q1 in range(q0+1,intramodalityCov.shape[1]):
                 lcov = intramodalityCov.at[q0,q1].get()
-                offdiag = offdiag + lcov*lcov
-        mycorr = jnp.trace( jnp.abs( intermodalityCov ) )
+                offdiag = offdiag + lcov*lcov/nev
+        mycorr = jnp.trace( jnp.abs( intermodalityCov ) )/nev
         loss_sum = loss_sum - mycorr + offdiag * nondiag_weight
     return loss_sum
 
@@ -380,10 +380,10 @@ def tab_simlr( matrix_list, regularization_matrices, quantile_list, loss_functio
     from jax import random
     myfg = jax.grad( loss_function )
     params = None
+    n = matrix_list[0].shape[0]
+    u = random.normal(random.PRNGKey(0), (n,nev))
     if params is None:
         # initial solution
-        n = matrix_list[0].shape[0]
-        u = random.normal(random.PRNGKey(0), (n,nev))
         params = []
         for k in range(len(matrix_list)):
             params.append(  jax.numpy.asarray( jnp.dot( u.T, matrix_list[k] ) ) )
@@ -418,10 +418,12 @@ def tab_simlr( matrix_list, regularization_matrices, quantile_list, loss_functio
         print("Between modality")
         for k in range(len(params)):
             temp = jnp.dot( matrix_list[k], params[k].T )
+            temp = temp/jnp.linalg.norm(temp)
             for j in range(k+1,len(params)):
                 temp2 = jnp.dot( matrix_list[j], params[j].T )
-                mydot = jnp.dot( temp.T, temp2 )
-                print( jnp.trace( jnp.abs( mydot ) ) )
+                mydot = jnp.dot( temp,
+                    temp2/jnp.linalg.norm(temp2) )
+                print( jnp.trace( jnp.abs( mydot ) )/nev )
 
     return params
 

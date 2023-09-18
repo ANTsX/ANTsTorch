@@ -136,13 +136,15 @@ fff = predictSubtypeClusterMulti(
        'eid', 'Years.bl', 0 )
 #######################################
 pp=getNamesFromDataframe( "", fff, exclusions=c("T1Hier","rsfMRI","DTI","mean_fa","mean_mo","mean_l2","T1w","mean_l3","mean_l1","simlr","bold_effect","brain_position","groupdefined_mask","Years.bl","mean_md_","volume_of_grey_matter",'fa_skel',"genetic_principal_components","weightedmean_isovf","median_t2star","weightedmean_od","t1_brain","_in_tract","in_t1_","fmri_","percentile_of_zstatistic","_SNR","to_standard_space","_mass","_fat","_evr","faceshapes","job_coding",
-"time_to_press","triplet_entered","triplet") )
-
+"time_to_press","triplet_entered","triplet","cervical") )
+######################
 isbl = fff$Years.bl==0
 for ( x in sample(pp) ) {
     if ( class(fff[,x]) == 'numeric' | class(fff[,x]) == 'integer' ) {
         zzz=fff[!is.na(fff[,x]),]
-        usesubs=intersect( zzz$eid[isbl], zzz$eid[ !isbl ])
+        eidtbl = table( zzz$eid )
+        usesubs = names( eidtbl[ eidtbl == 2 ]  )
+#        usesubs=intersect( zzz$eid[isbl], zzz$eid[ !isbl ])
 #        usesubs=unique( zzz$eid[isbl] )
         if ( length(usesubs)  > 100 ) {
             # check for change
@@ -165,6 +167,7 @@ for ( x in sample(pp) ) {
                 myform = paste(x,"~(1|eid)+(subjectAge_BL+sex_f31_0_0)+(", 
                     simnames, ")*Years.bl")
                 myform = paste(x,"~(1|eid)+(subjectAge_BL+sex_f31_0_0)+KMC*Years.bl")
+                myform = paste(x,"~(1|eid)+KMC*Years.bl")
                 mdl =lmer( myform,data=zzz)
                 print(coefficients(summary( mdl))[,-c(1:2)])
                 print(x)
@@ -173,3 +176,39 @@ for ( x in sample(pp) ) {
         }
     }
 }
+
+
+
+## pd prs
+ee=fff[isbl,]
+mdl = lm( paste("standard_prs_for_parkinsons_disease_pd_f26260_0_0~(subjectAge_BL+sex_f31_0_0)+", gpca, "+",simnames), data=ee)
+mdl = lm( paste("standard_prs_for_alzheimers_disease_ad_f26206_0_0~(subjectAge_BL+sex_f31_0_0)+",simnames), data=ee)
+summary( mdl )
+visreg::visreg(mdl,'simlrt110')
+
+mdl = lmer( paste("simlrt110~(1|eid)+standard_prs_for_parkinsons_disease_pd_f26260_0_0*Years.bl+(subjectAge_BL+sex_f31_0_0)+", gpca), data=fff)
+summary( mdl )
+visreg::visreg(mdl,'simlrt110')
+
+
+
+## pd prs
+ee=fff[isbl,]
+ee$fhaschild=NA
+ee[ fs(ee[,x] == 'Never true'), 'fhaschild' ] = 0
+ee[ fs(ee[,x] == 'Rarely true'), 'fhaschild' ] = 1
+ee[ fs(ee[,x] == 'Sometimes true'), 'fhaschild' ] = 2
+ee[ fs(ee[,x] == 'Very often true'), 'fhaschild' ] = 3
+ee[ fs(ee[,x] == 'Often'), 'fhaschild' ] = 4
+x='fathers_age_at_death_f1807'
+x='maximum_digits_remembered_correctly_f20240_0_0'
+zz=ee[!is.na(ee[,x]),]
+bmdl = lm( paste(x,"~1+",gpca,"+(subjectAge_BL+sex_f31_0_0)"), data=zz)
+mdl = lm( paste(x,"~1+",gpca,"+(subjectAge_BL+sex_f31_0_0)+(",simnames,")"), data=ee)
+summary( mdl )
+pp1=predict(mdl)
+ppb=predict(bmdl)
+mydf=data.frame(tru=ee[names(pp1),x],img=pp1,base=ppb)
+imdl=lm( tru~img,data=mydf)
+bmdl=lm( tru~base,data=mydf)
+print(paste(rsq(bmdl),rsq(imdl)))
