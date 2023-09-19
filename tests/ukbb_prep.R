@@ -28,9 +28,13 @@ if ( ! exists("dd") ) {
     rsfnames=getNamesFromDataframe( "rsfMRI"  , dd, exclusions=c("_BL","_delta","cnx","FD","motion","SNR","evr","ssnr","dvars","tsnr","volume","_alff") )
 
     #### cross-sectional
+    dd$subjectAge_BL=antsrimpute(dd$subjectAge_BL)
     rsfdd = antsrimpute(scale( dd[,rsfnames] ))
     dtidd = antsrimpute(scale( dd[,dtinames] ))
     t1dd = antsrimpute(scale( dd[,t1names] ))
+    t1dd = residuals( lm( t1dd ~ dd$sex_f31_0_0 + dd$subjectAge_BL))
+    dtidd = residuals( lm( dtidd ~ dd$sex_f31_0_0 + dd$subjectAge_BL))
+    rsfdd = residuals( lm( rsfdd ~ dd$sex_f31_0_0 + dd$subjectAge_BL))
     xsel = dd$eid %in% crosssubs
     write.csv( rsfdd[xsel,], "/tmp/ukrsfx.csv", row.names=FALSE)
     write.csv( dtidd[xsel,], "/tmp/ukdtix.csv", row.names=FALSE)
@@ -51,16 +55,15 @@ ev1=read.csv("/tmp/ukdtiev_b.csv")[,-1]
 ev2=read.csv("/tmp/ukrsfev_b.csv")[,-1]
 
 #
-pt1=data.frame(data.matrix(t1dd[lsel,]) %*% t(data.matrix(ev0)))
+pt1=data.frame(data.matrix(t1dd[,]) %*% t(data.matrix(ev0)))
 colnames(pt1)=paste0("simlrt1",1:ncol(pt1))
-pdti=data.frame(data.matrix(dtidd[lsel,]) %*% t(data.matrix(ev1)))
+pdti=data.frame(data.matrix(dtidd[,]) %*% t(data.matrix(ev1)))
 colnames(pdti)=paste0("simlrdti",1:ncol(pt1))
-prsf=data.frame(data.matrix(rsfdd[lsel,]) %*% t(data.matrix(ev2)))
+prsf=data.frame(data.matrix(rsfdd[,]) %*% t(data.matrix(ev2)))
 colnames(prsf)=paste0("simlrrsf",1:ncol(pt1))
-
-
+extras=cbind(pt1[,],pdti[,],prsf[,])
 library(lmerTest)
-ee=cbind(dd[lsel,],pt1,pdti,prsf)
+ee=cbind(dd[,],extras)
 nsim=nsimu=ncol(pt1)
 gpca=paste(getNamesFromDataframe("genetic_principal_components",dd)[1:10]
 ,collapse="+")
@@ -91,50 +94,32 @@ for ( p in c("townsend_deprivation_index_at_recruitment_f22189_0_0","fluid_intel
 
 # some clustering
 #
-pt1=data.frame(data.matrix(t1dd[xsel,]) %*% t(data.matrix(ev0)))
-colnames(pt1)=paste0("simlrt1",1:nsim)
-pdti=data.frame(data.matrix(dtidd[xsel,]) %*% t(data.matrix(ev1)))
-colnames(pdti)=paste0("simlrdti",1:nsim)
-prsf=data.frame(data.matrix(rsfdd[xsel,]) %*% t(data.matrix(ev2)))
-colnames(prsf)=paste0("simlrrsf",1:nsim)
-extras=cbind(pt1[,1:nsimu],pdti[,1:nsimu],prsf[,1:nsimu])
-ee=cbind(dd[xsel,],extras)
 nclust = 3
 ctype='angle'
+print(paste("BEGIN",ctype," learning CLUSTER-ing {{o/o}} k = ",nclust))
 myclust = trainSubtypeClusterMulti(
-       ee,
+       ee[xsel,],
        measureColumns=colnames(extras),
        method = ctype,
        nclust  )
 ################
 ########################################################################### 
 ########################################################################### 
-ee = predictSubtypeClusterMulti(
+print(paste("BEGIN",ctype," [predict] CLUSTER-ing {{o/|o}} k = ",nclust))
+fff = predictSubtypeClusterMulti(
        ee,
        measureColumns=colnames(extras),
        myclust,
        clustername = "KMC",
        'eid', 'Years.bl', 0 )
+print(table(fff$KMC))
 ########################################################################### 
 ########################################################################### 
 print("ARGER")
 mf=paste("fluid_intelligence_score_f20016~(subjectAge_BL+sex_f31_0_0)*KMC+",gpca)
-print(summary(lm(mf,data=eee)))
-pt1l=data.frame(data.matrix(t1dd[,]) %*% t(data.matrix(ev0)))
-colnames(pt1l)=paste0("simlrt1",1:ncol(pt1))
-pdtil=data.frame(data.matrix(dtidd[,]) %*% t(data.matrix(ev1)))
-colnames(pdtil)=paste0("simlrdti",1:ncol(pt1))
-prsfl=data.frame(data.matrix(rsfdd[,]) %*% t(data.matrix(ev2)))
-colnames(prsfl)=paste0("simlrrsf",1:ncol(pt1))
-ff=cbind(dd[,],pt1l,pdtil,prsfl)
-###########################################################################
-fff = predictSubtypeClusterMulti(
-       ff,
-       measureColumns=colnames(extras),
-       myclust,
-       clustername = "KMC",
-       'eid', 'Years.bl', 0 )
+print(summary(lm(mf,data=fff)))
 #######################################
+print("BEGIN LONG SEARCH")
 pp=getNamesFromDataframe( "", fff, exclusions=c("T1Hier","rsfMRI","DTI","mean_fa","mean_mo","mean_l2","T1w","mean_l3","mean_l1","simlr","bold_effect","brain_position","groupdefined_mask","Years.bl","mean_md_","volume_of_grey_matter",'fa_skel',"genetic_principal_components","weightedmean_isovf","median_t2star","weightedmean_od","t1_brain","_in_tract","in_t1_","fmri_","percentile_of_zstatistic","_SNR","to_standard_space","_mass","_fat","_evr","faceshapes","job_coding",
 "time_to_press","triplet_entered","triplet","cervical") )
 ######################
@@ -172,7 +157,7 @@ for ( x in sample(pp) ) {
                     subtype='KMC', vizname='yblr' ) %>% print() 
                 myform = paste(x,"~(1|eid)+(subjectAge_BL+sex_f31_0_0)+(", 
                     simnames, ")*Years.bl")
-                myform = paste(x,"~(1|eid)+(subjectAge_BL+sex_f31_0_0)+KMC+KMC:Years.bl")
+                myform = paste(x,"~(1|eid)+townsend_deprivation_index_at_recruitment_f22189_0_0+",gpca,"+(subjectAge_BL+sex_f31_0_0)+KMC+KMC:Years.bl")
 #                myform = paste(x,"~(1|eid)+KMC*Years.bl")
                 mdl =lmer( myform,data=zzz)
                 print(coefficients(summary( mdl))[,-c(1:2)])

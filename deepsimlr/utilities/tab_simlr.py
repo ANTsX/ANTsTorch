@@ -47,7 +47,7 @@ def preprocess_signal(signal):
     return jax.vmap(jnp.matmul, (None, 0), 0)(A, signal_centered), (A, mean)
 
 
-def fastIca(signals,  k=None, alpha = 1, thresh=1e-6, iterations=50 ):
+def fastIca(signals,  k=None, alpha = 1, thresh=1e-8, iterations=100 ):
     # calculate W but return the S matrix
     signals = icawhiten( signals )
     # signals = preprocess_signal( signals )
