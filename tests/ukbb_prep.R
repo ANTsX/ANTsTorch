@@ -172,8 +172,8 @@ for ( x in sample(pp) ) {
                     subtype='KMC', vizname='yblr' ) %>% print() 
                 myform = paste(x,"~(1|eid)+(subjectAge_BL+sex_f31_0_0)+(", 
                     simnames, ")*Years.bl")
-                myform = paste(x,"~(1|eid)+(subjectAge_BL+sex_f31_0_0)+KMC*Years.bl")
-                myform = paste(x,"~(1|eid)+KMC*Years.bl")
+                myform = paste(x,"~(1|eid)+(subjectAge_BL+sex_f31_0_0)+KMC+KMC:Years.bl")
+#                myform = paste(x,"~(1|eid)+KMC*Years.bl")
                 mdl =lmer( myform,data=zzz)
                 print(coefficients(summary( mdl))[,-c(1:2)])
                 print(x)
