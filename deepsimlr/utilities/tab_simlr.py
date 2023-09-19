@@ -24,8 +24,33 @@ def icawhiten(x):
     Xw = jnp.dot(whiteM, x)
     return Xw
 
-def fastIca(signals,  k=None, alpha = 1, thresh=1e-8, iterations=50 ):
+def preprocess_signal(signal):
+    """Center and whiten the signal
+    x_preprocessed = A @ (x - mean)
+
+    Args
+        signal [num_samples, signal_dim]
+    
+    Returns
+        signal_preprocessed [num_samples, signal_dim]
+        preprocessing_params
+            A [signal_dim, signal_dim]
+            mean [signal_dim]
+    """
+    mean = jnp.mean(signal, axis=0)
+    signal_centered = signal - jnp.mean(signal, axis=0)
+
+    signal_cov = jnp.mean(jax.vmap(jnp.outer, (0, 0), 0)(signal_centered, signal_centered), axis=0)
+    eigenvalues, eigenvectors = jnp.linalg.eigh(signal_cov)
+    A = jnp.diag(eigenvalues ** (-1 / 2)) @ eigenvectors.T
+
+    return jax.vmap(jnp.matmul, (None, 0), 0)(A, signal_centered), (A, mean)
+
+
+def fastIca(signals,  k=None, alpha = 1, thresh=1e-6, iterations=50 ):
+    # calculate W but return the S matrix
     signals = icawhiten( signals )
+    # signals = preprocess_signal( signals )
     m, n = signals.shape
 
     # Initialize random weights
@@ -67,7 +92,7 @@ def fastIca(signals,  k=None, alpha = 1, thresh=1e-8, iterations=50 ):
                 i += 1
 
             W = W.at[c,:].set( w.T )
-    return W
+    return jnp.dot( W, signals )
 
 
 # Calculate Kurtosis
@@ -222,28 +247,6 @@ def update_raw_mixing_matrix(raw_mixing_matrix, signals, get_source_log_prob, lr
     )
     return total_log_likelihood, raw_mixing_matrix + lr * g
 
-
-def preprocess_signal(signal):
-    """Center and whiten the signal
-    x_preprocessed = A @ (x - mean)
-
-    Args
-        signal [num_samples, signal_dim]
-    
-    Returns
-        signal_preprocessed [num_samples, signal_dim]
-        preprocessing_params
-            A [signal_dim, signal_dim]
-            mean [signal_dim]
-    """
-    mean = jnp.mean(signal, axis=0)
-    signal_centered = signal - jnp.mean(signal, axis=0)
-
-    signal_cov = jnp.mean(jax.vmap(jnp.outer, (0, 0), 0)(signal_centered, signal_centered), axis=0)
-    eigenvalues, eigenvectors = jnp.linalg.eigh(signal_cov)
-    A = jnp.diag(eigenvalues ** (-1 / 2)) @ eigenvectors.T
-
-    return jax.vmap(jnp.matmul, (None, 0), 0)(A, signal_centered), (A, mean)
 
 
 def ica(signal, get_source_log_prob, num_iterations=1000, lr=1e-3):
@@ -514,8 +517,7 @@ def simlr_absolute_canonical_covariance( xlist, reglist, qlist, positivity, nond
             p1 = jax.numpy.linalg.svd( uconcat, full_matrices=False )[0][:,0:nev]
         elif merging == 'ica':
             uconcat = jnp.concatenate( uconcat, axis=1 )
-            myica = fastIca( uconcat.T, nev )
-            p1 = jnp.dot(uconcat, myica.T)
+            p1 = fastIca( uconcat.T, nev ).T
         else:
             p1 = uconcat[0]/jnp.linalg.norm(uconcat[0])
             if len(uconcat) > 1:
