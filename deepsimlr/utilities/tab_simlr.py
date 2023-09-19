@@ -6,6 +6,287 @@ from sklearn.decomposition import PCA
 import jax
 from sklearn.decomposition import NMF
 
+import jax
+import jax.numpy as jnp
+import tqdm
+import math
+
+def icawhiten(x):
+    # Calculate the covariance matrix
+    coVarM = jnp.cov(x)
+    # Single value decoposition
+    U, S, V = jnp.linalg.svd(coVarM, full_matrices=False)
+    # Calculate diagonal matrix of eigenvalues
+    d = jnp.diag(1.0 / jnp.sqrt(S))
+    # Calculate whitening matrix
+    whiteM = jnp.dot(U, jnp.dot(d, U.T))
+    # Project onto whitening matrix
+    Xw = jnp.dot(whiteM, x)
+    return Xw
+
+def fastIca(signals,  k=None, alpha = 1, thresh=1e-8, iterations=50 ):
+    signals = icawhiten( signals )
+    m, n = signals.shape
+
+    # Initialize random weights
+    if k is None:
+        k=m
+    W = random.normal(random.PRNGKey(0), (k,m))
+
+    for c in range(k):
+            w = W[c, :].copy().reshape(m, 1)
+            w = w / jnp.sqrt((w ** 2).sum())
+
+            i = 0
+            lim = 100
+            while ((lim > thresh) & (i < iterations)):
+
+                # Dot product of weight and signal
+                ws = jnp.dot(w.T, signals)
+
+                # Pass w*s into contrast function g
+                wg = jnp.tanh(ws * alpha).T
+
+                # Pass w*s into g prime
+                wg_ = (1 - jnp.square(jnp.tanh(ws))) * alpha
+
+                # Update weights
+                wNew = (signals * wg.T).mean(axis=1) - wg_.mean() * w.squeeze()
+
+                # Decorrelate weights              
+                wNew = wNew - jnp.dot( jnp.dot(wNew, W[:c].T), W[:c])
+                wNew = wNew / jnp.sqrt((wNew ** 2).sum())
+
+                # Calculate limit condition
+                lim = jnp.abs(jnp.abs((wNew * w).sum()) - 1)
+
+                # Update weights
+                w = wNew
+
+                # Update counter
+                i += 1
+
+            W = W.at[c,:].set( w.T )
+    return W
+
+
+# Calculate Kurtosis
+def kurtosis(x):
+    n = jnp.shape(x)[0]
+    mean = jnp.sum((x**1)/n) # Calculate the mean
+    var = jnp.sum((x-mean)**2)/n # Calculate the variance
+    # skew = jnp.sum((x-mean)**3)/n # Calculate the skewness
+    kurt = jnp.sum((x-mean)**4)/n # Calculate the kurtosis
+    kurt = kurt/(var**2)-3
+    return kurt
+
+def get_signal(mixing_matrix, source):
+    """Compute single signal from a single source
+    Args
+        mixing_matrix [signal_dim, source_dim]
+        source [source_dim]
+    
+    Returns
+        signal [signal_dim]
+    """
+    return jnp.dot(mixing_matrix, source)
+
+
+def get_subgaussian_log_prob(source):
+    """Subgaussian log probability of a single source.
+
+    Args
+        source [source_dim]
+
+    Returns []
+    """
+    return jnp.sum(jnp.sqrt(jnp.abs(source)))
+
+
+def get_supergaussian_log_prob(source):
+    """Supergaussian log probability of a single source.
+    log cosh(x) = log ( (exp(x) + exp(-x)) / 2 )
+                = log (exp(x) + exp(-x)) - log(2)
+                = logaddexp(x, -x) - log(2)
+                   
+    https://en.wikipedia.org/wiki/Hyperbolic_functions#Exponential_definitions
+    https://en.wikipedia.org/wiki/FastICA#Single_component_extraction
+
+    Args
+        source [source_dim]
+
+    Returns []
+    """
+    return jnp.sum(jnp.logaddexp(source, -source) - math.log(2))
+
+
+def get_antisymmetric_matrix(raw_antisymmetric_matrix):
+    """Returns an antisymmetric matrix
+    https://en.wikipedia.org/wiki/Skew-symmetric_matrix
+
+    Args
+        raw_antisymmetric_matrix [dim * (dim - 1) / 2]: elements in the upper triangular
+            (excluding the diagonal)
+
+    Returns [dim, dim]
+    """
+    dim = math.ceil(math.sqrt(raw_antisymmetric_matrix.shape[0] * 2))
+    zeros = jnp.zeros((dim, dim))
+    indices = jnp.triu_indices(dim, k=1)
+    upper_triangular = zeros.at[indices].set(raw_antisymmetric_matrix)
+    return upper_triangular - upper_triangular.T
+
+
+def get_orthonormal_matrix(raw_orthonormal_matrix):
+    """Returns an orthonormal matrix
+    https://en.wikipedia.org/wiki/Cayley_transform#Matrix_map
+
+    Args
+        raw_orthonormal_matrix [dim * (dim - 1) / 2]
+
+    Returns [dim, dim]
+    """
+    antisymmetric_matrix = get_antisymmetric_matrix(raw_orthonormal_matrix)
+    dim = antisymmetric_matrix.shape[0]
+    eye = jnp.eye(dim)
+    return jnp.matmul(eye - antisymmetric_matrix, jnp.linalg.inv(eye + antisymmetric_matrix))
+
+
+def get_source(signal, raw_mixing_matrix):
+    """Get source from signal
+    
+    Args
+        signal [signal_dim]
+        raw_mixing_matrix [dim * (dim - 1) / 2]
+    
+    Returns []
+    """
+    return jnp.matmul(get_mixing_matrix(raw_mixing_matrix).T, signal)
+
+
+def get_log_likelihood(signal, raw_mixing_matrix, get_source_log_prob):
+    """Log likelihood of a single signal log p(x_n)
+    
+    Args
+        signal [signal_dim]
+        raw_mixing_matrix [dim * (dim - 1) / 2]
+        get_source_log_prob [source_dim] -> []
+    
+    Returns []
+    """
+    return get_source_log_prob(get_source(signal, raw_mixing_matrix))
+
+
+def get_mixing_matrix(raw_mixing_matrix):
+    """Get mixing matrix from a vector of raw values (to be optimized)
+
+    Args
+        raw_orthonormal_matrix [dim * (dim - 1) / 2]
+
+    Returns [dim, dim]
+    """
+    return get_orthonormal_matrix(raw_mixing_matrix)
+
+
+def get_total_log_likelihood(signals, raw_mixing_matrix, get_source_log_prob):
+    """Log likelihood of all signals ∑_n log p(x_n)
+    
+    Args
+        signals [num_samples, signal_dim]
+        raw_mixing_matrix [dim * (dim - 1) / 2]
+        get_source_log_prob [source_dim] -> []
+    
+    Returns []
+    """
+    log_likelihoods = jax.vmap(get_log_likelihood, (0, None, None), 0)(
+        signals, raw_mixing_matrix, get_source_log_prob
+    )
+    return jnp.sum(log_likelihoods)
+
+
+def update_raw_mixing_matrix(raw_mixing_matrix, signals, get_source_log_prob, lr=1e-3):
+    """Update raw mixing matrix by stepping the gradient
+
+    Args:
+        raw_mixing_matrix [signal_dim, source_dim]
+        signals [num_samples, signal_dim]
+        get_source_log_prob [source_dim] -> []
+        lr (float)
+
+    Returns
+        total_log_likelihood []
+        updated_raw_mixing_matrix [signal_dim, source_dim]
+    """
+    total_log_likelihood, g = jax.value_and_grad(get_total_log_likelihood, 1)(
+        signals, raw_mixing_matrix, get_source_log_prob
+    )
+    return total_log_likelihood, raw_mixing_matrix + lr * g
+
+
+def preprocess_signal(signal):
+    """Center and whiten the signal
+    x_preprocessed = A @ (x - mean)
+
+    Args
+        signal [num_samples, signal_dim]
+    
+    Returns
+        signal_preprocessed [num_samples, signal_dim]
+        preprocessing_params
+            A [signal_dim, signal_dim]
+            mean [signal_dim]
+    """
+    mean = jnp.mean(signal, axis=0)
+    signal_centered = signal - jnp.mean(signal, axis=0)
+
+    signal_cov = jnp.mean(jax.vmap(jnp.outer, (0, 0), 0)(signal_centered, signal_centered), axis=0)
+    eigenvalues, eigenvectors = jnp.linalg.eigh(signal_cov)
+    A = jnp.diag(eigenvalues ** (-1 / 2)) @ eigenvectors.T
+
+    return jax.vmap(jnp.matmul, (None, 0), 0)(A, signal_centered), (A, mean)
+
+
+def ica(signal, get_source_log_prob, num_iterations=1000, lr=1e-3):
+    """Gradient-descent based maximum likelihood estimation of the independent component analysis
+    (ICA) model
+
+    Args
+        signal [num_samples, signal_dim]
+        get_source_log_prob [source_dim] -> []
+        num_iterations (int)
+        lr (float)
+    
+    Returns
+        total_log_likelihoods: list of length num_iterations
+        raw_mixing_matrices: list of length (num_iterations + 1)
+        preprocessing_params
+            A [signal_dim, signal_dim]
+            mean [signal_dim]
+
+            where the preprocessed signal is obtained by
+
+            matmul(A, (signal - mean))
+    """
+    dim = signal.shape[1]
+
+    # Preprocess
+    signal_preprocessed, preprocessing_params = preprocess_signal(signal)
+
+    # Optim
+    key=0
+    raw_mixing_matrix = jax.random.normal(key, (int(dim * (dim - 1) / 2),))
+
+    total_log_likelihoods = []
+    raw_mixing_matrices = [raw_mixing_matrix]
+    for _ in tqdm.tqdm(range(num_iterations)):
+        total_log_likelihood, raw_mixing_matrix = update_raw_mixing_matrix(
+            raw_mixing_matrix, signal_preprocessed, get_source_log_prob, lr
+        )
+        total_log_likelihoods.append(total_log_likelihood.item())
+        raw_mixing_matrices.append(raw_mixing_matrix)
+
+    return total_log_likelihoods, raw_mixing_matrices, preprocessing_params
+
 def corr2_coeff(A, B):
     # from stack overflow
     # Rowwise mean of input arrays & subtract from input arrays themselves
@@ -196,7 +477,7 @@ def simlr_canonical_correlation_loss_reg_sparse( xlist, reglist, qlist, positivi
         loss_sum = loss_sum - mycorr + offdiag 
     return loss_sum
 
-def simlr_absolute_canonical_covariance( xlist, reglist, qlist, positivity, nondiag_weight, vlist ):
+def simlr_absolute_canonical_covariance( xlist, reglist, qlist, positivity, nondiag_weight, merging, vlist ):
     """
     implements a low-rank CCA-like loss function (error) for simlr (pure jax)
 
@@ -209,6 +490,8 @@ def simlr_absolute_canonical_covariance( xlist, reglist, qlist, positivity, nond
     positivity : boolean
 
     nondiag_weight : scalar parameter penalizing offdiagonal correlations within a given modality
+
+    merging : string svd, ica or average
 
     vlist : list of current solution vectors ( nev by nfeatures )
     """
@@ -226,8 +509,19 @@ def simlr_absolute_canonical_covariance( xlist, reglist, qlist, positivity, nond
         for j in range(len(vlist)):
             if k != j :
                 uconcat.append( ulist[j] )
-        uconcat = jnp.concatenate( uconcat, axis=1 )
-        p1 = jax.numpy.linalg.svd( uconcat, full_matrices=False )[0][:,0:nev]
+        if merging == 'svd':
+            uconcat = jnp.concatenate( uconcat, axis=1 )
+            p1 = jax.numpy.linalg.svd( uconcat, full_matrices=False )[0][:,0:nev]
+        elif merging == 'ica':
+            uconcat = jnp.concatenate( uconcat, axis=1 )
+            myica = fastIca( uconcat.T, nev )
+            p1 = jnp.dot(uconcat, myica.T)
+        else:
+            p1 = uconcat[0]/jnp.linalg.norm(uconcat[0])
+            if len(uconcat) > 1:
+                for m in range(1,len(uconcat)):
+                    p1 = p1 + uconcat[m]/jnp.linalg.norm(uconcat[m])
+            p1 = p1 / len(uconcat)
         p0 = jnp.dot( xlist[k], vlist[k].T )
         intramodalityCor = corr2_coeff( p0.T, p0.T )
         intermodalityCor = corr2_coeff( p0.T, p1.T )
@@ -239,7 +533,7 @@ def simlr_absolute_canonical_covariance( xlist, reglist, qlist, positivity, nond
                 offdiag = offdiag + jnp.abs(lcov)/offdiagcount
         mycorr = jnp.trace( jnp.abs( intermodalityCor ) )/nev
         loss_sum = loss_sum - mycorr + offdiag * nondiag_weight
-    return loss_sum
+    return loss_sum/len(xlist)
 
 def simlr_low_rank_frobenius_norm_loss_pj( xlist, vlist ):
     """

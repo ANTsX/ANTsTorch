@@ -194,6 +194,7 @@ visreg::visreg(mdl,'simlrt110')
 
 ## pd prs
 ee=fff[isbl,]
+x='felt_hated_by_family_member_as_a_child_f20487_0_0'
 ee$fhaschild=NA
 ee[ fs(ee[,x] == 'Never true'), 'fhaschild' ] = 0
 ee[ fs(ee[,x] == 'Rarely true'), 'fhaschild' ] = 1
@@ -201,10 +202,16 @@ ee[ fs(ee[,x] == 'Sometimes true'), 'fhaschild' ] = 2
 ee[ fs(ee[,x] == 'Very often true'), 'fhaschild' ] = 3
 ee[ fs(ee[,x] == 'Often'), 'fhaschild' ] = 4
 x='fathers_age_at_death_f1807'
+x='spine_bmc_bone_mineral_content_f23312'
 x='maximum_digits_remembered_correctly_f20240_0_0'
+x='standard_prs_for_parkinsons_disease_pd_f26260_0_0'
+x='fhaschild'
+x='fluid_intelligence_score_f20016'
 zz=ee[!is.na(ee[,x]),]
-bmdl = lm( paste(x,"~1+",gpca,"+(subjectAge_BL+sex_f31_0_0)"), data=zz)
-mdl = lm( paste(x,"~1+",gpca,"+(subjectAge_BL+sex_f31_0_0)+(",simnames,")"), data=ee)
+gpcax='1'
+bmdl = lm( paste(x,"~1+",gpcax,"+(subjectAge_BL+sex_f31_0_0)"), data=zz)
+mdl = lm( paste(x,"~1+",gpcax,"+(subjectAge_BL+sex_f31_0_0)+(",simnames,")"), data=ee)
+mdl = lm( paste(x,"~1+",gpcax,"+(subjectAge_BL+sex_f31_0_0)+(KMC)"), data=ee)
 summary( mdl )
 pp1=predict(mdl)
 ppb=predict(bmdl)

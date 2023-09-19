@@ -41,31 +41,35 @@ xx=jnp.dot( x0.T, x0 )
 xxw=deepsimlr.whiten( xx )
 print(type(xxw))
 qq = 0.9 # regularization
-sp = 0.95 # quantile sparseness
+sp = 0.99 # quantile sparseness
 sparseness = [sp,sp,sp]
 simlrdata = [jnp.asarray( x0 ), jnp.asarray( x1 ), jnp.asarray( x2 ) ]
 regmats = deepsimlr.correlation_regularization_matrices( simlrdata, [qq,qq,qq] )
-# rmsprop looks best for this
-lr=10.0
-parfun = jax.tree_util.Partial( 
-  deepsimlr.simlr_absolute_canonical_covariance, 
-  simlrdata, regmats, sparseness, True, 0.5 )
 
 # lion and rmsprop looks best for this
 lr=0.01
-parfunF = jax.tree_util.Partial( 
+parfun = jax.tree_util.Partial( 
   deepsimlr.simlr_low_rank_frobenius_norm_loss_reg_sparse, 
   simlrdata, regmats, sparseness, False )
+
+# rmsprop looks best for this
+lr=1.0
+mypos=True
+# (29936, 20) - uconcat
+# (10, 20) - ica W matrix
+parfun = jax.tree_util.Partial( 
+  deepsimlr.simlr_absolute_canonical_covariance, 
+  simlrdata, regmats, sparseness, mypos, 2.0, 'ica' )
 
 for myopt in [optax.rmsprop]:
   print(myopt)
   mysim = deepsimlr.tab_simlr(
-    simlrdata, 
+    simlrdata,
     regmats,
     sparseness,
     parfun,
-    simlr_optimizer=myopt(lr,centered=False, momentum=0.8, nesterov=True),
-    nev=10, max_iterations=333, positivity=False )
+    simlr_optimizer=myopt(lr,centered=False, momentum=None, nesterov=False),
+    nev=10, max_iterations=111, positivity=mypos )
 ##############################
 # write the features out
 pd.DataFrame(mysim[0]).to_csv("/tmp/ukt1ev_b.csv")
