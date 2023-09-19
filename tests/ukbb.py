@@ -59,7 +59,7 @@ mypos=True
 # (10, 20) - ica W matrix
 parfun = jax.tree_util.Partial( 
   deepsimlr.simlr_absolute_canonical_covariance, 
-  simlrdata, regmats, sparseness, mypos, 2.0, 'ica' )
+  simlrdata, regmats, sparseness, mypos, 0.001, 'ica' )
 
 for myopt in [optax.rmsprop]:
   print(myopt)

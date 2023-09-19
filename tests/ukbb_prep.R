@@ -99,8 +99,8 @@ prsf=data.frame(data.matrix(rsfdd[xsel,]) %*% t(data.matrix(ev2)))
 colnames(prsf)=paste0("simlrrsf",1:nsim)
 extras=cbind(pt1[,1:nsimu],pdti[,1:nsimu],prsf[,1:nsimu])
 ee=cbind(dd[xsel,],extras)
-nclust = 8
-ctype='ejaccard'
+nclust = 3
+ctype='angle'
 myclust = trainSubtypeClusterMulti(
        ee,
        measureColumns=colnames(extras),
@@ -142,8 +142,14 @@ isbl = fff$Years.bl==0
 for ( x in sample(pp) ) {
     if ( class(fff[,x]) == 'numeric' | class(fff[,x]) == 'integer' ) {
         zzz=fff[!is.na(fff[,x]),]
-        eidtbl = table( zzz$eid )
-        usesubs = names( eidtbl[ eidtbl == 2 ]  )
+        zzz$yblr = round( zzz$Years.bl)
+        tsel = table( zzz$yblr, zzz$eid )
+        # eidtbl = table( zzz$eid )
+        usesubs='x'
+        if ( '2' %in% rownames(tsel) )
+            usesubs = intersect( 
+                names(tsel['2', ][tsel['2', ]==1 ]),
+                names(tsel['0', ][tsel['0', ]==1 ]) )
 #        usesubs=intersect( zzz$eid[isbl], zzz$eid[ !isbl ])
 #        usesubs=unique( zzz$eid[isbl] )
         if ( length(usesubs)  > 100 ) {
