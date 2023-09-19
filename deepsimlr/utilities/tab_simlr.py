@@ -24,7 +24,7 @@ def icawhiten(x):
     Xw = jnp.dot(whiteM, x)
     return Xw
 
-def preprocess_signal(signal):
+def preprocess_signal_for_ica(signal):
     """Center and whiten the signal
     x_preprocessed = A @ (x - mean)
 
@@ -37,20 +37,22 @@ def preprocess_signal(signal):
             A [signal_dim, signal_dim]
             mean [signal_dim]
     """
-    mean = jnp.mean(signal, axis=0)
-    signal_centered = signal - jnp.mean(signal, axis=0)
+    # mean = jnp.mean(signal, axis=0)
+    signal_centered = signal - jnp.mean(signal, axis=1)
+    return signal_centered
 
     signal_cov = jnp.mean(jax.vmap(jnp.outer, (0, 0), 0)(signal_centered, signal_centered), axis=0)
     eigenvalues, eigenvectors = jnp.linalg.eigh(signal_cov)
     A = jnp.diag(eigenvalues ** (-1 / 2)) @ eigenvectors.T
 
-    return jax.vmap(jnp.matmul, (None, 0), 0)(A, signal_centered), (A, mean)
+    return jax.vmap(jnp.matmul, (None, 0), 0)(A, signal_centered) # , (A, mean)
 
 
 def fastIca(signals,  k=None, alpha = 1, thresh=1e-8, iterations=100 ):
     # calculate W but return the S matrix
+    # signals = preprocess_signal_for_ica( signals )
+    signals = signals - signals.mean(1)[:, None]
     signals = icawhiten( signals )
-    # signals = preprocess_signal( signals )
     m, n = signals.shape
 
     # Initialize random weights

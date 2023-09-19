@@ -51,9 +51,9 @@ lr=0.01
 parfun = jax.tree_util.Partial( 
   deepsimlr.simlr_low_rank_frobenius_norm_loss_reg_sparse, 
   simlrdata, regmats, sparseness, False )
-
-# rmsprop looks best for this
-lr=1.0
+###############################
+# rmsprop looks best for this #
+lr=0.1  #######################
 mypos=True
 # (29936, 20) - uconcat
 # (10, 20) - ica W matrix
@@ -69,7 +69,7 @@ for myopt in [optax.rmsprop]:
     sparseness,
     parfun,
     simlr_optimizer=myopt(lr,centered=False, momentum=None, nesterov=False),
-    nev=10, max_iterations=111, positivity=mypos )
+    nev=2, max_iterations=1111, positivity=mypos )
 ##############################
 # write the features out
 pd.DataFrame(mysim[0]).to_csv("/tmp/ukt1ev_b.csv")

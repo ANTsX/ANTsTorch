@@ -17,5 +17,7 @@ from .tab_simlr import basic_q_sparsify
 from .tab_simlr import correlation_regularization_matrices
 from .tab_simlr import correlation_regularization_matrices
 from .tab_simlr import corr2_coeff
+from .tab_simlr import preprocess_signal_for_ica
+
 
 
