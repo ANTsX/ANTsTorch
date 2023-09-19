@@ -41,7 +41,7 @@ xx=jnp.dot( x0.T, x0 )
 xxw=deepsimlr.whiten( xx )
 print(type(xxw))
 qq = 0.9 # regularization
-sp = 0.99 # quantile sparseness
+sp = 0.95 # quantile sparseness
 sparseness = [sp,sp,sp]
 simlrdata = [jnp.asarray( x0 ), jnp.asarray( x1 ), jnp.asarray( x2 ) ]
 regmats = deepsimlr.correlation_regularization_matrices( simlrdata, [qq,qq,qq] )
@@ -59,17 +59,17 @@ mypos=True
 # (10, 20) - ica W matrix
 parfun = jax.tree_util.Partial( 
   deepsimlr.simlr_absolute_canonical_covariance, 
-  simlrdata, regmats, sparseness, mypos, 0.001, 'ica' )
-
-for myopt in [optax.rmsprop]:
+  simlrdata, regmats, sparseness, mypos, 10, 'svd' )
+for myopt in [optax.radam]:
   print(myopt)
   mysim = deepsimlr.tab_simlr(
     simlrdata,
     regmats,
     sparseness,
     parfun,
-    simlr_optimizer=myopt(lr,centered=False, momentum=None, nesterov=False),
-    nev=2, max_iterations=1111, positivity=mypos )
+#    simlr_optimizer=myopt(lr,centered=False, momentum=None, nesterov=False),
+    simlr_optimizer=myopt(lr),
+    nev=2, max_iterations=55, positivity=mypos )
 ##############################
 # write the features out
 pd.DataFrame(mysim[0]).to_csv("/tmp/ukt1ev_b.csv")

@@ -160,7 +160,7 @@ for ( x in sample(pp) ) {
                 myform = paste(x,"~(1|eid)+townsend_deprivation_index_at_recruitment_f22189_0_0+",gpca,"+(subjectAge_BL+sex_f31_0_0)+KMC+KMC:Years.bl")
 #                myform = paste(x,"~(1|eid)+KMC*Years.bl")
                 mdl =lmer( myform,data=zzz)
-                print(coefficients(summary( mdl))[,-c(1:2)])
+                print(coefficients(summary( mdl))[,-c(1:3)])
                 print(x)
 #                visreg::visreg(mdl,'Years.bl',by='KMC')
             }

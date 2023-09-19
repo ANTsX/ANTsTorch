@@ -11,6 +11,28 @@ import jax.numpy as jnp
 import tqdm
 import math
 
+
+def test_orthogonality(Q):
+    QtQ = jnp.dot(Q.T, Q)
+    print(QtQ)
+
+def modified_gs(A):
+    Q = jnp.zeros(A.shape)
+    for k in range(A.shape[1]):
+        q = A[:, k]
+        for j in range(k):
+            q = q - jnp.dot(q, Q[:,j])*Q[:,j]
+        Q = Q.at[:,k].set( q/jnp.linalg.norm(q) )
+    return Q
+
+def safe_corr( x, y, eps = 1e-18 ):
+    xnorm=jnp.linalg.norm(x)
+    ynorm=jnp.linalg.norm(y)
+    if  xnorm > eps and ynorm > eps:
+        return jnp.dot( x.flatten()/xnorm,  y.flatten()/ynorm )
+    else:
+        return 0.0
+
 def icawhiten(x):
     # Calculate the covariance matrix
     coVarM = jnp.cov(x)
@@ -496,11 +518,12 @@ def simlr_absolute_canonical_covariance( xlist, reglist, qlist, positivity, nond
 
     nondiag_weight : scalar parameter penalizing offdiagonal correlations within a given modality
 
-    merging : string svd, ica or average
+    merging : string svd, ica, gs or average
 
     vlist : list of current solution vectors ( nev by nfeatures )
     """
     loss_sum = 0.0
+    offsum = 0.0
     ulist = []
     nev = vlist[0].shape[0]
     for k in range(len(vlist)):
@@ -508,7 +531,10 @@ def simlr_absolute_canonical_covariance( xlist, reglist, qlist, positivity, nond
         vlist[k] = jnp.dot( vlist[k], reglist[k]  )
         # make sparse
         vlist[k] = orthogonalize_and_q_sparsify( vlist[k], qlist[k],positivity=positivity )
-        ulist.append( jnp.dot( xlist[k], vlist[k].T ) )    
+        proj = jnp.dot( xlist[k], vlist[k].T )
+        if merging == 'gs':
+            proj = modified_gs( proj )
+        ulist.append( proj )    
     for k in range(len(vlist)):
         uconcat = []
         for j in range(len(vlist)):
@@ -521,22 +547,31 @@ def simlr_absolute_canonical_covariance( xlist, reglist, qlist, positivity, nond
             uconcat = jnp.concatenate( uconcat, axis=1 )
             p1 = fastIca( uconcat.T, nev ).T
         else:
-            p1 = uconcat[0]/jnp.linalg.norm(uconcat[0])
+            m=0
+            addthis = uconcat[m] - uconcat[m].mean(1)[:, None]
+            p1 = addthis/jnp.linalg.norm(addthis)
             if len(uconcat) > 1:
                 for m in range(1,len(uconcat)):
-                    p1 = p1 + uconcat[m]/jnp.linalg.norm(uconcat[m])
+                    addthis = uconcat[m] - uconcat[m].mean(1)[:, None]
+                    addthis = addthis/jnp.linalg.norm(addthis)
+                    p1 = p1 + addthis
             p1 = p1 / len(uconcat)
+            if merging == 'gs':
+                p1 = modified_gs( p1 )
         p0 = jnp.dot( xlist[k], vlist[k].T )
         intramodalityCor = corr2_coeff( p0.T, p0.T )
         intermodalityCor = corr2_coeff( p0.T, p1.T )
         offdiag = 0.0
         offdiagcount = ( nev * nev - nev ) / 2
-        for q0 in range(1,intramodalityCor.shape[0]):
-            for q1 in range(q0+1,intramodalityCor.shape[1]):
-                lcov = intramodalityCor.at[q0,q1].get()
-                offdiag = offdiag + jnp.abs(lcov)/offdiagcount
+        for q0 in range( vlist[k].shape[0] ):
+            for q1 in range(q0+1,vlist[k].shape[0]):
+                lcov = safe_corr( vlist[k][q0,:], vlist[k][q1,:] )
+                lcov2 = intramodalityCor.at[q0,q1].get()
+                offdiag = offdiag + jnp.abs( lcov )/offdiagcount + jnp.abs(lcov2)/offdiagcount
         mycorr = jnp.trace( jnp.abs( intermodalityCor ) )/nev
         loss_sum = loss_sum - mycorr + offdiag * nondiag_weight
+        offsum = offsum + offdiag * nondiag_weight
+        # print( str(float(nondiag_weight)), " wt vs sum ", str(float(offsum)))
     return loss_sum/len(xlist)
 
 def simlr_low_rank_frobenius_norm_loss_pj( xlist, vlist ):
