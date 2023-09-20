@@ -32,7 +32,19 @@ def chexnet(image,
       fork:  https://github.com/ntustison/reproduce-chexnet    
 
     NB:  There are slight differences due to the internal PyTorch transforms
-    that are not reproduced here through   
+    that are not reproduced here, i.e.,
+
+    >>> image = Image.open(image_file)
+    >>> image = image.convert('RGB')
+    >>> 
+    >>> # use imagenet mean,std for normalization
+    >>> mean = [0.485, 0.456, 0.406]
+    >>> std = [0.229, 0.224, 0.225]
+    >>> data_transforms = transforms.Compose([transforms.Resize(224),
+    >>>                                       transforms.CenterCrop(224),
+    >>>                                       transforms.ToTensor(),
+    >>>                                       transforms.Normalize(mean, std)
+    >>>                                     ])    
 
     Arguments
     ---------
