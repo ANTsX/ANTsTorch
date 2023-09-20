@@ -34,6 +34,7 @@ def get_pretrained_network(file_id=None,
 
     def switch_networks(argument):
         switcher = {
+            "chexnet_repro_pytorch": "https://figshare.com/ndownloader/files/42411897",
             "mriModalityClassification": "https://figshare.com/ndownloader/files/41692998"
         }
         return(switcher.get(argument, "Invalid argument."))
@@ -41,7 +42,8 @@ def get_pretrained_network(file_id=None,
     if file_id == None:
         raise ValueError("Missing file id.")
 
-    valid_list = ("mriModalityClassification",
+    valid_list = ("chexnet_repro_pytorch",
+                  "mriModalityClassification",
                   "show")
 
     if not file_id in valid_list:

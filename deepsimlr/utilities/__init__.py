@@ -3,6 +3,8 @@ from .get_deepsimlr_data import get_deepsimlr_data
 
 from .mri_modality_classification import mri_modality_classification
 
+from .chexnet import chexnet
+
 from .tab_simlr import tab_simlr
 from .tab_simlr import whiten
 from .tab_simlr import simlr_low_rank_frobenius_norm_loss
