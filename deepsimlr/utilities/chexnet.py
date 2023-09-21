@@ -109,7 +109,7 @@ def chexnet(image,
 
     image_size = (224, 224)
     image = ants.resample_image(image, image_size, use_voxels=True, interp_type=0)  
-    image_array = image.numpy() / 255
+    image_array = (image.numpy() - image.min()) / (image.max() - image.min())
 
     # use imagenet mean,std for normalization
     imagenet_mean = [0.485, 0.456, 0.406]
