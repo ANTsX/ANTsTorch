@@ -25,19 +25,17 @@ parfun = jax.tree_util.Partial(
 mysim = deepsimlr.tab_simlr( [x0,x1,x2], regmats, [0.9,0.9,0.9],   
   parfun, 
   nev=5, 
-  simlr_optimizer=optax.optimistic_gradient_descent( 0.01 ), max_iterations=11, 
+  simlr_optimizer=optax.optimistic_gradient_descent( 0.01 ), 
+  max_iterations=11, 
   positivity=False   )
 
 parfun0 = jax.tree_util.Partial( 
   deepsimlr.simlr_absolute_canonical_covariance, 
-  [x0,x1,x2], regmats, [0.9,0.9,0.9], False, 1e-4 )
+  [x0,x1,x2], regmats, [0.9,0.9,0.9], False, 1e-4, 'avg' )
 
 parfun1 = jax.tree_util.Partial( 
   deepsimlr.simlr_absolute_canonical_covariance, 
-  [x0,x1,x2], regmats, [0.9,0.9,0.9], False, 1e-6 )
-
-nits=201
-nev=3
+  [x0,x1,x2], regmats, [0.9,0.9,0.9], False, 1e-6, 'svd' )
 
 mysimcc0 = deepsimlr.tab_simlr( [x0,x1,x2], regmats, [0.9,0.9,0.9],   
   parfun0, 
