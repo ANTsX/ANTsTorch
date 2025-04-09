@@ -1,5 +1,0 @@
-antspyx
-antspynet
-torch
-torchvision
-

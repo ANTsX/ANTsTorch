@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "Deep SiMLR"
+version = "0.0.1"
+description = "Interpretable, similarity-driven multi-view embeddings from high-dimensional biomedical data."
+readme = "README.md"
+authors = [{name = "Nick Tustison", email = "ntustison@gmail.com"},
+           {name = "Brian Avants", email = "stnava@gmail.com"}]
+license = {text = "Apache License 2.0"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "antspyx",
+    "torch",
+    "scikit-learn",
+    "numpy",
+    "requests",
+    "statsmodels",
+    "matplotlib",
+    "jax",
+    "optax",
+    "jaxopt",
+    "normalizing-flows @ git+https://github.com/ntustison/normalizing-flows.git@master"
+    ]
+
+[project.urls]
+"Homepage" = "https://github.com/ntustison/DeepSiMLR"
+
