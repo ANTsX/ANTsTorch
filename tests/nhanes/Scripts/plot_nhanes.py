@@ -116,7 +116,7 @@ x_np = x.cpu().detach().numpy()
 nan_rows = np.isnan(x_np).any(axis=1)
 inf_rows = np.isinf(x_np).any(axis=1)
 x_np = x_np[~nan_rows & ~inf_rows]
-u2 = fit.fit_transform(x_np)
+u2 = fit.transform(x_np)
 
 fig, (ax1, ax2) = plt.subplots(1, 2)
 fig.suptitle('UMAP embedding')
