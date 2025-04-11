@@ -12,12 +12,13 @@ from tqdm import tqdm
 cuda_device = 'cuda:0'
 
 base_directory = "/home/ntustison/Data/NVP_nhanes/"
-which = "nh_list_5"
+which = "nh_list_2"
 
 csv_file = base_directory + "Data/" + which + ".csv"
-model_file = base_directory + "Scripts/model_" + which + ".pt"
-loss_plot_file_prefix = base_directory + "Scripts/Plots/loss_" + which
+model_file = base_directory + "Scripts/model_pca_" + which + ".pt"
+loss_plot_file_prefix = base_directory + "Scripts/Plots/loss_pca_" + which
 
+pca_latent_dim = 4
 show_iter = 100
 
 # Set up datasets/dataloaders
@@ -104,7 +105,8 @@ for i in range(K):
     flows += [nf.flows.ActNorm(latent_size)]
 
 # Construct flow model
-q0 = nf.distributions.DiagGaussian(latent_size)
+# q0 = nf.distributions.DiagGaussian(latent_size)
+q0 = nf.distributions.GaussianPCA(latent_size, latent_dim=pca_latent_dim)
 model = nf.NormalizingFlow(q0=q0, flows=flows)
 
 # Move model on GPU if available

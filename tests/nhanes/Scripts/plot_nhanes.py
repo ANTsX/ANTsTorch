@@ -12,11 +12,13 @@ from matplotlib import pyplot as plt
 cuda_device = 'cuda:0'
 
 base_directory = "/home/ntustison/Data/NVP_nhanes/"
-which = "nh_list_5"
+which = "nh_list_2"
 
 csv_file = base_directory + "Data/" + which + ".csv"
-model_file = base_directory + "Scripts/model_" + which + ".pt"
-umap_plot_file = base_directory + "Scripts/Plots/umap_" + which + ".png"
+model_file = base_directory + "Scripts/model_pca_" + which + ".pt"
+umap_plot_file = base_directory + "Scripts/Plots/umap_pca_" + which + ".png"
+
+pca_latent_dim = 4
 
 # Set up datasets/dataloaders
 
@@ -90,7 +92,8 @@ for i in range(K):
     flows += [nf.flows.ActNorm(latent_size)]
 
 # Construct flow model
-q0 = nf.distributions.DiagGaussian(latent_size)
+# q0 = nf.distributions.DiagGaussian(latent_size)
+q0 = nf.distributions.GaussianPCA(latent_size, latent_dim=pca_latent_dim)
 model = nf.NormalizingFlow(q0=q0, flows=flows)
 
 # Move model on GPU if available
@@ -103,9 +106,9 @@ model = model.double()
 
 number_of_samples = dataset.csv_data.shape[0]
 model.load(model_file)
-z = torch.tensor(np.random.normal(0, 1, (number_of_samples, number_of_columns)), dtype=torch.float32)
+z = torch.tensor(np.random.normal(0, 1, (number_of_samples, pca_latent_dim)), dtype=torch.float64)
 z = z.to(device, non_blocking=True)
-x = model.forward(z)
+x = model.forward(torch.matmul(z, q0.W))
 # Sanity check:
 # zz = model.inverse(x)
 
