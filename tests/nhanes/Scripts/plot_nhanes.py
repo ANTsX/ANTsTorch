@@ -12,11 +12,11 @@ from matplotlib import pyplot as plt
 cuda_device = 'cuda:0'
 
 base_directory = "/home/ntustison/Data/NVP_nhanes/"
-which = "nh_list_2"
+which = "nh_list_5"
 
 csv_file = base_directory + "Data/" + which + ".csv"
-model_file = base_directory + "Scripts/model_pca_" + which + ".pt"
-umap_plot_file = base_directory + "Scripts/Plots/umap_pca_" + which + ".png"
+model_file = base_directory + "Scripts/model_joint_" + which + ".pt"
+umap_plot_file = base_directory + "Scripts/Plots/umap_joint_" + which + ".png"
 
 pca_latent_dim = 4
 
@@ -118,7 +118,9 @@ u = fit.fit_transform(dataset.normalize_data(dataset.csv_data))
 x_np = x.cpu().detach().numpy()
 nan_rows = np.isnan(x_np).any(axis=1)
 inf_rows = np.isinf(x_np).any(axis=1)
-x_np = x_np[~nan_rows & ~inf_rows]
+is_finite = np.isfinite(x_np)
+finite_row_indices = np.where(np.all(is_finite, axis=1))[0]
+x_np = x_np[finite_row_indices,:]
 u2 = fit.transform(x_np)
 
 fig, (ax1, ax2) = plt.subplots(1, 2)
