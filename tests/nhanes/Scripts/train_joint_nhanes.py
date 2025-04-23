@@ -98,36 +98,6 @@ def create_normalizing_flow_model(latent_size,
     model = nf.NormalizingFlow(q0=q0, flows=flows)
     return model
 
-def mutual_information_kde_torch(x_torch, y_torch, bandwidth=0.1):
-    """
-    Computes mutual information between two PyTorch tensors using KDE.
-    """
-    x_np = x_torch.cpu().detach().numpy()
-    y_np = y_torch.cpu().detach().numpy()
-    xy_np = np.hstack([x_np, y_np])
-
-    kde_xy = KernelDensity(bandwidth=bandwidth).fit(xy_np)
-    kde_x = KernelDensity(bandwidth=bandwidth).fit(x_np)
-    kde_y = KernelDensity(bandwidth=bandwidth).fit(y_np)
-
-    joint_log_density = kde_xy.score_samples(xy_np)
-    x_log_density = kde_x.score_samples(x_np)
-    y_log_density = kde_y.score_samples(y_np)
-
-    mi_np = np.mean(joint_log_density - x_log_density - y_log_density)
-    return torch.tensor(mi_np, requires_grad=True, device=x_torch.device)
-
-# def mutual_information_kde(x, y, bandwidth=0.1):
-#     xy = np.hstack([x, y])
-#     kde = KernelDensity(bandwidth=bandwidth).fit(xy)
-#     x_kde = KernelDensity(bandwidth=bandwidth).fit(x)
-#     y_kde = KernelDensity(bandwidth=bandwidth).fit(y)
-#     samples = xy
-#     joint_log_density = kde.score_samples(samples)
-#     x_log_density = x_kde.score_samples(x)
-#     y_log_density = y_kde.score_samples(y)
-#     return np.mean(joint_log_density - x_log_density - y_log_density)
-
 def mutual_information_kde_torch(x, y, bandwidth=0.1):
     x_np = x.cpu().detach().numpy()
     y_np = y.cpu().detach().numpy()
