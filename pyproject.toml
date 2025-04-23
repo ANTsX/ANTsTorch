@@ -30,5 +30,5 @@ dependencies = [
     ]
 
 [project.urls]
-"Homepage" = "https://github.com/ntustison/DeepSiMLR"
+"Homepage" = "https://github.com/ntustison/DeepSiMR"
 

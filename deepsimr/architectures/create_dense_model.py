@@ -33,7 +33,7 @@ class create_dense_model(nn.Module):
 
     Example
     -------
-    >>> model = deepsimlr.create_dense_model(128)
+    >>> model = deepsimr.create_dense_model(128)
     >>> torchinfo.summary(model)
     """
 

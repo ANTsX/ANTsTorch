@@ -428,9 +428,9 @@ def basic_q_sparsify(v, sparseness_quantile=0.5 ):
     return v
 
 
-def simlr_low_rank_frobenius_norm_loss_reg_sparse( xlist, reglist, qlist, positivity, vlist ):
+def simr_low_rank_frobenius_norm_loss_reg_sparse( xlist, reglist, qlist, positivity, vlist ):
     """
-    implements a low-rank loss function (error) for simlr (pure jax)
+    implements a low-rank loss function (error) for simr (pure jax)
 
     xlist : list of data matrices  ( nsamples by nfeatures )
 
@@ -462,9 +462,9 @@ def simlr_low_rank_frobenius_norm_loss_reg_sparse( xlist, reglist, qlist, positi
         loss_sum = loss_sum + jax.numpy.linalg.norm(  p0 - p1 )
     return loss_sum
 
-def simlr_canonical_correlation_loss_reg_sparse( xlist, reglist, qlist, positivity, nondiag_weight, vlist ):
+def simr_canonical_correlation_loss_reg_sparse( xlist, reglist, qlist, positivity, nondiag_weight, vlist ):
     """
-    implements a low-rank CCA-like loss function (error) for simlr (pure jax)
+    implements a low-rank CCA-like loss function (error) for simr (pure jax)
 
     xlist : list of data matrices  ( nsamples by nfeatures )
 
@@ -504,9 +504,9 @@ def simlr_canonical_correlation_loss_reg_sparse( xlist, reglist, qlist, positivi
         loss_sum = loss_sum - mycorr + offdiag 
     return loss_sum
 
-def simlr_absolute_canonical_covariance( xlist, reglist, qlist, positivity, nondiag_weight, merging, vlist ):
+def simr_absolute_canonical_covariance( xlist, reglist, qlist, positivity, nondiag_weight, merging, vlist ):
     """
-    implements a low-rank CCA-like loss function (error) for simlr (pure jax)
+    implements a low-rank CCA-like loss function (error) for simr (pure jax)
 
     xlist : list of data matrices  ( nsamples by nfeatures )
 
@@ -574,9 +574,9 @@ def simlr_absolute_canonical_covariance( xlist, reglist, qlist, positivity, nond
         # print( str(float(nondiag_weight)), " wt vs sum ", str(float(offsum)))
     return loss_sum/len(xlist)
 
-def simlr_low_rank_frobenius_norm_loss_pj( xlist, vlist ):
+def simr_low_rank_frobenius_norm_loss_pj( xlist, vlist ):
     """
-    implements a low-rank loss function (error) for simlr (pure jax)
+    implements a low-rank loss function (error) for simr (pure jax)
 
     xlist : list of data matrices  ( nsamples by nfeatures )
 
@@ -600,9 +600,9 @@ def simlr_low_rank_frobenius_norm_loss_pj( xlist, vlist ):
         loss_sum = loss_sum + jax.numpy.linalg.norm(  p0 - p1 )
     return loss_sum
 
-def simlr_canonical_correlation_loss_pj( xlist, vlist ):
+def simr_canonical_correlation_loss_pj( xlist, vlist ):
     """
-    implements a low-rank loss function (error) for simlr (pure jax)
+    implements a low-rank loss function (error) for simr (pure jax)
 
     xlist : list of data matrices  ( nsamples by nfeatures )
 
@@ -628,15 +628,15 @@ def simlr_canonical_correlation_loss_pj( xlist, vlist ):
         loss_sum = loss_sum - jnp.mean( jnp.diagonal( mydot ) )
     return loss_sum
 
-def simlr_low_rank_frobenius_norm_loss( xlist, vlist, simlrtransformer ):
+def simr_low_rank_frobenius_norm_loss( xlist, vlist, simrtransformer ):
     """
-    implements a low-rank loss function (error) for simlr 
+    implements a low-rank loss function (error) for simr 
 
     xlist : list of data matrices  ( nsamples by nfeatures )
 
     vlist : list of current solution vectors ( nev by nfeatures )
 
-    simlrtransformer : a scikitlearn transformer
+    simrtransformer : a scikitlearn transformer
     """
     loss_sum = 0.0
     ulist = []
@@ -648,20 +648,20 @@ def simlr_low_rank_frobenius_norm_loss( xlist, vlist, simlrtransformer ):
             if k != j :
                 uconcat.append( ulist[j] )
         uconcat = jnp.concatenate( uconcat, axis=1 )
-        p1 = simlrtransformer.fit_transform( uconcat )
+        p1 = simrtransformer.fit_transform( uconcat )
         p0 = jnp.dot( xlist[k], vlist[k].T )
         loss_sum = loss_sum + jax.numpy.linalg.norm(  p0 - p1 )
     return loss_sum
 
-def simlr_canonical_correlation_loss( xlist, vlist, simlrtransformer ):
+def simr_canonical_correlation_loss( xlist, vlist, simrtransformer ):
     """
-    implements a CCA-like loss for simlr 
+    implements a CCA-like loss for simr 
 
     xlist : list of data matrices  ( nsamples by nfeatures )
 
     vlist : list of current solution vectors ( nev by nfeatures )
 
-    simlrtransformer : a scikitlearn transformer
+    simrtransformer : a scikitlearn transformer
     """
     loss_sum = 0.0
     ulist = []
@@ -673,7 +673,7 @@ def simlr_canonical_correlation_loss( xlist, vlist, simlrtransformer ):
             if k != j :
                 uconcat.append( ulist[j] )
         uconcat = jnp.concatenate( uconcat, axis=1 )
-        p1 = simlrtransformer.fit_transform( uconcat )
+        p1 = simrtransformer.fit_transform( uconcat )
         p0 = jnp.dot( xlist[k], vlist[k].T )
         mydot = jnp.dot( p0.T, p1 )
         loss_sum = loss_sum - jnp.mean( jnp.diagonal( mydot ) )
@@ -697,7 +697,7 @@ def correlation_regularization_matrices( matrix_list, correlation_threshold_list
         corl.append( jax.numpy.asarray( cor1 ) )
     return corl
 
-def tab_simlr( matrix_list, regularization_matrices, quantile_list, loss_function, simlr_optimizer, nev=2, max_iterations=5000, positivity=False, verbose=True ):
+def tab_simr( matrix_list, regularization_matrices, quantile_list, loss_function, simr_optimizer, nev=2, max_iterations=5000, positivity=False, verbose=True ):
     """
     matrix_list : list of matrices
 
@@ -705,9 +705,9 @@ def tab_simlr( matrix_list, regularization_matrices, quantile_list, loss_functio
 
     quantile_list : list of quantiles that determine sparseness level
 
-    loss_function : a partial deep_simlr loss function where its only parameter is the current solution value (params)
+    loss_function : a partial deep_simr loss function where its only parameter is the current solution value (params)
 
-    simlr_optimizer : optax optimizer to use with simlr (initialized with relevant parameters)
+    simr_optimizer : optax optimizer to use with simr (initialized with relevant parameters)
 
     nev : number of solution vectors per modality
 
@@ -735,14 +735,14 @@ def tab_simlr( matrix_list, regularization_matrices, quantile_list, loss_functio
     best_params = params
     best_e = math.inf
     import optax
-    opt_state = simlr_optimizer.init(params)
+    opt_state = simr_optimizer.init(params)
     loss_grad_fn = jax.value_and_grad(loss_function)
     for i in range(max_iterations):
         loss_val, grads = loss_grad_fn(params)
         if loss_val < best_e:
             best_params = params
             best_e = loss_val
-        updates, opt_state = simlr_optimizer.update(grads, opt_state, params=params )
+        updates, opt_state = simr_optimizer.update(grads, opt_state, params=params )
         params = optax.apply_updates(params, updates)
         if i % 10 == 0 and verbose:
             print('Loss step {}: '.format(i), loss_val)
@@ -818,7 +818,7 @@ def reconstruction_error(U, V, X):
   return 0.5 * jnp.mean((UV - X) ** 2)
 
 
-def tab_simlrx( x0, x1, v0i, v1i, maxiter=10):
+def tab_simrx( x0, x1, v0i, v1i, maxiter=10):
   v0, v1 = v0i, v1i
   u0 = jnp.dot( x0, v0.T)
   u1 = jnp.dot( x1, v1.T )
@@ -866,12 +866,12 @@ def mainer(argv):
   print("gamma", FLAGS.gamma)
   print()
 
-  tab_simlr(x0, x1, v0, v1, maxiter=300)
+  tab_simr(x0, x1, v0, v1, maxiter=300)
 
 
-def tab_simlr_old( x ):
+def tab_simr_old( x ):
     """
-    linear alebraic simlr for tabular data
+    linear alebraic simr for tabular data
 
     x: list of matrices
     """

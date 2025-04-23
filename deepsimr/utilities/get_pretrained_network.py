@@ -1,12 +1,12 @@
 import torchvision
 import os
 
-def get_deepsimlr_data(file_id=None,
-                       target_file_name=None,
-                       deepsimlr_cache_directory=None):
+def get_pretrained_network(file_id=None,
+                           target_file_name=None,
+                           deepsimr_cache_directory=None):
 
     """
-    Download data such as prefabricated templates and spatial priors.
+    Download pretrained network/weights.
 
     Arguments
     ---------
@@ -19,9 +19,9 @@ def get_deepsimlr_data(file_id=None,
     target_file_name string
        Optional target filename.
 
-    deepsimlr_cache_directory string
+    deepsimr_cache_directory string
        Optional target output.  If not specified these data will be downloaded
-       to the subdirectory ~/.deepsimlr/.
+       to the subdirectory ~/.deepsimr/.
 
     Returns
     -------
@@ -29,19 +29,21 @@ def get_deepsimlr_data(file_id=None,
 
     Example
     -------
-    >>> template_file = get_deepsimlr_data('biobank')
+    >>> model_file = get_pretrained_network('not_yet')
     """
 
-    def switch_data(argument):
+    def switch_networks(argument):
         switcher = {
-            "kirby": "https://ndownloader.figshare.com/files/25620107"
+            "chexnet_repro_pytorch": "https://figshare.com/ndownloader/files/42411897",
+            "mriModalityClassification": "https://figshare.com/ndownloader/files/41692998"
         }
         return(switcher.get(argument, "Invalid argument."))
 
     if file_id == None:
         raise ValueError("Missing file id.")
 
-    valid_list = ("kirby",
+    valid_list = ("chexnet_repro_pytorch",
+                  "mriModalityClassification",
                   "show")
 
     if not file_id in valid_list:
@@ -50,18 +52,18 @@ def get_deepsimlr_data(file_id=None,
     if file_id == "show":
        return(valid_list)
 
-    url = switch_data(file_id)
+    url = switch_networks(file_id)
 
     if target_file_name is None:
-        target_file_name = file_id + ".nii.gz"
+        target_file_name = file_id + ".h5"
 
-    if deepsimlr_cache_directory is None:
-        deepsimlr_cache_directory = os.path.join(os.path.expanduser('~'), '.deepsimlr/')
-    target_file_name_path = os.path.join(deepsimlr_cache_directory, target_file_name)
+    if deepsimr_cache_directory is None:
+        deepsimr_cache_directory = os.path.join(os.path.expanduser('~'), '.deepsimr/')
+    target_file_name_path = os.path.join(deepsimr_cache_directory, target_file_name)
 
     if not os.path.exists(target_file_name_path):
         torchvision.datasets.utils.download_url(url,
-                                                deepsimlr_cache_directory,
+                                                deepsimr_cache_directory,
                                                 target_file_name)
 
     return(target_file_name_path)

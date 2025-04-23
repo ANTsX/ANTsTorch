@@ -59,7 +59,7 @@ class create_resnet_model_2d(nn.Module):
 
     Example
     -------
-    >>> model = deepsimlr.create_resnet_model_2d(input_channel_size=3)
+    >>> model = deepsimr.create_resnet_model_2d(input_channel_size=3)
     >>> torchinfo.summary(model, input_size=(1, 3, 128, 128))
     """
 
@@ -336,7 +336,7 @@ class create_resnet_model_3d(nn.Module):
 
     Example
     -------
-    >>> model = deepsimlr.create_resnet_model_3d(input_channel_size=3)
+    >>> model = deepsimr.create_resnet_model_3d(input_channel_size=3)
     >>> torchinfo.summary(model, input_size=(1, 3, 128, 128))
     """
 

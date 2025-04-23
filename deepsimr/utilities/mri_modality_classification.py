@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 def mri_modality_classification(image,
-                                deepsimlr_cache_directory=None,
+                                deepsimr_cache_directory=None,
                                 verbose=False):
 
     """
@@ -36,12 +36,12 @@ def mri_modality_classification(image,
 
     Example
     -------
-    >>> image = ants.image_read(deepsimlr.get_deepsimlr_data("kirby"))
-    >>> classification = deepsimlr.mri_modality_classification(image)
+    >>> image = ants.image_read(deepsimr.get_deepsimr_data("kirby"))
+    >>> classification = deepsimr.mri_modality_classification(image)
     """
 
     from ..utilities import get_pretrained_network
-    from ..utilities import get_deepsimlr_data
+    from ..utilities import get_deepsimr_data
     from ..architectures import create_resnet_model_3d
 
     if image.dimension != 3:
@@ -56,7 +56,7 @@ def mri_modality_classification(image,
     image_size = (112, 112, 112)
     resample_size = (2, 2, 2)
 
-    template = ants.image_read(get_deepsimlr_data("kirby"))
+    template = ants.image_read(get_deepsimr_data("kirby"))
     template = ants.resample_image(template, resample_size)
     template = antspynet.pad_or_crop_image_to_size(template, image_size)
     direction = template.direction
@@ -80,7 +80,7 @@ def mri_modality_classification(image,
     ################################
 
     weights_file_name = get_pretrained_network("mriModalityClassification",
-                                               deepsimlr_cache_directory=deepsimlr_cache_directory)
+                                               deepsimr_cache_directory=deepsimr_cache_directory)
 
     modality_types = ["T1", "T2", "FLAIR", "T2Star", "Mean DWI", "Mean Bold", "ASL Perfusion"]
 
