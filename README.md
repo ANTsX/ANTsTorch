@@ -1,4 +1,4 @@
-# DeepSiMR
+# ANTsTorch 
 
 _Interpretable, similarity-driven multi-view embeddings from high-dimensional biomedical data_
 

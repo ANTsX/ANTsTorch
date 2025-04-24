@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 def chexnet(image,
-            deepsimr_cache_directory=None,
+            antstorch_cache_directory=None,
             verbose=False):
 
     """
@@ -62,7 +62,7 @@ def chexnet(image,
     Example
     -------
     >>> image = ants.image_read()
-    >>> classification = deepsimr.chexnet(image)
+    >>> classification = antstorch.chexnet(image)
     """
 
     from ..utilities import get_pretrained_network
@@ -92,12 +92,12 @@ def chexnet(image,
     ################################
 
     weights_file_name = get_pretrained_network("chexnet_repro_pytorch",
-                                               deepsimr_cache_directory=deepsimr_cache_directory)
+                                                antstorch_cache_directory=antstorch_cache_directory)
 
     model = models.densenet121(weights='DEFAULT')
     model.classifier = torch.nn.Sequential(torch.nn.Linear(model.classifier.in_features, 
-                                                       len(disease_categories)), 
-                                       torch.nn.Sigmoid())
+                                                           len(disease_categories)), 
+                                           torch.nn.Sigmoid())
     model.eval()
     model.load_state_dict(torch.load(weights_file_name))
 
