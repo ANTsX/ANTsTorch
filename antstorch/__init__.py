@@ -5,5 +5,5 @@ except:
     pass
 
 from .architectures import *
-from .deepsimr import *
+from .deep_simr import *
 from .utilities import *
