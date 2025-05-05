@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 cuda_device = 'cuda:0'
 
-base_directory = "/home/ntustison/Data/NVP_nhanes/"
+base_directory = "../"
 which = "nh_list_2"
 
 csv_file = base_directory + "Data/" + which + ".csv"

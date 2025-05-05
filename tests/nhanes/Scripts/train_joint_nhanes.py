@@ -14,7 +14,7 @@ from tqdm import tqdm
 cuda_device = 'cuda:0'
 torch.manual_seed(0)
 
-base_directory = "/home/ntustison/Data/NVP_nhanes/"
+base_directory = "../"
 which = ["nh_list_2", "nh_list_3", "nh_list_4", "nh_list_5"]
 
 # model_file = base_directory + "Scripts/model_pca_" + which + ".pt"
