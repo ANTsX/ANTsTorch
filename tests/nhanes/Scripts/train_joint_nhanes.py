@@ -4,9 +4,9 @@ import normflows as nf
 import pandas as pd
 import random
 
-from torch.utils.data import Dataset, DataLoader
+import antstorch
 
-from sklearn.neighbors import KernelDensity
+from torch.utils.data import Dataset, DataLoader
 
 from matplotlib import pyplot as plt
 from tqdm import tqdm
@@ -98,19 +98,6 @@ def create_normalizing_flow_model(latent_size,
     model = nf.NormalizingFlow(q0=q0, flows=flows)
     return model
 
-def mutual_information_kde_torch(x, y, bandwidth=0.1):
-    x_np = x.cpu().detach().numpy()
-    y_np = y.cpu().detach().numpy()
-    xy_np = np.hstack([x_np, y_np])
-    kde_xy = KernelDensity(bandwidth=bandwidth).fit(xy_np)
-    kde_x = KernelDensity(bandwidth=bandwidth).fit(x_np)
-    kde_y = KernelDensity(bandwidth=bandwidth).fit(y_np)
-    joint_log_density = kde_xy.score_samples(xy_np)
-    x_log_density = kde_x.score_samples(x_np)
-    y_log_density = kde_y.score_samples(y_np)
-    mi_np = np.mean(joint_log_density - x_log_density - y_log_density)
-    return torch.tensor(mi_np, requires_grad=True, device=x.device)
-
 training_datasets = list()
 training_dataloaders = list()
 training_iterators = list()
@@ -176,7 +163,7 @@ for it in tqdm(range(max_iter)):
     # Mutual information
     for m in range(len(models)):
         for n in range(m + 1, len(models)):
-            loss += (mi_beta * mutual_information_kde_torch(z[m], z[n])) 
+            loss += (mi_beta * antstorch.mutual_information_kde(z[m], z[n])) 
 
     if (count_iter + 1) % show_iter == 0:
         plt.plot(loss_hist[:count_iter+1,0], loss_hist[:count_iter+1,1], label="Loss")
