@@ -5,6 +5,30 @@ import normflows as nf
 def create_real_nvp_normalizing_flow_model(latent_size,
                                            pca_latent_dimension, 
                                            K=64):
+    """
+    Create Real NVP model.
+
+    Arguments
+    ---------
+    latent_size : integer
+        Input size.
+
+    pca_latent_dimension : integer
+        PCA latent dimension.
+
+    K : integer
+        Number of layers    
+
+    Returns
+    -------
+    PyTorch model
+        A PyTorch model defining the network.
+
+    Example
+    -------
+    >>> model = antstorch.create_real_nvp_normalizing_flow_model(512, 8)
+    >>> torchinfo.summary(model)
+    """
 
     b = torch.Tensor([1 if i % 2 == 0 else 0 for i in range(latent_size)])
     flows = []
