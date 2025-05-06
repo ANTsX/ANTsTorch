@@ -24,7 +24,8 @@ loss_plot_file_prefix = base_directory + "Scripts/Plots/loss_pca_" + which
 pca_latent_dim = 4
 show_iter = 100
 
-training_dataset = antstorch.DataFrame(dataframe=pd.read(csv_file), number_of_samples=1000000)
+training_dataset = antstorch.DataFrame(dataframe=pd.read_csv(csv_file), 
+                                       number_of_samples=1000000)
 training_dataloader = DataLoader(training_dataset, batch_size=64,
                                  shuffle=True, num_workers=4)
 training_iterator = iter(training_dataloader)
@@ -33,11 +34,11 @@ training_iterator = iter(training_dataloader)
 # testing_dataloader = DataLoader(testing_dataset, batch_size=32,
 #                                 shuffle=True, num_workers=4)
 
-number_of_columns = training_dataset.csv_data.shape[1]
+number_of_columns = len(training_dataset.dataframe.columns)
 
 print("Latent size: ", str(number_of_columns))
 print("Column names: ")
-print(training_dataset.colnames)
+print(training_dataset.dataframe.columns)
 
 # Define model
 K = 64
