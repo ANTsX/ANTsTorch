@@ -7,7 +7,7 @@ import random
 
 
 
-class DataFrame(Dataset):
+class DataFrameDataset(Dataset):
 
     """
     Class for defining a data frame (i.e., pandas) dataset.  
@@ -33,15 +33,8 @@ class DataFrame(Dataset):
     Returns
     -------
 
-    Singleton PyTorch tensor
-
-    Data frame with probability values for each disease category.
-
     Example
     -------
-    >>> x = torch.rand((5, 2))
-    >>> y = torch.rand((5, 2))
-    >>> mi = antstorch.mutual_information_kde(x, y)
     """    
 
     def __init__(self,

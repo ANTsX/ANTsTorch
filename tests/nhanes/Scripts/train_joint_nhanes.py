@@ -38,8 +38,8 @@ print("Loading training data and generating models.")
 for i in range(len(which)):
     print("  Dataset", which[i])
     csv_file = base_directory + "Data/" + which[i] + ".csv"
-    training_datasets.append(antstorch.DataFrame(dataframe=pd.read_csv(csv_file), 
-                                                 number_of_samples=1000000))
+    training_datasets.append(antstorch.DataFrameDataset(dataframe=pd.read_csv(csv_file), 
+                                                        number_of_samples=1000000))
     training_dataloaders.append(DataLoader(training_datasets[i], batch_size=64,
                                           shuffle=True, num_workers=4))
     training_iterators.append(iter(training_dataloaders[i]))
