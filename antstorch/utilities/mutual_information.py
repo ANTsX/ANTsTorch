@@ -17,10 +17,10 @@ def mutual_information_kde(x, y, bandwidth=0.1):
     y : PyTorch tensor
         PyTorch tensor.
 
-    bandwith : scalar
+    bandwidth : scalar
         Parameter for kernel density estimation.
-
-            Returns
+        
+    Returns
     -------
 
     Singleton PyTorch tensor

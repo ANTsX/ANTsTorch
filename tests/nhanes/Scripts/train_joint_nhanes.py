@@ -2,11 +2,10 @@ import torch
 import numpy as np
 import normflows as nf
 import pandas as pd
-import random
 
 import antstorch
 
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 
 from matplotlib import pyplot as plt
 from tqdm import tqdm
@@ -28,58 +27,7 @@ max_iter = 5000
 lr = 1e-4
 weight_decay = 0.0
 
-
 # Set up datasets/dataloaders
-
-class CsvDataset(Dataset):
-    def __init__(self,
-                 dataframe,
-                 alpha=0.01,
-                 do_normalize=True,
-                 do_data_augmentation=True,
-                 number_of_samples=1):
-        self.csv_file = csv_file
-        self.number_of_samples = number_of_samples
-        self.alpha = alpha
-        self.do_normalize = do_normalize
-        self.do_data_augmentation = do_data_augmentation
-        csv = dataframe
-        self.csv_data_colnames = csv.columns  
-        self.csv_data = csv.to_numpy()
-        self.number_of_measurements = self.csv_data.shape[0]
-        self.csv_std = np.std(self.csv_data, axis=0)
-        self.csv_mean = np.mean(self.csv_data, axis=0)
-        self.csv_min = np.min(self.csv_data, axis=0)
-        self.csv_max = np.max(self.csv_data, axis=0)
-    def __len__(self):
-        return self.number_of_samples
-    def __getitem__(self, idx):
-        if torch.is_tensor(idx):
-            idx = idx.tolist()
-        random_index = random.sample(range(self.number_of_measurements), k=1)[0]
-        random_measurement = self.csv_data[random_index,:]
-        if self.do_data_augmentation:
-            random_measurement += np.random.normal(np.zeros(random_measurement.shape),
-                                                   self.alpha * self.csv_std)
-        if self.do_normalize:
-            random_measurement = self.normalize_data(random_measurement)
-        return random_measurement 
-    def normalize_data(self, data):
-        if len(data.shape) == 2:
-            min = np.tile(self.csv_min, (self.number_of_measurements, 1))
-            max = np.tile(self.csv_max, (self.number_of_measurements, 1))
-            normalized_data = (data - min) / (max - min)
-        else:
-            normalized_data = (data - self.csv_min) / (self.csv_max - self.csv_min) 
-        return normalized_data       
-    def denormalize_data(self, data):
-        if len(data.shape) == 2:
-            min = np.tile(self.csv_min, (self.number_of_measurements, 1))
-            max = np.tile(self.csv_max, (self.number_of_measurements, 1))
-            denormalized_data = data * (max - min) + min
-        else:
-            denormalized_data = data * (self.csv_max - self.csv_min) + self.csv_min
-        return denormalized_data       
 
 def create_normalizing_flow_model(latent_size,
                                   pca_latent_dimension, 
@@ -108,8 +56,8 @@ print("Loading training data and generating models.")
 for i in range(len(which)):
     print("  Dataset", which[i])
     csv_file = base_directory + "Data/" + which[i] + ".csv"
-    training_datasets.append(CsvDataset(dataframe=pd.read_csv(csv_file), 
-                                        number_of_samples=1000000))
+    training_datasets.append(antstorch.DataFrame(dataframe=pd.read_csv(csv_file), 
+                                                 number_of_samples=1000000))
     training_dataloaders.append(DataLoader(training_datasets[i], batch_size=64,
                                           shuffle=True, num_workers=4))
     training_iterators.append(iter(training_dataloaders[i]))
