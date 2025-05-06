@@ -33,7 +33,7 @@ weight_decay = 0.0
 
 class CsvDataset(Dataset):
     def __init__(self,
-                 csv_file,
+                 dataframe,
                  alpha=0.01,
                  do_normalize=True,
                  do_data_augmentation=True,
@@ -43,7 +43,7 @@ class CsvDataset(Dataset):
         self.alpha = alpha
         self.do_normalize = do_normalize
         self.do_data_augmentation = do_data_augmentation
-        csv = pd.read_csv(csv_file)
+        csv = dataframe
         self.csv_data_colnames = csv.columns  
         self.csv_data = csv.to_numpy()
         self.number_of_measurements = self.csv_data.shape[0]
@@ -108,7 +108,8 @@ print("Loading training data and generating models.")
 for i in range(len(which)):
     print("  Dataset", which[i])
     csv_file = base_directory + "Data/" + which[i] + ".csv"
-    training_datasets.append(CsvDataset(csv_file=csv_file, number_of_samples=1000000))
+    training_datasets.append(CsvDataset(dataframe=pd.read_csv(csv_file), 
+                                        number_of_samples=1000000))
     training_dataloaders.append(DataLoader(training_datasets[i], batch_size=64,
                                           shuffle=True, num_workers=4))
     training_iterators.append(iter(training_dataloaders[i]))
