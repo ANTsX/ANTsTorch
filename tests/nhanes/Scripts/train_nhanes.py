@@ -5,6 +5,8 @@ import pandas as pd
 
 import antstorch
 
+import normflows as nf
+
 from torch.utils.data import DataLoader
 
 from matplotlib import pyplot as plt
