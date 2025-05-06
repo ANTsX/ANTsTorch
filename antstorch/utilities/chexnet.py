@@ -91,6 +91,9 @@ def chexnet(image,
     #
     ################################
 
+    if verbose:
+        print("Loading model and weights.")
+
     weights_file_name = get_pretrained_network("chexnet_repro_pytorch",
                                                 antstorch_cache_directory=antstorch_cache_directory)
 
@@ -106,6 +109,9 @@ def chexnet(image,
     # Prepare image
     #
     ################################
+
+    if verbose:
+        print("Image preprocessing.")  
 
     image_size = (224, 224)
     image = ants.resample_image(image, image_size, use_voxels=True, interp_type=0)  
@@ -127,6 +133,8 @@ def chexnet(image,
     batchX = batchX.transpose((2, 1, 0))
     batchX = np.expand_dims(batchX, 0)
 
+    if verbose:
+        print("Prediction.")
     batchY = model((torch.from_numpy(batchX)).float())
 
     disease_df = pd.DataFrame(batchY.detach().numpy(), columns = disease_categories)
