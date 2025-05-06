@@ -55,7 +55,6 @@ class DataFrame(Dataset):
         self.alpha = alpha
         self.do_normalize = do_normalize
         self.do_data_augmentation = do_data_augmentation
-        self.data_colnames = self.dataframe.columns  
         self.dataframe_numpy = self.dataframe.to_numpy()
         self.number_of_measurements = self.dataframe_numpy.shape[0]
         self.data_std = np.std(self.dataframe_numpy, axis=0)
