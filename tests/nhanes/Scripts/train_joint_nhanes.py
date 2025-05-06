@@ -61,10 +61,10 @@ for i in range(len(which)):
     training_dataloaders.append(DataLoader(training_datasets[i], batch_size=64,
                                           shuffle=True, num_workers=4))
     training_iterators.append(iter(training_dataloaders[i]))
-    number_of_columns = training_datasets[i].csv_data.shape[1]
+    number_of_columns = len(training_datasets[i].dataframe.columns)
     print("    model hyperparameters: ")
     print("      latent size: ", str(number_of_columns))
-    print("      column names: ", training_datasets[i].csv_data_colnames)
+    print("      column names: ", training_datasets[i].dataframe.columns)
     nf_model = create_normalizing_flow_model(number_of_columns,
                                              pca_latent_dimension=pca_latent_dimension)
     models.append(nf_model)
