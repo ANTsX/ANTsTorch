@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-import normflows as nf
 import pandas as pd
 
 import antstorch
@@ -27,25 +26,6 @@ max_iter = 5000
 lr = 1e-4
 weight_decay = 0.0
 
-# Set up datasets/dataloaders
-
-def create_normalizing_flow_model(latent_size,
-                                  pca_latent_dimension, 
-                                  K=64):
-    b = torch.Tensor([1 if i % 2 == 0 else 0 for i in range(latent_size)])
-    flows = []
-    for i in range(K):
-        s = nf.nets.MLP([latent_size, 2 * latent_size, latent_size], init_zeros=True)
-        t = nf.nets.MLP([latent_size, 2 * latent_size, latent_size], init_zeros=True)
-        if i % 2 == 0:
-            flows += [nf.flows.MaskedAffineFlow(b, t, s)]
-        else:
-            flows += [nf.flows.MaskedAffineFlow(1 - b, t, s)]
-        flows += [nf.flows.ActNorm(latent_size)]
-    q0 = nf.distributions.GaussianPCA(latent_size, latent_dim=pca_latent_dimension)
-    model = nf.NormalizingFlow(q0=q0, flows=flows)
-    return model
-
 training_datasets = list()
 training_dataloaders = list()
 training_iterators = list()
@@ -65,8 +45,8 @@ for i in range(len(which)):
     print("    model hyperparameters: ")
     print("      latent size: ", str(number_of_columns))
     print("      column names: ", training_datasets[i].dataframe.columns)
-    nf_model = create_normalizing_flow_model(number_of_columns,
-                                             pca_latent_dimension=pca_latent_dimension)
+    nf_model = antstorch.create_real_nvp_normalizing_flow_model(number_of_columns,
+                                                                pca_latent_dimension=pca_latent_dimension)
     models.append(nf_model)
     combined_model_parameters += list(models[i].parameters())
     # Move model on GPU if available
@@ -74,7 +54,6 @@ for i in range(len(which)):
     device = torch.device(cuda_device if torch.cuda.is_available() and enable_cuda else 'cpu')
     models[i] = models[i].to(device)
     models[i] = models[i].double()
-
 
 loss_hist = np.zeros((max_iter, 2))
 

@@ -50,6 +50,7 @@ class DataFrame(Dataset):
                  do_normalize=True,
                  do_data_augmentation=True,
                  number_of_samples=1):
+        
         self.dataframe = dataframe
         self.number_of_samples = number_of_samples
         self.alpha = alpha

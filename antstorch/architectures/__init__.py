@@ -5,3 +5,6 @@ from .create_resnet_model import create_resnet_model_2d
 from .create_resnet_model import create_resnet_model_3d
 
 from .create_dense_model import create_dense_model
+
+from .create_normalizing_flow_model import create_real_nvp_normalizing_flow_model
+
