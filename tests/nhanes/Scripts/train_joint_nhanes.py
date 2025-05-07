@@ -49,7 +49,8 @@ for i in range(len(which)):
     print("      column names: ", training_datasets[i].dataframe.columns)
     q0 = nf.distributions.GaussianPCA(number_of_columns, latent_dim=pca_latent_dimension)
     nf_model = antstorch.create_real_nvp_normalizing_flow_model(number_of_columns,
-                                                             q0=q0)
+                                                                q0=q0,
+                                                                leaky_relu_negative_slope=0.2)
     models.append(nf_model)
     combined_model_parameters += list(models[i].parameters())
     # Move model on GPU if available

@@ -4,8 +4,8 @@ import normflows as nf
 
 def create_real_nvp_normalizing_flow_model(latent_size,
                                            K=64,
-                                           q0=None,
-                                           number_of_initial_dense_layers=0):
+                                           q0=None, 
+                                           leaky_relu_negative_slope=0.0):
     """
     Create Real NVP model.
 
@@ -22,8 +22,8 @@ def create_real_nvp_normalizing_flow_model(latent_size,
         e.g., diagonal gaussian q0 = nf. DiagGaussian(latent_size).
         None is also a possibility. 
 
-    number_of_initial_dense_layers : integer
-        Number of initial dense layers.    
+    leaky_relu_negative_slope : float
+        Negative slope value for leaky relu layers.    
 
     Returns
     -------
@@ -38,19 +38,20 @@ def create_real_nvp_normalizing_flow_model(latent_size,
     >>> model = antstorch.create_real_nvp_normalizing_flow_model(input_size,
                                                                  K=4, 
                                                                  q0=q0, 
-                                                                 number_of_initial_dense_layers=2)
+                                                                 leaky_relu_negative_slope=0.0)
+                                                                 
     """
 
     flows = []
 
-    for _ in range(number_of_initial_dense_layers): 
-        d = nf.nets.MLP([latent_size, latent_size], output_fn="relu", init_zeros=False)
-        flows += [nf.flows.AffineCoupling(d, scale=False)]
-        
     b = torch.Tensor([1 if i % 2 == 0 else 0 for i in range(latent_size)])
     for i in range(K):
-        s = nf.nets.MLP([latent_size, 2 * latent_size, latent_size], init_zeros=True)
-        t = nf.nets.MLP([latent_size, 2 * latent_size, latent_size], init_zeros=True)
+        s = nf.nets.MLP([latent_size, 2 * latent_size, latent_size],
+                        leaky=leaky_relu_negative_slope, 
+                        init_zeros=True)
+        t = nf.nets.MLP([latent_size, 2 * latent_size, latent_size],
+                        leaky=leaky_relu_negative_slope, 
+                        init_zeros=True)
         if i % 2 == 0:
             flows += [nf.flows.MaskedAffineFlow(b, t, s)]
         else:
