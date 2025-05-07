@@ -44,8 +44,9 @@ print(training_dataset.dataframe.columns)
 K = 64
 torch.manual_seed(0)
 
+q0 = nf.distributions.GaussianPCA(number_of_columns, latent_dim=pca_latent_dim)
 model = antstorch.create_real_nvp_normalizing_flow_model(number_of_columns,
-                                                         pca_latent_dimension=pca_latent_dim)
+                                                         q0=q0)
 
 enable_cuda = True
 device = torch.device(cuda_device if torch.cuda.is_available() and enable_cuda else 'cpu')

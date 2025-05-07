@@ -3,8 +3,8 @@ import torch
 import normflows as nf
 
 def create_real_nvp_normalizing_flow_model(latent_size,
-                                           pca_latent_dimension, 
-                                           K=64):
+                                           K=64, 
+                                           q0=None):
     """
     Create Real NVP model.
 
@@ -13,11 +13,13 @@ def create_real_nvp_normalizing_flow_model(latent_size,
     latent_size : integer
         Input size.
 
-    pca_latent_dimension : integer
-        PCA latent dimension.
-
     K : integer
         Number of layers    
+
+    q0 : base distribution
+        Base distribution defined in the normflows package
+        e.g., diagonal gaussian q0 = nf. DiagGaussian(latent_size).
+        None is also a possibility. 
 
     Returns
     -------
@@ -26,7 +28,7 @@ def create_real_nvp_normalizing_flow_model(latent_size,
 
     Example
     -------
-    >>> model = antstorch.create_real_nvp_normalizing_flow_model(512, 8)
+    >>> model = antstorch.create_real_nvp_normalizing_flow_model(512)
     >>> torchinfo.summary(model)
     """
 
@@ -41,7 +43,6 @@ def create_real_nvp_normalizing_flow_model(latent_size,
             flows += [nf.flows.MaskedAffineFlow(1 - b, t, s)]
         flows += [nf.flows.ActNorm(latent_size)]
 
-    q0 = nf.distributions.GaussianPCA(latent_size, latent_dim=pca_latent_dimension)
     model = nf.NormalizingFlow(q0=q0, flows=flows)
 
     return model
