@@ -45,6 +45,7 @@ class ImageDataset(Dataset):
                  outputs=None,
                  do_data_augmentation=True,
                  is_output_segmentation=False,
+                 duplicate_channels=None,
                  number_of_samples=1):
 
         self.images = images
@@ -53,6 +54,7 @@ class ImageDataset(Dataset):
         self.do_data_augmentation = do_data_augmentation
         self.is_output_segmentation = is_output_segmentation
         self.number_of_samples = number_of_samples
+        self.duplicate_channels = duplicate_channels
 
     def __len__(self):
         return self.number_of_samples
@@ -62,11 +64,12 @@ class ImageDataset(Dataset):
             idx = idx.tolist()
 
         random_index = random.sample(list(range(len(self.images))), 1)[0]
-        if ants.is_image(self.image[random_index]):
-            image = ants.image_clone(self.image[random_index])
+        if ants.is_image(self.images[random_index]):
+            image = ants.image_clone(self.images[random_index])
         else:  
-            image = ants.image_read(self.image[random_index])
+            image = ants.image_read(self.images[random_index])
 
+        output = None
         if self.is_output_segmentation: 
             if ants.is_image(self.outputs[random_index]):
                 output = ants.image_clone(self.outputs[random_index])
@@ -90,7 +93,8 @@ class ImageDataset(Dataset):
                                                 output_numpy_file_prefix=None,
                                                 verbose=False)
             image = data_aug['simulated_images'][0][0]
-            output = data_aug['simulated_segmentation_images'][0]
+            if output is not None: 
+                output = data_aug['simulated_segmentation_images'][0]
         else:    
             center_of_mass_template = ants.get_center_of_mass(self.template*0 + 1)
             center_of_mass_image = ants.get_center_of_mass(image*0 + 1)
@@ -102,18 +106,39 @@ class ImageDataset(Dataset):
 
         image = (image - image.min()) / (image.max() - image.min())
         image_array = np.expand_dims(image.numpy(), axis=-1)
+        if self.duplicate_channels is not None:
+            if image.dimension == 2:
+                image_array = np.tile(image_array, (1, 1, self.duplicate_channels))
+            elif image.dimension == 3:    
+                image_array = np.tile(image_array, (1, 1, 1, self.duplicate_channels))
+            else:
+                raise ValueError("Unrecognized dimension.")    
 
         # swap color axis because
         # numpy image: H x W x D x C
         # torch image: C x H x W x D
+        
+        image_tensor = None
+        output_tensor = None
 
-        image_array = image_array.transpose((3, 0, 1, 2))
-        image_tensor = torch.from_numpy(image_array)
+        if image.dimension == 2:
+            image_array = image_array.transpose((2, 0, 1))
+            image_tensor = torch.from_numpy(image_array)
+            if output is not None:
+                output_array = np.expand_dims(output.numpy(), axis=-1)
+                output_array = output_array.transpose((2, 0, 1))
+                output_tensor = torch.from_numpy(output_array)
+        elif image.dimension == 3:
+            image_array = image_array.transpose((3, 0, 1, 2))
+            image_tensor = torch.from_numpy(image_array)
+            if output is not None:
+                output_array = np.expand_dims(output.numpy(), axis=-1)
+                output_array = output_array.transpose((3, 0, 1, 2))
+                output_tensor = torch.from_numpy(output_array)
+        else:
+            raise ValueError("Unrecognized dimension.")    
 
-        if self.is_output_segmentation:
-            output_array = np.expand_dims(output.numpy(), axis=-1)
-            output_array = output_array.transpose((3, 0, 1, 2))
-            output_tensor = torch.from_numpy(output_array)
+        if output_tensor is not None:
             return image_tensor, output_tensor
         elif self.outputs is None:
             return image_tensor
