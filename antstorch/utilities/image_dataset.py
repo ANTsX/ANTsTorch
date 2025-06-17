@@ -14,7 +14,9 @@ class ImageDataset(Dataset):
     Arguments
     ---------
     images : list
-        List of ANTs images or image files.
+        List of ANTs images or image files.  Or list of list of 
+        ANTs images or image files in the case of multiple 
+        modalities (i.e., channels).
 
     template : ANTs image
         ANts image defining the reference space for normalization.
@@ -49,6 +51,9 @@ class ImageDataset(Dataset):
                  number_of_samples=1):
 
         self.images = images
+        self.number_of_modalities = 1
+        if isinstance(self.images[0], list):
+            self.number_of_modalities = len(self.images[0])
         self.outputs = outputs
         self.template = template
         self.do_data_augmentation = do_data_augmentation
@@ -64,10 +69,19 @@ class ImageDataset(Dataset):
             idx = idx.tolist()
 
         random_index = random.sample(list(range(len(self.images))), 1)[0]
-        if ants.is_image(self.images[random_index]):
-            image = ants.image_clone(self.images[random_index])
-        else:  
-            image = ants.image_read(self.images[random_index])
+        image = list()
+        if isinstance(self.images[random_index], list):
+            if ants.is_image(self.images[random_index][0]):     
+                for i in range(self.number_of_modalities):
+                    image.append(ants.image_clone(self.images[random_index][i]))
+            else: 
+                for i in range(self.number_of_modalities):
+                    image.append(ants.image_read(self.images[random_index][i]))
+        else:            
+            if ants.is_image(self.images[random_index]): 
+                image.append(ants.image_clone(self.images[random_index]))
+            else:
+                image.append(ants.image_read(self.images[random_index]))
 
         output = None
         if self.is_output_segmentation: 
@@ -80,7 +94,7 @@ class ImageDataset(Dataset):
             noise_model = None
             if random.uniform(0.0, 1.0) > 0.33:
                 noise_model = ("additivegaussian", "shot", "saltandpepper")
-            data_aug = ants.data_augmentation(input_image_list=[[image]],
+            data_aug = ants.data_augmentation(input_image_list=[image],
                                                 segmentation_image_list=output,
                                                 pointset_list=None,
                                                 number_of_simulations=1,
@@ -92,20 +106,28 @@ class ImageDataset(Dataset):
                                                 sd_affine=0.05,
                                                 output_numpy_file_prefix=None,
                                                 verbose=False)
-            image = data_aug['simulated_images'][0][0]
+            image = data_aug['simulated_images'][0]
             if output is not None: 
                 output = data_aug['simulated_segmentation_images'][0]
         else:    
             center_of_mass_template = ants.get_center_of_mass(self.template*0 + 1)
-            center_of_mass_image = ants.get_center_of_mass(image*0 + 1)
+            center_of_mass_image = ants.get_center_of_mass(image[0]*0 + 1)
             translation = np.asarray(center_of_mass_image) - np.asarray(center_of_mass_template)
             xfrm = ants.create_ants_transform(transform_type="Euler3DTransform",
                 center=np.asarray(center_of_mass_template), translation=translation)
-            image = ants.apply_ants_transform_to_image(xfrm, image, self.template)
+            for i in range(self.number_of_modalities):
+                image[i] = ants.apply_ants_transform_to_image(xfrm, image[i], self.template)
             output = ants.apply_ants_transform_to_image(xfrm, output, self.template, interpolation="nearestneighbor")
 
-        image = (image - image.min()) / (image.max() - image.min())
-        image_array = np.expand_dims(image.numpy(), axis=-1)
+        for i in range(self.number_of_modalities):
+            image[i] = ants.iMath_normalize(image[i])
+        image_array = np.zeros((*image[0].shape, self.number_of_modalities))
+        for i in range(self.number_of_modalities):
+            if image[i].dimension == 2:
+                image_array[:,:,i] = image[i].numpy()
+            elif image[i].dimension == 3:    
+                image_array[:,:,:,i] = image[i].numpy()
+
         if self.duplicate_channels is not None:
             if image.dimension == 2:
                 image_array = np.tile(image_array, (1, 1, self.duplicate_channels))
@@ -121,14 +143,14 @@ class ImageDataset(Dataset):
         image_tensor = None
         output_tensor = None
 
-        if image.dimension == 2:
+        if image[0].dimension == 2:
             image_array = image_array.transpose((2, 0, 1))
             image_tensor = torch.from_numpy(image_array)
             if output is not None:
                 output_array = np.expand_dims(output.numpy(), axis=-1)
                 output_array = output_array.transpose((2, 0, 1))
                 output_tensor = torch.from_numpy(output_array)
-        elif image.dimension == 3:
+        elif image[0].dimension == 3:
             image_array = image_array.transpose((3, 0, 1, 2))
             image_tensor = torch.from_numpy(image_array)
             if output is not None:
