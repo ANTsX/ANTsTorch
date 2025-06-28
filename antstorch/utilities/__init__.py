@@ -8,4 +8,6 @@ from .chexnet import chexnet
 from .dataframe_dataset import DataFrameDataset
 from .image_dataset import ImageDataset
 
+from .mutual_information import MINE
+from .mutual_information import mutual_information_mine
 from .mutual_information import mutual_information_kde

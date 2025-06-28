@@ -5,6 +5,7 @@ import numpy as np
 import normflows as nf
 import glob
 import os
+import math
 
 import ants 
 import antspynet
@@ -43,6 +44,8 @@ modalities = ['T1', 'T2', 'FA']
 models = list()
 combined_model_parameters = list()
 
+mine_latent_dim = 0
+
 for m in range(len(modalities)):
     q0 = []
     merges = []
@@ -61,6 +64,8 @@ for m in range(len(modalities)):
         else:
             latent_shape = (input_shape[0] * 2 ** (L + 1), input_shape[1] // 2 ** L, 
                             input_shape[2] // 2 ** L)
+        if m == 0:
+            mine_latent_dim += math.prod(latent_shape)
         q0 += [nf.distributions.DiagGaussian(latent_shape)]
     # Construct flow model with the multiscale architecture
     model = nf.MultiscaleFlow(q0, flows, merges)
@@ -72,12 +77,27 @@ for m in range(len(modalities)):
     models[m] = models[m].to(device)
     models[m] = models[m].double()
 
-loss_hist = np.zeros((max_iter, 2))
-
 model_files = list()
 for m in range(len(models)):
     models[m].train()
     model_files.append("model_joint_2d" + modalities[m] + ".pt")
+
+# Set up mutual information part
+
+mine_nets = []
+ma_ets = []
+combined_mine_parameters = list()
+
+num_model_pairs = sum(1 for m in range(len(models)) for n in range(m + 1, len(models)))
+
+for n in range(num_model_pairs):
+    net = antstorch.MINE(mine_latent_dim, mine_latent_dim).to(device)
+    mine_nets.append(net)
+    combined_mine_parameters += list(mine_nets[n].parameters())
+    ma_ets.append(None)
+
+loss_hist = np.zeros((max_iter, 2))
+
 
 
 # Prepare training data
@@ -129,10 +149,12 @@ train_iter = iter(train_loader)
 loss_hist = np.array([])
 loss_iter = np.array([])
 
-optimizer = torch.optim.Adamax(combined_model_parameters, lr=1e-3, weight_decay=1e-5)
+flow_optimizer = torch.optim.Adamax(combined_model_parameters, lr=1e-3, weight_decay=1e-5)
+mine_optimizer = torch.optim.Adamax(combined_mine_parameters, lr=1e-3, weight_decay=1e-5)
 
 for i in tqdm(range(max_iter)):
-    optimizer.zero_grad()
+    flow_optimizer.zero_grad()
+    mine_optimizer.zero_grad()
 
     try:
         x = next(train_iter)
@@ -146,36 +168,39 @@ for i in tqdm(range(max_iter)):
     #         ants.image_write(ants.from_numpy(x_m), "x_" + str(b) + str(m) + ".nii.gz")
     # raise ValueError("HERE")
 
-    loss = torch.tensor(0.0)
-    loss = loss.to(device, non_blocking=True)
+    loss = torch.tensor(0.0, device=device)
  
-    z = list()
+    z = []
     for m in range(len(models)):
-        x_m = x[:,m:m+1,:,:].to(device, non_blocking=True)
+        x_m = x[:,m:m+1,:,:].to(device)
         z_m, _ = models[m].inverse_and_log_det(x_m)
-        for n in range(len(z_m)):
-            z_m[n].to(device, non_blocking=True)
         z.append(z_m)
         loss += models[m].forward_kld(x_m)
 
     # Mutual information
+    pair_idx = 0
     for m in range(len(models)):
         for n in range(m + 1, len(models)):
-            for p in range(len(z[m])):
-                loss += (mi_beta * antstorch.mutual_information_kde(z[m][p].reshape(1, -1), 
-                                                                    z[n][p].reshape(1, -1))) 
+            zm_flat = [z[m][p].reshape(z[m][p].shape[0], -1).float() for p in range(len(z[m]))]
+            zn_flat = [z[n][p].reshape(z[n][p].shape[0], -1).float() for p in range(len(z[n]))]
+            zm = torch.cat(zm_flat, dim=1)
+            zn = torch.cat(zn_flat, dim=1)
+            mi_est, ma_ets[pair_idx] = antstorch.mutual_information_mine(zm, 
+                                                                         zn, 
+                                                                         mine_nets[pair_idx], 
+                                                                         ma_ets[pair_idx])
+            (-mi_est).backward(retain_graph=True)
+            mine_optimizer.step()
+            mine_optimizer.zero_grad()
+            # Add detached MI estimate to loss
+            loss += (mi_beta * mi_est.detach())
 
     if ~(torch.isnan(loss) | torch.isinf(loss)):
-        if i == 0:
-            loss.backward()
-            optimizer.step()
-            loss_hist = np.append(loss_hist, loss.detach().to('cpu').numpy())
-            loss_iter = np.append(loss_iter, i)
-        else:
-            loss.backward()
-            optimizer.step()
-            loss_hist = np.append(loss_hist, loss.detach().to('cpu').numpy())
-            loss_iter = np.append(loss_iter, i)
+        loss.backward()
+        flow_optimizer.step()
+        mine_optimizer.step()
+        loss_hist = np.append(loss_hist, loss.detach().to('cpu').numpy())
+        loss_iter = np.append(loss_iter, i)
 
     if (i + 1) % plot_interval == 0:
         plt.figure(figsize=(10, 10))
