@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 
-cuda_device = 'cuda:0'
+cuda_device = 'cuda:1'
 torch.manual_seed(0)
 
 base_directory = "../"
@@ -66,36 +66,73 @@ for m in range(len(models)):
     models[m].train()
     model_files.append(base_directory + "Scripts/model_joint_" + which[m] + ".pt")
 
-optimizer = torch.optim.Adam(combined_model_parameters, lr=lr, weight_decay=weight_decay)
+# Set up mutual information part
+
+mine_nets = []
+ma_ets = []
+combined_mine_parameters = list()
+
+num_model_pairs = sum(1 for m in range(len(models)) for n in range(m + 1, len(models)))
+
+for n in range(num_model_pairs):
+    net = antstorch.MINE(pca_latent_dimension, pca_latent_dimension).to(device)
+    mine_nets.append(net)
+    combined_mine_parameters += list(mine_nets[n].parameters())
+    ma_ets.append(None)
+
+flow_optimizer = torch.optim.Adam(combined_model_parameters, lr=lr, weight_decay=weight_decay)
+mine_optimizer = torch.optim.Adam(combined_mine_parameters, lr=lr, weight_decay=weight_decay)
 
 count_iter = 0
 min_loss = 100000000
 for it in tqdm(range(max_iter)):
-    optimizer.zero_grad()
+    flow_optimizer.zero_grad()
+    mine_optimizer.zero_grad()
 
-    loss = torch.tensor(0.0)
-    loss = loss.to(device, non_blocking=True)
+    loss = torch.tensor(0.0, device=device)
 
-    x = list()
-    z = list()    
+    x = []
+    z = []
     for m in range(len(models)):
         try:
             x.append(next(training_iterators[m]))
         except StopIteration:
             training_iterator = iter(training_dataloaders[m])
             x.append(next(training_iterator))
-        x[m] = x[m].to(device, non_blocking=True)
-        z.append(models[m].inverse(x[m]))
-        z[m] = z[m].to(device, non_blocking=True)
+        x[m] = x[m].to(device).double()
+        z_m = models[m].inverse(x[m])
+        z.append(z_m)
 
     # Likelihood
     for m in range(len(models)):
         loss += models[m].forward_kld(x[m])
 
     # Mutual information
+    pair_idx = 0
     for m in range(len(models)):
         for n in range(m + 1, len(models)):
-            loss += (mi_beta * antstorch.mutual_information_kde(z[m], z[n])) 
+            q0_m = models[m].q0
+            Wm = q0_m.W.T
+            locm = q0_m.loc
+            eps_m = torch.matmul(z[m] - locm, torch.linalg.pinv(Wm.T)).float()
+
+            q0_n = models[n].q0
+            Wn = q0_n.W.T
+            locn = q0_n.loc
+            eps_n = torch.matmul(z[n] - locn, torch.linalg.pinv(Wn.T)).float()
+
+            mi_est, ma_ets[pair_idx] = antstorch.mutual_information_mine(eps_m, 
+                                                                         eps_n, 
+                                                                         mine_nets[pair_idx], 
+                                                                         ma_ets[pair_idx])
+            # Step MINE network (gradient ascent)
+            (-mi_est).backward(retain_graph=True)
+            mine_optimizer.step()
+            mine_optimizer.zero_grad()
+            # Add detached MI to loss
+            loss += (mi_beta * mi_est.detach())
+            pair_idx += 1
+
 
     if (count_iter + 1) % show_iter == 0:
         plt.plot(loss_hist[:count_iter+1,0], loss_hist[:count_iter+1,1], label="Loss")
@@ -106,7 +143,7 @@ for it in tqdm(range(max_iter)):
     # Make step
     if not torch.isnan(loss) and not torch.isinf(loss):
         loss.backward()
-        optimizer.step()
+        flow_optimizer.step()
 
     # Log loss
     loss_hist[count_iter, 0] = it
