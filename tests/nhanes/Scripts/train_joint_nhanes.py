@@ -25,7 +25,6 @@ mi_beta = 0.1
 show_iter = 100
 
 max_iter = 5000
-lr = 1e-4
 weight_decay = 0.0
 
 training_datasets = list()
@@ -80,8 +79,8 @@ for n in range(num_model_pairs):
     combined_mine_parameters += list(mine_nets[n].parameters())
     ma_ets.append(None)
 
-flow_optimizer = torch.optim.Adam(combined_model_parameters, lr=lr, weight_decay=weight_decay)
-mine_optimizer = torch.optim.Adam(combined_mine_parameters, lr=lr, weight_decay=weight_decay)
+flow_optimizer = torch.optim.Adamax(combined_model_parameters, lr=1e-4, weight_decay=1e-5)
+mine_optimizer = torch.optim.Adamax(combined_mine_parameters, lr=1e-6, weight_decay=1e-5)
 
 count_iter = 0
 min_loss = 100000000

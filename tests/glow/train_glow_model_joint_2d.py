@@ -22,9 +22,9 @@ warnings.filterwarnings("ignore", category=UserWarning)
 L = 4
 K = 2
 hidden_channels = 64
-resampled_image_size = (128,128)
+resampled_image_size = (64, 64)
 max_iter = 1000000
-plot_interval = 10000
+plot_interval = 100
 
 ############################################################################
 
@@ -35,7 +35,7 @@ input_shape = (channels, *resampled_image_size)
 n_dims = np.prod(input_shape)
 split_mode = 'channel'
 scale = True
-mi_beta = 0.1
+mi_beta = 100.0
 
 # Set up flows, distributions and merge operations for each of T1, T2, FA
 
@@ -87,6 +87,8 @@ for m in range(len(models)):
 mine_nets = []
 ma_ets = []
 combined_mine_parameters = list()
+mine_reg_lambda = 1e-3 
+mine_update_frequency = 5 
 
 num_model_pairs = sum(1 for m in range(len(models)) for n in range(m + 1, len(models)))
 
@@ -147,10 +149,12 @@ train_iter = iter(train_loader)
 # Train model
 
 loss_hist = np.array([])
+loss_kld_hist = np.array([])
+loss_mi_hist = np.array([])
 loss_iter = np.array([])
 
-flow_optimizer = torch.optim.Adamax(combined_model_parameters, lr=1e-3, weight_decay=1e-5)
-mine_optimizer = torch.optim.Adamax(combined_mine_parameters, lr=1e-3, weight_decay=1e-5)
+flow_optimizer = torch.optim.Adamax(combined_model_parameters, lr=1e-4, weight_decay=1e-5)
+mine_optimizer = torch.optim.Adamax(combined_mine_parameters, lr=1e-6, weight_decay=1e-5)
 
 for i in tqdm(range(max_iter)):
     flow_optimizer.zero_grad()
@@ -168,14 +172,15 @@ for i in tqdm(range(max_iter)):
     #         ants.image_write(ants.from_numpy(x_m), "x_" + str(b) + str(m) + ".nii.gz")
     # raise ValueError("HERE")
 
-    loss = torch.tensor(0.0, device=device)
+    loss_kld = torch.tensor(0.0, device=device)
+    loss_mi = torch.tensor(0.0, device=device)
  
     z = []
     for m in range(len(models)):
         x_m = x[:,m:m+1,:,:].to(device)
         z_m, _ = models[m].inverse_and_log_det(x_m)
         z.append(z_m)
-        loss += models[m].forward_kld(x_m)
+        loss_kld += models[m].forward_kld(x_m)
 
     # Mutual information
     pair_idx = 0
@@ -188,40 +193,81 @@ for i in tqdm(range(max_iter)):
             mi_est, ma_ets[pair_idx] = antstorch.mutual_information_mine(zm, 
                                                                          zn, 
                                                                          mine_nets[pair_idx], 
-                                                                         ma_ets[pair_idx])
-            (-mi_est).backward(retain_graph=True)
-            mine_optimizer.step()
-            mine_optimizer.zero_grad()
+                                                                         ma_ets[pair_idx],
+                                                                         ma_rate=0.0001)
+            # Compute regularization term
+            reg = 0.0
+            for param in mine_nets[pair_idx].parameters():
+                reg += torch.norm(param, 2)
+
+            # Update MINE only every 'update_frequency'
+            if i % mine_update_frequency == 0:    
+                (-mi_est + mine_reg_lambda * reg).backward(retain_graph=True)
+                torch.nn.utils.clip_grad_norm_(mine_nets[pair_idx].parameters(), max_norm=1.0)
+                mine_optimizer.step()
+                mine_optimizer.zero_grad()
+
             # Add detached MI estimate to loss
-            loss += (mi_beta * mi_est.detach())
+            loss_mi += (mi_beta * mi_est.detach())
+
+            pair_idx += 1
+
+    loss = loss_kld + loss_mi
 
     if ~(torch.isnan(loss) | torch.isinf(loss)):
         loss.backward()
         flow_optimizer.step()
-        mine_optimizer.step()
         loss_hist = np.append(loss_hist, loss.detach().to('cpu').numpy())
+        loss_kld_hist = np.append(loss_kld_hist, loss_kld.detach().to('cpu').numpy())
+        loss_mi_hist = np.append(loss_mi_hist, loss_mi.detach().to('cpu').numpy())
         loss_iter = np.append(loss_iter, i)
 
     if (i + 1) % plot_interval == 0:
         plt.figure(figsize=(10, 10))
-        plt.plot(loss_iter, loss_hist, label='loss')
+        plt.figure(figsize=(30, 10))
+
+        # Subplot 1: KLD loss
+        plt.subplot(1, 3, 1)
+        plt.plot(loss_iter, loss_kld_hist, label='KLD loss', color='tab:blue')
+        plt.xlabel('Iteration')
+        plt.ylabel('KLD loss')
+        plt.title('KLD Loss')
+        plt.grid(True)
         plt.legend()
+
+        # Subplot 2: MI loss
+        plt.subplot(1, 3, 2)
+        plt.plot(loss_iter, -loss_mi_hist, label='-MI penalty', color='tab:orange')
+        plt.xlabel('Iteration')
+        plt.ylabel('Neg. MI')
+        plt.title('Negative MI (Penalty)')
+        plt.grid(True)
+        plt.legend()
+
+        # Subplot 3: Total loss
+        plt.subplot(1, 3, 3)
+        plt.plot(loss_iter, loss_hist, label='Total loss', color='tab:green')
+        plt.xlabel('Iteration')
+        plt.ylabel('Total loss')
+        plt.title('Total Loss')
+        plt.grid(True)
+        plt.legend()
+
+        plt.tight_layout()
         # plt.show()
-        plt.savefig("loss_hist_glow_2d_" + str(i+1) + ".pdf")
+        plt.savefig("loss_hist_glow_2d.pdf")
+        plt.close()
         for m in range(len(models)):
             models[m].save(model_files[m])
 
-        # Model samples
-        num_sample = 10
-
         with torch.no_grad():
-            # y = torch.arange(1).repeat(num_sample).to(device)
             for m in range(len(models)):
                 x, _ = models[m].sample(100)
                 x_ = torch.clamp(x, 0, 1)
                 plt.figure(figsize=(10, 10))
                 plt.imshow(np.transpose(tv.utils.make_grid(x_, nrow=10).cpu().numpy(), (1, 2, 0)))
                 # plt.show()
-                plt.savefig("samples_glow_2d_" + str(i+1) + "_model" + str(m) + ".pdf")
+                plt.savefig("samples_glow_2d_model" + str(m) + ".pdf")
+                plt.close()
     
 
