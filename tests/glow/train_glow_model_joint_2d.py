@@ -21,7 +21,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 L = 4
 K = 2
 hidden_channels = 64
-resampled_image_size = (128, 128)
+resampled_image_size = (128,128)
 max_iter = 1000000
 plot_interval = 10000
 
@@ -99,9 +99,23 @@ template = ants.resample_image(hcpya_slices[0],
 
 transformed_dataset = antstorch.ImageDataset(images=[hcpya_slices],
                                              template=template,
+                                             do_data_augmentation=True,
+                                             data_augmentation_transform_type="affineAndDeformation",
+                                             data_augmentation_sd_affine=0.02,
+                                             data_augmentation_sd_deformation=10.0,
+                                             data_augmentation_noise_model=None,
+                                             data_augmentation_sd_simulated_bias_field=0.0,
+                                             data_augmentation_sd_histogram_warping=0.05,
                                              number_of_samples=100)
 transformed_dataset_testing = antstorch.ImageDataset(images=[hcpya_slices],
                                                      template=template,
+                                                     do_data_augmentation=True,
+                                                     data_augmentation_transform_type="affineAndDeformation",
+                                                     data_augmentation_sd_affine=0.05,
+                                                     data_augmentation_sd_deformation=0.2,
+                                                     data_augmentation_noise_model="additivegaussian",
+                                                     data_augmentation_sd_simulated_bias_field=1.0,
+                                                     data_augmentation_sd_histogram_warping=0.05,
                                                      number_of_samples=16)
 train_loader = DataLoader(transformed_dataset, batch_size=16,
                           shuffle=True, num_workers=4)
@@ -125,7 +139,13 @@ for i in tqdm(range(max_iter)):
     except StopIteration:
         train_iter = iter(train_loader)
         x = next(train_iter)
-  
+
+    # for b in range(4):   
+    #     for m in range(len(models)):
+    #         x_m = x[b,m:m+1,:,:].numpy()
+    #         ants.image_write(ants.from_numpy(x_m), "x_" + str(b) + str(m) + ".nii.gz")
+    # raise ValueError("HERE")
+
     loss = torch.tensor(0.0)
     loss = loss.to(device, non_blocking=True)
  

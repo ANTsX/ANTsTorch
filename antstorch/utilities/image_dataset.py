@@ -28,6 +28,28 @@ class ImageDataset(Dataset):
         Use random spatial transformations, added noise, added bias fields,
         and histogram warping for image data augmentation.        
 
+    data_augmentation_transform_type : string
+        One of the following options: "translation", "rigid", "scaleShear", "affine",
+        "deformation", "affineAndDeformation".
+
+    data_augmentation_sd_affine : float
+        Determines the amount of affine transformation.
+
+    data_augmentation_sd_deformation : float
+        Determines the amount of deformable transformation.
+        
+    data_augmentation_noise_model : string
+        'additivegaussian', 'saltandpepper', 'shot', and 'speckle'. Alternatively, one
+        can specify a tuple or list of one or more of the options and one is selected
+        at random with reasonable, randomized parameters.  Note that the "speckle" model
+        takes much longer than the others.
+
+    data_augmentation_sd_simulated_bias_field : float
+        Characterize the standard deviation of the amplitude.
+
+    data_augmentation_sd_histogram_warping : float
+        Determines the strength of the bias field.
+
     is_output_segmentation: boolean
         Is the specified output (if not None) segmentation images.
 
@@ -46,6 +68,12 @@ class ImageDataset(Dataset):
                  template,
                  outputs=None,
                  do_data_augmentation=True,
+                 data_augmentation_transform_type="affineAndDeformation",
+                 data_augmentation_sd_affine=0.05,
+                 data_augmentation_sd_deformation=0.2,
+                 data_augmentation_noise_model="additivegaussian",
+                 data_augmentation_sd_simulated_bias_field=1.0,
+                 data_augmentation_sd_histogram_warping=0.05,
                  is_output_segmentation=False,
                  duplicate_channels=None,
                  number_of_samples=1):
@@ -57,6 +85,12 @@ class ImageDataset(Dataset):
         self.outputs = outputs
         self.template = template
         self.do_data_augmentation = do_data_augmentation
+        self.data_augmentation_transform_type = data_augmentation_transform_type
+        self.data_augmentation_sd_affine = data_augmentation_sd_affine
+        self.data_augmentation_sd_deformation = data_augmentation_sd_deformation
+        self.data_augmentation_noise_model = data_augmentation_noise_model
+        self.data_augmentation_sd_simulated_bias_field = data_augmentation_sd_simulated_bias_field
+        self.data_augmentation_sd_histogram_warping = data_augmentation_sd_histogram_warping
         self.is_output_segmentation = is_output_segmentation
         self.number_of_samples = number_of_samples
         self.duplicate_channels = duplicate_channels
@@ -91,19 +125,17 @@ class ImageDataset(Dataset):
                 output = ants.image_read(self.outputs[random_index])
             
         if self.do_data_augmentation:
-            noise_model = None
-            if random.uniform(0.0, 1.0) > 0.33:
-                noise_model = ("additivegaussian", "shot", "saltandpepper")
             data_aug = ants.data_augmentation(input_image_list=[image],
                                                 segmentation_image_list=output,
                                                 pointset_list=None,
                                                 number_of_simulations=1,
                                                 reference_image=self.template,
-                                                transform_type='affineAndDeformation',
-                                                noise_model=noise_model,
-                                                sd_simulated_bias_field=1.0,
-                                                sd_histogram_warping=0.05,
-                                                sd_affine=0.05,
+                                                transform_type=self.data_augmentation_transform_type,
+                                                noise_model=self.data_augmentation_noise_model,
+                                                sd_simulated_bias_field=self.data_augmentation_sd_simulated_bias_field,
+                                                sd_histogram_warping=self.data_augmentation_sd_histogram_warping,
+                                                sd_affine=self.data_augmentation_sd_affine,
+                                                sd_deformation=self.data_augmentation_sd_deformation,
                                                 output_numpy_file_prefix=None,
                                                 verbose=False)
             image = data_aug['simulated_images'][0]
