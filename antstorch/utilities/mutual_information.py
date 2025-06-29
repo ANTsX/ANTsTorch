@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import numpy as np
+import math
 from sklearn.neighbors import KernelDensity
 
 
@@ -16,6 +17,8 @@ class MINE(nn.Module):
     Belghazi, Mohamed Ishmael, et al. "Mutual Information Neural Estimation."
     Proceedings of the 35th International Conference on Machine Learning, 2018.
     https://arxiv.org/abs/1801.04062
+
+    Also https://github.com/gtegner/mine-pytorch.
 
     Arguments
     ---------
@@ -43,61 +46,89 @@ class MINE(nn.Module):
         
     def forward(self, x, y):
         h = F.relu(self.fc1_x(x) + self.fc1_y(y))
-        return torch.tanh(self.fc2(h))
-
-def mutual_information_mine(x, y, mine_net, ma_et=None, ma_rate=0.01):
+        return self.fc2(h)
+    
+def mutual_information_mine(x, y, mine_net, running_mean=None, alpha=0.01, loss_type='mine'):
     """
-    Estimate mutual information between two PyTorch tensors using
-    the MINE (Mutual Information Neural Estimation) approach.
+    Estimate mutual information using different loss options and EMA stabilization.  Variable
+    loss type available:
 
-    Arguments
-    ---------
+    | Loss type       | Gradient stability     | Bias risk                 | Practical use                             |
+    | --------------- | -----------------------| ------------------------- | ----------------------------------------- |
+    | `'mine'`        | Needs EMA tuning       | Unbiased if done properly | Most commonly used if EMA well-tuned      |
+    | `'mine_biased'` | More stable early on   | Biased downward           | Good for small batches or simpler code    |
+    | `'fdiv'`        | Generally stable       | Lower bound may be loose  | Alternative if other two fail to converge |
+
+    Parameters
+    ----------
     x : torch.Tensor
-        First input tensor of shape [batch_size, dim].
+        Input X.
 
     y : torch.Tensor
-        Second input tensor of shape [batch_size, dim].
+        Input Y.
 
-    mine_net : MINE
-        Neural network (critic) used to estimate mutual information.
+    mine_net : nn.Module
+        Critic network.
 
-    ma_et : torch.Tensor or None, optional
-        Moving average of the marginal term for numerical stability.
-        If None, initialized on first call.
+    running_mean : torch.Tensor or None
+        Exponential moving average of the marginal term.
 
-    ma_rate : float, optional
-        Update rate for the moving average (default: 0.01).
+    alpha : float
+        Smoothing parameter for EMA.
+
+    loss_type : str
+        'mine', 'mine_biased', or 'fdiv'.
 
     Returns
     -------
     mi_est : torch.Tensor
-        Scalar tensor representing the estimated mutual information.
+        MI estimate.
 
-    ma_et : torch.Tensor
-        Updated moving average term.
+    running_mean : torch.Tensor
+        Updated running mean.
 
     Example
     -------
     >>> mine_net = MINE(32, 32)
-    >>> x = torch.rand((10, 32))
-    >>> y = torch.rand((10, 32))
-    >>> mi_est, ma_et = mutual_information_mine(x, y, mine_net)
+    >>> x = torch.rand((100, 32))
+    >>> y = torch.rand((100, 32))
+    >>> 
+    >>> running_mean = None
+    >>> for i in range(1000):
+    >>>     mi_est, running_mean = mutual_information_mine(
+    >>>         x, y, mine_net, running_mean, alpha=0.01, loss_type='mine'
+    >>>     )
+    >>>     # Backprop using -mi_est (if maximizing MI)
     """
 
-    joint = mine_net(x, y).mean()
+    def ema(value, running_mean, alpha):
+        if running_mean is None:
+            return value.detach()
+        else:
+            return alpha * value.detach() + (1. - alpha) * running_mean
 
-    # Shuffle y to create independent pairs
+    t_joint = mine_net(x, y)
+    joint_mean = torch.mean(t_joint)
+
+    # Shuffle y for marginal
     y_shuffle = y[torch.randperm(y.size(0))]
-    marginal = torch.exp(mine_net(x, y_shuffle)).mean()
+    t_marg = mine_net(x, y_shuffle)
 
-    # Moving average for stability
-    if ma_et is None:
-        ma_et = marginal.detach()
+    if loss_type == 'mine':
+        # Exponential moving average on exp term
+        marginal_exp_mean = torch.exp(t_marg).mean()
+        running_mean = ema(marginal_exp_mean, running_mean, alpha)
+        mi_est = joint_mean - torch.log(running_mean + torch.finfo(torch.float32).eps)
+    elif loss_type == 'mine_biased':
+        logsumexp_marg = torch.logsumexp(t_marg, 0) - math.log(t_marg.shape[0])
+        mi_est = joint_mean - logsumexp_marg
+    elif loss_type == 'fdiv':
+        f_marg = torch.exp(t_marg - 1).mean()
+        mi_est = joint_mean - f_marg
     else:
-        ma_et = (1 - ma_rate) * ma_et + ma_rate * marginal.detach()
+        raise ValueError(f"Unknown loss_type: {loss_type}")
 
-    mi_est = joint - torch.log(ma_et + 1e-8)
-    return mi_est, ma_et
+    return mi_est, running_mean
 
 
 def mutual_information_kde(x, y, bandwidth=0.1):
