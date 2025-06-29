@@ -43,7 +43,7 @@ class MINE(nn.Module):
         
     def forward(self, x, y):
         h = F.relu(self.fc1_x(x) + self.fc1_y(y))
-        return self.fc2(h)
+        return torch.tanh(self.fc2(h))
 
 def mutual_information_mine(x, y, mine_net, ma_et=None, ma_rate=0.01):
     """
