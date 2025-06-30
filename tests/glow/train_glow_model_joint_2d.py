@@ -82,6 +82,9 @@ model_files = list()
 for m in range(len(models)):
     models[m].train()
     model_files.append("model_joint_2d" + modalities[m] + ".pt")
+    if os.path.exists(model_files[m]):
+        print("Loading " + model_files[m])
+        models[m].load_state_dict(torch.load(model_files[m]))
 
 # Set up penalty part
 
@@ -279,17 +282,17 @@ for i in tqdm(range(max_iter)):
         for m in range(len(models)):
             models[m].save(model_files[m])
 
-    for m in range(len(models)):
-        nf.utils.clear_grad(models[m])
+        for m in range(len(models)):
+            nf.utils.clear_grad(models[m])
 
-        with torch.no_grad():
-            for m in range(len(models)):
-                x, _ = models[m].sample(100)
-                x_ = torch.clamp(x, 0, 1)
-                plt.figure(figsize=(10, 10))
-                plt.imshow(np.transpose(tv.utils.make_grid(x_, nrow=10).cpu().numpy(), (1, 2, 0)))
-                # plt.show()
-                plt.savefig("samples_glow_2d_model" + str(m) + ".pdf")
-                plt.close()
+            with torch.no_grad():
+                for m in range(len(models)):
+                    x, _ = models[m].sample(100)
+                    x_ = torch.clamp(x, 0, 1)
+                    plt.figure(figsize=(10, 10))
+                    plt.imshow(np.transpose(tv.utils.make_grid(x_, nrow=10).cpu().numpy(), (1, 2, 0)))
+                    # plt.show()
+                    plt.savefig("samples_glow_2d_model" + str(m) + ".pdf")
+                    plt.close()
     
 
