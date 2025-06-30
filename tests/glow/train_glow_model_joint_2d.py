@@ -226,7 +226,7 @@ for i in tqdm(range(max_iter)):
                 loss_penalty += (beta * mi_est.detach())
 
             else:
-                corr_value = antstorch.absolute_pearson_correlation(zm, zn)
+                corr_value = antstorch.absolute_pearson_correlation(zm, zn, 1e-6)
                 loss_penalty += (beta * -corr_value)
 
             pair_idx += 1
@@ -254,7 +254,7 @@ for i in tqdm(range(max_iter)):
         plt.grid(True)
         plt.legend()
 
-        # Subplot 2: MI loss
+        # Subplot 2: Penalty loss
         plt.subplot(1, 3, 2)
         plt.plot(loss_iter, -loss_penalty_hist, label='Penalty', color='tab:orange')
         plt.xlabel('Iteration')

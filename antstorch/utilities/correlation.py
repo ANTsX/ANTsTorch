@@ -1,6 +1,6 @@
 import torch
 
-def absolute_pearson_correlation(x, y):
+def absolute_pearson_correlation(x, y, eps=1e-8):
     """
     Compute absolute Pearson correlation between two vectors (batch-wise).
 
@@ -15,8 +15,8 @@ def absolute_pearson_correlation(x, y):
     y_centered = y - y.mean(0, keepdim=True)
 
     cov = (x_centered * y_centered).mean(0)
-    x_std = x_centered.std(0) + torch.finfo(torch.float32).eps
-    y_std = y_centered.std(0) + torch.finfo(torch.float32).eps
+    x_std = x_centered.std(0) + eps
+    y_std = y_centered.std(0) + eps
 
     corr = cov / (x_std * y_std)
 
