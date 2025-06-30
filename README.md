@@ -1,6 +1,6 @@
 # ANTsTorch 
 
-A collection of deep learning architectures and applications ported to the Python language and tools for basic medical image processing. Based on `Pytorch`. 
+A collection of deep learning architectures and applications ported to the Python language and tools for basic medical image processing. Based on `PyTorch`. 
 
 <!--
 _Interpretable, similarity-driven multi-view embeddings from high-dimensional biomedical data_
