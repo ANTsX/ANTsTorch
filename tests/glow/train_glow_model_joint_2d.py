@@ -35,7 +35,8 @@ input_shape = (channels, *resampled_image_size)
 n_dims = np.prod(input_shape)
 split_mode = 'channel'
 scale = True
-mi_beta = 100.0
+use_mutual_information_penalty = False
+beta = 100.0
 
 # Set up flows, distributions and merge operations for each of T1, T2, FA
 
@@ -82,25 +83,31 @@ for m in range(len(models)):
     models[m].train()
     model_files.append("model_joint_2d" + modalities[m] + ".pt")
 
-# Set up mutual information part
+# Set up penalty part
 
-mine_nets = []
-ma_ets = []
-combined_mine_parameters = list()
-mine_reg_lambda = 1e-3 
-mine_update_frequency = 5 
+if use_mutual_information_penalty:
 
-num_model_pairs = sum(1 for m in range(len(models)) for n in range(m + 1, len(models)))
+    penalty_string = "Mutual information"
+ 
+    mine_nets = []
+    ma_ets = []
+    combined_penalty_parameters = list()
+    mine_reg_lambda = 1e-2
+    mine_update_frequency = 10
 
-for n in range(num_model_pairs):
-    net = antstorch.MINE(mine_latent_dim, mine_latent_dim).to(device)
-    mine_nets.append(net)
-    combined_mine_parameters += list(mine_nets[n].parameters())
-    ma_ets.append(None)
+    num_model_pairs = sum(1 for m in range(len(models)) for n in range(m + 1, len(models)))
+
+    for n in range(num_model_pairs):
+        net = antstorch.MINE(mine_latent_dim, mine_latent_dim).to(device)
+        mine_nets.append(net)
+        combined_penalty_parameters += list(mine_nets[n].parameters())
+        ma_ets.append(None)
+else:
+
+    penalty_string = "Pearson Correlation"
+        
 
 loss_hist = np.zeros((max_iter, 2))
-
-
 
 # Prepare training data
 batch_size = 128
@@ -150,15 +157,19 @@ train_iter = iter(train_loader)
 
 loss_hist = np.array([])
 loss_kld_hist = np.array([])
-loss_mi_hist = np.array([])
+loss_penalty_hist = np.array([])
 loss_iter = np.array([])
 
 flow_optimizer = torch.optim.Adamax(combined_model_parameters, lr=1e-4, weight_decay=1e-5)
-mine_optimizer = torch.optim.Adamax(combined_mine_parameters, lr=1e-6, weight_decay=1e-5)
+if use_mutual_information_penalty:
+    mine_optimizer = torch.optim.Adamax(combined_penalty_parameters, lr=1e-6, weight_decay=1e-5)
+
 
 for i in tqdm(range(max_iter)):
     flow_optimizer.zero_grad()
-    mine_optimizer.zero_grad()
+    
+    if use_mutual_information_penalty:
+        mine_optimizer.zero_grad()
 
     try:
         x = next(train_iter)
@@ -173,7 +184,7 @@ for i in tqdm(range(max_iter)):
     # raise ValueError("HERE")
 
     loss_kld = torch.tensor(0.0, device=device)
-    loss_mi = torch.tensor(0.0, device=device)
+    loss_penalty = torch.tensor(0.0, device=device)
  
     z = []
     for m in range(len(models)):
@@ -182,7 +193,7 @@ for i in tqdm(range(max_iter)):
         z.append(z_m)
         loss_kld += models[m].forward_kld(x_m)
 
-    # Mutual information
+    # Penalty term
     pair_idx = 0
     for m in range(len(models)):
         for n in range(m + 1, len(models)):
@@ -190,36 +201,44 @@ for i in tqdm(range(max_iter)):
             zn_flat = [z[n][p].reshape(z[n][p].shape[0], -1).float() for p in range(len(z[n]))]
             zm = torch.cat(zm_flat, dim=1)
             zn = torch.cat(zn_flat, dim=1)
-            mi_est, ma_ets[pair_idx] = antstorch.mutual_information_mine(zm, 
-                                                                         zn, 
-                                                                         mine_nets[pair_idx], 
-                                                                         ma_ets[pair_idx],
-                                                                         ma_rate=0.0001)
-            # Compute regularization term
-            reg = 0.0
-            for param in mine_nets[pair_idx].parameters():
-                reg += torch.norm(param, 2)
 
-            # Update MINE only every 'update_frequency'
-            if i % mine_update_frequency == 0:    
-                (-mi_est + mine_reg_lambda * reg).backward(retain_graph=True)
-                torch.nn.utils.clip_grad_norm_(mine_nets[pair_idx].parameters(), max_norm=1.0)
-                mine_optimizer.step()
-                mine_optimizer.zero_grad()
+            if use_mutual_information_penalty: 
 
-            # Add detached MI estimate to loss
-            loss_mi += (mi_beta * mi_est.detach())
+                mi_est, ma_ets[pair_idx] = antstorch.mutual_information_mine(zm, 
+                                                                             zn, 
+                                                                             mine_nets[pair_idx], 
+                                                                             ma_ets[pair_idx],
+                                                                             alpha=0.0001,
+                                                                             loss_type='fdiv')
+                # Compute regularization term
+                reg = 0.0
+                for param in mine_nets[pair_idx].parameters():
+                    reg += torch.norm(param, 2)
+
+                # Update MINE only every 'update_frequency'
+                if i % mine_update_frequency == 0:    
+                    (-mi_est + mine_reg_lambda * reg).backward(retain_graph=True)
+                    torch.nn.utils.clip_grad_norm_(mine_nets[pair_idx].parameters(), max_norm=1.0)
+                    mine_optimizer.step()
+                    mine_optimizer.zero_grad()
+
+                # Add detached MI estimate to loss
+                loss_penalty += (beta * mi_est.detach())
+
+            else:
+                corr_value = antstorch.absolute_pearson_correlation(zm, zn)
+                loss_penalty += (beta * -corr_value)
 
             pair_idx += 1
 
-    loss = loss_kld + loss_mi
+    loss = loss_kld + loss_penalty
 
     if ~(torch.isnan(loss) | torch.isinf(loss)):
         loss.backward()
         flow_optimizer.step()
         loss_hist = np.append(loss_hist, loss.detach().to('cpu').numpy())
         loss_kld_hist = np.append(loss_kld_hist, loss_kld.detach().to('cpu').numpy())
-        loss_mi_hist = np.append(loss_mi_hist, loss_mi.detach().to('cpu').numpy())
+        loss_penalty_hist = np.append(loss_penalty_hist, loss_penalty.detach().to('cpu').numpy())
         loss_iter = np.append(loss_iter, i)
 
     if (i + 1) % plot_interval == 0:
@@ -237,10 +256,10 @@ for i in tqdm(range(max_iter)):
 
         # Subplot 2: MI loss
         plt.subplot(1, 3, 2)
-        plt.plot(loss_iter, -loss_mi_hist, label='-MI penalty', color='tab:orange')
+        plt.plot(loss_iter, -loss_penalty_hist, label='Penalty', color='tab:orange')
         plt.xlabel('Iteration')
-        plt.ylabel('Neg. MI')
-        plt.title('Negative MI (Penalty)')
+        plt.ylabel(penalty_string)
+        plt.title('Penalty')
         plt.grid(True)
         plt.legend()
 
@@ -259,6 +278,9 @@ for i in tqdm(range(max_iter)):
         plt.close()
         for m in range(len(models)):
             models[m].save(model_files[m])
+
+    for m in range(len(models)):
+        nf.utils.clear_grad(models[m])
 
         with torch.no_grad():
             for m in range(len(models)):
