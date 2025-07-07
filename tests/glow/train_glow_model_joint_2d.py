@@ -22,7 +22,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 L = 4
 K = 2
 hidden_channels = 64
-resampled_image_size = (64, 64)
+resampled_image_size = (128, 128)
 max_iter = 1000000
 plot_interval = 100
 
@@ -36,11 +36,13 @@ n_dims = np.prod(input_shape)
 split_mode = 'channel'
 scale = True
 use_mutual_information_penalty = False
-beta = 100.0
+beta = 1.0
+batch_size = 128
+
 
 # Set up flows, distributions and merge operations for each of T1, T2, FA
 
-modalities = ['T1', 'T2', 'FA']
+modalities = ['T2', 'T1', 'FA']
 
 models = list()
 combined_model_parameters = list()
@@ -110,14 +112,11 @@ else:
     penalty_string = "Pearson Correlation"
         
 
-loss_hist = np.zeros((max_iter, 2))
-
 # Prepare training data
-batch_size = 128
 
 hcpya_images = list()
-hcpya_images.append(ants.image_read(antspynet.get_antsxnet_data("hcpyaT1Template")))
 hcpya_images.append(ants.image_read(antspynet.get_antsxnet_data("hcpyaT2Template")))
+hcpya_images.append(ants.image_read(antspynet.get_antsxnet_data("hcpyaT1Template")))
 hcpya_images.append(ants.image_read(antspynet.get_antsxnet_data("hcpyaFATemplate")))
 
 hcpya_slices = list()
@@ -158,10 +157,12 @@ train_iter = iter(train_loader)
 
 # Train model
 
+loss_iter = np.array([])
+
+loss_conv = np.array([])
 loss_hist = np.array([])
 loss_kld_hist = np.array([])
 loss_penalty_hist = np.array([])
-loss_iter = np.array([])
 
 flow_optimizer = torch.optim.Adamax(combined_model_parameters, lr=1e-4, weight_decay=1e-5)
 if use_mutual_information_penalty:
@@ -192,6 +193,7 @@ for i in tqdm(range(max_iter)):
     z = []
     for m in range(len(models)):
         x_m = x[:,m:m+1,:,:].to(device)
+        x_m = (x_m - x_m.min()) / (x_m.max() - x_m.min())
         z_m, _ = models[m].inverse_and_log_det(x_m)
         z.append(z_m)
         loss_kld += models[m].forward_kld(x_m)
@@ -226,15 +228,26 @@ for i in tqdm(range(max_iter)):
                     mine_optimizer.zero_grad()
 
                 # Add detached MI estimate to loss
-                loss_penalty += (beta * mi_est.detach())
+                if i > 0:
+                    last_n_elements = min(100, i)
+                    local_beta = loss_hist[-last_n_elements:].mean() * 0.10
+                else:
+                    local_beta = beta
+                loss_penalty += (local_beta * mi_est.detach())
 
             else:
                 corr_value = antstorch.absolute_pearson_correlation(zm, zn, 1e-6)
-                loss_penalty += (beta * -corr_value)
+                if i > 0:
+                    last_n_elements = min(100, i)
+                    local_beta = loss_hist[-last_n_elements:].mean() * 0.10
+                else:
+                    local_beta = beta
+                loss_penalty += (local_beta * -corr_value)
 
             pair_idx += 1
 
     loss = loss_kld + loss_penalty
+
 
     if ~(torch.isnan(loss) | torch.isinf(loss)):
         loss.backward()
@@ -243,13 +256,15 @@ for i in tqdm(range(max_iter)):
         loss_kld_hist = np.append(loss_kld_hist, loss_kld.detach().to('cpu').numpy())
         loss_penalty_hist = np.append(loss_penalty_hist, loss_penalty.detach().to('cpu').numpy())
         loss_iter = np.append(loss_iter, i)
+        loss_conv = np.append(loss_conv, ants.convergence_monitoring(loss_hist, 100))
+
 
     if (i + 1) % plot_interval == 0:
         plt.figure(figsize=(10, 10))
-        plt.figure(figsize=(30, 10))
+        plt.figure(figsize=(40, 10))
 
         # Subplot 1: KLD loss
-        plt.subplot(1, 3, 1)
+        plt.subplot(1, 4, 1)
         plt.plot(loss_iter, loss_kld_hist, label='KLD loss', color='tab:blue')
         plt.xlabel('Iteration')
         plt.ylabel('KLD loss')
@@ -258,7 +273,7 @@ for i in tqdm(range(max_iter)):
         plt.legend()
 
         # Subplot 2: Penalty loss
-        plt.subplot(1, 3, 2)
+        plt.subplot(1, 4, 2)
         plt.plot(loss_iter, -loss_penalty_hist, label='Penalty', color='tab:orange')
         plt.xlabel('Iteration')
         plt.ylabel(penalty_string)
@@ -267,13 +282,23 @@ for i in tqdm(range(max_iter)):
         plt.legend()
 
         # Subplot 3: Total loss
-        plt.subplot(1, 3, 3)
+        plt.subplot(1, 4, 3)
         plt.plot(loss_iter, loss_hist, label='Total loss', color='tab:green')
         plt.xlabel('Iteration')
         plt.ylabel('Total loss')
         plt.title('Total Loss')
         plt.grid(True)
         plt.legend()
+
+        # Subplot 4: Total loss
+        plt.subplot(1, 4, 4)
+        plt.plot(loss_iter, loss_conv, label='Convergence', color='tab:red')
+        plt.xlabel('Iteration')
+        plt.ylabel('Convergence')
+        plt.title('Convergence (window=10)')
+        plt.grid(True)
+        plt.legend()
+
 
         plt.tight_layout()
         # plt.show()
