@@ -131,7 +131,7 @@ for it in tqdm(range(max_iter)):
                                                                          eps_n, 
                                                                          mine_nets[pair_idx], 
                                                                          ma_ets[pair_idx],
-                                                                         ma_rate=0.0001)
+                                                                         alpha=0.0001)
             # Compute regularization term
             reg = 0.0
             for param in mine_nets[pair_idx].parameters():
