@@ -22,8 +22,8 @@ pca_latent_dim = 4
 
 # Set up datasets/dataloaders
 
-dataset = antstorch.CsvDataset(csv_file=csv_file, number_of_samples=1000000)
-number_of_columns = dataset.csv_data.shape[1]
+dataset = antstorch.DataFrameDataset(dataframe=pd.read_csv(csv_file), number_of_samples=1000000)
+number_of_columns = dataset.dataframe.shape[1]
 
 # Define model
 K = 64
@@ -57,7 +57,7 @@ model = model.double()
 
 # Plot
 
-number_of_samples = dataset.csv_data.shape[0]
+number_of_samples = dataset.dataframe.shape[0]
 model.load(model_file)
 z = torch.tensor(np.random.normal(0, 1, (number_of_samples, pca_latent_dim)), dtype=torch.float64)
 z = z.to(device, non_blocking=True)
@@ -66,7 +66,7 @@ x = model.forward(torch.matmul(z, q0.W))
 # zz = model.inverse(x)
 
 fit = umap.UMAP()
-u = fit.fit_transform(dataset.normalize_data(dataset.csv_data))
+u = fit.fit_transform(dataset.normalize_data(dataset.dataframe))
 
 x_np = x.cpu().detach().numpy()
 nan_rows = np.isnan(x_np).any(axis=1)
