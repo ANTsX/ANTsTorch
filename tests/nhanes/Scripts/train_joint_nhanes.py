@@ -245,6 +245,6 @@ for m in range(len(which)):
     df_x = pd.read_csv(csv_file)
     x = torch.from_numpy(df_x.to_numpy()).to(device).double()
     z = models[m].inverse(x)
-    df_z = pd.DataFrame(z.cpu().detach().numpy(), columns='z_' + df_x.columns)
+    df_z = pd.DataFrame(z.cpu().detach().numpy(), columns=df_x.columns)
     csv_file_z = base_directory + "Data/z_" + which[m] + ".csv"
     df_z.to_csv(csv_file_z, index=False)
