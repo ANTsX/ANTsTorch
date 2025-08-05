@@ -39,7 +39,7 @@ combined_model_parameters = list()
 
 print("Loading training data and generating models.")
 for i in range(len(which)):
-    print("  Dataset", which[i])
+    print("  Reading dataset", which[i])
     csv_file = base_directory + "Data/" + which[i] + ".csv"
     training_datasets.append(antstorch.DataFrameDataset(dataframe=pd.read_csv(csv_file), 
                                                         number_of_samples=1000000))
@@ -78,24 +78,19 @@ for m in range(len(models)):
 # Set up penalty part
 
 if use_mutual_information_penalty:
-
-    penalty_string = "Mutual information"
- 
+    penalty_string = "Mutual information" 
     mine_nets = []
     ma_ets = []
     combined_mine_parameters = list()
     mine_reg_lambda = 1e-3 
     mine_update_frequency = 5 
-
     num_model_pairs = sum(1 for m in range(len(models)) for n in range(m + 1, len(models)))
-
     for n in range(num_model_pairs):
         net = antstorch.MINE(pca_latent_dimension, pca_latent_dimension).to(device)
         mine_nets.append(net)
         combined_mine_parameters += list(mine_nets[n].parameters())
         ma_ets.append(None)
 else:
-
     penalty_string = "Pearson Correlation"
 
 
@@ -243,3 +238,13 @@ for i in tqdm(range(max_iter)):
 
     count_iter += 1
 
+print("Transform training data to Gaussian.")
+for m in range(len(which)):
+    print("  Writing transformed dataset z_", which[m], sep="")
+    csv_file = base_directory + "Data/" + which[m] + ".csv"
+    df_x = pd.read_csv(csv_file)
+    x = torch.from_numpy(df_x.to_numpy()).to(device).double()
+    z = models[m].inverse(x)
+    df_z = pd.DataFrame(z.cpu().detach().numpy(), columns='z_' + df_x.columns)
+    csv_file_z = base_directory + "Data/z_" + which[m] + ".csv"
+    df_z.to_csv(csv_file_z, index=False)
