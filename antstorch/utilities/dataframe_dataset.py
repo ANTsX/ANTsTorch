@@ -21,8 +21,10 @@ class DataFrameDataset(Dataset):
         Parameter for defining the standard deviation in random 
         data augmentation.
 
-    do_normalize : boolean
-        Normalize values (column-wise) to [0, 1].
+    normalization_type : string or None
+        Options: 1) None - no normalization
+                 2) '01' - Normalize values (column-wise) to [0, 1].
+                 3) '0mean' - Normalize values (column-wise) to have 0 mean, unit std.
 
     do_data_augmentation :  boolean    
         Allow for generation of random values.
@@ -40,14 +42,14 @@ class DataFrameDataset(Dataset):
     def __init__(self,
                  dataframe,
                  alpha=0.01,
-                 do_normalize=True,
+                 normalization_type=None,
                  do_data_augmentation=True,
                  number_of_samples=1):
         
         self.dataframe = dataframe
         self.number_of_samples = number_of_samples
         self.alpha = alpha
-        self.do_normalize = do_normalize
+        self.normalization_type = normalization_type
         self.do_data_augmentation = do_data_augmentation
         self.dataframe_numpy = self.dataframe.to_numpy()
         self.number_of_measurements = self.dataframe_numpy.shape[0]
@@ -67,24 +69,43 @@ class DataFrameDataset(Dataset):
         if self.do_data_augmentation:
             random_measurement += np.random.normal(np.zeros(random_measurement.shape),
                                                    self.alpha * self.data_std)
-        if self.do_normalize:
+        if self.normalization_type is not None:
             random_measurement = self.normalize_data(random_measurement)
         return random_measurement 
 
     def normalize_data(self, data):
-        if len(data.shape) == 2:
-            min = np.tile(self.data_min, (self.number_of_measurements, 1))
-            max = np.tile(self.data_max, (self.number_of_measurements, 1))
-            normalized_data = (data - min) / (max - min)
-        else:
-            normalized_data = (data - self.data_min) / (self.data_max - self.data_min) 
+        if self.normalization_type == "01":
+            if len(data.shape) == 2:
+                min = np.tile(self.data_min, (self.number_of_measurements, 1))
+                max = np.tile(self.data_max, (self.number_of_measurements, 1))
+                normalized_data = (data - min) / (max - min)
+            else:
+                normalized_data = (data - self.data_min) / (self.data_max - self.data_min) 
+        elif self.normalization_type == "0mean":
+            if len(data.shape) == 2:
+                mean = np.tile(self.data_mean, (self.number_of_measurements, 1))
+                std = np.tile(self.data_std, (self.number_of_measurements, 1))
+                normalized_data = (data - mean) / std
+            else:
+                normalized_data = (data - self.data_mean) / self.data_std
+        elif self.normalization_type == None:
+            normalized_data = data         
         return normalized_data       
 
     def denormalize_data(self, data):
-        if len(data.shape) == 2:
-            min = np.tile(self.data_min, (self.number_of_measurements, 1))
-            max = np.tile(self.data_max, (self.number_of_measurements, 1))
-            denormalized_data = data * (max - min) + min
-        else:
-            denormalized_data = data * (self.data_max - self.data_min) + self.data_min
+        if self.normalization_type == "01":
+            if len(data.shape) == 2:
+                min = np.tile(self.data_min, (self.number_of_measurements, 1))
+                max = np.tile(self.data_max, (self.number_of_measurements, 1))
+                denormalized_data = data * (max - min) + min
+            else:
+                denormalized_data = data * (self.data_max - self.data_min) + self.data_min
+        elif self.normalization_type == "0mean":
+            if len(data.shape) == 2:
+                mean = np.tile(self.data_mean, (self.number_of_measurements, 1))
+                std = np.tile(self.data_std, (self.number_of_measurements, 1))
+                denormalized_data = data * std + mean
+            else:
+                denormalized_data = data * self.data_std + self.data_mean
+
         return denormalized_data       
