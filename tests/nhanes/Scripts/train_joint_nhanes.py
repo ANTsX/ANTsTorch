@@ -21,7 +21,7 @@ which = ["nh_list_2", "nh_list_3", "nh_list_4", "nh_list_5"]
 
 loss_plot_file_prefix = base_directory + "Scripts/loss_joint"
 
-pca_latent_dimension = 4
+pca_latent_dimension = 12
 use_mutual_information_penalty = False
 show_iter = 100
 max_iter = 2000
