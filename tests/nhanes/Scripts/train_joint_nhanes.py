@@ -19,9 +19,9 @@ torch.manual_seed(0)
 base_directory = "../"
 which = ["nh_list_2", "nh_list_3", "nh_list_4", "nh_list_5"]
 
-loss_plot_file_prefix = base_directory + "Scripts/loss_joint"
+loss_plot_file_prefix = base_directory + "Scripts/loss_joint_nhanes"
 
-pca_latent_dimension = 12
+pca_latent_dimension = 4
 use_mutual_information_penalty = False
 show_iter = 100
 max_iter = 2000
@@ -42,7 +42,8 @@ for i in range(len(which)):
     print("  Reading dataset", which[i])
     csv_file = base_directory + "Data/" + which[i] + ".csv"
     training_datasets.append(antstorch.DataFrameDataset(dataframe=pd.read_csv(csv_file), 
-                                                        number_of_samples=1000000))
+                                                        number_of_samples=1000000,
+                                                        normalization_type="0mean"))
     training_dataloaders.append(DataLoader(training_datasets[i], batch_size=512,
                                           shuffle=True, num_workers=4))
     training_iterators.append(iter(training_dataloaders[i]))
@@ -224,10 +225,11 @@ for i in tqdm(range(max_iter)):
 
         plt.tight_layout()
         # plt.show()
-        plt.savefig("loss_hist_nhanes_2d.pdf")
+        plt.savefig(loss_plot_file_prefix + ".pdf")
         plt.close()
-        for m in range(len(models)):
-            models[m].save(model_files[m])
+
+    for m in range(len(models)):
+        models[m].save(model_files[m])
 
     for m in range(len(models)):
         nf.utils.clear_grad(models[m])
@@ -240,11 +242,15 @@ for i in tqdm(range(max_iter)):
 
 print("Transform training data to Gaussian.")
 for m in range(len(which)):
-    print("  Writing transformed dataset z_", which[m], sep="")
-    csv_file = base_directory + "Data/" + which[m] + ".csv"
-    df_x = pd.read_csv(csv_file)
-    x = torch.from_numpy(df_x.to_numpy()).to(device).double()
-    z = models[m].inverse(x)
-    df_z = pd.DataFrame(z.cpu().detach().numpy(), columns=df_x.columns)
-    csv_file_z = base_directory + "Data/z_" + which[m] + ".csv"
-    df_z.to_csv(csv_file_z, index=False)
+    models[m].eval()
+    with torch.inference_mode():
+        print("  Writing transformed dataset z_", which[m], sep="")
+        csv_file = base_directory + "Data/" + which[m] + ".csv"
+        pd_x = pd.read_csv(csv_file)
+        df_x = pd_x.to_numpy()
+        df_x = (df_x - np.mean(df_x, axis=0)) / np.std(df_x, axis=0)
+        x = torch.from_numpy(df_x).to(device).double()
+        z = models[m].inverse(x)
+        df_z = pd.DataFrame(z.cpu().detach().numpy(), columns=pd_x.columns)
+        csv_file_z = base_directory + "Data/z_joint_" + which[m] + ".csv"
+        df_z.to_csv(csv_file_z, index=False)

@@ -666,14 +666,14 @@ verbose : bool
             no_improve += 1
         if early_stop_enabled and (step + 1) >= early_stop_min_iters and no_improve >= early_stop_patience:
             if verbose:
-                print(f"[INFO] Early stopping at step {step+1}; best smoothed={best_smooth:.6f}")
+                print(f"[INFO] Early stopping at step {step+1}; best smooth={best_smooth:.6f}")
             break
 
         # Periodic validation
         if (step + 1) % val_interval == 0:
             bpd = _eval_val_bpd(models, val_loader, device, total_dims, verbose)
             if verbose:
-                print(f"[VAL] step={step+1}, bpd={bpd:.6f}, alpha={alpha_now:.2f}")
+                print(f"[VAL] Iteration {step+1} (alpha={alpha_now:.2f}): smooth={smooth:.6f}, bpd={bpd:.6f}")
             if best_selection_metric == "val_bpd":
                 if bpd < best_val_bpd:
                     best_val_bpd = bpd

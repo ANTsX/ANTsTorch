@@ -15,91 +15,136 @@ from tqdm import tqdm
 cuda_device = 'cuda:0'
 
 base_directory = "../"
-which = "nh_list_2"
 
-csv_file = base_directory + "Data/" + which + ".csv"
-model_file = base_directory + "Scripts/model_pca_" + which + ".pt"
-loss_plot_file_prefix = base_directory + "Scripts/Plots/loss_pca_" + which
+which = ["nh_list_2", "nh_list_3", "nh_list_4", "nh_list_5"]
 
-pca_latent_dim = 4
-show_iter = 100
-
-training_dataset = antstorch.DataFrameDataset(dataframe=pd.read_csv(csv_file), 
-                                       number_of_samples=1000000)
-training_dataloader = DataLoader(training_dataset, batch_size=64,
-                                 shuffle=True, num_workers=4)
-training_iterator = iter(training_dataloader)
-
-# testing_dataset = CsvDataset(csv_file=csv_file, number_of_samples=1000000)
-# testing_dataloader = DataLoader(testing_dataset, batch_size=32,
-#                                 shuffle=True, num_workers=4)
-
-number_of_columns = len(training_dataset.dataframe.columns)
-
-print("Latent size: ", str(number_of_columns))
-print("Column names: ")
-print(training_dataset.dataframe.columns)
-
-# Define model
-K = 64
-torch.manual_seed(0)
-
-q0 = nf.distributions.GaussianPCA(number_of_columns, latent_dim=pca_latent_dim)
-model = antstorch.create_real_nvp_normalizing_flow_model(number_of_columns,
-                                                         q0=q0)
-
-enable_cuda = True
-device = torch.device(cuda_device if torch.cuda.is_available() and enable_cuda else 'cpu')
-model = model.to(device)
-model = model.double()
-
-# Train model
 max_iter = 5000
-lr = 1e-4
+
+lr = 1e-5
 weight_decay = 0.0
 
-loss_hist = np.zeros((max_iter, 2))
+for i in range(len(which)):
+    print("Doing", which[i])
+  
+    csv_file = base_directory + "Data/" + which[i] + ".csv"
+    model_file = base_directory + "Scripts/model_individual_" + which[i] + ".pt"
+    loss_plot_file_prefix = base_directory + "Scripts/loss_" + which[i]
 
-model.train()
-optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    # pca_latent_dim = 4
+    show_iter = 100
 
-count_iter = 0
-min_loss = 100000000
-for it in tqdm(range(max_iter)):
-    optimizer.zero_grad()
-    
-    try:
-        x = next(training_iterator)
-    except StopIteration:
-        training_iterator = iter(training_dataloader)
-        x = next(training_iterator)
-    x = x.to(device, non_blocking=True)
-    loss = model.forward_kld(x)
-    
-    # Make step
-    if not torch.isnan(loss) and not torch.isinf(loss):
-        loss.backward()
-        optimizer.step()
+    training_dataset = antstorch.DataFrameDataset(dataframe=pd.read_csv(csv_file), 
+                                        number_of_samples=1000000,
+                                        normalization_type='0mean')
+    training_dataloader = DataLoader(training_dataset, batch_size=64,
+                                    shuffle=True, num_workers=4)
+    training_iterator = iter(training_dataloader)
 
-    # Log loss
-    loss_hist[count_iter, 0] = it
-    loss_hist[count_iter, 1] = loss.cpu().detach().numpy().item()
-    if loss_hist[count_iter, 1] < min_loss:
-        min_loss = loss_hist[count_iter, 1]
+    # testing_dataset = CsvDataset(csv_file=csv_file, number_of_samples=1000000)
+    # testing_dataloader = DataLoader(testing_dataset, batch_size=32,
+    #                                 shuffle=True, num_workers=4)
+
+    number_of_columns = len(training_dataset.dataframe.columns)
+
+    print("Latent size: ", str(number_of_columns))
+    print("Column names: ")
+    print(training_dataset.dataframe.columns)
+
+    # Define model
+    K = 64
+    torch.manual_seed(0)
+
+    q0 = nf.distributions.DiagGaussian(number_of_columns)
+    # q0 = nf.distributions.GaussianPCA(number_of_columns, latent_dim=pca_latent_dim)
+    model = antstorch.create_real_nvp_normalizing_flow_model(number_of_columns,
+                                                            q0=q0)
+
+    enable_cuda = True
+    device = torch.device(cuda_device if torch.cuda.is_available() and enable_cuda else 'cpu')
+    model = model.to(device)
+    model = model.double()
+
+    # Train model
+
+    loss_hist = np.zeros((max_iter, 2))
+
+    model.train()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    count_iter = 0
+    min_loss = 100000000
+    for it in tqdm(range(max_iter)):
+        optimizer.zero_grad()
+        
+        try:
+            x = next(training_iterator)
+        except StopIteration:
+            training_iterator = iter(training_dataloader)
+            x = next(training_iterator)
+        x = x.to(device, non_blocking=True)
+        loss = model.forward_kld(x)
+
+        # Make step
+        if not torch.isnan(loss) and not torch.isinf(loss):
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+        # Log loss
+        loss_hist[count_iter, 0] = it
+        loss_hist[count_iter, 1] = loss.cpu().detach().numpy().item()
+        if loss_hist[count_iter, 1] < min_loss:
+            min_loss = loss_hist[count_iter, 1]
+            model.save(model_file)
+
+        if (count_iter + 1) % show_iter == 0:
+            plt.plot(loss_hist[:count_iter+1,0], loss_hist[:count_iter+1,1], label="KLD loss")
+            plt.xlabel('Iteration')
+            plt.ylabel('KLD loss')
+            plt.grid(True)
+            plt.axis('tight')
+            plt.savefig(loss_plot_file_prefix + ".png")
+            plt.close()
+
+        # Perform checks
+        for name, param in model.named_parameters():
+            if torch.isnan(param).any():
+                print(f"NaN detected in parameter: {name}")
+                raise ValueError("Check1.")
+            max_val = param.abs().max().item()
+            if max_val > 1e6:
+                print(f"Large value in {name}: {max_val}")
+                raise ValueError("Check2.")
+
+        z_check, log_det = model.inverse_and_log_det(x)
+        if torch.isnan(z_check).any():
+            raise ValueError("z_check is nan.")
+
         model.save(model_file)
 
-    if (count_iter + 1) % show_iter == 0:
-        plt.plot(loss_hist[:count_iter+1,0], loss_hist[:count_iter+1,1], label="Loss")
-        plt.grid(True)
-        plt.axis('tight')
-        plt.savefig(loss_plot_file_prefix + ".png")
+        # Clear gradients
+        nf.utils.clear_grad(model)
 
-    # Clear gradients
-    nf.utils.clear_grad(model)
+        # Delete variables to prevent out of memory errors
+        del loss
+        del x
 
-    # Delete variables to prevent out of memory errors
-    del loss
-    del x
+        count_iter += 1
 
-    count_iter += 1
+    print("Transform training data to Gaussian.")
 
+    print("Loading " + model_file)
+    model.load_state_dict(torch.load(model_file))    
+    model.eval()
+    with torch.inference_mode():
+        print("  Writing transformed dataset z_", which[i], sep="")
+        csv_file = base_directory + "Data/" + which[i] + ".csv"
+        pd_x = pd.read_csv(csv_file)
+        df_x = pd_x.to_numpy()
+        df_x = (df_x - np.mean(df_x, axis=0)) / np.std(df_x, axis=0)
+        x = torch.from_numpy(df_x).to(device).double()
+        z = model.inverse(x)
+        df_z = pd.DataFrame(z.cpu().detach().numpy(), columns=pd_x.columns)
+        csv_file_z = base_directory + "Data/z_individual_" + which[i] + ".csv"
+        df_z.to_csv(csv_file_z, index=False)
+        
