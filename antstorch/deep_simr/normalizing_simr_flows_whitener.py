@@ -2,6 +2,7 @@ import os, json, time
 from pathlib import Path
 from typing import List, Union, Dict, Any
 from functools import partial
+import random
 
 import numpy as np
 import pandas as pd
@@ -136,6 +137,82 @@ def _scale_penalty(models, weight: float = 1e-4):
         return torch.zeros_like(total)
     return weight * (total / count)
 
+# -------------------------
+# Alpha schedule and checkpoints
+# -------------------------
+class _AlphaSchedule:
+    def __init__(self, alpha_start: float, alpha_end: float, total_steps: int, mode: str = "cosine"):
+        self.a0 = float(alpha_start)
+        self.a1 = float(alpha_end)
+        self.T = max(1, int(total_steps))
+        self.mode = mode
+
+    def __call__(self, step: int) -> float:
+        import math
+        t = min(max(int(step), 0), self.T)
+        if self.mode == "cosine":
+            return self.a1 + 0.5 * (self.a0 - self.a1) * (1.0 + math.cos(math.pi * t / self.T))
+        elif self.mode == "linear":
+            return self.a0 + (self.a1 - self.a0) * (t / self.T) if self.T > 0 else self.a1
+        elif self.mode == "exp":
+            k = 5.0
+            return max(self.a1, self.a0 * math.exp(-k * t / self.T))
+        else:
+            return self.a0
+
+def _save_checkpoint(path: str,
+                     models: list,
+                     view_names: list,
+                     optimizer,
+                     scheduler,
+                     epoch: int,
+                     global_step: int,
+                     alpha_now: float,
+                     best_val_bpd: float,
+                     extra_meta: dict | None = None):
+    device = next(models[0].parameters()).device
+    state = {
+        "models": {vn: m.state_dict() for vn, m in zip(view_names, models)},
+        "optimizer": None if optimizer is None else optimizer.state_dict(),
+        "scheduler": None if scheduler is None else scheduler.state_dict(),
+        "epoch": int(epoch),
+        "global_step": int(global_step),
+        "alpha_now": float(alpha_now),
+        "best_val_bpd": None if best_val_bpd is None else float(best_val_bpd),
+        "rng": {
+            "torch": torch.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "numpy": np.random.get_state(),
+            "random": random.getstate(),
+        },
+        "meta": {} if extra_meta is None else extra_meta,
+        "device": str(device),
+    }
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    torch.save(state, path)
+
+def _load_checkpoint(path: str, models: list, view_names: list,
+                     optimizer=None, scheduler=None):
+    ckpt = torch.load(path, map_location="cpu")
+    for vn, m in zip(view_names, models):
+        m.load_state_dict(ckpt["models"][vn], strict=True)
+    if optimizer is not None and ckpt.get("optimizer"):
+        optimizer.load_state_dict(ckpt["optimizer"])
+    if scheduler is not None and ckpt.get("scheduler"):
+        scheduler.load_state_dict(ckpt["scheduler"])
+    # Restore RNG (optional, but helps reproducibility across resumes)
+    if "rng" in ckpt and ckpt["rng"]:
+        torch.set_rng_state(ckpt["rng"]["torch"])
+        if torch.cuda.is_available() and ckpt["rng"]["cuda"] is not None:
+            for i, s in enumerate(ckpt["rng"]["cuda"]):
+                torch.cuda.set_rng_state(s, device=i)
+        np.random.set_state(ckpt["rng"]["numpy"])
+        random.setstate(ckpt["rng"]["random"])
+    return ckpt
+
+
+
+
 
 # -------------------------
 # Main trainer
@@ -187,6 +264,17 @@ def normalizing_simr_flows_whitener(
     restore_best_for_final_eval: bool = True,
     output_prefix: Union[str, None] = None,     # if not None: save models/metrics using this prefix
 
+
+
+    # Checkpointing / Resume
+    resume_checkpoint: Union[str, None] = None,
+    save_checkpoint_dir: Union[str, None] = None,
+    checkpoint_interval: Union[int, None] = None,  # defaults to val_interval if None
+
+    # Jitter annealing
+    jitter_alpha_end: float = 0.0,
+    jitter_alpha_mode: str = "cosine",
+    jitter_alpha_total_steps: int = 20000,
     # Verbosity
     verbose: bool = True,
 ) -> Dict[str, Any]:
@@ -234,7 +322,14 @@ def normalizing_simr_flows_whitener(
         Reload best weights before final validation.
     output_prefix : str | None
         If set, saves weights & JSON metadata under this prefix.
-    verbose : bool
+resume_checkpoint : str | None
+        If set, load optimizer/scheduler/model state and resume training.
+save_checkpoint_dir : str | None
+        If set, save full checkpoints (models, optimizer, scheduler, RNG) here.
+checkpoint_interval : int | None
+        Save a checkpoint every N steps (defaults to val_interval if None).
+jitter_alpha_end, jitter_alpha_mode, jitter_alpha_total_steps : control annealing of jitter.
+verbose : bool
         Console logging.
 
     Returns
@@ -252,6 +347,14 @@ def normalizing_simr_flows_whitener(
         }
     """
     t0 = time.time()
+
+    # Determine checkpoint cadence
+    if checkpoint_interval is None:
+        checkpoint_interval = val_interval
+
+    # Alpha schedule (anneal jitter)
+    alpha_sched = _AlphaSchedule(jitter_alpha, jitter_alpha_end, jitter_alpha_total_steps, jitter_alpha_mode)
+
     torch.manual_seed(seed)
     np.random.seed(seed)
     device = torch.device(cuda_device if torch.cuda.is_available() else "cpu")
@@ -332,6 +435,12 @@ def normalizing_simr_flows_whitener(
         worker_init_fn=MultiViewDataFrameDataset.worker_init_fn,
     )
 
+    # Initialize dataset jitter alpha
+    if hasattr(ds_train, 'set_alpha'):
+        ds_train.set_alpha(float(jitter_alpha))
+    else:
+        ds_train.alpha = float(jitter_alpha)
+
     dims = [ds_train.view_dim(v) for v in view_names]
     total_dims = float(sum(dims))
     min_dim = min(dims)
@@ -387,6 +496,25 @@ def normalizing_simr_flows_whitener(
     warmup_iters = 500
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_iter - warmup_iters, eta_min=lr*0.1)
 
+    
+    # Resume if requested
+    start_step = 0
+    if resume_checkpoint:
+        if verbose:
+            print(f"[RESUME] Loading checkpoint from {resume_checkpoint}")
+        ckpt = _load_checkpoint(resume_checkpoint, models, view_names, optimizer=optimizer, scheduler=scheduler)
+        start_step = int(ckpt.get("global_step", 0))
+        # Restore dataset alpha
+        alpha_now = float(ckpt.get("alpha_now", jitter_alpha))
+        if hasattr(ds_train, 'set_alpha'):
+            ds_train.set_alpha(alpha_now)
+        else:
+            ds_train.alpha = alpha_now
+        # Restore best val bpd if present
+        if ckpt.get("best_val_bpd") is not None:
+            best_val_bpd = float(ckpt["best_val_bpd"])
+        
+
     # EMA state (for "ema" tradeoff)
     ema_kld = 0.0
     ema_pen = 0.0
@@ -409,7 +537,7 @@ def normalizing_simr_flows_whitener(
 
     # Train loop
     train_iter = iter(train_loader)
-    for step in range(max_iter):
+    for step in range(start_step, max_iter):
         optimizer.zero_grad()
         try:
             xs = next(train_iter)            # xs is list[Tensor] ordered by view_names
@@ -418,6 +546,14 @@ def normalizing_simr_flows_whitener(
             xs = next(train_iter)
 
         xs = [x.to(device).double() for x in xs]
+
+        # Update jitter temperature via schedule
+        alpha_now = alpha_sched(step)
+        if hasattr(ds_train, 'set_alpha'):
+            ds_train.set_alpha(alpha_now)
+        else:
+            ds_train.alpha = float(alpha_now)
+
 
         for m in models:
             if hasattr(m, "_scale_tensors"):
@@ -546,7 +682,26 @@ def normalizing_simr_flows_whitener(
             if output_prefix:
                 _save_models(models, output_prefix, view_names, "last")
 
+        # Periodic checkpoint save
+        if save_checkpoint_dir and ((step + 1) % checkpoint_interval == 0):
+            ckpt_path = os.path.join(save_checkpoint_dir, f"ckpt_step{step+1}.pt")
+            _save_checkpoint(ckpt_path, models, view_names, optimizer, scheduler,
+            epoch=0, global_step=step+1, alpha_now=alpha_now,
+            best_val_bpd=best_val_bpd,
+            extra_meta={"views": view_names, "dims": dims})
+
+
     # Finalize checkpoints
+
+    # Save a final checkpoint
+    if save_checkpoint_dir:
+        final_ckpt_path = os.path.join(save_checkpoint_dir, f"ckpt_final_step{step+1 if 'step' in locals() else 0}.pt")
+        _save_checkpoint(final_ckpt_path, models, view_names, optimizer, scheduler,
+        epoch=0, global_step=(step+1 if 'step' in locals() else 0),
+        alpha_now=(alpha_now if 'alpha_now' in locals() else jitter_alpha_end),
+        best_val_bpd=best_val_bpd,
+        extra_meta={"views": view_names, "dims": dims})
+
     if output_prefix:
         _save_models(models, output_prefix, view_names, "last")
 
