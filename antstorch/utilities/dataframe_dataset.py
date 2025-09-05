@@ -109,11 +109,11 @@ class MultiViewDataFrameDataset(Dataset):
         all views or a dict keyed by view name.
 
     alpha : float, default=0.01
-        Gaussian noise scale for augmentation of quasi-categorical numerical columns.
+        Gaussian noise scale for augmentation. Noise is applied to **all numeric columns**.
 
     add_noise_in : {'raw','normalized','none'}, default='raw'
-        Where to add Gaussian noise. In 'raw', noise std is `alpha * per-column std`. In 'normalized',
-        unit-variance noise with scale `alpha` is used.
+        Where to add Gaussian noise. In 'raw', per-column std is used (`alpha * eps_std`);
+        in 'normalized', unit-variance noise with scale `alpha` is used.
 
     impute : {'none','mean','zero'}, default='none'
         Imputation strategy applied after normalization. For '0mean', 'mean' imputation maps to 0.
@@ -283,46 +283,7 @@ class MultiViewDataFrameDataset(Dataset):
             self._num_pos[v] = num_pos
             self._dummy_pos[v] = dummy_pos
 
-        self._jitter_pos: Dict[str, np.ndarray] = {}
-        for v in self.view_names:
-            st = self._state[v]
-            dfv = aligned[v]  # raw (pre-encoded) frame for this view
-            # Only inspect numeric columns from the raw frame
-            num_cols = st.numeric_cols
-            if len(num_cols) == 0:
-                self._jitter_pos[v] = np.array([], dtype=np.int64)
-                continue
-
-            col_mask = []
-            N = len(dfv)
-            for c in num_cols:
-                s = pd.to_numeric(dfv[c], errors="coerce")
-                s = s[np.isfinite(s)]
-                cnt = len(s)
-                if cnt == 0:
-                    col_mask.append(False)
-                    continue
-
-                nunq = s.nunique(dropna=True)
-                prop_unique = nunq / max(cnt, 1)
-
-                # fraction near-integer
-                frac_near_int = (np.abs(s.to_numpy() - np.round(s.to_numpy())) < 1e-6).mean()
-
-                # mode concentration
-                mode_frac = (s.value_counts(normalize=True).iloc[0]) if nunq > 0 else 1.0
-
-                is_quasi_discrete = (
-                    (nunq <= 8) or
-                    (prop_unique <= 0.01 and frac_near_int >= 0.99) or
-                    (mode_frac >= 0.90 and nunq <= 20)
-                )
-                col_mask.append(bool(is_quasi_discrete))
-
-            col_mask = np.array(col_mask, dtype=bool)  # mask over numeric columns
-            # Map to positions in the *encoded* array (num_pos indexes those)
-            num_pos = self._num_pos[v]
-            self._jitter_pos[v] = num_pos[col_mask]
+        # jitter positions removed (noise applied to all numeric columns)
 
     def __len__(self) -> int:
         return self.number_of_samples
@@ -351,25 +312,14 @@ class MultiViewDataFrameDataset(Dataset):
             num_pos = self._num_pos[v]
             dummy_pos = self._dummy_pos[v]
 
-            jpos = self._jitter_pos[v] 
-            # --- Normalization and augmentation ---
+                        # --- Normalization and augmentation ---
             if num_pos.size > 0:
                 x_num = x[num_pos]
 
                 if self.add_noise_in == 'raw' and self.alpha > 0:
                     x_num = x_num + np.random.normal(0.0, self.alpha * st.eps_std).astype(np.float32)
 
-                if self.add_noise_in == 'raw' and self.alpha > 0 and jpos.size > 0:
-                    # Map jpos (encoded positions) back to local indices within x_num
-                    local_mask = np.isin(num_pos, jpos)
-                    if local_mask.any():
-                        # noise scale based on raw std (eps_std was computed per numeric col)
-                        noise = np.zeros_like(x_num, dtype=np.float32)
-                        noise[:,] = 0.0  # (no-op for 1D vector, left for clarity)
-                        noise_vals = np.random.normal(0.0, self.alpha * st.eps_std[local_mask]).astype(np.float32)
-                        # Add only on selected columns
-                        x_num[local_mask] = x_num[local_mask] + noise_vals
-                        
+                
                 norm_mode = self._norm_mode[v]
                 if norm_mode == '0mean':
                     x_num = (x_num - st.mean) / st.eps_std
@@ -377,12 +327,8 @@ class MultiViewDataFrameDataset(Dataset):
                     x_num = (x_num - st.vmin) / st.eps_rng
                 # else: no normalization
 
-                if self.add_noise_in == 'normalized' and self.alpha > 0 and jpos.size > 0:
-                    local_mask = np.isin(num_pos, jpos)
-                    if local_mask.any():
-                        noise = np.zeros_like(x_num, dtype=np.float32)
-                        noise_vals = np.random.normal(0.0, self.alpha, size=local_mask.sum()).astype(np.float32)
-                        x_num[local_mask] = x_num[local_mask] + noise_vals
+                if self.add_noise_in == 'normalized' and self.alpha > 0:
+                    x_num = x_num + np.random.normal(0.0, self.alpha, size=x_num.shape).astype(np.float32)
 
                 # Automatic clamp for '01' mode
                 if norm_mode == '01':
