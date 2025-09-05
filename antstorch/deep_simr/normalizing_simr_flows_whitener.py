@@ -673,7 +673,7 @@ verbose : bool
         if (step + 1) % val_interval == 0:
             bpd = _eval_val_bpd(models, val_loader, device, total_dims, verbose)
             if verbose:
-                print(f"[VAL] step={step+1}  bpd={bpd:.6f}")
+                print(f"[VAL] step={step+1}, bpd={bpd:.6f}, alpha={alpha_now:.2f}")
             if best_selection_metric == "val_bpd":
                 if bpd < best_val_bpd:
                     best_val_bpd = bpd
