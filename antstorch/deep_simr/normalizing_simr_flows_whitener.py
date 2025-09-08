@@ -529,11 +529,8 @@ verbose : bool
     it_hist, total_hist, kld_hist, pen_hist = [], [], [], []
 
     # Checkpoints
-    best_paths = last_paths = None
     if output_prefix:
         os.makedirs(os.path.dirname(output_prefix), exist_ok=True)
-        best_paths = [f"{output_prefix}_model_{nm}_best.pt" for nm in view_names]
-        last_paths = [f"{output_prefix}_model_{nm}_last.pt" for nm in view_names]
 
     # Train loop
     train_iter = iter(train_loader)
