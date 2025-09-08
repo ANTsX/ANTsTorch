@@ -260,7 +260,7 @@ def normalizing_simr_flows_whitener(
     early_stop_beta: float = 0.98,
 
     # Checkpointing / Output
-    best_selection_metric: str = "val_bpd",     # {"val_bpd","train_smooth"}
+    best_selection_metric: str = "val_bpd",     # {"val_bpd","smooth_total"}
     restore_best_for_final_eval: bool = True,
     output_prefix: Union[str, None] = None,     # if not None: save models/metrics using this prefix
 
@@ -314,9 +314,9 @@ def normalizing_simr_flows_whitener(
 
     val_fraction, val_interval, val_batch_size : validation controls.
 
-    early_stop_* : early stopping controls on smoothed training loss.
+    early_stop_* : early stopping controls on smoothed total training loss.
 
-    best_selection_metric : {"val_bpd","train_smooth"}, default="val_bpd"
+    best_selection_metric : {"val_bpd","smooth_total"}, default="val_bpd"
         Selects which metric controls "best" checkpointing.
     restore_best_for_final_eval : bool, default=True
         Reload best weights before final validation.
@@ -521,8 +521,8 @@ verbose : bool
     eps = 1e-8
 
     # Logging/early stop
-    best_smooth = float("inf")
-    smooth = None
+    best_smooth_total = float("inf")
+    smooth_total = None
     no_improve = 0
     best_val_bpd = float("inf")
 
@@ -650,27 +650,27 @@ verbose : bool
         kld_hist.append(curr_kld)
         pen_hist.append(curr_pen)
 
-        # Smooth + early stop
-        smooth = curr_total if smooth is None else (early_stop_beta * smooth + (1 - early_stop_beta) * curr_total)
-        if best_selection_metric == "train_smooth":
-            if (smooth + early_stop_min_delta) < best_smooth:
-                best_smooth = smooth
+        # Smooth total + early stop
+        smooth_total = curr_total if smooth_total is None else (early_stop_beta * smooth_total + (1 - early_stop_beta) * curr_total)
+        if best_selection_metric == "smooth_total":
+            if (smooth_total + early_stop_min_delta) < best_smooth_total:
+                best_smooth_total = smooth_total
                 if output_prefix:
                     _save_models(models, output_prefix, view_names, "best")
-        if (smooth + early_stop_min_delta) < best_smooth:
+        if (smooth_total + early_stop_min_delta) < best_smooth_total:
             no_improve = 0
         else:
             no_improve += 1
         if early_stop_enabled and (step + 1) >= early_stop_min_iters and no_improve >= early_stop_patience:
             if verbose:
-                print(f"[INFO] Early stopping at step {step+1}; best smooth={best_smooth:.6f}")
+                print(f"[INFO] Early stopping at step {step+1}; best smooth_total={best_smooth_total:.6f}")
             break
 
         # Periodic validation
         if (step + 1) % val_interval == 0:
             bpd = _eval_val_bpd(models, val_loader, device, total_dims, verbose)
             if verbose:
-                print(f"[VAL] Iteration {step+1} (alpha={alpha_now:.2f}): smooth={smooth:.6f}, bpd={bpd:.6f}")
+                print(f"[VAL] Iteration {step+1} (alpha={alpha_now:.4f}): smooth_total={smooth_total:.6f}, bpd={bpd:.6f}")
             if best_selection_metric == "val_bpd":
                 if bpd < best_val_bpd:
                     best_val_bpd = bpd
@@ -703,7 +703,7 @@ verbose : bool
         _save_models(models, output_prefix, view_names, "last")
 
     # Ensure there is a best
-    if output_prefix and best_selection_metric in {"val_bpd", "train_smooth"}:
+    if output_prefix and best_selection_metric in {"val_bpd", "smooth_total"}:
         for nm in view_names:
             p_best = f"{output_prefix}_model_{nm}_best.pt"
             p_last = f"{output_prefix}_model_{nm}_last.pt"
