@@ -56,8 +56,7 @@ def apply_normalizing_simr_flows_whitener(
     output_space: str = "z",                 # {"z", "whitened"} for direction="forward"
     input_space: str = "z",                  # {"z", "whitened"} for direction="inverse"
     batch_size: int = 4096,
-    device: str = "cpu",
-    verbose: bool = True,
+    device: str = "cpu"
 ) -> pd.DataFrame | List[pd.DataFrame]:
     """
     Apply trained normalizing-flow whitener model(s) to new data.
@@ -93,14 +92,12 @@ def apply_normalizing_simr_flows_whitener(
     for v_idx, (df, model) in enumerate(zip(data_list, models)):
         X_np = df.to_numpy().astype(np.float64, copy=False)
 
-        used_stats = None
         if direction == "forward" and use_training_standardization:
             if (v_idx not in stdz_map) or ("mean" not in stdz_map[v_idx]) or ("std" not in stdz_map[v_idx]):
                 raise ValueError("No mean/std provided for view {v_idx}.")
             mean = stdz_map[v_idx]["mean"]
             std  = stdz_map[v_idx]["std"]
             X_proc = _standardize_with_stats(X_np, mean, std)
-            used_stats = (mean, std)
         else:
             X_proc = X_np
 
