@@ -53,7 +53,7 @@ def _eval_val_bpd(models, val_loader, device, total_dims, verbose: bool):
                         skipped += 1; continue
                     total += kld.item(); count += 1
             if skipped > 0 and verbose:
-                print(f"[VAL][WARN] skipped {skipped} non-finite chunks")
+                print(f"[WARNING] skipped {skipped} non-finite chunks")
             avg_kld = total / max(count, 1)
             return avg_kld / float(total_dims)
     finally:
@@ -377,7 +377,7 @@ verbose : bool
 
     if base_distribution == "GaussianPCA" and pca_latent_dimension > min_dim:
         if verbose:
-            print(f"[WARN] pca_latent_dimension={pca_latent_dimension} > min(view_dims)={min_dim}, clipping.")
+            print(f"[WARNING] pca_latent_dimension={pca_latent_dimension} > min(view_dims)={min_dim}, clipping.")
         pca_latent_dimension = min_dim
 
     # Split (train/val) using positional indices → convert to index labels for slicing
@@ -448,7 +448,7 @@ verbose : bool
     # now do the PCA latent clip using the *encoded* dims
     if base_distribution == "GaussianPCA" and pca_latent_dimension > min_dim:
         if verbose:
-            print(f"[WARN] pca_latent_dimension={pca_latent_dimension} > min(view_dims)={min_dim}, clipping.")
+            print(f"[WARNING] pca_latent_dimension={pca_latent_dimension} > min(view_dims)={min_dim}, clipping.")
         pca_latent_dimension = min_dim
 
     standardizers = {}
@@ -482,7 +482,7 @@ verbose : bool
     # Tradeoff params
     single_view = (len(models) == 1)
     if single_view and verbose:
-        print("[INFO] Single-view mode detected: alignment/correlation penalty is disabled.")
+        print("[WARNING] Single-view mode detected: alignment/correlation penalty is disabled.")
 
     s_kld = s_pen = None
     if tradeoff_mode == "uncertainty":
@@ -501,7 +501,7 @@ verbose : bool
     start_step = 0
     if resume_checkpoint:
         if verbose:
-            print(f"[RESUME] Loading checkpoint from {resume_checkpoint}")
+            print(f"Loading checkpoint from {resume_checkpoint}")
         ckpt = _load_checkpoint(resume_checkpoint, models, view_names, optimizer=optimizer, scheduler=scheduler)
         start_step = int(ckpt.get("global_step", 0))
         # Restore dataset alpha
@@ -626,7 +626,7 @@ verbose : bool
  
         if not torch.isfinite(loss):
             if verbose:
-                print(f"[WARN] Non-finite total loss at step {step}; skipping.")
+                print(f"[WARNING] Non-finite total loss at step {step}; skipping.")
             continue
 
         loss.backward()
@@ -663,14 +663,14 @@ verbose : bool
             no_improve += 1
         if early_stop_enabled and (step + 1) >= early_stop_min_iters and no_improve >= early_stop_patience:
             if verbose:
-                print(f"[INFO] Early stopping at step {step+1}; best smooth_total={best_smooth_total:.6f}")
+                print(f"** Early stopping at step {step+1}; best smooth_total={best_smooth_total:.6f} **")
             break
 
         # Periodic validation
         if (step + 1) % val_interval == 0:
             bpd = _eval_val_bpd(models, val_loader, device, total_dims, verbose)
             if verbose:
-                print(f"[VAL] Iteration {step+1} (alpha={alpha_now:.4f}): smooth_total={smooth_total:.6f}, bpd={bpd:.6f}")
+                print(f"Iteration {step+1} (alpha={alpha_now:.4f}): smooth_total={smooth_total:.6f}, bpd={bpd:.6f}")
             if best_selection_metric == "val_bpd":
                 if bpd < best_val_bpd:
                     best_val_bpd = bpd
