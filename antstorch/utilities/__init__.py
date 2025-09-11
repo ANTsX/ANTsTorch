@@ -6,7 +6,6 @@ from .mri_modality_classification import mri_modality_classification
 from .chexnet import chexnet
 
 from .dataframe_dataset import MultiViewDataFrameDataset
-from .dataframe_dataset import DataFrameDataset
 from .image_dataset import ImageDataset
 
 from .mutual_information import MINE
