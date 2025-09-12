@@ -27,37 +27,37 @@ def _to_df(arr: np.ndarray, like_df: pd.DataFrame, col_prefix: str) -> pd.DataFr
     cols = [f"{col_prefix}{i}" for i in range(arr.shape[1])]
     return pd.DataFrame(arr, index=like_df.index, columns=cols)
 
-# def _extract_whitened_from_z(model, z: torch.Tensor) -> torch.Tensor:
-#     q0 = model.q0
-#     if hasattr(q0, "W") and hasattr(q0, "loc") and hasattr(q0, "log_sigma"):
-#         zc = (z - q0.loc).to(torch.float64)       # (N, D)
-#         W  = q0.W.to(torch.float64)               # (L, D)
-#         sigma2 = torch.exp(2.0 * q0.log_sigma.to(torch.float64))  # scalar
-#         # (L, L): WW^T + σ^2 I
-#         A = W @ W.T + sigma2 * torch.eye(W.shape[0], dtype=W.dtype, device=W.device)
-#         # (L, L) inverse (or solve)
-#         A_inv = torch.linalg.inv(A)
-#         # (N, L): (z-loc) W^T A^{-1}
-#         return zc @ W.T @ A_inv
-#     # DiagGaussian fallback (if you use it elsewhere)
-#     loc = getattr(q0, "loc", None)
-#     scale = getattr(q0, "scale", None)
-#     if (loc is not None) and (scale is not None):
-#         return ((z - loc) / (scale + 1e-12)).to(torch.float64)
-#     return z.to(torch.float64)
-
-# def _z_from_whitened(model, eps: torch.Tensor) -> torch.Tensor:
-#     q0 = model.q0
-#     if hasattr(q0, "W") and hasattr(q0, "loc"):
-#         return eps.to(torch.float64) @ q0.W.to(torch.float64) + q0.loc.to(torch.float64)
-#     # keep DiagGaussian fallback if you actually use that base elsewhere
-#     loc = getattr(q0, "loc", None)
-#     scale = getattr(q0, "scale", None)
-#     if (loc is not None) and (scale is not None):
-#         return eps * scale + loc
-#     raise ValueError("Expected GaussianPCA with W/loc or DiagGaussian with loc/scale.")
-
 def _extract_whitened_from_z(model, z: torch.Tensor) -> torch.Tensor:
+    q0 = model.q0
+    if hasattr(q0, "W") and hasattr(q0, "loc") and hasattr(q0, "log_sigma"):
+        zc = (z - q0.loc).to(torch.float64)       # (N, D)
+        W  = q0.W.to(torch.float64)               # (L, D)
+        sigma2 = torch.exp(2.0 * q0.log_sigma.to(torch.float64))  # scalar
+        # (L, L): WW^T + σ^2 I
+        A = W @ W.T + sigma2 * torch.eye(W.shape[0], dtype=W.dtype, device=W.device)
+        # (L, L) inverse (or solve)
+        A_inv = torch.linalg.inv(A)
+        # (N, L): (z-loc) W^T A^{-1}
+        return zc @ W.T @ A_inv
+    # DiagGaussian fallback (if you use it elsewhere)
+    loc = getattr(q0, "loc", None)
+    scale = getattr(q0, "scale", None)
+    if (loc is not None) and (scale is not None):
+        return ((z - loc) / (scale + 1e-12)).to(torch.float64)
+    return z.to(torch.float64)
+
+def _z_from_whitened(model, eps: torch.Tensor) -> torch.Tensor:
+    q0 = model.q0
+    if hasattr(q0, "W") and hasattr(q0, "loc"):
+        return eps.to(torch.float64) @ q0.W.to(torch.float64) + q0.loc.to(torch.float64)
+    # keep DiagGaussian fallback if you actually use that base elsewhere
+    loc = getattr(q0, "loc", None)
+    scale = getattr(q0, "scale", None)
+    if (loc is not None) and (scale is not None):
+        return eps * scale + loc
+    raise ValueError("Expected GaussianPCA with W/loc or DiagGaussian with loc/scale.")
+
+def _extract_whitened_from_z_full(model, z: torch.Tensor) -> torch.Tensor:
     q0 = model.q0
     zc = (z - q0.loc).to(torch.float64)                 # (N, D)
     W  = q0.W.to(torch.float64)                         # (L, D)
@@ -68,7 +68,7 @@ def _extract_whitened_from_z(model, z: torch.Tensor) -> torch.Tensor:
     yT = torch.linalg.solve(L.T, zc.T)                  # (D, N)
     return yT.T                                         # (N, D)
 
-def _z_from_whitened(model, eps_full: torch.Tensor) -> torch.Tensor:
+def _z_from_whitened_full(model, eps_full: torch.Tensor) -> torch.Tensor:
     q0 = model.q0
     W  = q0.W.to(torch.float64)
     sigma2 = torch.exp(2.0 * q0.log_sigma.to(torch.float64))
@@ -83,8 +83,8 @@ def apply_normalizing_simr_flows_whitener(
     direction: str = "forward",              # {"forward", "inverse"}
     use_training_standardization: bool = True,
     custom_standardizers: Dict[int, Dict[str, np.ndarray]] | List[Dict[str, np.ndarray]] | None = None,
-    output_space: str = "z",                 # {"z", "whitened"} for direction="forward"
-    input_space: str = "z",                  # {"z", "whitened"} for direction="inverse"
+    output_space: str = "z",                 # {"z", "whitened", or "whitened_full"} for direction="forward"
+    input_space: str = "z",                  # {"z", "whitened", or "whitened_full"} for direction="inverse"
     batch_size: int = 4096,
     device: str = "cpu"
 ) -> pd.DataFrame | List[pd.DataFrame]:
@@ -124,7 +124,7 @@ def apply_normalizing_simr_flows_whitener(
 
         if direction == "forward" and use_training_standardization:
             if (v_idx not in stdz_map) or ("mean" not in stdz_map[v_idx]) or ("std" not in stdz_map[v_idx]):
-                raise ValueError("No mean/std provided for view {v_idx}.")
+                raise ValueError(f"No mean/std provided for view {v_idx}.")
             mean = stdz_map[v_idx]["mean"]
             std  = stdz_map[v_idx]["std"]
             X_proc = _standardize_with_stats(X_np, mean, std)
@@ -139,24 +139,40 @@ def apply_normalizing_simr_flows_whitener(
 
                 if direction == "forward":
                     z = model.forward(xb)
+                    if isinstance(z, (tuple, list)): 
+                        z = z[0]
                     if output_space == "whitened":
                         z = _extract_whitened_from_z(model, z)
+                    elif output_space == "whitened_full":
+                        z = _extract_whitened_from_z_full(model, z)
                     Z_out.append(z.detach().cpu().numpy())
 
                 elif direction == "inverse":
                     q0 = model.q0
 
                     if input_space == "whitened":
-                        # After (expects data_dim = D, because whitened is now D-dim)
+                        # After (expects data_dim = L, because whitened is L-dim)
+                        if hasattr(q0, "W"):
+                            L, D = q0.W.shape
+                            if xb.shape[1] != L:
+                                raise ValueError(
+                                    f"apply(): input_space='whitened' expects data_dim={L}, "
+                                    f"but got {xb.shape[1]}."
+                                )
+                        # Map whitened -> z
+                        z = _z_from_whitened(model, xb)
+
+                    elif input_space == "whitened_full":
+                        # After (expects data_dim = D, because whitened_full is D-dim)
                         if hasattr(q0, "W"):
                             L, D = q0.W.shape
                             if xb.shape[1] != D:
                                 raise ValueError(
-                                    f"apply(): input_space='whitened' now expects data_dim={D} (full whitening), "
-                                    f"but got {xb.shape[1]}. If you have old L-dim content latents, set input_space='z' or convert them."
+                                    f"apply(): input_space='whitened_full' now expects data_dim={D} (full whitening), "
+                                    f"but got {xb.shape[1]}."
                                 )
                         # Map whitened -> z
-                        z = _z_from_whitened(model, xb)
+                        z = _z_from_whitened_full(model, xb)
 
                     elif input_space == "z":
                         # Expect N x D, where D = data_dim
@@ -168,12 +184,12 @@ def apply_normalizing_simr_flows_whitener(
                         if expected_D is not None and xb.shape[1] != expected_D:
                             raise ValueError(
                                 f"apply(): input_space='z' expects data_dim={expected_D}, "
-                                f"but got {xb.shape[1]}. Hint: if you passed whitened latents, set input_space='whitened'."
+                                f"but got {xb.shape[1]}."
                             )
                         z = xb
 
                     else:
-                        raise ValueError("input_space must be 'z' or 'whitened'")
+                        raise ValueError("input_space must be 'z', 'whitened', or 'whitened_full'")
 
                     xrec = model.inverse(z)
 
@@ -183,10 +199,18 @@ def apply_normalizing_simr_flows_whitener(
 
         if (direction == "inverse") and use_training_standardization:
             if (v_idx not in stdz_map) or ("mean" not in stdz_map[v_idx]) or ("std" not in stdz_map[v_idx]):
-                raise ValueError("No mean/std provided for view {v_idx} to de-standardize outputs.")
+                raise ValueError(f"No mean/std provided for view {v_idx} to de-standardize outputs.")
             Y = _destandardize_with_stats(Y, stdz_map[v_idx]["mean"], stdz_map[v_idx]["std"])
 
-        col_prefix = "whitened_" if (direction == "forward" and output_space == "whitened") else ("z_" if direction == "forward" else "xrec_")
+        if direction == "forward":
+            if output_space == "whitened":
+                col_prefix = "whitened_"
+            elif output_space == "whitened_full":    
+                col_prefix = "whitened_full_"
+            else:    
+                col_prefix = "z_"
+        else:         
+            col_prefix = "x_reconstructed_"  
         outputs.append(_to_df(Y, df, col_prefix))
 
     return outputs[0] if isinstance(data, pd.DataFrame) else outputs
