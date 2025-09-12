@@ -163,6 +163,9 @@ class MultiViewDataFrameDataset(Dataset):
         preprocessors: Optional[Dict[str, Callable[[pd.DataFrame], pd.DataFrame]]] = None,
         number_of_samples: Optional[int] = None,
         dtype: torch.dtype = torch.float32,
+        nonfinite_clean: Optional[str] = None,        # None | 'drop' | 'impute_zero' | 'impute_mean'
+        nonfinite_scope: str = 'numeric_only',        # 'numeric_only' | 'all_columns'
+        max_row_na_frac: float = 0.0,                 # for 'drop': allow up to this frac of non-finites per row
     ):
         assert add_noise_in in {'raw', 'normalized', 'none'}
         assert impute in {'none', 'mean', 'zero'}
@@ -201,6 +204,71 @@ class MultiViewDataFrameDataset(Dataset):
         # Restrict all to common index and remember order
         self.index = common_index
         aligned: Dict[str, pd.DataFrame] = {v: processed[v].loc[self.index] for v in self.view_names}
+        self.nonfinite_clean = nonfinite_clean
+        self.nonfinite_scope = nonfinite_scope
+        self.max_row_na_frac = float(max_row_na_frac)
+
+        if nonfinite_clean in {'drop', 'impute_zero', 'impute_mean'}:
+            # Build per-view boolean masks of finiteness according to scope
+            finite_masks: Dict[str, np.ndarray] = {}
+            for v in self.view_names:
+                dfv = aligned[v]
+                if nonfinite_scope == 'numeric_only':
+                    cols = [c for c in dfv.columns if pd.api.types.is_numeric_dtype(dfv[c])]
+                    arr = dfv[cols].to_numpy(copy=False).astype(np.float32) if len(cols) else \
+                          np.ones((len(dfv), 0), dtype=np.float32)
+                else:
+                    arr = dfv.to_numpy(copy=False).astype(np.float32)
+                if arr.size == 0:
+                    finite = np.ones((len(dfv),), dtype=bool)
+                else:
+                    finite = np.isfinite(arr)
+                    # If using a tolerance on row NA fraction for dropping
+                    row_ok = (finite.sum(axis=1) >= (1.0 - self.max_row_na_frac) * finite.shape[1]) \
+                             if finite.shape[1] > 0 else np.ones((finite.shape[0],), dtype=bool)
+                finite_masks[v] = row_ok
+
+            # Intersection across views
+            keep_rows = np.ones((len(self.index),), dtype=bool)
+            for v in self.view_names:
+                keep_rows &= finite_masks[v]
+
+            if nonfinite_clean == 'drop':
+                # Drop rows consistently across ALL views (and target)
+                if not keep_rows.all():
+                    self.index = self.index[keep_rows]
+                    aligned = {v: aligned[v].loc[self.index] for v in self.view_names}
+                    if target is not None:
+                        if isinstance(target, pd.Series):
+                            self.target = target.loc[self.index].astype(np.float32).to_numpy()
+                        else:
+                            self.target = target.loc[self.index].astype(np.float32).to_numpy()
+                # For 'drop' we’re done; arrays build below will be finite by construction.
+
+            else:
+                # In-place imputation across ALL views (consistent rule)
+                for v in self.view_names:
+                    dfv = aligned[v]
+                    if nonfinite_clean == 'impute_zero':
+                        fill_map = {}
+                        if nonfinite_scope == 'numeric_only':
+                            for c in dfv.columns:
+                                if pd.api.types.is_numeric_dtype(dfv[c]):
+                                    fill_map[c] = 0.0
+                        else:
+                            # numeric -> 0, non-numeric leave as-is (dummies typically numeric already)
+                            for c in dfv.columns:
+                                if pd.api.types.is_numeric_dtype(dfv[c]):
+                                    fill_map[c] = 0.0
+                        if fill_map:
+                            aligned[v] = dfv.fillna(value=fill_map).replace([np.inf, -np.inf], 0.0)
+
+                    elif nonfinite_clean == 'impute_mean':
+                        # column-wise means for numeric columns only; inf -> NaN -> mean
+                        dfv_num = dfv.select_dtypes(include=[np.number]).replace([np.inf, -np.inf], np.nan)
+                        means = dfv_num.mean(axis=0)
+                        aligned[v][dfv_num.columns] = dfv_num.fillna(means)
+
         if target is not None:
             if isinstance(target, pd.Series):
                 self.target = target.loc[self.index].astype(np.float32).to_numpy()
@@ -373,16 +441,18 @@ class MultiViewDataFrameDataset(Dataset):
             sample = {
                 'x': _to_tensor(x_all, self.dtype),
                 'mask': _to_tensor(m_all, self.dtype),
-                'target': None if self.target is None else _to_tensor(self.target[ridx].reshape(-1), self.dtype),
                 'index': index_value,
             }
+            if self.target is not None:
+                sample['target'] = _to_tensor(self.target[ridx].reshape(-1), self.dtype)
         else:
             sample = {
                 'views': view_tensors,
                 'masks': view_masks,
-                'target': None if self.target is None else _to_tensor(self.target[ridx].reshape(-1), self.dtype),
                 'index': index_value,
             }
+            if self.target is not None:
+                sample['target'] = _to_tensor(self.target[ridx].reshape(-1), self.dtype)
         return sample
 
     def denormalize(self, view: str, x: np.ndarray) -> np.ndarray:

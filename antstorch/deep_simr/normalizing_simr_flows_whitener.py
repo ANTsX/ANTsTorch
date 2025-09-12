@@ -15,6 +15,10 @@ from ..architectures.create_normalizing_flow_model import (
     create_real_nvp_normalizing_flow_model as create_rnvp
 )
 
+from torch.utils.data import DataLoader, Subset
+from ..utilities.dataframe_dataset import MultiViewDataFrameDataset
+
+
 # -------------------------------
 # Helpers
 # -------------------------------
@@ -216,11 +220,6 @@ def _scale_param_penalty(models) -> torch.Tensor:
         return torch.tensor(0.0)
     return total
 
-
-# -------------------------------
-# Public API
-# -------------------------------
-
 def normalizing_simr_flows_whitener(
     views: List[pd.DataFrame],
     *,
@@ -236,8 +235,8 @@ def normalizing_simr_flows_whitener(
     leaky_relu_negative_slope: float = 0.0,
 
     # Base distribution
-    base_distribution: str = "GaussianPCA",   # supports 'GaussianPCA' or 'DiagGaussian'
-    pca_latent_dimension: Optional[int] = 4,  # required if GaussianPCA
+    base_distribution: str = "GaussianPCA",
+    pca_latent_dimension: Optional[int] = 4,
     base_min_log: float = -5.0,
     base_max_log: float = 5.0,
     base_sigma: float = 0.1,
@@ -270,7 +269,7 @@ def normalizing_simr_flows_whitener(
     ema_beta: float = 0.98,
 
     # Penalty type/params
-    penalty_type: str = "barlow_twins_align",  # also 'correlate' | 'decorrelate'
+    penalty_type: str = "barlow_twins_align",
     bt_lambda_diag: float = 1.0,
     bt_lambda_offdiag: float = 5e-3,
     bt_eps: float = 1e-6,
@@ -297,19 +296,10 @@ def normalizing_simr_flows_whitener(
     # Optional: penalize scale/log-scale parameters
     scale_penalty_weight: float = 0.0,
 ) -> Dict[str, Any]:
-    """
-    Train per-view RealNVP whiteners. Cross-view penalty behavior:
-      - If base_distribution == 'GaussianPCA': all views must share the same k=pca_latent_dimension;
-        compute penalty on PCA-whitened coords h=(z-loc)W^T (shape k).
-      - If base_distribution == 'DiagGaussian': compute penalty on standardized z only when ALL view
-        dimensions are equal; otherwise raise RuntimeError.
-    Returns:
-      - "models": list of trained normflows models (one per view)
-      - "standardizers": per-view dicts {'mean': tensor, 'std': tensor}
-      - "metrics": final metrics including best val bpd (or smooth_total)
-    """
 
-    # Device / seeds
+    # ----------------------------
+    # Device / seeds / base checks
+    # ----------------------------
     torch.manual_seed(seed)
     np.random.seed(seed)
     device = _ensure_device(cuda_device)
@@ -318,37 +308,76 @@ def normalizing_simr_flows_whitener(
     if base_lower in ("gaussianpca", "pca") and pca_latent_dimension is None:
         raise ValueError("pca_latent_dimension must be provided when base_distribution='GaussianPCA'.")
 
-    # Convert inputs to tensors
-    Xs_np = [torch.tensor(df.values, dtype=torch.float32) for df in views]
-    N = Xs_np[0].shape[0]
-    for x in Xs_np:
-        if x.shape[0] != N:
-            raise ValueError("All views must have the same number of rows")
+    # ----------------------------
+    # Wrap inputs in the Dataset
+    # ----------------------------
+    # Give view names v0, v1, ... (order preserved)
+    view_names = [f"v{i}" for i in range(len(views))]
+    view_map = {vn: df for vn, df in zip(view_names, views)}
 
-    # Train/val split
+    # Important: we set normalization=None so the dataset only aligns/encodes.
+    # We still fit our own per-view standardizers below to match original behavior.
+    ds_full = MultiViewDataFrameDataset(
+        views=view_map,
+        normalization=None,      # keep raw numeric scale; we standardize below
+        alpha=0.0,               # no dataset noise
+        add_noise_in='none',
+        impute='mean',           # ensure finite values after encoding
+        nonfinite_clean='mean',
+        concat_views=False,
+        dtype=torch.float32,
+    )
+    N = len(ds_full)
+
+    # Train/val split (by index so both views and masks stay aligned)
     perm = torch.randperm(N)
     n_val = int(N * float(val_fraction))
-    val_idx = perm[:n_val]
-    train_idx = perm[n_val:]
+    val_idx = perm[:n_val].tolist()
+    train_idx = perm[n_val:].tolist()
 
-    Xs_train = [x[train_idx].to(device) for x in Xs_np]
-    Xs_val = [x[val_idx].to(device) for x in Xs_np]
+    ds_train = Subset(ds_full, train_idx)
+    ds_val   = Subset(ds_full, val_idx)
 
-    # Per-view standardization (fit on train)
-    standardizers = []
-    Xs_train_std = []
-    Xs_val_std = []
-    for Xtr, Xv in zip(Xs_train, Xs_val):
-        mu, sd = _standardize_fit(Xtr)
-        standardizers.append({'mean': mu.detach().cpu(), 'std': sd.detach().cpu()})
-        Xs_train_std.append(_standardize_apply(Xtr, mu, sd))
-        Xs_val_std.append(_standardize_apply(Xv, mu, sd))
+    # DataLoaders (use dataset worker_init if you later add augmentation)
+    train_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True, drop_last=False)
+    val_loader   = DataLoader(ds_val,   batch_size=val_batch_size, shuffle=False, drop_last=False)
 
+    # ----------------------------
+    # Discover per-view dims (D_v)
+    # ----------------------------
+    first_batch = next(iter(train_loader))
+    Ds = [int(first_batch['views'][vn].shape[1]) for vn in view_names]
+
+    # ----------------------------
+    # Fit per-view standardizers on TRAIN subset
+    # ----------------------------
+    # We stream through train_loader once to compute mean/std per view.
+    sums = [torch.zeros(D, device=device) for D in Ds]
+    cnts = [0 for _ in Ds]
+    for batch in train_loader:
+        for i, vn in enumerate(view_names):
+            xb = batch['views'][vn].to(device)
+            sums[i] += xb.sum(dim=0)
+            cnts[i] += xb.shape[0]
+    means = [s / max(1, c) for s, c in zip(sums, cnts)]
+
+    ssq = [torch.zeros(D, device=device) for D in Ds]
+    for batch in train_loader:
+        for i, vn in enumerate(view_names):
+            xb = batch['views'][vn].to(device)
+            diff = xb - means[i][None, :]
+            ssq[i] += (diff * diff).sum(dim=0)
+    stds = [torch.sqrt(ss / max(1, cnts[i])) for i, ss in enumerate(ssq)]
+    stds = [s.clamp_min(1e-6) for s in stds]
+
+    standardizers = [{'mean': m.detach().cpu().unsqueeze(0), 'std': s.detach().cpu().unsqueeze(0)}
+                     for m, s in zip(means, stds)]
+
+    # ----------------------------
     # Build per-view models
+    # ----------------------------
     models = []
     opt_params = []
-    Ds = [x.shape[1] for x in Xs_train_std]
-
     for D in Ds:
         q0 = _build_base_distribution(
             D=D,
@@ -370,7 +399,7 @@ def normalizing_simr_flows_whitener(
             mask_mode=mask_mode,
         ).to(device)
 
-        # Validate q0 shapes for GaussianPCA
+        # Validate PCA base shape where applicable
         if base_lower in ("gaussianpca", "pca"):
             if not (hasattr(model.q0, "W") and hasattr(model.q0, "loc")):
                 raise RuntimeError("GaussianPCA base must expose 'W' and 'loc'.")
@@ -382,12 +411,14 @@ def normalizing_simr_flows_whitener(
         models.append(model)
         opt_params += list(model.parameters())
 
-    # For DiagGaussian: require equal dims across views for cross penalty
+    # For DiagGaussian: require equal dims across views for cross-view penalty
     dims_equal = all(D == Ds[0] for D in Ds)
     if base_lower in ("diag", "diaggaussian", "gauss_diag", "diaggaussian") and not dims_equal:
         raise RuntimeError(f"DiagGaussian cross-view penalty requires equal dims across views, got {Ds}.")
 
-    # Resume if requested
+    # ----------------------------
+    # Resume (if any)
+    # ----------------------------
     start_step = 0
     ckpt = _try_resume(resume_checkpoint, device)
     if ckpt is not None:
@@ -402,10 +433,10 @@ def normalizing_simr_flows_whitener(
         except Exception as e:
             print(f"[warn] resume failed to load state dicts: {e}")
 
-    # Single optimizer across views
+    # ----------------------------
+    # Optimizer, schedulers
+    # ----------------------------
     opt = optim.AdamW(opt_params, lr=lr, betas=betas, eps=eps_opt, weight_decay=weight_decay)
-
-    # Schedulers/EMAs
     if jitter_alpha_total_steps is None:
         jitter_sched = _AlphaSchedule(jitter_alpha, jitter_alpha_end, jitter_alpha_total_steps, jitter_alpha_mode)
     else:
@@ -413,7 +444,7 @@ def normalizing_simr_flows_whitener(
     ema_nll = None
     ema_pen = None
 
-    # Early stopping bookkeeping
+    # Early stop bookkeeping
     best_metric = float('inf')
     best_state = None
     best_std = None
@@ -421,53 +452,58 @@ def normalizing_simr_flows_whitener(
     patience_counter = 0
     smooth_total = None
 
-    ckpt_every = checkpoint_interval if (checkpoint_interval is not None) else val_interval
     if save_checkpoint_dir is not None:
         os.makedirs(save_checkpoint_dir, exist_ok=True)
+    ckpt_every = checkpoint_interval if (checkpoint_interval is not None) else val_interval
 
-    lam_eff_value = float(lambda_penalty)  # for logging
-
+    # ----------------------------
     # Training loop
+    # ----------------------------
+    # We iterate over the train_loader each step; this matches your original per-step batching,
+    # but now comes from the dataset (aligned, finite, per-view tensors).
     for step in range(start_step, max_iter):
         for m in models:
             m.train()
 
-        for batch_idx in _batchify(len(train_idx), batch_size):
+        for batch in train_loader:
             J = float(jitter_sched.value(step))
+
+            # Build standardized per-view batches
             batch_X = []
-            for Xtr_std in Xs_train_std:
-                xb = Xtr_std[batch_idx]
+            for i, vn in enumerate(view_names):
+                xb = batch['views'][vn].to(device)
+                # whitener-standardize here (dataset normalization=None)
+                mu = standardizers[i]['mean'].to(device)
+                sd = standardizers[i]['std'].to(device)
+                xb = (xb - mu) / sd
                 if J > 0:
                     xb = xb + J * torch.randn_like(xb)
                 batch_X.append(xb)
 
+            # Forward: inverse + nll + features
             nll_sum = 0.0
-            H = []  # features for penalty
+            H = []
             for m, xb in zip(models, batch_X):
                 z, log_det = _inverse_with_guard(m, xb)
                 nll = -(m.q0.log_prob(z) + log_det).mean()
                 nll_sum = nll_sum + nll
-                h = _extract_whitened_from_z(m, z)  # PCA whitened or standardized z
+                h = _extract_whitened_from_z(m, z)
                 H.append(h)
 
-            # Sanity/shape checks for penalty space
+            # Cross-view penalty (same as before)
             can_penalize = True
             if base_lower in ("gaussianpca", "pca"):
                 ks = [h.shape[1] for h in H]
-                k = ks[0]
-                if not all(kv == k for kv in ks):
+                if not all(k == ks[0] for k in ks):
                     raise RuntimeError(f"GaussianPCA views disagree on k: {ks}")
             else:
-                # DiagGaussian: equal dims already enforced above; just ensure features match
                 ks = [h.shape[1] for h in H]
-                if not all(kv == ks[0] for kv in ks):
+                if not all(k == ks[0] for k in ks):
                     raise RuntimeError(f"DiagGaussian standardized dims disagree across views: {ks}")
 
             penalty_active = can_penalize and (len(models) >= 2)
-
-            # Cross-view penalty
             pen = torch.tensor(0.0, device=H[0].device)
-            if can_penalize and len(models) >= 2:
+            if penalty_active:
                 for i in range(len(models)):
                     for j in range(i + 1, len(models)):
                         if penalty_type == "barlow_twins_align":
@@ -479,14 +515,10 @@ def normalizing_simr_flows_whitener(
                         else:
                             raise ValueError(f"Unknown penalty_type: {penalty_type}")
 
-            # Warmup + tradeoff controller
             warm = min(1.0, (step + 1) / max(1, penalty_warmup_iters))
-
             if penalty_active:
-                # update EMAs and compute lam_eff normally
                 ema_nll = nll_sum.detach() if ema_nll is None else (ema_beta * ema_nll + (1 - ema_beta) * nll_sum.detach())
                 ema_pen = pen.detach() if ema_pen is None else (ema_beta * ema_pen + (1 - ema_beta) * pen.detach())
-
                 if tradeoff_mode == "ema":
                     pen_scale = (ema_nll / (ema_pen + 1e-8)) / max(1e-8, float(target_ratio))
                     lam_eff = lambda_penalty * pen_scale
@@ -497,12 +529,10 @@ def normalizing_simr_flows_whitener(
                 else:
                     raise ValueError(f"Unknown tradeoff_mode: {tradeoff_mode}")
             else:
-                # penalty is inactive (e.g., single view) → force weight to 0 and don't touch EMAs
                 lam_eff = torch.tensor(0.0, device=nll_sum.device)
 
             total = nll_sum + warm * lam_eff * pen
 
-            # Optional scale penalty
             if scale_penalty_weight and scale_penalty_weight > 0:
                 sp = _scale_param_penalty(models).to(total.device)
                 total = total + float(scale_penalty_weight) * sp
@@ -514,36 +544,36 @@ def normalizing_simr_flows_whitener(
                     nn.utils.clip_grad_norm_(opt.param_groups[0]["params"], grad_clip)
                 opt.step()
 
-            # Update logging value
-            try:
-                lam_eff_value = float(lam_eff.detach().cpu()) if hasattr(lam_eff, "detach") else float(lam_eff)
-            except Exception:
-                lam_eff_value = float(lambda_penalty)
-
-        # === Validation ===
+        # ----------------------------
+        # Validation (unchanged)
+        # ----------------------------
         do_val = ((step + 1) % max(1, val_interval) == 0) or (step == max_iter - 1)
         if do_val:
+            for m in models:
+                m.eval()
             with torch.no_grad():
-                for m in models:
-                    m.eval()
                 nll_val_sum = 0.0
                 count = 0
-                for i in range(0, len(val_idx), val_batch_size):
-                    sl = slice(i, min(len(val_idx), i + val_batch_size))
-                    batch_val = [Xv[sl] for Xv in Xs_val_std]
-                    for m, xb in zip(models, batch_val):
-                        z, log_det = _inverse_with_guard(m, xb)
-                        nll = -(m.q0.log_prob(z) + log_det).sum()
-                        nll_val_sum += nll
-                    count += (sl.stop - sl.start)
+                for batch in val_loader:
+                    for i, vn in enumerate(view_names):
+                        xb = batch['views'][vn].to(device)
+                        mu = standardizers[i]['mean'].to(device)
+                        sd = standardizers[i]['std'].to(device)
+                        xb = (xb - mu) / sd
+                        z, log_det = _inverse_with_guard(models[i], xb)
+                        nll_val_sum += (-(models[i].q0.log_prob(z) + log_det)).sum()
+                    count += xb.shape[0]
                 nll_val = nll_val_sum / max(1, count)
                 D_total = sum(Ds)
                 val_bpd = _bits_per_dim(nll_val, D_total)
 
-                smooth_total = total.detach().cpu().item() if smooth_total is None else (early_stop_beta * smooth_total + (1 - early_stop_beta) * total.detach().cpu().item())
+                # smooth_total tracks train_total via EMA-like smoothing
+                smooth_total = float(total.detach().cpu()) if smooth_total is None else \
+                               (early_stop_beta * float(smooth_total) + (1 - early_stop_beta) * float(total.detach().cpu()))
                 metric = val_bpd if best_selection_metric == "val_bpd" else smooth_total
 
-                if metric + early_stop_min_delta < best_metric and (step + 1) >= early_stop_min_iters:
+                improved = (metric + early_stop_min_delta < best_metric) and (step + 1) >= early_stop_min_iters
+                if improved:
                     best_metric = metric
                     best_state = [m.state_dict() for m in models]
                     best_std = [{'mean': s['mean'].clone(), 'std': s['std'].clone()} for s in standardizers]
@@ -557,20 +587,19 @@ def normalizing_simr_flows_whitener(
                     penalty_last = float(pen.detach().cpu()) if penalty_active else 0.0
                     lam_eff_value = float(lam_eff.detach().cpu()) if penalty_active else 0.0
                     st = float(smooth_total) if smooth_total is not None else float('nan')
-
                     print(f"[{step+1:5d}/{max_iter}] (alpha={alpha_now:.4f}): "
                           f"train_total={float(total):.4f}, smooth_total={st:.4f}, "
-                          f"val_bpd={val_bpd:.4f}, lam_eff={lam_eff_value:.2e}, "
-                          f"penalty={penalty_last:.4f}")
+                          f"val_bpd={val_bpd:.4f}, lam_eff={lam_eff_value:.2e}, penalty={penalty_last:.4f}")
 
                 if early_stop_enabled and (step + 1) >= early_stop_min_iters and patience_counter >= early_stop_patience:
                     if verbose:
                         print(f"[early stop] step {step+1} best {best_selection_metric}={best_metric:.4f} @ step {best_step}")
                     break
 
-        # === Checkpoint ===
+        # ----------------------------
+        # Checkpointing (unchanged)
+        # ----------------------------
         if save_checkpoint_dir is not None:
-            ckpt_every = checkpoint_interval if (checkpoint_interval is not None) else val_interval
             if ((step + 1) % max(1, ckpt_every) == 0) or (step == max_iter - 1):
                 ckpt_path = os.path.join(save_checkpoint_dir, f"ckpt_step{step+1}.pth")
                 _save_checkpoint(ckpt_path, step + 1, models, standardizers)
