@@ -438,9 +438,9 @@ def normalizing_simr_flows_whitener(
     # ----------------------------
     opt = optim.AdamW(opt_params, lr=lr, betas=betas, eps=eps_opt, weight_decay=weight_decay)
     if jitter_alpha_total_steps is None:
-        jitter_sched = _AlphaSchedule(jitter_alpha, jitter_alpha_end, jitter_alpha_total_steps, jitter_alpha_mode)
-    else:
         jitter_sched = _AlphaSchedule(jitter_alpha, jitter_alpha_end, max_iter, jitter_alpha_mode)
+    else:
+        jitter_sched = _AlphaSchedule(jitter_alpha, jitter_alpha_end, jitter_alpha_total_steps, jitter_alpha_mode)
     ema_nll = None
     ema_pen = None
 
@@ -530,6 +530,9 @@ def normalizing_simr_flows_whitener(
                     raise ValueError(f"Unknown tradeoff_mode: {tradeoff_mode}")
             else:
                 lam_eff = torch.tensor(0.0, device=nll_sum.device)
+
+            lam_eff = torch.nan_to_num(lam_eff, nan=0.0, posinf=0.0, neginf=0.0)
+            lam_eff = lam_eff.clamp(min=0.0)
 
             total = nll_sum + warm * lam_eff * pen
 
