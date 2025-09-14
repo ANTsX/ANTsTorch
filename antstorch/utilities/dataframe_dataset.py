@@ -1,60 +1,13 @@
-"""
-Multi-view DataFrame dataset for PyTorch / ANTsTorch.
-
-This module provides a production-ready `MultiViewDataFrameDataset` that wraps one or
-more pandas DataFrames ("views") into a single PyTorch Dataset with:
-
-* Per-view normalization (None, z-score "0mean", or min–max "01" with automatic [0,1] clamping)
-* Optional Gaussian augmentation in raw or normalized space
-* One-hot encoding for categorical columns (numeric-only normalization)
-* Finite-value masks and simple imputation (none/mean/zero)
-* Deterministic indexing (use DataLoader for shuffling), worker seeding helper
-* Optional concatenation of all views into a single feature vector
-* Target support aligned to the intersection of indices across views
-
-Intended usage matches ANTsTorch patterns: compute statistics once at init-time,
-apply light, explicit transforms in `__getitem__`, and return tensors ready for models.
-
-Example
--------
->>> # Single view (concat to a flat vector)
->>> ds = MultiViewDataFrameDataset(
-...     views={"t1": df_t1},
-...     target=y,                      # optional, Series or DataFrame
-...     normalization="0mean",        # or "01" or None
-...     alpha=0.02,
-...     add_noise_in="normalized",    # 'raw', 'normalized', or 'none'
-...     impute="mean",
-...     concat_views=True,
-... )
->>> dl = torch.utils.data.DataLoader(
-...     ds, batch_size=64, shuffle=True, num_workers=4,
-...     worker_init_fn=MultiViewDataFrameDataset.worker_init_fn)
->>> batch = next(iter(dl))
->>> batch['x'].shape, batch['mask'].shape
-
->>> # Multi-view (keep per-view tensors)
->>> ds = MultiViewDataFrameDataset(
-...     views={"t1": df_t1, "dt": df_dt, "rsf": df_rsf},
-...     normalization={"t1": "0mean", "dt": "01", "rsf": None},
-...     concat_views=False,
-... )
->>> batch = next(iter(torch.utils.data.DataLoader(ds, batch_size=8)))
->>> batch['views']['t1'].shape, batch['masks']['t1'].shape
-
-Notes
------
-* Indices: rows are aligned on the intersection of indices across views (and target).
-* Numeric vs. categorical: numeric columns are normalized; categorical columns are
-  one-hot encoded and passed through unchanged (except for optional imputation).
-* "01" normalization includes automatic clamping to [0,1] after optional noise.
-* For reproducible augmentation across workers, use `worker_init_fn`.
-"""
+# dataframe_dataset_patched.py
+# Multi-view DataFrame dataset for PyTorch / ANTsTorch.
+# Owns per-view normalization and optional Gaussian jitter (raw or normalized space).
+# Adds: set_alpha(), denormalize(), worker_init_fn(), view_dim(), total_dim().
+# Designed to be drop-in compatible with previous versions you used.
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Callable, List, Union, Any
+from typing import Dict, Optional, Callable, List, Union, Any, Tuple
 
 import numpy as np
 import pandas as pd
@@ -89,65 +42,149 @@ class _ViewState:
 
 class MultiViewDataFrameDataset(Dataset):
     """
-    Multi-view (or single-view) tabular dataset for ANTsTorch workflows.
+    Multi-view (or single-view) tabular dataset for PyTorch.
 
-    This dataset handles aligned tabular data across one or more "views" (e.g., modalities or
-    feature sets), providing normalization, augmentation, missing-data masking, and optional
-    concatenation.
+    This dataset aligns one or more pandas DataFrames by row index and returns
+    tensors suitable for training normalizing-flow and other tabular models.
+    It optionally normalizes numeric features, injects Gaussian jitter for
+    augmentation, one-hot encodes categoricals, and provides finite-value masks.
 
     Parameters
     ----------
     views : Dict[str, pandas.DataFrame]
-        Mapping from view name to DataFrame. Rows are samples; indices should be subject IDs.
-        For a single view, simply pass {"viewname": dataframe}.
+        Mapping from view name to DataFrame (rows = samples). All views are aligned
+        on the intersection of their indices. For a single view, pass
+        ``{"view": df}``.
 
     target : Optional[Union[pandas.Series, pandas.DataFrame]], default=None
-        Optional target aligned to the intersection of all view indices. Cast to float.
+        Optional target aligned to the intersection of indices across all views.
+        Converted to float and returned with each sample when provided.
 
     normalization : Union[str, Dict[str, Optional[str]]], default='0mean'
-        Normalization mode per view: one of {None, '01', '0mean'}. Provide a single string for
-        all views or a dict keyed by view name.
+        Per-view normalization mode: one of ``None``, ``'0mean'`` (z-score),
+        or ``'01'`` (min–max to [0,1]). Provide a single string for all views
+        or a dict keyed by view name.
 
-    alpha : float, default=0.01
-        Gaussian noise scale for augmentation. Noise is applied to **all numeric columns**.
+    alpha : float, default=0.0
+        Scale of Gaussian jitter applied to numeric features. Exact behavior
+        depends on ``add_noise_in``.
 
-    add_noise_in : {'raw','normalized','none'}, default='raw'
-        Where to add Gaussian noise. In 'raw', per-column std is used (`alpha * eps_std`);
-        in 'normalized', unit-variance noise with scale `alpha` is used.
+    add_noise_in : {'raw', 'normalized', 'none'}, default='raw'
+        Domain for jitter:
+          * ``'raw'`` — noise ~ N(0, (alpha * per-column std)^2) before normalization
+          * ``'normalized'`` — noise ~ N(0, alpha^2) after normalization
+          * ``'none'`` — no noise
 
-    impute : {'none','mean','zero'}, default='none'
-        Imputation strategy applied after normalization. For '0mean', 'mean' imputation maps to 0.
-        For '01', 'mean' imputation maps to 0 (min in [0,1]).
+    impute : {'none', 'mean', 'zero'}, default='none'
+        Imputation applied after normalization:
+          * ``'mean'`` — maps to 0 for ``'0mean'``/``'01'``, raw mean otherwise
+          * ``'zero'`` — fills NaNs/inf with 0
 
     concat_views : bool, default=False
-        If True, return a single concatenated feature tensor. Otherwise, return per-view tensors.
+        If ``True``, returns a single concatenated feature vector per sample.
+        If ``False``, returns a dict of per-view tensors.
 
     column_info : Optional[Dict[str, Dict[str, List[str]]]], default=None
-        Optional per-view schema: {'view': {'numeric': [...], 'categorical': [...]}}. If omitted,
-        dtypes are auto-detected.
+        Optional schema per view: ``{'view': {'numeric': [...], 'categorical': [...]}}``.
+        If omitted, types are inferred (numeric dtypes vs others).
 
     preprocessors : Optional[Dict[str, Callable[[pandas.DataFrame], pandas.DataFrame]]], default=None
-        Optional per-view callable applied before fitting (e.g., custom encoders). Must be deterministic.
+        Optional deterministic per-view preprocessing callables run before
+        statistics are computed.
 
     number_of_samples : Optional[int], default=None
-        Dataset length; defaults to number of aligned rows (N). If larger, indexing wraps via modulo.
+        Dataset length; defaults to number of aligned rows. If larger than the
+        number of rows, indexing wraps (modulo).
 
     dtype : torch.dtype, default=torch.float32
         Output tensor dtype.
 
-    Returns (per __getitem__)
-    -------------------------
-    If concat_views=True:
-        {'x': Tensor[D], 'mask': Tensor[D], 'target': Optional[Tensor], 'index': Any}
-    else:
-        {'views': Dict[str, Tensor[D_v]], 'masks': Dict[str, Tensor[D_v]], 'target': Optional[Tensor], 'index': Any}
+    nonfinite_clean : Optional[str], default=None
+        Optional pre-cleaning before stats: one of ``None``, ``'drop'``,
+        ``'impute_zero'``, ``'impute_mean'``. Applied consistently across views.
 
-    Design Notes (ANTsTorch-style)
-    ------------------------------
-    * Statistics are computed once at initialization.
-    * Augmentation is simple and explicit; heavy transforms belong in model space.
-    * Deterministic indexing; use DataLoader's `shuffle`/samplers for randomness.
-    * Categorical handling is minimal and predictable (one-hot; no target leakage).
+    nonfinite_scope : {'numeric_only', 'all_columns'}, default='numeric_only'
+        Columns considered when computing row-level non-finite handling for
+        ``nonfinite_clean``.
+
+    max_row_na_frac : float, default=0.0
+        For ``nonfinite_clean='drop'``: maximum allowed fraction of non-finite
+        values per row within the chosen scope.
+
+    Attributes
+    ----------
+    view_names : List[str]
+        View names in the order provided.
+
+    index : pandas.Index
+        Aligned index (intersection) used by all views (and target if provided).
+
+    N : int
+        Number of aligned rows.
+
+    number_of_samples : int
+        Reported dataset length (may exceed N if wrapping).
+
+    dtype : torch.dtype
+        Output dtype.
+
+    alpha : float
+        Current jitter scale.
+
+    add_noise_in : str
+        Current jitter domain ('raw' | 'normalized' | 'none').
+
+    impute : str
+        Current imputation mode.
+
+    concat_views : bool
+        Whether samples are concatenated or per-view.
+
+    Methods
+    -------
+    set_alpha(alpha: float, add_noise_in: Optional[str] = None) -> None
+        Adjust jitter magnitude and/or domain at runtime.
+
+    denormalize(view: str, x: np.ndarray) -> np.ndarray
+        Invert normalization for the numeric portion of a view (categoricals are
+        returned unchanged).
+
+    view_dim(view: str) -> int
+        Total encoded dimensionality for a view (numeric + one-hots).
+
+    total_dim() -> int
+        Sum of encoded dimensionalities across all views.
+
+    norm_mode(view: str) -> Optional[str]
+        Normalization mode in effect for a given view.
+        
+    worker_init_fn(worker_id: int) -> None
+        Seed NumPy in DataLoader workers for reproducible augmentation.
+
+    __getitem__ Returns
+    -------------------
+    If ``concat_views=True``:
+        ``{'x': Tensor[D], 'mask': Tensor[D], 'index': Any, 'target': Optional[Tensor]}``
+    If ``concat_views=False``:
+        ``{'views': Dict[str, Tensor[D_v]], 'masks': Dict[str, Tensor[D_v]], 'index': Any, 'target': Optional[Tensor]}``
+
+    Notes
+    -----
+    * Numeric features are normalized; categoricals are one-hot encoded and passed through.
+    * For ``'01'`` normalization, outputs are clamped to [0,1] after optional jitter.
+    * Statistics are computed once at init on the provided data (per-split if you
+      construct separate train/val datasets).
+
+    Examples
+    --------
+    >>> ds = MultiViewDataFrameDataset(
+    ...     views={'t1': df_t1, 'rsf': df_rsf},
+    ...     normalization={'t1': '0mean', 'rsf': '01'},
+    ...     alpha=0.02, add_noise_in='normalized', impute='mean')
+    >>> dl = torch.utils.data.DataLoader(ds, batch_size=64, shuffle=True,
+    ...     worker_init_fn=MultiViewDataFrameDataset.worker_init_fn)
+    >>> batch = next(iter(dl))
+    >>> batch['views']['t1'].shape, batch['masks']['t1'].shape
     """
 
     def __init__(
@@ -155,22 +192,23 @@ class MultiViewDataFrameDataset(Dataset):
         views: Dict[str, pd.DataFrame],
         target: Optional[Union[pd.Series, pd.DataFrame]] = None,
         normalization: Union[str, Dict[str, Optional[str]]] = '0mean',
-        alpha: float = 0.01,
-        add_noise_in: str = 'raw',
-        impute: str = 'none',
+        alpha: float = 0.0,
+        add_noise_in: str = 'raw',              # 'raw' | 'normalized' | 'none'
+        impute: str = 'none',                   # 'none' | 'mean' | 'zero'
         concat_views: bool = False,
         column_info: Optional[Dict[str, Dict[str, List[str]]]] = None,
         preprocessors: Optional[Dict[str, Callable[[pd.DataFrame], pd.DataFrame]]] = None,
         number_of_samples: Optional[int] = None,
         dtype: torch.dtype = torch.float32,
+        # Non-finite handling before stats (optional, conservative defaults)
         nonfinite_clean: Optional[str] = None,        # None | 'drop' | 'impute_zero' | 'impute_mean'
         nonfinite_scope: str = 'numeric_only',        # 'numeric_only' | 'all_columns'
-        max_row_na_frac: float = 0.0,                 # for 'drop': allow up to this frac of non-finites per row
+        max_row_na_frac: float = 0.0,                 # for 'drop': allow up to this frac non-finites per row
     ):
         assert add_noise_in in {'raw', 'normalized', 'none'}
         assert impute in {'none', 'mean', 'zero'}
 
-        self.view_names = sorted(list(views.keys()))
+        self.view_names = list(views.keys())  # preserve caller order
         self.add_noise_in = add_noise_in
         self.alpha = float(alpha)
         self.impute = impute
@@ -189,7 +227,7 @@ class MultiViewDataFrameDataset(Dataset):
                 df = self._preprocessors[v](df)
             processed[v] = df
 
-        # Align on common index across views (inner join of indices)
+        # Align on common index across views (inner join of indices); include target if provided
         common_index = None
         for v, df in processed.items():
             idx = df.index
@@ -208,66 +246,42 @@ class MultiViewDataFrameDataset(Dataset):
         self.nonfinite_scope = nonfinite_scope
         self.max_row_na_frac = float(max_row_na_frac)
 
+        # Optional pre-clean (drop/impute) for stability
         if nonfinite_clean in {'drop', 'impute_zero', 'impute_mean'}:
-            # Build per-view boolean masks of finiteness according to scope
-            finite_masks: Dict[str, np.ndarray] = {}
-            for v in self.view_names:
-                dfv = aligned[v]
-                if nonfinite_scope == 'numeric_only':
-                    cols = [c for c in dfv.columns if pd.api.types.is_numeric_dtype(dfv[c])]
-                    arr = dfv[cols].to_numpy(copy=False).astype(np.float32) if len(cols) else \
-                          np.ones((len(dfv), 0), dtype=np.float32)
-                else:
-                    arr = dfv.to_numpy(copy=False).astype(np.float32)
-                if arr.size == 0:
-                    finite = np.ones((len(dfv),), dtype=bool)
-                else:
-                    finite = np.isfinite(arr)
-                    # If using a tolerance on row NA fraction for dropping
-                    row_ok = (finite.sum(axis=1) >= (1.0 - self.max_row_na_frac) * finite.shape[1]) \
-                             if finite.shape[1] > 0 else np.ones((finite.shape[0],), dtype=bool)
-                finite_masks[v] = row_ok
-
-            # Intersection across views
             keep_rows = np.ones((len(self.index),), dtype=bool)
-            for v in self.view_names:
-                keep_rows &= finite_masks[v]
-
             if nonfinite_clean == 'drop':
-                # Drop rows consistently across ALL views (and target)
+                # mark rows to drop if non-finite beyond threshold
+                for v in self.view_names:
+                    dfv = aligned[v]
+                    if nonfinite_scope == 'numeric_only':
+                        cols = [c for c in dfv.columns if pd.api.types.is_numeric_dtype(dfv[c])]
+                        arr = dfv[cols].to_numpy(copy=False).astype(np.float32) if len(cols) else \
+                              np.ones((len(dfv), 0), dtype=np.float32)
+                    else:
+                        # all columns numeric cast; non-numeric ignored in mask
+                        cols = [c for c in dfv.columns if pd.api.types.is_numeric_dtype(dfv[c])]
+                        arr = dfv[cols].to_numpy(copy=False).astype(np.float32) if len(cols) else \
+                              np.ones((len(dfv), 0), dtype=np.float32)
+                    if arr.size == 0:
+                        continue
+                    finite = np.isfinite(arr)
+                    row_ok = (finite.sum(axis=1) >= (1.0 - self.max_row_na_frac) * finite.shape[1])
+                    keep_rows &= row_ok
                 if not keep_rows.all():
                     self.index = self.index[keep_rows]
                     aligned = {v: aligned[v].loc[self.index] for v in self.view_names}
                     if target is not None:
-                        if isinstance(target, pd.Series):
-                            self.target = target.loc[self.index].astype(np.float32).to_numpy()
-                        else:
-                            self.target = target.loc[self.index].astype(np.float32).to_numpy()
-                # For 'drop' we’re done; arrays build below will be finite by construction.
+                        target = target.loc[self.index]
 
             else:
-                # In-place imputation across ALL views (consistent rule)
+                # in-place imputation across views for numeric columns
                 for v in self.view_names:
                     dfv = aligned[v]
+                    df_num = dfv.select_dtypes(include=[np.number]).replace([np.inf, -np.inf], np.nan)
                     if nonfinite_clean == 'impute_zero':
-                        fill_map = {}
-                        if nonfinite_scope == 'numeric_only':
-                            for c in dfv.columns:
-                                if pd.api.types.is_numeric_dtype(dfv[c]):
-                                    fill_map[c] = 0.0
-                        else:
-                            # numeric -> 0, non-numeric leave as-is (dummies typically numeric already)
-                            for c in dfv.columns:
-                                if pd.api.types.is_numeric_dtype(dfv[c]):
-                                    fill_map[c] = 0.0
-                        if fill_map:
-                            aligned[v] = dfv.fillna(value=fill_map).replace([np.inf, -np.inf], 0.0)
-
+                        aligned[v][df_num.columns] = df_num.fillna(0.0)
                     elif nonfinite_clean == 'impute_mean':
-                        # column-wise means for numeric columns only; inf -> NaN -> mean
-                        dfv_num = dfv.select_dtypes(include=[np.number]).replace([np.inf, -np.inf], np.nan)
-                        means = dfv_num.mean(axis=0)
-                        aligned[v][dfv_num.columns] = dfv_num.fillna(means)
+                        aligned[v][df_num.columns] = df_num.fillna(df_num.mean(axis=0))
 
         if target is not None:
             if isinstance(target, pd.Series):
@@ -311,13 +325,13 @@ class MultiViewDataFrameDataset(Dataset):
 
             if num_vals.size > 0:
                 mean = np.nanmean(num_vals, axis=0)
-                std = np.nanstd(num_vals, axis=0)
+                std  = np.nanstd(num_vals, axis=0)
                 vmin = np.nanmin(num_vals, axis=0)
                 vmax = np.nanmax(num_vals, axis=0)
                 eps_std = np.maximum(std, 1e-8)
                 eps_rng = np.maximum(vmax - vmin, 1e-8)
             else:
-                # No numeric cols: create empty arrays
+                # No numeric cols
                 mean = std = vmin = vmax = eps_std = eps_rng = np.empty((0,), dtype=np.float32)
 
             self._state[v] = _ViewState(
@@ -351,7 +365,9 @@ class MultiViewDataFrameDataset(Dataset):
             self._num_pos[v] = num_pos
             self._dummy_pos[v] = dummy_pos
 
-        # jitter positions removed (noise applied to all numeric columns)
+    # ------------------------------
+    # Public API
+    # ------------------------------
 
     def __len__(self) -> int:
         return self.number_of_samples
@@ -360,7 +376,7 @@ class MultiViewDataFrameDataset(Dataset):
         """
         Return one sample by aligned index (modulo N).
 
-        Steps for numeric features:
+        Numeric path:
           raw-noise (optional) -> normalization -> normalized-noise (optional)
           -> auto clamp to [0,1] if mode == '01' -> imputation (optional).
         """
@@ -380,14 +396,13 @@ class MultiViewDataFrameDataset(Dataset):
             num_pos = self._num_pos[v]
             dummy_pos = self._dummy_pos[v]
 
-                        # --- Normalization and augmentation ---
+            # --- Normalization and augmentation ---
             if num_pos.size > 0:
                 x_num = x[num_pos]
 
                 if self.add_noise_in == 'raw' and self.alpha > 0:
                     x_num = x_num + np.random.normal(0.0, self.alpha * st.eps_std).astype(np.float32)
 
-                
                 norm_mode = self._norm_mode[v]
                 if norm_mode == '0mean':
                     x_num = (x_num - st.mean) / st.eps_std
@@ -420,7 +435,7 @@ class MultiViewDataFrameDataset(Dataset):
             if dummy_pos.size > 0 and self.impute != 'none':
                 xd = x[dummy_pos]
                 if self.impute == 'mean':
-                    xd = np.where(np.isfinite(xd), xd, 0.0)  # mean of one-hot ~ 0 for rare categories
+                    xd = np.where(np.isfinite(xd), xd, 0.0)  # one-hot mean ~ 0 for rare categories
                 else:
                     xd = np.where(np.isfinite(xd), xd, 0.0)
                 x[dummy_pos] = xd
@@ -454,6 +469,14 @@ class MultiViewDataFrameDataset(Dataset):
             if self.target is not None:
                 sample['target'] = _to_tensor(self.target[ridx].reshape(-1), self.dtype)
         return sample
+
+    def set_alpha(self, alpha: float, add_noise_in: Optional[str] = None):
+        """Adjust jitter alpha (and optionally noise domain) at runtime."""
+        self.alpha = float(alpha)
+        if add_noise_in is not None:
+            if add_noise_in not in {'raw', 'normalized', 'none'}:
+                raise ValueError("add_noise_in must be 'raw', 'normalized', or 'none'")
+            self.add_noise_in = add_noise_in
 
     def denormalize(self, view: str, x: np.ndarray) -> np.ndarray:
         """Invert normalization for a single view's **numeric** part.
@@ -502,7 +525,7 @@ class MultiViewDataFrameDataset(Dataset):
     # Internal
     # ------------------------------
     def _expand_norm_modes(self, normalization: Union[str, Dict[str, Optional[str]]]) -> Dict[str, Optional[str]]:
-        if isinstance(normalization, str) or normalization is None:
+        if isinstance(normalization, (str, type(None))):
             modes = {v: normalization for v in self.view_names}
         elif isinstance(normalization, dict):
             modes = {v: normalization.get(v, '0mean') for v in self.view_names}
@@ -512,5 +535,3 @@ class MultiViewDataFrameDataset(Dataset):
             if m not in {None, '01', '0mean'}:
                 raise ValueError(f"Unsupported normalization mode '{m}' for view '{v}'")
         return modes
-
-
