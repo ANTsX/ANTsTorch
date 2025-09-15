@@ -263,7 +263,7 @@ def normalizing_simr_flows_whitener(
     jitter_alpha_total_steps: Optional[int] = None,  # None -> default to max_iter
 
     # Tradeoff / penalties
-    tradeoff_mode: str = "ema",
+    tradeoff_mode: str = "uncertainty",
     target_ratio: float = 9.0,
     lambda_penalty: float = 1.0,
     ema_beta: float = 0.98,
@@ -410,6 +410,9 @@ def normalizing_simr_flows_whitener(
     patience_counter = 0
     smooth_total = None
 
+    smooth_u_n = None   # EMA of |nll|  (for 'uncertainty' mode)
+    smooth_u_p = None   # EMA of |pen|  (for 'uncertainty' mode)
+
     if save_checkpoint_dir is not None:
         os.makedirs(save_checkpoint_dir, exist_ok=True)
     ckpt_every = checkpoint_interval if (checkpoint_interval is not None) else val_interval
@@ -458,10 +461,43 @@ def normalizing_simr_flows_whitener(
                 if tradeoff_mode == "ema":
                     ema_nll = nll_sum.detach() if ema_nll is None else (ema_beta * ema_nll + (1 - ema_beta) * nll_sum.detach())
                     ema_pen = pen.detach() if ema_pen is None else (ema_beta * ema_pen + (1 - ema_beta) * pen.detach())
-                    pen_scale = (ema_nll / (ema_pen + 1e-8)) / max(1e-8, float(target_ratio))
+                    # Use magnitudes so weight stays positive even if nll < 0
+                    ema_n_mag = ema_nll.abs().clamp(min=1e-4)
+                    ema_p_mag = ema_pen.clamp(min=1e-4)
+
+                    # same ratio, but stable in sign and scale; log version avoids overflow/underflow
+                    pen_scale = torch.exp(torch.log(ema_n_mag) - torch.log(ema_p_mag) - math.log(max(1e-8, float(target_ratio))))
                     lam_eff = lambda_penalty * pen_scale
+
+                    # final safety clamps (prevents collapse to zero or blowups)
+                    lam_eff = torch.nan_to_num(lam_eff, nan=0.0, posinf=1e3, neginf=0.0).clamp(min=1e-3, max=1e3)
                 elif tradeoff_mode == "uncertainty":
-                    lam_eff = lambda_penalty * (nll_sum.detach() / (pen.detach() + 1e-8))
+                    import math
+                    eps = 1e-4
+                    lam_min, lam_max = 1e-3, 1e3     # expose as CLI if you like
+                    beta = 0.9                       # light smoothing to avoid jitter
+                    tr = max(1e-8, float(target_ratio))
+
+                    # Magnitudes so weight stays positive even if nll < 0
+                    n_mag = nll_sum.detach().abs().clamp(min=eps)
+                    p_mag = pen.detach().abs().clamp(min=eps)
+
+                    # Smooth a bit (EMA)
+                    smooth_u_n = n_mag if smooth_u_n is None else beta * smooth_u_n + (1 - beta) * n_mag
+                    smooth_u_p = p_mag if smooth_u_p is None else beta * smooth_u_p + (1 - beta) * p_mag
+
+                    # Ratio in log-space for stability, then exp back
+                    ratio_log = torch.log(smooth_u_n) - torch.log(smooth_u_p) - math.log(tr)
+                    pen_scale = torch.exp(ratio_log)
+
+                    lam_eff = lambda_penalty * pen_scale
+                    lam_eff = torch.nan_to_num(lam_eff, nan=0.0, posinf=lam_max, neginf=0.0).clamp(lam_min, lam_max)
+
+                    # Gentle warmup: keep it small early on so NLL can stabilize
+                    if step < penalty_warmup_iters:
+                        # linear ramp or cap — choose one; cap is simplest:
+                        lam_eff = lam_eff.clamp(max=0.1)
+
                 elif tradeoff_mode == "fixed":
                     lam_eff = lambda_penalty
                 else:
