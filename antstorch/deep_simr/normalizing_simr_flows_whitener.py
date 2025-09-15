@@ -299,25 +299,217 @@ def normalizing_simr_flows_whitener(
     dataset_normalizers_dump_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Train one normalizing-flow model per view with dataset-owned preprocessing.
+    Train a multi-view RealNVP-style normalizing-flow *whitener* with an optional PCA base
+    and a cross-view alignment penalty, using a robust data pipeline built on
+    `MultiViewDataFrameDataset`.
 
-    Summary
-    -------
-    - The dataset handles normalization (None | "0mean" | "01"), optional Gaussian
-      alpha-jitter (in "raw" or "normalized" space), simple imputation, and basic
-      non-finite cleanup.
-    - Each view gets its own flow; base distributions: GaussianPCA (latent dim k)
-      or DiagGaussian.
-    - Optional cross-view alignment penalty (Barlow Twins-like or correlation)
-      with EMA-scaled tradeoff.
+    Pipeline (high level)
+    ---------------------
+    1) Wrap per-view pandas DataFrames with `MultiViewDataFrameDataset`:
+       - Align indices across views.
+       - Handle non-finite values (drop/impute) consistently across views.
+       - Optionally apply dataset-owned normalization and input jitter.
+    2) Build one flow per view with the chosen base distribution:
+       - "GaussianPCA": k-dim PCA Gaussian base (latent dimension = `pca_latent_dimension`).
+       - "DiagGaussian": factorized full-dim Gaussian base.
+    3) Train by maximizing likelihood (minimizing NLL). If multiple views are present,
+       apply a cross-view alignment penalty on “whitened” latents.
+    4) A controller (`tradeoff_mode`) adjusts the penalty weight λ_eff relative to NLL:
+       - "uncertainty": λ_eff ∝ |NLL| / |penalty| (smoothed, sign-robust).
+       - "ema":         λ_eff ∝ EMA(NLL) / EMA(penalty) (sign-robust).
+       λ_eff is clamped and warmed up for stability.
+    5) Validate periodically, track the best state by `best_selection_metric`,
+       and optionally restore it at the end.
+
+    Parameters
+    ----------
+    views : list[pd.DataFrame]
+        One DataFrame per view (rows = subjects, columns = features) with a shared index.
+        Categorical encoding should be handled upstream or by the dataset wrapper.
+
+    # Splits / batching
+    val_fraction : float, default 0.2
+        Fraction of samples reserved for validation (random split).
+    batch_size : int, default 256
+        Training batch size.
+    val_batch_size : int, default 2048
+        Validation batch size (can be larger for throughput).
+    seed : int, default 0
+        RNG seed for splitting and initialization.
+    cuda_device : str or None, default None
+        Device spec, e.g. "cuda:0" or None for CPU/auto.
+
+    # Dataset-owned normalization & jitter
+    normalization : {"0mean","zscore", None} or dict, default "0mean"
+        Per-view, dataset-owned normalization strategy. If dict, may specify per-view
+        modes or None to disable for a view. Typical:
+          - "0mean": subtract column means.
+          - "zscore": (x - mean) / std with std floors.
+          - None: no dataset normalization (use model-side stats only).
+    add_noise_in : {"raw","normalized","none"}, default "normalized"
+        Where to add dataset-level Gaussian noise (jitter). Only applied if the dataset
+        is configured to add noise. "normalized" means after normalization; "raw" before.
+    impute : {"none","zero","mean"}, default "mean"
+        Per-view imputation rule applied inside the dataset for non-finite values.
+    nonfinite_clean : {None,"drop","impute_zero","impute_mean"}, default None
+        Cross-view cleaning policy applied **before** building tensors:
+          - "drop": drop any row where any view violates finiteness (per `nonfinite_scope`).
+          - "impute_zero"/"impute_mean": fill non-finites consistently across views.
+          - None: disable extra cleaning (use `impute` only).
+    nonfinite_scope : {"numeric_only","all_columns"}, default "numeric_only"
+        Whether finiteness checks/cleaning are restricted to numeric columns.
+    max_row_na_frac : float, default 0.0
+        For "drop" cleaning, maximum allowed fraction of non-finite entries per row.
+
+    # Flow config
+    K : int, default 64
+        Number of coupling layers per view.
+    leaky_relu_negative_slope : float, default 0.0
+        Negative slope for internal activations (if used).
+
+    # Base distribution
+    base_distribution : {"GaussianPCA","DiagGaussian"}, default "GaussianPCA"
+        Choice of base density for each view’s flow.
+    pca_latent_dimension : int or None, default 4
+        PCA latent dimension k (for "GaussianPCA"). Must be ≤ feature dimension D and ≤
+        effective rank of the view.
+    base_min_log, base_max_log : float, defaults -5.0, 5.0
+        Log-scale clamps for base parameters (numerical safety).
+    base_sigma : float, default 0.1
+        Base Gaussian scale (σ). Acts as a prior scale; higher values are more forgiving.
+
+    # Flow stability
+    scale_cap : float, default 3.0
+        Clamp for coupling log-scale/scale outputs to prevent explosions.
+    spectral_norm_scales : bool, default False
+        Apply spectral normalization to scale networks.
+    additive_first_n : int, default 0
+        Use additive couplings (no scaling) for the first N layers as a warmup.
+    actnorm_every : int, default 1
+        Insert ActNorm layers at this cadence (1 = every block).
+    mask_mode : str, default "alternating"
+        Coupling mask strategy ("alternating", "rolling", etc.).
+
+    # Optimization
+    lr : float, default 2e-4
+        AdamW learning rate.
+    betas : (float, float), default (0.9, 0.98)
+        AdamW β parameters.
+    eps_opt : float, default 1e-8
+        Optimizer epsilon.
+    weight_decay : float, default 0.0
+        AdamW weight decay.
+    max_iter : int, default 5000
+        Number of training steps.
+    grad_clip : float, default 5.0
+        Global gradient-norm clip.
+
+    # Jitter schedule
+    jitter_alpha : float, default 0.0
+        Initial input noise std (model-side jitter; separate from dataset noise).
+    jitter_alpha_end : float, default 0.0
+        Final noise std.
+    jitter_alpha_mode : {"cosine","linear"}, default "cosine"
+        Schedule shape.
+    jitter_alpha_total_steps : int or None, default None
+        Number of steps across which to schedule from start→end. If None, uses `max_iter`.
+
+    # Tradeoff / penalties
+    tradeoff_mode : {"uncertainty","ema"}, default "uncertainty"
+        Controller that scales the alignment penalty relative to NLL.
+          • "uncertainty": λ_eff ∝ |NLL| / |penalty| (we use a small EMA of magnitudes
+            for stability; λ_eff is clamped and warmed up).
+          • "ema":         λ_eff ∝ EMA(NLL) / EMA(penalty) (sign-robust EMAs).
+    target_ratio : float, default 9.0
+        Desired NLL:penalty ratio used by the controller (larger → smaller λ_eff).
+    lambda_penalty : float, default 1.0
+        Global multiplier on λ_eff.
+    ema_beta : float, default 0.98
+        EMA smoothing factor for "ema" mode; a lighter EMA is also used inside
+        "uncertainty" to reduce jitter.
+
+    penalty_type : {"barlow_twins_align","correlate","decorrelate"}, default "barlow_twins_align"
+        Alignment objective on whitened latents across views:
+          • "barlow_twins_align": push cross-view correlation toward identity (diag≈1, off-diag≈0).
+          • "correlate":         maximize correlation.
+          • "decorrelate":       minimize correlation (ablation).
+    bt_lambda_diag : float, default 1.0
+        Diagonal weight for Barlow-Twins-style alignment.
+    bt_lambda_offdiag : float, default 5e-3
+        Off-diagonal weight.
+    bt_eps : float, default 1e-6
+        Numerical epsilon in correlation/whitening ops.
+    penalty_warmup_iters : int, default 400
+        Warmup period: linearly introduce the alignment term and cap λ_eff early.
+
+    # Validation / early stopping
+    val_interval : int, default 200
+        Validate (and optionally checkpoint) every N steps.
+    early_stop_enabled : bool, default False
+        Enable early stopping on `best_selection_metric`.
+    early_stop_patience : int, default 300
+        Steps without improvement after `early_stop_min_iters` before stopping.
+    early_stop_min_delta : float, default 1e-4
+        Required improvement to reset patience.
+    early_stop_min_iters : int, default 600
+        Do not early-stop before this many steps.
+    early_stop_beta : float, default 0.98
+        Smoothing factor for the `smooth_total` metric.
+
+    # Checkpointing / resume
+    save_checkpoint_dir : str or None, default None
+        Directory to write checkpoints (per `checkpoint_interval` and "latest.pth").
+    checkpoint_interval : int or None, default None
+        If None, checkpoint every `val_interval`; otherwise, every `checkpoint_interval`.
+    resume_checkpoint : str or None, default None
+        Path to a checkpoint to resume (models, standardizers, step).
+    restore_best_for_final_eval : bool, default True
+        Restore the best weights (by `best_selection_metric`) before returning.
+
+    # Bookkeeping
+    best_selection_metric : {"val_bpd","smooth_total"}, default "val_bpd"
+        Which metric defines “best” for model selection.
+    verbose : bool, default False
+        Print detailed training logs.
+
+    # Optional regularizer
+    scale_penalty_weight : float, default 0.0
+        L2 penalty on scale/log-scale parameters (stability regularization).
+
+    # Export stats to disk (optional)
+    dataset_normalizers_dump_path : str or None, default None
+        If set, write dataset-owned normalizer statistics (e.g., means/stds per view/column)
+        to this path for reproducibility/auditing.
 
     Returns
     -------
     dict
-      - "models": List[nn.Module]
-      - "metrics": {"best_step","best_metric","best_metric_name"}
-      - "dataset_normalizers": per-view stats for apply()
+        {
+          "models": list[torch.nn.Module],
+              # One trained flow per view.
+          "standardizers": list[{"mean": (1, D_v), "std": (1, D_v)}],
+              # Per-view train-split statistics used for model-side standardization
+              # (if applicable to your implementation).
+          "metrics": {
+              "best_step": int,
+              "best_metric": float,
+              "best_metric_name": str,
+          }
+        }
+
+    Notes
+    -----
+    • Negative bpd is expected on continuous data; use it *relatively* for model selection.
+    • For "GaussianPCA", ensure `pca_latent_dimension ≤ D` and ≤ effective rank; drop or
+      repair degenerate columns upstream (dataset can help via `nonfinite_*`).
+    • λ_eff is kept non-negative and clamped to a safe range; during warmup the alignment
+      term is introduced gently to avoid destabilizing early optimization.
+    • If you enable dataset normalization **and** perform model-side standardization, make
+      sure you are not double-normalizing unless that’s intentional—prefer one place.
+    • Repro tip: persist both dataset normalizers (`dataset_normalizers_dump_path`) and the
+      model’s per-view standardizers (returned) alongside checkpoints.
     """
+
     # Device / seeds
     torch.manual_seed(seed); np.random.seed(seed)
     device = _ensure_device(cuda_device)
