@@ -1,0 +1,25 @@
+python3 ../train_antstorch_simr_flows.py \
+  --views UniformSimulatedData/uniform_10000x4.csv \
+  --output-prefix ./runs/uniform \
+  --base-distribution DiagGaussian \
+  --base-sigma 1.0 \
+  --K 8 \
+  --additive-first-n 6 \
+  --scale-cap 1.3 \
+  --spectral-norm-scales \
+  --actnorm-every 0 \
+  --mask-mode alternating \
+  --jitter-alpha 0.02 --jitter-alpha-end 0.0 --jitter-alpha-mode cosine \
+  --lr 1e-4 --weight-decay 5e-5 \
+  --best-selection-metric val_bpd \
+  --max-iter 2000 --val-interval 10 \
+  --save-z --verbose
+
+python3 ../plot_csv_distributions.py runs/uniform_z_view0.csv --ncols 4 -o ./
+
+Rscript sanity_check_gauss_decor.R  \
+  --raw UniformSimulatedData/uniform_10000x4.csv \
+  --z runs/uniform_z_view0.csv \
+  --labelraw raw \
+  --labelsz z \
+  --outdir sanity_uniform
