@@ -108,7 +108,22 @@ class create_unet_model_2d(nn.Module):
                                          kernel_size=(1, 1),
                                          stride=(1, 1),
                                          padding="valid")
-                self.g_conv = nn.Conv2d(in_channels=in_channels,
+                        # Optional scalar head using GAP of all encoder stages
+        if scalar_output_size is not None:
+            self.scalar_pool = nn.AdaptiveAvgPool2d((1,1))
+            # in_features is the sum of channels across encoder tensors
+            self.scalar_in_features = sum(number_of_filters)
+            self.scalar_fc = nn.Linear(self.scalar_in_features, scalar_output_size)
+            if scalar_output_activation == 'sigmoid':
+                self.scalar_activation = nn.Sigmoid()
+            elif scalar_output_activation == 'relu':
+                self.scalar_activation = nn.ReLU()
+            elif scalar_output_activation == 'tanh':
+                self.scalar_activation = nn.Tanh()
+            else:
+                self.scalar_activation = nn.Identity()
+
+self.g_conv = nn.Conv2d(in_channels=in_channels,
                                        out_channels=out_channels,
                                        kernel_size=(1, 1),
                                        stride=(1, 1),
@@ -132,6 +147,8 @@ class create_unet_model_2d(nn.Module):
         add_attention_gating = False
         nn_unet_activation_style = False
 
+        scalar_output_size = None
+        scalar_output_activation = 'linear'
         if additional_options is not None:
 
             if "attentionGating" in additional_options:
@@ -139,6 +156,20 @@ class create_unet_model_2d(nn.Module):
 
             if "nnUnetActivationStyle" in additional_options:
                 nn_unet_activation_style = True
+
+            # Scalar head options: e.g., 'scalarOutputSize[8]' and optional 'scalarOutputActivation[sigmoid]'
+            option_scalar = [o for o in additional_options if o.startswith('scalarOutputSize')]
+            if option_scalar:
+                size_str = option_scalar[0][option_scalar[0].find('[')+1: option_scalar[0].find(']')]
+                try:
+                    scalar_output_size = int(size_str)
+                except Exception:
+                    pass
+            option_scalar_act = [o for o in additional_options if o.startswith('scalarOutputActivation')]
+            if option_scalar_act:
+                act_str = option_scalar_act[0][option_scalar_act[0].find('[')+1: option_scalar_act[0].find(']')]
+                if act_str:
+                    scalar_output_activation = act_str
 
             option = [o for o in additional_options if o.startswith('initialConvolutionKernelSize')]
             if not not option:
@@ -270,7 +301,7 @@ class create_unet_model_2d(nn.Module):
         elif mode == 'classification':
             self.output = nn.Sequential(conv, nn.Softmax(dim=1))
         elif mode == 'regression':
-            self.output = nn.Sequential(conv, nn.Linear())
+            self.output = nn.Sequential(conv)
         else:
             raise ValueError('mode must be either `classification`, `regression` or `sigmoid`.')
 
@@ -314,7 +345,7 @@ class create_unet_model_2d(nn.Module):
 
         output = self.output(decoding_path)
 
-        return output
+                return (output, scalar_out) if 'scalar_out' in locals() and scalar_out is not None else output
 
 
 class create_unet_model_3d(nn.Module):
@@ -403,7 +434,7 @@ class create_unet_model_3d(nn.Module):
                        deconvolution_kernel_size=(2, 2, 2),
                        pool_size=(2, 2, 2),
                        strides=(2, 2, 2),
-                       dropout_rate=0.5,
+                       dropout_rate=0.0,
                        mode='classification',
                        additional_options=None
                       ):
@@ -422,7 +453,21 @@ class create_unet_model_3d(nn.Module):
                                          kernel_size=(1, 1, 1),
                                          stride=(1, 1, 1),
                                          padding="valid")
-                self.g_conv = nn.Conv3d(in_channels=in_channels,
+                        # Optional scalar head using GAP of all encoder stages
+        if scalar_output_size is not None:
+            self.scalar_pool = nn.AdaptiveAvgPool3d((1,1,1))
+            self.scalar_in_features = sum(number_of_filters)
+            self.scalar_fc = nn.Linear(self.scalar_in_features, scalar_output_size)
+            if scalar_output_activation == 'sigmoid':
+                self.scalar_activation = nn.Sigmoid()
+            elif scalar_output_activation == 'relu':
+                self.scalar_activation = nn.ReLU()
+            elif scalar_output_activation == 'tanh':
+                self.scalar_activation = nn.Tanh()
+            else:
+                self.scalar_activation = nn.Identity()
+
+self.g_conv = nn.Conv3d(in_channels=in_channels,
                                         out_channels=out_channels,
                                         kernel_size=(1, 1, 1),
                                         stride=(1, 1, 1),
@@ -446,6 +491,8 @@ class create_unet_model_3d(nn.Module):
         add_attention_gating = False
         nn_unet_activation_style = False
 
+        scalar_output_size = None
+        scalar_output_activation = 'linear'
         if additional_options is not None:
 
             if "attentionGating" in additional_options:
@@ -453,6 +500,20 @@ class create_unet_model_3d(nn.Module):
 
             if "nnUnetActivationStyle" in additional_options:
                 nn_unet_activation_style = True
+
+            # Scalar head options: e.g., 'scalarOutputSize[8]' and optional 'scalarOutputActivation[sigmoid]'
+            option_scalar = [o for o in additional_options if o.startswith('scalarOutputSize')]
+            if option_scalar:
+                size_str = option_scalar[0][option_scalar[0].find('[')+1: option_scalar[0].find(']')]
+                try:
+                    scalar_output_size = int(size_str)
+                except Exception:
+                    pass
+            option_scalar_act = [o for o in additional_options if o.startswith('scalarOutputActivation')]
+            if option_scalar_act:
+                act_str = option_scalar_act[0][option_scalar_act[0].find('[')+1: option_scalar_act[0].find(']')]
+                if act_str:
+                    scalar_output_activation = act_str
 
             option = [o for o in additional_options if o.startswith('initialConvolutionKernelSize')]
             if not not option:
@@ -584,7 +645,7 @@ class create_unet_model_3d(nn.Module):
         elif mode == 'classification':
             self.output = nn.Sequential(conv, nn.Softmax(dim=1))
         elif mode == 'regression':
-            self.output = nn.Sequential(conv, nn.Linear())
+            self.output = nn.Sequential(conv)
         else:
             raise ValueError('mode must be either `classification`, `regression` or `sigmoid`.')
 
@@ -630,5 +691,5 @@ class create_unet_model_3d(nn.Module):
 
         output = self.output(decoding_path)
 
-        return output
+                return (output, scalar_out) if 'scalar_out' in locals() and scalar_out is not None else output
 
