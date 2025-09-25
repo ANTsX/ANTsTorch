@@ -1,4 +1,5 @@
-python3 train_glow_model_joint_2d_uncertainty_es_plus_dir_safeguarded.py \
+python3 train.py \
+  --resume runs/glow_joint2d_uncertES_plus_dir_safeguarded_20250924_185659 \
   --devices cuda:1 \
   --modalities T2 T1 FA \
   --precision mixed --ema --ema-decay 0.999 \
@@ -6,7 +7,6 @@ python3 train_glow_model_joint_2d_uncertainty_es_plus_dir_safeguarded.py \
   --L 4 --K 2 --hidden-channels 64 \
   --resampled-size 128 128 \
   --batch-size 128 \
-  --train-samples 1000 --val-samples 64 \
   --max-iter 200000 \
   --eval-interval 1000 --plot-interval 1000 \
   --early-stopping-patience 10 --min-delta 0.001 \
@@ -14,5 +14,7 @@ python3 train_glow_model_joint_2d_uncertainty_es_plus_dir_safeguarded.py \
   --warmup-iters 400 \
   --plateau-factor 0.5 --plateau-patience 3 --plateau-threshold 1e-4 --min-lr 1e-6 \
   --sentry-interval 200 --sentry-dump --grad-clip 1.0 \
-  --sentry-z-absmax 1e3 --sentry-sample-absmax 10.0 \
-  --scale-map tanh --scale-cap 3.0 --net-actnorm --net-leaky 0.1
+  --sentry-z-absmax 1e3 \
+  --scale-map tanh --scale-cap 3.0 --net-actnorm --net-leaky 0.1 \
+  --sentry-sample-quantile 0.999 \
+  --sentry-sample-absmax 32

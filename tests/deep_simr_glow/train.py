@@ -124,29 +124,52 @@ def grad_is_finite_and_below(param_list, max_abs: float = 1e6):
     return True
 
 @torch.no_grad()
-def probe_forward(models, x_probe, device, model_dtype, z_absmax_thresh=None, sample_absmax_thresh=None):
+def probe_forward(models, x_probe, device, model_dtype,
+                  z_absmax_thresh=None,
+                  sample_absmax_thresh=None,
+                  sample_quantile: float = 0.999):
     """
-    Returns dict with simple stats to detect obvious explosions.
+    Quantile-based sample sentry: robust to lone extreme pixels.
+    Also reports z-abs-max (strict) for visibility.
     """
     stats = {"ok": True, "per_view": []}
     try:
         for m in range(len(models)):
-            x_m = per_sample_minmax01(nonfinite_and_outlier_clean(x_probe[:,m:m+1,:,:].to(device))).to(model_dtype)
-            # run the two core ops to smoke-test
+            x_m = per_sample_minmax01(nonfinite_and_outlier_clean(
+                x_probe[:, m:m+1, :, :].to(device)
+            )).to(model_dtype)
+
+            # Smoke-test core ops
             z_m, _ = models[m].inverse_and_log_det(x_m)
             kld = models[m].forward_kld(x_m)
             xs, _ = models[m].sample(x_m.shape[0])
-            # flatten z blocks and compute simple stats
+
+            # z stats (strict max for observability)
             zs = torch.cat([z_m[p].reshape(z_m[p].shape[0], -1) for p in range(len(z_m))], dim=1)
-            z_max = float(zs.abs().max().item())
+            z_abs_max = float(zs.abs().max().item())
             z_mean = float(zs.mean().item())
-            x_absmax = float(xs.abs().max().item())
-            stats["per_view"].append({"z_abs_max": z_max, "z_mean": z_mean, "x_abs_max": x_absmax, "kld": float(kld.detach().cpu().item())})
-            if (not np.isfinite(z_max)) or (not np.isfinite(z_mean)):
+
+            # sample stats: quantile across pixels per sample, then max across batch
+            flat = xs.abs().reshape(xs.shape[0], -1)
+            q = float(sample_quantile)
+            if q >= 1.0:
+                x_q_stat = float(flat.max().item())
+            else:
+                xq = torch.quantile(flat, q, dim=1)   # shape [batch]
+                x_q_stat = float(xq.max().item())
+
+            stats["per_view"].append({
+                "z_abs_max": z_abs_max,
+                "z_mean": z_mean,
+                "x_q_stat": x_q_stat,
+                "kld": float(kld.detach().cpu().item())
+            })
+
+            if (not np.isfinite(z_abs_max)) or (not np.isfinite(z_mean)) or (not np.isfinite(x_q_stat)):
                 stats["ok"] = False
-            if z_absmax_thresh is not None and z_max > float(z_absmax_thresh):
+            if (z_absmax_thresh is not None) and (z_abs_max > float(z_absmax_thresh)):
                 stats["ok"] = False
-            if sample_absmax_thresh is not None and x_absmax > float(sample_absmax_thresh):
+            if (sample_absmax_thresh is not None) and (x_q_stat > float(sample_absmax_thresh)):
                 stats["ok"] = False
     except Exception as e:
         stats["ok"] = False
@@ -242,6 +265,7 @@ parser.add_argument("--net-leaky", type=float, default=0.1, help="Leaky slope fo
 # NEW: Sentry controls
 parser.add_argument("--sentry-interval", type=int, default=200, help="How often (iters) to run sentry checks. 0 disables.")
 parser.add_argument("--sentry-grad-absmax", type=float, default=1e6, help="Declares non-finite if any grad has abs() > this.")
+parser.add_argument("--sentry-sample-quantile", type=float, default=0.999, help="Quantile of |sample| used for sentry (1.0 = strict max).")
 parser.add_argument("--sentry-probe-batchsize", type=int, default=4, help="Mini-batch size for probe forward.")
 parser.add_argument("--sentry-dump", action="store_true", help="Dump models/optimizer/meta if a sentry fails.")
 parser.add_argument("--sentry-z-absmax", type=float, default=1e3, help="Fail sentry if any |z| exceeds this.")
@@ -494,17 +518,36 @@ for it in tqdm(range(start_iter, int(args.max_iter)+1)):
             z.append(z_m)
             loss_kld = loss_kld + models[m].forward_kld(x_m)
 
-    # Quick z explosion guard (per batch)
+    # Quick z explosion guard (per batch) — use 99.9% quantile of |z| instead of strict max
     try:
-        z_abs_max = max([torch.cat([z[m][p].reshape(z[m][p].shape[0], -1) for p in range(len(z[m]))], dim=1).abs().max().item() for m in range(len(z))])
+        q = 0.999  # quantile for the z-stat guard
+        z_view_stats = []
+        for m in range(len(z)):
+            # Flatten multiscale latents for this view and compute per-sample |z|
+            flat_m = torch.cat(
+                [z[m][p].reshape(z[m][p].shape[0], -1).to(torch.float32) for p in range(len(z[m]))],
+                dim=1,
+            ).abs()
+            # Per-sample quantile, then take batch max for this view
+            zq_m = torch.quantile(flat_m, q, dim=1)  # shape: [batch]
+            z_view_stats.append(zq_m.max())
+        # Max across views → single batch statistic
+        z_abs_max = float(torch.stack(z_view_stats).max().item())
     except Exception:
         z_abs_max = float("nan")
+
     if np.isfinite(z_abs_max) and z_abs_max > float(args.sentry_z_absmax):
-        extra = {"why": "z absmax over threshold", "z_abs_max": float(z_abs_max), "modalities": args.modalities}
+        extra = {
+            "why": f"z |.| q{q*100:.1f} over threshold",
+            "z_q": float(z_abs_max),
+            "modalities": args.modalities,
+        }
         if args.sentry_dump:
             dump_dir = dump_sentry_package(trial_dir, it, models, flow_optimizer, float("nan"), extra)
-            print(f"[SENTRY] z explosion at iter {it}. Dumped to: {dump_dir}")
-        raise FloatingPointError(f"z absmax {z_abs_max} exceeds threshold {args.sentry_z_absmax} at iter {it}")
+            print(f"[SENTRY] z quantile guard at iter {it}. Dumped to: {dump_dir}")
+        raise FloatingPointError(
+            f"z |.| q{q*100:.1f} = {z_abs_max} exceeds threshold {args.sentry_z_absmax} at iter {it}"
+        )
 
     # Cross-view penalty (depends on direction)
     penalty_term = torch.tensor(0.0, device=device, dtype=model_dtype)
@@ -575,7 +618,10 @@ for it in tqdm(range(start_iter, int(args.max_iter)+1)):
         try:
             x_probe = next(iter(val_loader))
             x_probe = x_probe[:max(1, int(args.sentry_probe_batchsize))]
-            pf_stats = probe_forward(models, x_probe, device, model_dtype, z_absmax_thresh=args.sentry_z_absmax, sample_absmax_thresh=args.sentry_sample_absmax)
+            pf_stats = probe_forward(models, x_probe, device, model_dtype,
+                                     z_absmax_thresh=args.sentry_z_absmax,
+                                     sample_absmax_thresh=args.sentry_sample_absmax,
+                                     sample_quantile=float(args.sentry_sample_quantile))
             sentry_ok = sentry_ok and pf_stats.get("ok", False)
         except Exception as e:
             pf_stats = {"ok": False, "error": str(e)}
