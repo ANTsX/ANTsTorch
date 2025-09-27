@@ -736,27 +736,27 @@ for it in tqdm(range(start_iter, int(args.max_iter)+1)):
         # Panel 1 — KLD bpd + weight
         ax1 = plt.subplot(1,4,1)
         kld_bpd = (-np.array(loss_kld_hist)) / (np.log(2.0) * n_dims)
-        ax1.plot(loss_iter[-len(kld_bpd):], smooth_moving_average(kld_bpd), label='−KLD (bits/dim, SMA)')
+        ax1.plot(loss_iter[-len(kld_bpd):], simple_moving_average(kld_bpd), label='−KLD (bits/dim, SMA)')
         ax1.set_xlabel('Iteration'); ax1.set_ylabel('bits/dim'); ax1.set_title('KLD (per-dim)')
         ax1.grid(True); ax1.legend(loc='upper left'); ax1.ticklabel_format(style='plain', axis='y')
         ax1.yaxis.set_major_formatter(mtick.FormatStrFormatter('%.3f'))
         ax1b = ax1.twinx()
-        ax1b.plot(loss_iter, smooth_moving_average(w_kld_hist), alpha=0.6, label='w_kld', linestyle='--')
+        ax1b.plot(loss_iter, simple_moving_average(w_kld_hist), alpha=0.6, label='w_kld', linestyle='--')
         ax1b.set_ylabel('weight'); ax1b.legend(loc='upper right')
 
         # Panel 2 — penalty + weight
         ax2 = plt.subplot(1,4,2)
-        ax2.plot(loss_iter, smooth_moving_average(penalty_hist), label='Penalty (SMA)')
+        ax2.plot(loss_iter, simple_moving_average(penalty_hist), label='Penalty (SMA)')
         ax2.set_xlabel('Iteration'); ax2.set_ylabel('value'); ax2.set_title('Penalty + weight')
         ax2.grid(True); ax2.legend(loc='upper left'); ax2.ticklabel_format(style='plain', axis='y')
         ax2b = ax2.twinx()
-        ax2b.plot(loss_iter, smooth_moving_average(w_pen_hist), alpha=0.6, label='w_pen', linestyle='--', color='tab:orange')
+        ax2b.plot(loss_iter, simple_moving_average(w_pen_hist), alpha=0.6, label='w_pen', linestyle='--', color='tab:orange')
         ax2b.set_ylabel('weight'); ax2b.legend(loc='upper right')
 
         # Panel 3: show smoothed curves without scientific offset
         ax3 = plt.subplot(1,4,3)
-        ax3.plot(loss_iter[-len(tot_bpd):], smooth_moving_average(tot_bpd), label='Total (≈NLL) BPD (SMA)')
-        ax3.plot(loss_iter[-len(kld_bpd):], smooth_moving_average(-kld_bpd), label='-KLD BPD (SMA)', alpha=0.6)  # positive goes down as model improves
+        ax3.plot(loss_iter[-len(tot_bpd):], simple_moving_average(tot_bpd), label='Total (≈NLL) BPD (SMA)')
+        ax3.plot(loss_iter[-len(kld_bpd):], simple_moving_average(-kld_bpd), label='-KLD BPD (SMA)', alpha=0.6)  # positive goes down as model improves
         ax3.set_xlabel('Iteration'); ax3.set_ylabel('bits/dim'); ax3.set_title('Per-dim losses')
         ax3.grid(True); ax3.legend()
         ax3.ticklabel_format(style='plain', axis='y')  # turn off 1eX offset
