@@ -707,8 +707,8 @@ for it in tqdm(range(start_iter, int(args.max_iter)+1)):
                  float(penalty_hist[-1]) if len(penalty_hist) else float("nan"),
                  float(clamped_lsig_kld.detach().cpu().item()),
                  float(clamped_lsig_pen.detach().cpu().item()),
-                 float(w_kld_hist[-1].detach().cpu().item()),
-                 float(w_pen_hist[-1].detach().cpu().item()),
+                 float(w_kld.detach().cpu().item()),
+                 float(w_pen.detach().cpu().item()),
                  avg_val_raw, avg_val_ema, lr_now, float(grad_norm_hist[-1]), float(z_abs_max_hist[-1]), int(sentry_ok_hist[-1])] + [float(v) for v in val_bpds_raw]
             writer.writerow(row)
 
