@@ -64,9 +64,10 @@ def bits_per_dim_from_kld(model, x: torch.Tensor, num_dims: int):
 
 def simple_moving_average(x, w=200):
     x = np.asarray(x, dtype=float)
-    if len(x) < w: return x
-    k = np.ones(w) / w
-    return np.convolve(x, k, mode="valid")    
+    if w <= 1 or len(x) < w:  # no smoothing if too short
+        return x
+    k = np.ones(w, dtype=float) / w
+    return np.convolve(x, k, mode="valid")  # length N-w+1
 
 def evaluate_val_bpd(models, loader, device, num_dims, max_batches=10):
     for m in range(len(models)): models[m].eval()
@@ -733,41 +734,40 @@ for it in tqdm(range(start_iter, int(args.max_iter)+1)):
         # Loss plots
         plt.figure(figsize=(40,10))
 
-        # Panel 1 — KLD bpd + weight
+        kld_bpd = (-np.array(loss_kld_hist, dtype=float)) / (np.log(2.0) * n_dims)
+        tot_bpd = (-np.array(loss_hist, dtype=float)) / (np.log(2.0) * n_dims)
+
+        # Panel 1 — KLD (bits/dim), smoothed
         ax1 = plt.subplot(1,4,1)
-        kld_bpd = (-np.array(loss_kld_hist)) / (np.log(2.0) * n_dims)
-        ax1.plot(loss_iter[-len(kld_bpd):], simple_moving_average(kld_bpd), label='−KLD (bits/dim, SMA)')
+        ax1.plot(loss_iter, simple_moving_average(kld_bpd, w=200), label='−KLD (bits/dim, SMA)')
         ax1.set_xlabel('Iteration'); ax1.set_ylabel('bits/dim'); ax1.set_title('KLD (per-dim)')
-        ax1.grid(True); ax1.legend(loc='upper left'); ax1.ticklabel_format(style='plain', axis='y')
+        ax1.grid(True); ax1.legend(); ax1.ticklabel_format(style='plain', axis='y')
         ax1.yaxis.set_major_formatter(mtick.FormatStrFormatter('%.3f'))
-        ax1b = ax1.twinx()
-        ax1b.plot(loss_iter, simple_moving_average(w_kld_hist), alpha=0.6, label='w_kld', linestyle='--')
-        ax1b.set_ylabel('weight'); ax1b.legend(loc='upper right')
 
-        # Panel 2 — penalty + weight
+        # Panel 2 — Penalty term (smoothed)
         ax2 = plt.subplot(1,4,2)
-        ax2.plot(loss_iter, simple_moving_average(penalty_hist), label='Penalty (SMA)')
-        ax2.set_xlabel('Iteration'); ax2.set_ylabel('value'); ax2.set_title('Penalty + weight')
-        ax2.grid(True); ax2.legend(loc='upper left'); ax2.ticklabel_format(style='plain', axis='y')
-        ax2b = ax2.twinx()
-        ax2b.plot(loss_iter, simple_moving_average(w_pen_hist), alpha=0.6, label='w_pen', linestyle='--', color='tab:orange')
-        ax2b.set_ylabel('weight'); ax2b.legend(loc='upper right')
+        ax2.plot(loss_iter, simple_moving_average(penalty_hist, w=200), label='Penalty (SMA)')
+        ax2.set_xlabel('Iteration'); ax2.set_ylabel('value'); ax2.set_title('Penalty term')
+        ax2.grid(True); ax2.legend(); ax2.ticklabel_format(style='plain', axis='y')
 
-        # Panel 3: show smoothed curves without scientific offset
+        # Panel 3 — Total (≈NLL) as bits/dim, smoothed
         ax3 = plt.subplot(1,4,3)
-        ax3.plot(loss_iter[-len(tot_bpd):], simple_moving_average(tot_bpd), label='Total (≈NLL) BPD (SMA)')
-        ax3.plot(loss_iter[-len(kld_bpd):], simple_moving_average(-kld_bpd), label='-KLD BPD (SMA)', alpha=0.6)  # positive goes down as model improves
-        ax3.set_xlabel('Iteration'); ax3.set_ylabel('bits/dim'); ax3.set_title('Per-dim losses')
-        ax3.grid(True); ax3.legend()
-        ax3.ticklabel_format(style='plain', axis='y')  # turn off 1eX offset
+        ax3.plot(loss_iter, simple_moving_average(tot_bpd, w=200), label='Total (≈NLL) BPD (SMA)')
+        ax3.set_xlabel('Iteration'); ax3.set_ylabel('bits/dim'); ax3.set_title('Total (per-dim)')
+        ax3.grid(True); ax3.legend(); ax3.ticklabel_format(style='plain', axis='y')
         ax3.yaxis.set_major_formatter(mtick.FormatStrFormatter('%.3f'))
 
+        # Panel 4 — Grad norm (log) with clip line
         ax4 = plt.subplot(1,4,4)
         g = np.asarray(grad_norm_hist, dtype=float)
         ax4.semilogy(loss_iter[-len(g):], g, label='||grad|| (pre-clip)')
-        ax4.axhline(y=float(args.grad_clip), linestyle='--', linewidth=1.5, label=f'clip={args.grad_clip}')
+        ax4.axhline(y=max(float(args.grad_clip), 1e-12), linestyle='--', linewidth=1.5, label=f'clip={args.grad_clip}')
         ax4.set_xlabel('Iteration'); ax4.set_ylabel('||grad||'); ax4.set_title('Grad Norm (log)')
         ax4.grid(True, which='both'); ax4.legend()
+
+        plt.tight_layout()
+        plt.savefig(str(trial_dir / "loss_hist_glow_2d_uncertES_plus_dir_safeguarded.pdf"))
+        plt.close()
 
         # Samples per model (RAW)
         for m in range(len(models)):
