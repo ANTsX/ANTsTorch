@@ -22,10 +22,12 @@ from torch.utils.data import DataLoader
 import normflows as nf
 from normflows import distributions as nfd
 
-import ants, antspynet, antstorch
+import ants, antstorch
 
 from tqdm import tqdm
 from matplotlib import pyplot as plt
+from matplotlib import ticker as mtick
+
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -59,6 +61,12 @@ def bits_per_dim_from_kld(model, x: torch.Tensor, num_dims: int):
             total += float(loss_i.detach().cpu().item())
     avg = total / b
     return avg / (np.log(2.0) * num_dims)
+
+def simple_moving_average(x, w=200):
+    x = np.asarray(x, dtype=float)
+    if len(x) < w: return x
+    k = np.ones(w) / w
+    return np.convolve(x, k, mode="valid")    
 
 def evaluate_val_bpd(models, loader, device, num_dims, max_batches=10):
     for m in range(len(models)): models[m].eval()
@@ -350,9 +358,9 @@ if use_mutual_information_penalty:
 else: penalty_string="Pearson Correlation"; mine_nets=None; ma_ets=None; combined_penalty_parameters=[]
 
 # Data
-hcpya_images=[ants.image_read(antspynet.get_antsxnet_data("hcpyaT2Template")),
-              ants.image_read(antspynet.get_antsxnet_data("hcpyaT1Template")),
-              ants.image_read(antspynet.get_antsxnet_data("hcpyaFATemplate"))]
+hcpya_images=[ants.image_read(antstorch.get_antstorch_data("hcpyaT2Template")),
+              ants.image_read(antstorch.get_antstorch_data("hcpyaT1Template")),
+              ants.image_read(antstorch.get_antstorch_data("hcpyaFATemplate"))]
 hcpya_slices=[ants.slice_image(im,axis=2,idx=120,collapse_strategy=1) for im in hcpya_images]
 template=ants.resample_image(hcpya_slices[0],resampled_image_size,use_voxels=True)
 train_loader=DataLoader(antstorch.ImageDataset(images=[hcpya_slices],template=template,do_data_augmentation=True,
@@ -433,6 +441,7 @@ if not args.resume or not log_path.exists():
     with open(log_path,"w",newline="") as f:
         writer=csv.writer(f)
         header=["iter","loss_total","loss_kld","penalty_term","log_sigma_kld","log_sigma_pen",
+                "w_kld","w_pen",
                 "avg_val_bpd_raw","avg_val_bpd_ema","lr","grad_norm","z_abs_max","sentry_ok"]
         for m in range(len(models)): header+=[f"val_bpd_{args.modalities[m]}"]
         writer.writerow(header)
@@ -459,12 +468,12 @@ plateau_sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
 # Resume logic (if any)
 # ---------------------------
 if args.resume and state_path.exists():
-    ckpt = torch.load(state_path, map_location=device)
+    ckpt = torch.load(state_path, map_location=device, weights_only=False)
     # Load flow weights if last exists
     for m in range(len(models)):
         model_path = trial_dir / f"model_{args.modalities[m]}_last.pt"
         if model_path.exists():
-            models[m].load_state_dict(torch.load(model_path, map_location=device))
+            models[m].load_state_dict(torch.load(model_path, map_location=device, weights_only=False))
     # Load optimizers/scheduler/scalers/state
     flow_optimizer.load_state_dict(ckpt.get("flow_optimizer", flow_optimizer.state_dict()))
     if mine_optimizer and "mine_optimizer" in ckpt and ckpt["mine_optimizer"] is not None: mine_optimizer.load_state_dict(ckpt["mine_optimizer"])
@@ -500,6 +509,7 @@ if args.actnorm_init and not args.resume:
 
 loss_iter = []; loss_kld_hist = []; penalty_hist = []; loss_hist = []; loss_conv = []
 grad_norm_hist = []; sentry_ok_hist = []; z_abs_max_hist = []
+w_kld_hist, w_pen_hist = [], []
 
 for it in tqdm(range(start_iter, int(args.max_iter)+1)):
     flow_optimizer.zero_grad()
@@ -585,6 +595,11 @@ for it in tqdm(range(start_iter, int(args.max_iter)+1)):
     # Learned-uncertainty combination
     clamped_lsig_kld = torch.clamp(log_sigma_kld, -5.0, 5.0)
     clamped_lsig_pen = torch.clamp(log_sigma_pen, -5.0, 5.0)
+
+    w_kld = 0.5 * torch.exp(-2*clamped_lsig_kld)  # scalar
+    w_pen = 0.5 * torch.exp(-2*clamped_lsig_pen)  # scalar
+    w_kld_hist.append(float(w_kld.detach().cpu().item()))
+    w_pen_hist.append(float(w_pen.detach().cpu().item()))
 
     with torch.amp.autocast('cuda', enabled=amp_enabled, dtype=(amp_dtype if amp_enabled else None)):
         loss = (0.5 * torch.exp(-2*clamped_lsig_kld) * loss_kld + clamped_lsig_kld) \
@@ -692,6 +707,8 @@ for it in tqdm(range(start_iter, int(args.max_iter)+1)):
                  float(penalty_hist[-1]) if len(penalty_hist) else float("nan"),
                  float(clamped_lsig_kld.detach().cpu().item()),
                  float(clamped_lsig_pen.detach().cpu().item()),
+                 float(w_kld_hist[-1].detach().cpu().item()),
+                 float(w_pen_hist[-1].detach().cpu().item()),
                  avg_val_raw, avg_val_ema, lr_now, float(grad_norm_hist[-1]), float(z_abs_max_hist[-1]), int(sentry_ok_hist[-1])] + [float(v) for v in val_bpds_raw]
             writer.writerow(row)
 
@@ -712,13 +729,45 @@ for it in tqdm(range(start_iter, int(args.max_iter)+1)):
 
     # Periodic plotting & sampling
     if it % args.plot_interval == 0:
+
         # Loss plots
         plt.figure(figsize=(40,10))
-        plt.subplot(1,4,1); plt.plot(loss_iter, loss_kld_hist, label='KLD loss'); plt.xlabel('Iteration'); plt.ylabel('KLD loss'); plt.title('KLD Loss'); plt.grid(True); plt.legend()
-        plt.subplot(1,4,2); plt.plot(loss_iter, penalty_hist, label='Penalty term'); plt.xlabel('Iteration'); plt.ylabel('Penalty'); plt.title('Penalty term'); plt.grid(True); plt.legend()
-        plt.subplot(1,4,3); plt.plot(loss_iter, loss_hist, label='Total loss'); plt.xlabel('Iteration'); plt.ylabel('Total loss'); plt.title('Total Loss'); plt.grid(True); plt.legend()
-        plt.subplot(1,4,4); plt.plot(loss_iter, grad_norm_hist, label='Grad norm'); plt.xlabel('Iteration'); plt.ylabel('||grad||'); plt.title('Grad Norm'); plt.grid(True); plt.legend()
-        plt.tight_layout(); plt.savefig(str(trial_dir / "loss_hist_glow_2d_uncertES_plus_dir_safeguarded.pdf")); plt.close()
+
+        # Panel 1 — KLD bpd + weight
+        ax1 = plt.subplot(1,4,1)
+        kld_bpd = (-np.array(loss_kld_hist)) / (np.log(2.0) * n_dims)
+        ax1.plot(loss_iter[-len(kld_bpd):], smooth_moving_average(kld_bpd), label='−KLD (bits/dim, SMA)')
+        ax1.set_xlabel('Iteration'); ax1.set_ylabel('bits/dim'); ax1.set_title('KLD (per-dim)')
+        ax1.grid(True); ax1.legend(loc='upper left'); ax1.ticklabel_format(style='plain', axis='y')
+        ax1.yaxis.set_major_formatter(mtick.FormatStrFormatter('%.3f'))
+        ax1b = ax1.twinx()
+        ax1b.plot(loss_iter, smooth_moving_average(w_kld_hist), alpha=0.6, label='w_kld', linestyle='--')
+        ax1b.set_ylabel('weight'); ax1b.legend(loc='upper right')
+
+        # Panel 2 — penalty + weight
+        ax2 = plt.subplot(1,4,2)
+        ax2.plot(loss_iter, smooth_moving_average(penalty_hist), label='Penalty (SMA)')
+        ax2.set_xlabel('Iteration'); ax2.set_ylabel('value'); ax2.set_title('Penalty + weight')
+        ax2.grid(True); ax2.legend(loc='upper left'); ax2.ticklabel_format(style='plain', axis='y')
+        ax2b = ax2.twinx()
+        ax2b.plot(loss_iter, smooth_moving_average(w_pen_hist), alpha=0.6, label='w_pen', linestyle='--', color='tab:orange')
+        ax2b.set_ylabel('weight'); ax2b.legend(loc='upper right')
+
+        # Panel 3: show smoothed curves without scientific offset
+        ax3 = plt.subplot(1,4,3)
+        ax3.plot(loss_iter[-len(tot_bpd):], smooth_moving_average(tot_bpd), label='Total (≈NLL) BPD (SMA)')
+        ax3.plot(loss_iter[-len(kld_bpd):], smooth_moving_average(-kld_bpd), label='-KLD BPD (SMA)', alpha=0.6)  # positive goes down as model improves
+        ax3.set_xlabel('Iteration'); ax3.set_ylabel('bits/dim'); ax3.set_title('Per-dim losses')
+        ax3.grid(True); ax3.legend()
+        ax3.ticklabel_format(style='plain', axis='y')  # turn off 1eX offset
+        ax3.yaxis.set_major_formatter(mtick.FormatStrFormatter('%.3f'))
+
+        ax4 = plt.subplot(1,4,4)
+        g = np.asarray(grad_norm_hist, dtype=float)
+        ax4.semilogy(loss_iter[-len(g):], g, label='||grad|| (pre-clip)')
+        ax4.axhline(y=float(args.grad_clip), linestyle='--', linewidth=1.5, label=f'clip={args.grad_clip}')
+        ax4.set_xlabel('Iteration'); ax4.set_ylabel('||grad||'); ax4.set_title('Grad Norm (log)')
+        ax4.grid(True, which='both'); ax4.legend()
 
         # Samples per model (RAW)
         for m in range(len(models)):
