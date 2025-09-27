@@ -64,10 +64,11 @@ def bits_per_dim_from_kld(model, x: torch.Tensor, num_dims: int):
 
 def simple_moving_average(x, w=200):
     x = np.asarray(x, dtype=float)
-    if w <= 1 or len(x) < w:  # no smoothing if too short
+    if w <= 1 or len(x) < w:
         return x
     k = np.ones(w, dtype=float) / w
-    return np.convolve(x, k, mode="valid")  # length N-w+1
+    y = np.convolve(x, k, mode="valid")            # length N-w+1
+    return np.concatenate([np.full(w-1, np.nan), y])  # length N
 
 def evaluate_val_bpd(models, loader, device, num_dims, max_batches=10):
     for m in range(len(models)): models[m].eval()
