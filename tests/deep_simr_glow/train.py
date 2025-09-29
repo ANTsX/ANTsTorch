@@ -159,14 +159,30 @@ def probe_forward(models, x_probe, device, model_dtype,
             z_abs_max = float(zs.abs().max().item())
             z_mean = float(zs.mean().item())
 
-            # sample stats: quantile across pixels per sample, then max across batch
-            flat = xs.abs().reshape(xs.shape[0], -1)
+            # replace the block that builds `flat = xs.abs().reshape(...)` and quantiles with:
             q = float(sample_quantile)
-            if q >= 1.0:
-                x_q_stat = float(flat.max().item())
+
+            # choose sample space
+            mode = getattr(args, "sentry_sample_space", "tanh")  # default "tanh" if flag not present
+
+            if mode == "tanh":
+                xs_meas = torch.tanh(xs)                     # compress dynamic range
+            elif mode == "robust":
+                flat = xs.reshape(xs.shape[0], -1)
+                med = flat.median(dim=1, keepdim=True).values
+                mad = (flat - med).abs().median(dim=1, keepdim=True).values + 1e-6
+                xs_meas = ((flat - med) / mad).reshape_as(xs)  # per-sample robust standardization
             else:
-                xq = torch.quantile(flat, q, dim=1)   # shape [batch]
+                xs_meas = xs  # "raw"
+
+            flat_meas = xs_meas.abs().reshape(xs_meas.shape[0], -1)
+
+            if q >= 1.0:
+                x_q_stat = float(flat_meas.max().item())
+            else:
+                xq = torch.quantile(flat_meas, q, dim=1)   # per-sample q; then max across batch
                 x_q_stat = float(xq.max().item())
+
 
             stats["per_view"].append({
                 "z_abs_max": z_abs_max,
@@ -280,7 +296,7 @@ parser.add_argument("--sentry-probe-batchsize", type=int, default=4, help="Mini-
 parser.add_argument("--sentry-dump", action="store_true", help="Dump models/optimizer/meta if a sentry fails.")
 parser.add_argument("--sentry-z-absmax", type=float, default=1e3, help="Fail sentry if any |z| exceeds this.")
 parser.add_argument("--sentry-sample-absmax", type=float, default=10.0, help="Fail sentry if any sample pixel exceeds this (pre-clamp).")
-
+parser.add_argument("--sentry-sample-space", type=str, default="tanh", choices=["tanh", "robust", "raw"], help="Space to measure sample magnitudes for the sentry (tanh|robust|raw).")
 args = parser.parse_args()
 
 set_deterministic(args.seed)
