@@ -18,4 +18,6 @@ python3 train.py \
   --scale-map tanh --scale-cap 3.0 --net-actnorm --net-leaky 0.1 \
   --sentry-sample-quantile 0.9995 \
   --sentry-sample-absmax 0.98 \
-  --sentry-sample-space tanh
+  --sentry-sample-space tanh \
+  --sentry-strikes 2
+  

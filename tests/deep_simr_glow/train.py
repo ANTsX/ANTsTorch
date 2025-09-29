@@ -297,6 +297,7 @@ parser.add_argument("--sentry-dump", action="store_true", help="Dump models/opti
 parser.add_argument("--sentry-z-absmax", type=float, default=1e3, help="Fail sentry if any |z| exceeds this.")
 parser.add_argument("--sentry-sample-absmax", type=float, default=10.0, help="Fail sentry if any sample pixel exceeds this (pre-clamp).")
 parser.add_argument("--sentry-sample-space", type=str, default="tanh", choices=["tanh", "robust", "raw"], help="Space to measure sample magnitudes for the sentry (tanh|robust|raw).")
+parser.add_argument("--sentry-strikes", type=int, default=1, help="Consecutive sentry failures required before aborting.")
 args = parser.parse_args()
 
 set_deterministic(args.seed)
@@ -528,6 +529,7 @@ if args.actnorm_init and not args.resume:
 loss_iter = []; loss_kld_hist = []; penalty_hist = []; loss_hist = []; loss_conv = []
 grad_norm_hist = []; sentry_ok_hist = []; z_abs_max_hist = []
 w_kld_hist, w_pen_hist = [], []
+sentry_strikes = 0
 
 for it in tqdm(range(start_iter, int(args.max_iter)+1)):
     flow_optimizer.zero_grad()
@@ -645,32 +647,54 @@ for it in tqdm(range(start_iter, int(args.max_iter)+1)):
 
     # Sentry gradient check (every N steps)
     sentry_ok = True
-    if args.sentry_interval > 0 and (it % args.sentry_interval == 0):
-        sentry_ok = grad_is_finite_and_below(combined_model_parameters, max_abs=float(args.sentry_grad_absmax))
-        # Probe forward on a tiny batch from val set
+    if (args.sentry_interval > 0) and (it % args.sentry_interval == 0) and (it >= int(getattr(args, "sentry_begin", 0))):
+        # 1) gradient sentry
+        grad_ok = grad_is_finite_and_below(
+            combined_model_parameters,
+            max_abs=float(args.sentry_grad_absmax)
+        )
+        sentry_ok = sentry_ok and grad_ok
+
+        # 2) probe-forward sentry on a tiny batch from val set
         try:
             x_probe = next(iter(val_loader))
+            if isinstance(x_probe, (tuple, list)):
+                x_probe = x_probe[0]
             x_probe = x_probe[:max(1, int(args.sentry_probe_batchsize))]
-            pf_stats = probe_forward(models, x_probe, device, model_dtype,
-                                     z_absmax_thresh=args.sentry_z_absmax,
-                                     sample_absmax_thresh=args.sentry_sample_absmax,
-                                     sample_quantile=float(args.sentry_sample_quantile))
-            sentry_ok = sentry_ok and pf_stats.get("ok", False)
+            pf_stats = probe_forward(
+                models, x_probe, device, model_dtype,
+                z_absmax_thresh=args.sentry_z_absmax,
+                sample_absmax_thresh=args.sentry_sample_absmax,
+                sample_quantile=float(getattr(args, "sentry_sample_quantile", 0.999))
+                # if you added sample-space, also pass:
+                # , sample_space=getattr(args, "sentry_sample_space", "tanh")
+            )
         except Exception as e:
             pf_stats = {"ok": False, "error": str(e)}
-            sentry_ok = False
+
+        sentry_ok = sentry_ok and bool(pf_stats.get("ok", False))
+
+        # 3) handle strikes / optional dump / single raise point
         if not sentry_ok:
+            sentry_strikes += 1
             extra = {
                 "why": "sentry failure (grad or probe forward)",
-                "grad_ok": bool(grad_is_finite_and_below(combined_model_parameters, max_abs=float(args.sentry_grad_absmax))),
+                "grad_ok": bool(grad_ok),
                 "probe": pf_stats,
                 "lr": float(flow_optimizer.param_groups[0]["lr"]),
                 "modalities": args.modalities,
             }
             if args.sentry_dump:
-                dump_dir = dump_sentry_package(trial_dir, it, models, flow_optimizer, float(loss.detach().cpu().item()), extra)
-                print(f"[SENTRY] Failure at iter {it}. Dumped to: {dump_dir}")
-            raise FloatingPointError(f"Sentry failure at iter {it}: {extra}")
+                dump_dir = dump_sentry_package(
+                    trial_dir, it, models, flow_optimizer,
+                    float(loss.detach().cpu().item()), extra
+                )
+                print(f"[SENTRY] Failure at iter {it} (strike {sentry_strikes}/{int(getattr(args,'sentry_strikes',1))}). Dumped to: {dump_dir}")
+
+            if sentry_strikes >= int(getattr(args, "sentry_strikes", 1)):
+                raise FloatingPointError(f"Sentry failure at iter {it}: {extra}")
+        else:
+            sentry_strikes = 0  # reset on pass
 
     # EMA update after optimizer step
     if ema_models is not None:
