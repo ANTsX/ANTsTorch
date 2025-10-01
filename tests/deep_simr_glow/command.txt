@@ -9,12 +9,15 @@ python3 train.py \
   --batch-size 128 \
   --max-iter 200000 \
   --eval-interval 1000 --plot-interval 1000 \
-  --early-stopping-patience 10 --min-delta 0.001 \
+  --early-stopping-patience 100000 --min-delta 0.0000001 \
   --base glow --out-dir runs --actnorm-init \
   --warmup-iters 400 \
   --plateau-factor 0.5 --plateau-patience 3 --plateau-threshold 1e-4 --min-lr 1e-6 \
-  --sentry-interval 200 --sentry-dump --grad-clip 1.0 \
+  --sentry-interval 500 --sentry-dump --grad-clip 1.0 \
   --sentry-z-absmax 1e3 \
   --scale-map tanh --scale-cap 3.0 --net-actnorm --net-leaky 0.1 \
-  --sentry-sample-quantile 0.999 \
-  --sentry-sample-absmax 32
+  --sentry-sample-quantile 0.9995 \
+  --sentry-sample-absmax 0.98 \
+  --sentry-sample-space tanh \
+  --sentry-strikes 2
+  

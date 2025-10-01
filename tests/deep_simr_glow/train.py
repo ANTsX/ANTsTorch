@@ -22,10 +22,12 @@ from torch.utils.data import DataLoader
 import normflows as nf
 from normflows import distributions as nfd
 
-import ants, antspynet, antstorch
+import ants, antstorch
 
 from tqdm import tqdm
 from matplotlib import pyplot as plt
+from matplotlib import ticker as mtick
+
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -59,6 +61,14 @@ def bits_per_dim_from_kld(model, x: torch.Tensor, num_dims: int):
             total += float(loss_i.detach().cpu().item())
     avg = total / b
     return avg / (np.log(2.0) * num_dims)
+
+def simple_moving_average(x, w=200):
+    x = np.asarray(x, dtype=float)
+    if w <= 1 or len(x) < w:
+        return x
+    k = np.ones(w, dtype=float) / w
+    y = np.convolve(x, k, mode="valid")            # length N-w+1
+    return np.concatenate([np.full(w-1, np.nan), y])  # length N
 
 def evaluate_val_bpd(models, loader, device, num_dims, max_batches=10):
     for m in range(len(models)): models[m].eval()
@@ -149,14 +159,30 @@ def probe_forward(models, x_probe, device, model_dtype,
             z_abs_max = float(zs.abs().max().item())
             z_mean = float(zs.mean().item())
 
-            # sample stats: quantile across pixels per sample, then max across batch
-            flat = xs.abs().reshape(xs.shape[0], -1)
+            # replace the block that builds `flat = xs.abs().reshape(...)` and quantiles with:
             q = float(sample_quantile)
-            if q >= 1.0:
-                x_q_stat = float(flat.max().item())
+
+            # choose sample space
+            mode = getattr(args, "sentry_sample_space", "tanh")  # default "tanh" if flag not present
+
+            if mode == "tanh":
+                xs_meas = torch.tanh(xs)                     # compress dynamic range
+            elif mode == "robust":
+                flat = xs.reshape(xs.shape[0], -1)
+                med = flat.median(dim=1, keepdim=True).values
+                mad = (flat - med).abs().median(dim=1, keepdim=True).values + 1e-6
+                xs_meas = ((flat - med) / mad).reshape_as(xs)  # per-sample robust standardization
             else:
-                xq = torch.quantile(flat, q, dim=1)   # shape [batch]
+                xs_meas = xs  # "raw"
+
+            flat_meas = xs_meas.abs().reshape(xs_meas.shape[0], -1)
+
+            if q >= 1.0:
+                x_q_stat = float(flat_meas.max().item())
+            else:
+                xq = torch.quantile(flat_meas, q, dim=1)   # per-sample q; then max across batch
                 x_q_stat = float(xq.max().item())
+
 
             stats["per_view"].append({
                 "z_abs_max": z_abs_max,
@@ -270,7 +296,8 @@ parser.add_argument("--sentry-probe-batchsize", type=int, default=4, help="Mini-
 parser.add_argument("--sentry-dump", action="store_true", help="Dump models/optimizer/meta if a sentry fails.")
 parser.add_argument("--sentry-z-absmax", type=float, default=1e3, help="Fail sentry if any |z| exceeds this.")
 parser.add_argument("--sentry-sample-absmax", type=float, default=10.0, help="Fail sentry if any sample pixel exceeds this (pre-clamp).")
-
+parser.add_argument("--sentry-sample-space", type=str, default="tanh", choices=["tanh", "robust", "raw"], help="Space to measure sample magnitudes for the sentry (tanh|robust|raw).")
+parser.add_argument("--sentry-strikes", type=int, default=1, help="Consecutive sentry failures required before aborting.")
 args = parser.parse_args()
 
 set_deterministic(args.seed)
@@ -350,9 +377,9 @@ if use_mutual_information_penalty:
 else: penalty_string="Pearson Correlation"; mine_nets=None; ma_ets=None; combined_penalty_parameters=[]
 
 # Data
-hcpya_images=[ants.image_read(antspynet.get_antsxnet_data("hcpyaT2Template")),
-              ants.image_read(antspynet.get_antsxnet_data("hcpyaT1Template")),
-              ants.image_read(antspynet.get_antsxnet_data("hcpyaFATemplate"))]
+hcpya_images=[ants.image_read(antstorch.get_antstorch_data("hcpyaT2Template")),
+              ants.image_read(antstorch.get_antstorch_data("hcpyaT1Template")),
+              ants.image_read(antstorch.get_antstorch_data("hcpyaFATemplate"))]
 hcpya_slices=[ants.slice_image(im,axis=2,idx=120,collapse_strategy=1) for im in hcpya_images]
 template=ants.resample_image(hcpya_slices[0],resampled_image_size,use_voxels=True)
 train_loader=DataLoader(antstorch.ImageDataset(images=[hcpya_slices],template=template,do_data_augmentation=True,
@@ -433,6 +460,7 @@ if not args.resume or not log_path.exists():
     with open(log_path,"w",newline="") as f:
         writer=csv.writer(f)
         header=["iter","loss_total","loss_kld","penalty_term","log_sigma_kld","log_sigma_pen",
+                "w_kld","w_pen",
                 "avg_val_bpd_raw","avg_val_bpd_ema","lr","grad_norm","z_abs_max","sentry_ok"]
         for m in range(len(models)): header+=[f"val_bpd_{args.modalities[m]}"]
         writer.writerow(header)
@@ -459,12 +487,12 @@ plateau_sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
 # Resume logic (if any)
 # ---------------------------
 if args.resume and state_path.exists():
-    ckpt = torch.load(state_path, map_location=device)
+    ckpt = torch.load(state_path, map_location=device, weights_only=False)
     # Load flow weights if last exists
     for m in range(len(models)):
         model_path = trial_dir / f"model_{args.modalities[m]}_last.pt"
         if model_path.exists():
-            models[m].load_state_dict(torch.load(model_path, map_location=device))
+            models[m].load_state_dict(torch.load(model_path, map_location=device, weights_only=False))
     # Load optimizers/scheduler/scalers/state
     flow_optimizer.load_state_dict(ckpt.get("flow_optimizer", flow_optimizer.state_dict()))
     if mine_optimizer and "mine_optimizer" in ckpt and ckpt["mine_optimizer"] is not None: mine_optimizer.load_state_dict(ckpt["mine_optimizer"])
@@ -500,6 +528,8 @@ if args.actnorm_init and not args.resume:
 
 loss_iter = []; loss_kld_hist = []; penalty_hist = []; loss_hist = []; loss_conv = []
 grad_norm_hist = []; sentry_ok_hist = []; z_abs_max_hist = []
+w_kld_hist, w_pen_hist = [], []
+sentry_strikes = 0
 
 for it in tqdm(range(start_iter, int(args.max_iter)+1)):
     flow_optimizer.zero_grad()
@@ -586,6 +616,11 @@ for it in tqdm(range(start_iter, int(args.max_iter)+1)):
     clamped_lsig_kld = torch.clamp(log_sigma_kld, -5.0, 5.0)
     clamped_lsig_pen = torch.clamp(log_sigma_pen, -5.0, 5.0)
 
+    w_kld = 0.5 * torch.exp(-2*clamped_lsig_kld)  # scalar
+    w_pen = 0.5 * torch.exp(-2*clamped_lsig_pen)  # scalar
+    w_kld_hist.append(float(w_kld.detach().cpu().item()))
+    w_pen_hist.append(float(w_pen.detach().cpu().item()))
+
     with torch.amp.autocast('cuda', enabled=amp_enabled, dtype=(amp_dtype if amp_enabled else None)):
         loss = (0.5 * torch.exp(-2*clamped_lsig_kld) * loss_kld + clamped_lsig_kld) \
              + (0.5 * torch.exp(-2*clamped_lsig_pen) * penalty_term + clamped_lsig_pen)
@@ -612,32 +647,54 @@ for it in tqdm(range(start_iter, int(args.max_iter)+1)):
 
     # Sentry gradient check (every N steps)
     sentry_ok = True
-    if args.sentry_interval > 0 and (it % args.sentry_interval == 0):
-        sentry_ok = grad_is_finite_and_below(combined_model_parameters, max_abs=float(args.sentry_grad_absmax))
-        # Probe forward on a tiny batch from val set
+    if (args.sentry_interval > 0) and (it % args.sentry_interval == 0) and (it >= int(getattr(args, "sentry_begin", 0))):
+        # 1) gradient sentry
+        grad_ok = grad_is_finite_and_below(
+            combined_model_parameters,
+            max_abs=float(args.sentry_grad_absmax)
+        )
+        sentry_ok = sentry_ok and grad_ok
+
+        # 2) probe-forward sentry on a tiny batch from val set
         try:
             x_probe = next(iter(val_loader))
+            if isinstance(x_probe, (tuple, list)):
+                x_probe = x_probe[0]
             x_probe = x_probe[:max(1, int(args.sentry_probe_batchsize))]
-            pf_stats = probe_forward(models, x_probe, device, model_dtype,
-                                     z_absmax_thresh=args.sentry_z_absmax,
-                                     sample_absmax_thresh=args.sentry_sample_absmax,
-                                     sample_quantile=float(args.sentry_sample_quantile))
-            sentry_ok = sentry_ok and pf_stats.get("ok", False)
+            pf_stats = probe_forward(
+                models, x_probe, device, model_dtype,
+                z_absmax_thresh=args.sentry_z_absmax,
+                sample_absmax_thresh=args.sentry_sample_absmax,
+                sample_quantile=float(getattr(args, "sentry_sample_quantile", 0.999))
+                # if you added sample-space, also pass:
+                # , sample_space=getattr(args, "sentry_sample_space", "tanh")
+            )
         except Exception as e:
             pf_stats = {"ok": False, "error": str(e)}
-            sentry_ok = False
+
+        sentry_ok = sentry_ok and bool(pf_stats.get("ok", False))
+
+        # 3) handle strikes / optional dump / single raise point
         if not sentry_ok:
+            sentry_strikes += 1
             extra = {
                 "why": "sentry failure (grad or probe forward)",
-                "grad_ok": bool(grad_is_finite_and_below(combined_model_parameters, max_abs=float(args.sentry_grad_absmax))),
+                "grad_ok": bool(grad_ok),
                 "probe": pf_stats,
                 "lr": float(flow_optimizer.param_groups[0]["lr"]),
                 "modalities": args.modalities,
             }
             if args.sentry_dump:
-                dump_dir = dump_sentry_package(trial_dir, it, models, flow_optimizer, float(loss.detach().cpu().item()), extra)
-                print(f"[SENTRY] Failure at iter {it}. Dumped to: {dump_dir}")
-            raise FloatingPointError(f"Sentry failure at iter {it}: {extra}")
+                dump_dir = dump_sentry_package(
+                    trial_dir, it, models, flow_optimizer,
+                    float(loss.detach().cpu().item()), extra
+                )
+                print(f"[SENTRY] Failure at iter {it} (strike {sentry_strikes}/{int(getattr(args,'sentry_strikes',1))}). Dumped to: {dump_dir}")
+
+            if sentry_strikes >= int(getattr(args, "sentry_strikes", 1)):
+                raise FloatingPointError(f"Sentry failure at iter {it}: {extra}")
+        else:
+            sentry_strikes = 0  # reset on pass
 
     # EMA update after optimizer step
     if ema_models is not None:
@@ -692,6 +749,8 @@ for it in tqdm(range(start_iter, int(args.max_iter)+1)):
                  float(penalty_hist[-1]) if len(penalty_hist) else float("nan"),
                  float(clamped_lsig_kld.detach().cpu().item()),
                  float(clamped_lsig_pen.detach().cpu().item()),
+                 float(w_kld.detach().cpu().item()),
+                 float(w_pen.detach().cpu().item()),
                  avg_val_raw, avg_val_ema, lr_now, float(grad_norm_hist[-1]), float(z_abs_max_hist[-1]), int(sentry_ok_hist[-1])] + [float(v) for v in val_bpds_raw]
             writer.writerow(row)
 
@@ -712,13 +771,44 @@ for it in tqdm(range(start_iter, int(args.max_iter)+1)):
 
     # Periodic plotting & sampling
     if it % args.plot_interval == 0:
+
         # Loss plots
         plt.figure(figsize=(40,10))
-        plt.subplot(1,4,1); plt.plot(loss_iter, loss_kld_hist, label='KLD loss'); plt.xlabel('Iteration'); plt.ylabel('KLD loss'); plt.title('KLD Loss'); plt.grid(True); plt.legend()
-        plt.subplot(1,4,2); plt.plot(loss_iter, penalty_hist, label='Penalty term'); plt.xlabel('Iteration'); plt.ylabel('Penalty'); plt.title('Penalty term'); plt.grid(True); plt.legend()
-        plt.subplot(1,4,3); plt.plot(loss_iter, loss_hist, label='Total loss'); plt.xlabel('Iteration'); plt.ylabel('Total loss'); plt.title('Total Loss'); plt.grid(True); plt.legend()
-        plt.subplot(1,4,4); plt.plot(loss_iter, grad_norm_hist, label='Grad norm'); plt.xlabel('Iteration'); plt.ylabel('||grad||'); plt.title('Grad Norm'); plt.grid(True); plt.legend()
-        plt.tight_layout(); plt.savefig(str(trial_dir / "loss_hist_glow_2d_uncertES_plus_dir_safeguarded.pdf")); plt.close()
+
+        kld_bpd = (-np.array(loss_kld_hist, dtype=float)) / (np.log(2.0) * n_dims)
+        tot_bpd = (-np.array(loss_hist, dtype=float)) / (np.log(2.0) * n_dims)
+
+        # Panel 1 — KLD (bits/dim), smoothed
+        ax1 = plt.subplot(1,4,1)
+        ax1.plot(loss_iter, simple_moving_average(kld_bpd, w=200), label='−KLD (bits/dim, SMA)')
+        ax1.set_xlabel('Iteration'); ax1.set_ylabel('bits/dim'); ax1.set_title('KLD (per-dim)')
+        ax1.grid(True); ax1.legend(); ax1.ticklabel_format(style='plain', axis='y')
+        ax1.yaxis.set_major_formatter(mtick.FormatStrFormatter('%.3f'))
+
+        # Panel 2 — Penalty term (smoothed)
+        ax2 = plt.subplot(1,4,2)
+        ax2.plot(loss_iter, simple_moving_average(penalty_hist, w=200), label='Penalty (SMA)')
+        ax2.set_xlabel('Iteration'); ax2.set_ylabel('value'); ax2.set_title('Penalty term')
+        ax2.grid(True); ax2.legend(); ax2.ticklabel_format(style='plain', axis='y')
+
+        # Panel 3 — Total (≈NLL) as bits/dim, smoothed
+        ax3 = plt.subplot(1,4,3)
+        ax3.plot(loss_iter, simple_moving_average(tot_bpd, w=200), label='Total (≈NLL) BPD (SMA)')
+        ax3.set_xlabel('Iteration'); ax3.set_ylabel('bits/dim'); ax3.set_title('Total (per-dim)')
+        ax3.grid(True); ax3.legend(); ax3.ticklabel_format(style='plain', axis='y')
+        ax3.yaxis.set_major_formatter(mtick.FormatStrFormatter('%.3f'))
+
+        # Panel 4 — Grad norm (log) with clip line
+        ax4 = plt.subplot(1,4,4)
+        g = np.asarray(grad_norm_hist, dtype=float)
+        ax4.semilogy(loss_iter[-len(g):], g, label='||grad|| (pre-clip)')
+        ax4.axhline(y=max(float(args.grad_clip), 1e-12), linestyle='--', linewidth=1.5, label=f'clip={args.grad_clip}')
+        ax4.set_xlabel('Iteration'); ax4.set_ylabel('||grad||'); ax4.set_title('Grad Norm (log)')
+        ax4.grid(True, which='both'); ax4.legend()
+
+        plt.tight_layout()
+        plt.savefig(str(trial_dir / "loss_hist_glow_2d_uncertES_plus_dir_safeguarded.pdf"))
+        plt.close()
 
         # Samples per model (RAW)
         for m in range(len(models)):
