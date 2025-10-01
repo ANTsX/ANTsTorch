@@ -39,6 +39,7 @@ def get_pretrained_network(file_id=None,
             "chexnet_repro_pytorch": "https://figshare.com/ndownloader/files/42411897",
             "mriModalityClassification": "https://figshare.com/ndownloader/files/41692998",
             "brainExtractionRobustT1_pytorch": "https://figshare.com/ndownloader/files/<FILE_ID>",
+            "brainExtractionBrainWeb20_pytorch" : ""
             # "brainExtractionT2_pytorch": "https://figshare.com/ndownloader/files/<FILE_ID>",
             # "brainExtractionFLAIR_pytorch": "https://figshare.com/ndownloader/files/<FILE_ID>"
         }
@@ -50,6 +51,7 @@ def get_pretrained_network(file_id=None,
     valid_list = ("chexnet_repro_pytorch",
                   "mriModalityClassification",
                   "brainExtractionRobustT1_pytorch",
+                  "brainExtractionBrainWeb20_pytorch",
                   "show")
 
     if not file_id in valid_list:

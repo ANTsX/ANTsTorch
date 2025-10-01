@@ -1,6 +1,5 @@
 
 # antstorch/utilities/brain_extraction.py
-# Torch implementation mirroring antspynet preprocessing & routing
 
 from __future__ import annotations
 
@@ -10,24 +9,9 @@ import torch
 import torch.nn.functional as F
 import ants
 
-# -----------------------------
-# Imports with fallbacks
-# -----------------------------
-try:
-    from ..architectures.create_unet_model import create_unet_model_3d
-except Exception:
-    from antstorch.architectures.create_unet_model import create_unet_model_3d  # type: ignore
-
-try:
-    from ..utilities.get_pretrained_network import get_pretrained_network
-except Exception:
-    from antstorch.utilities.get_pretrained_network import get_pretrained_network  # type: ignore
-
-# templates: use the same source as antspynet
-try:
-    from ..utilities import get_antsxnet_data
-except Exception:
-    from antspynet.utilities import get_antsxnet_data  # type: ignore
+from ..architectures.create_unet_model import create_unet_model_3d
+from ..utilities.get_pretrained_network import get_pretrained_network
+from ..utilities.get_antstorch_data import get_antstorch_data
 
 
 # -----------------------------
@@ -200,10 +184,10 @@ def brain_extraction(image, modality, verbose: bool = False):
             print("Brain extraction:  retrieving template.")
 
         if modality == "t1threetissue":
-            reorient_template = ants.image_read(get_antsxnet_data("nki"))
+            reorient_template = ants.image_read(get_antstorch_data("nki"))
         elif modality in ("t1hemi", "t1lobes"):
-            reorient_template = ants.image_read(get_antsxnet_data("hcpyaT1Template"))
-            reorient_template_mask = ants.image_read(get_antsxnet_data("hcpyaTemplateBrainMask"))
+            reorient_template = ants.image_read(get_antstorch_data("hcpyaT1Template"))
+            reorient_template_mask = ants.image_read(get_antstorch_data("hcpyaTemplateBrainMask"))
             reorient_template = reorient_template * reorient_template_mask
             reorient_template = ants.resample_image(reorient_template, (1, 1, 1), use_voxels=False, interp_type=0)
             reorient_template = ants.pad_or_crop_image_to_size(reorient_template, (160, 192, 160))
@@ -211,7 +195,7 @@ def brain_extraction(image, modality, verbose: bool = False):
                                 center=np.asarray(ants.get_center_of_mass(reorient_template)), translation=(0, 0, -10))
             reorient_template = xfrm_tmp.apply_to_image(reorient_template)
         else:
-            reorient_template = ants.image_read(get_antsxnet_data("S_template3"))
+            reorient_template = ants.image_read(get_antstorch_data("S_template3"))
             if is_standard_network and (modality != "t1.v1" and modality != "mra"):
                 ants.set_spacing(reorient_template, (1.5, 1.5, 1.5))
         resampled_image_size = reorient_template.shape
@@ -247,6 +231,7 @@ def brain_extraction(image, modality, verbose: bool = False):
             pool_size=(2, 2, 2),
             strides=(2, 2, 2),
             dropout_rate=0.0,
+            pad_crop="center",
             mode=mode)
 
         ret = model.load_state_dict(sd, strict=False)
