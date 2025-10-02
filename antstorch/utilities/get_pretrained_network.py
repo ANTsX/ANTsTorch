@@ -38,17 +38,16 @@ def get_pretrained_network(file_id=None,
         switcher = {
             "chexnet_repro_pytorch": "https://figshare.com/ndownloader/files/42411897",
             "mriModalityClassification": "https://figshare.com/ndownloader/files/41692998",
-            "brainExtractionRobustT1_pytorch": "https://figshare.com/ndownloader/files/58438351",
+            "brainExtractionRobustT1_pytorch": "https://figshare.com/ndownloader/files/58439353",
             "brainExtractionBrainWeb20_pytorch" : "https://figshare.com/ndownloader/files/58438324",
-            "brainExtractionRobustT1_pytorch": "https://figshare.com/ndownloader/files/58436701",
-            "brainExtractionRobustT2_pytorch": "https://figshare.com/ndownloader/files/58436704",
-            "brainExtractionRobustT2Star_pytorch": "https://figshare.com/ndownloader/files/58436707",
-            "brainExtractionRobustFLAIR_pytorch": "https://figshare.com/ndownloader/files/58436698",
+            "brainExtractionRobustT2_pytorch": "https://figshare.com/ndownloader/files/58439389",
+            "brainExtractionRobustT2Star_pytorch": "https://figshare.com/ndownloader/files/58439458",
+            "brainExtractionRobustFLAIR_pytorch": "https://figshare.com/ndownloader/files/58439521",
             "brainExtractionRobustBOLD_pytorch": "https://figshare.com/ndownloader/files/58436692",
-            "brainExtractionMra_pytorch": "https://figshare.com/ndownloader/files/58436716",
+            "brainExtractionMra_pytorch": "https://figshare.com/ndownloader/files/58439560",
             "brainExtractionRobustFA_pytorch": "https://figshare.com/ndownloader/files/58436695",
-            "brainExtractionT1Hemi_pytorch" : "https://figshare.com/ndownloader/files/58436710",
-            "brainExtractionT1Lobes_pytorch" : "https://figshare.com/ndownloader/files/58436713"
+            "brainExtractionT1Hemi_pytorch" : "https://figshare.com/ndownloader/files/58439605",
+            "brainExtractionT1Lobes_pytorch" : "https://figshare.com/ndownloader/files/58439629"
         }
         return(switcher.get(argument, "Invalid argument."))
 
