@@ -1,13 +1,3 @@
-"""
-antstorch.preprocessing.preprocess_image
-
-A near line-for-line port of the ANTsPyNet preprocessing utility to ANTsTorch.
-Only minimal changes were made:
-  * Replaced get_antsxnet_data -> get_antstorch_data
-  * Removed unused TensorFlow import
-  * Kept function/API names and behavior identical where possible for diffing
-"""
-
 from __future__ import annotations
 
 import ants
@@ -95,7 +85,7 @@ def preprocess_brain_image(
 
     # Local imports to mirror original structure and keep dependency surface minimal
     from ..utilities import brain_extraction
-    from ..utilities import get_antstorch_data  # NOTE: antstorch replacement
+    from ..utilities import get_antstorch_data  
 
     preprocessed_image = ants.image_clone(image, pixeltype='float')
 
@@ -117,8 +107,6 @@ def preprocess_brain_image(
         bext = brain_extraction(preprocessed_image, modality=brain_extraction_modality, verbose=verbose)
         if brain_extraction_modality == "t1threetissue":
             mask = ants.threshold_image(bext['segmentation_image'], 1, 1, 1, 0)
-        elif brain_extraction_modality == "t1combined":
-            mask = ants.threshold_image(bext, 2, 3, 1, 0)
         else:
             mask = ants.threshold_image(bext, 0.5, 1, 1, 0)
             mask = ants.morphology(mask, "close", 6).iMath_fill_holes()
