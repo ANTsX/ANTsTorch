@@ -38,10 +38,17 @@ def get_pretrained_network(file_id=None,
         switcher = {
             "chexnet_repro_pytorch": "https://figshare.com/ndownloader/files/42411897",
             "mriModalityClassification": "https://figshare.com/ndownloader/files/41692998",
-            "brainExtractionRobustT1_pytorch": "https://figshare.com/ndownloader/files/<FILE_ID>",
-            "brainExtractionBrainWeb20_pytorch" : ""
-            # "brainExtractionT2_pytorch": "https://figshare.com/ndownloader/files/<FILE_ID>",
-            # "brainExtractionFLAIR_pytorch": "https://figshare.com/ndownloader/files/<FILE_ID>"
+            "brainExtractionRobustT1_pytorch": "https://figshare.com/ndownloader/files/58438351",
+            "brainExtractionBrainWeb20_pytorch" : "https://figshare.com/ndownloader/files/58438324",
+            "brainExtractionRobustT1_pytorch": "https://figshare.com/ndownloader/files/58436701",
+            "brainExtractionRobustT2_pytorch": "https://figshare.com/ndownloader/files/58436704",
+            "brainExtractionRobustT2Star_pytorch": "https://figshare.com/ndownloader/files/58436707",
+            "brainExtractionRobustFLAIR_pytorch": "https://figshare.com/ndownloader/files/58436698",
+            "brainExtractionRobustBOLD_pytorch": "https://figshare.com/ndownloader/files/58436692",
+            "brainExtractionMra_pytorch": "https://figshare.com/ndownloader/files/58436716",
+            "brainExtractionRobustFA_pytorch": "https://figshare.com/ndownloader/files/58436695",
+            "brainExtractionT1Hemi_pytorch" : "https://figshare.com/ndownloader/files/58436710",
+            "brainExtractionT1Lobes_pytorch" : "https://figshare.com/ndownloader/files/58436713"
         }
         return(switcher.get(argument, "Invalid argument."))
 
@@ -52,6 +59,15 @@ def get_pretrained_network(file_id=None,
                   "mriModalityClassification",
                   "brainExtractionRobustT1_pytorch",
                   "brainExtractionBrainWeb20_pytorch",
+                  "brainExtractionRobustT1_pytorch",
+                  "brainExtractionRobustT2_pytorch",
+                  "brainExtractionRobustT2Star_pytorch",
+                  "brainExtractionRobustFLAIR_pytorch",
+                  "brainExtractionRobustBOLD_pytorch",
+                  "brainExtractionMra_pytorch",
+                  "brainExtractionRobustFA_pytorch",
+                  "brainExtractionT1Hemi_pytorch",
+                  "brainExtractionT1Lobes_pytorch",
                   "show")
 
     if not file_id in valid_list:
