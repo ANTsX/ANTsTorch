@@ -4,7 +4,7 @@
 
 # Advanced Normalization Tools for Deep Learning in PyTorch (ANTsTorch)
 
-A collection of deep learning architectures and applications ported to the PyTorch framework and tools for basic medical image processing. ANTsTorch provides cross-compatibility with our R analog [ANTsRNet](https://github.com/ANTsX/ANTsRNet/).  
+A collection of deep learning architectures and applications ported to the PyTorch framework and tools for basic medical image processing. ANTsTorch with some cross-compatibility with our Python and R analogs, [ANTsPyNet](https://github.com/ANTsX/ANTsPyNet/) and [ANTsRNet](https://github.com/ANTsX/ANTsRNet/), respectively.  
 
 ANTsTorch provides several high-level features:
 
