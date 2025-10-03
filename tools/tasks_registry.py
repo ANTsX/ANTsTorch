@@ -14,6 +14,18 @@ from typing import Dict, Any, List
 
 # Common architectural specs per task
 _TASKS: Dict[str, Dict[str, Any]] = {
+    "brain_extraction_t1": dict(
+        dimension=3,
+        input_image_size=(None, None, None, 1),
+        number_of_outputs=1,                  # sigmoid
+        number_of_filters=(16, 32, 64, 128),
+        convolution_kernel_size=(3, 3, 3),
+        deconvolution_kernel_size=(2, 2, 2),
+        pool_size=(2, 2, 2),
+        strides=(2, 2, 2),
+        dropout_rate=0.0,
+        mode="sigmoid"
+    ),
     "deep_atropos_t1": dict(
         dimension=3,
         input_image_size=(192, 224, 192, 1+6),
@@ -62,28 +74,16 @@ _TASKS: Dict[str, Dict[str, Any]] = {
         dropout_rate=0.0,
         mode="classification"
     ),
-    "brain_extraction_t1": dict(
-        dimension=3,
-        input_image_size=(None, None, None, 1),
-        number_of_outputs=1,                  # sigmoid
-        number_of_filters=(16, 32, 64, 128),
-        convolution_kernel_size=(3, 3, 3),
-        deconvolution_kernel_size=(2, 2, 2),
-        pool_size=(2, 2, 2),
-        strides=(2, 2, 2),
-        dropout_rate=0.0,
-        mode="sigmoid"
-    ),
 }
 
 # Weight file naming conventions for each framework
 # For ANTsPyNet (Keras), use the existing published prefixes
 _ANTSPYNET_PREFIX: Dict[str, str] = {
+    "brain_extraction_t1": "brainExtractionRobustT1",
     "deep_atropos_t1": "DeepAtroposHcpT1Weights",
     "deep_atropos_t1_t2": "DeepAtroposHcpT1T2Weights",
     "deep_atropos_t1_fa": "DeepAtroposHcpT1FAWeights",
     "deep_atropos_t1_t2_fa": "DeepAtroposHcpT1T2FAWeights",
-    "brain_extraction_t1": "brainExtractionRobustT1",
 }
 
 # For ANTsTorch (PyTorch), we standardize on "<prefix>_pytorch.pt"

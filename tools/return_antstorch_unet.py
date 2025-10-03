@@ -32,7 +32,7 @@ def _create_unet_from_spec(spec: Dict[str, Any]) -> nn.Module:
         strides=spec["strides"],
         dropout_rate=spec["dropout_rate"],
         mode=spec["mode"],
-        pad_crop=spec.get("keras", "center")
+        pad_crop="keras"
     )
 
 
