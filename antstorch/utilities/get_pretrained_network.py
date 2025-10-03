@@ -51,7 +51,15 @@ def get_pretrained_network(file_id=None,
             "DeepAtroposHcpT1Weights_pytorch" : "https://figshare.com/ndownloader/files/58468954",
             "DeepAtroposHcpT1T2Weights_pytorch" : "https://figshare.com/ndownloader/files/58468960",
             "DeepAtroposHcpT1FAWeights_pytorch" : "https://figshare.com/ndownloader/files/58469074",
-            "DeepAtroposHcpT1T2FAWeights_pytorch" : "https://figshare.com/ndownloader/files/58469134"
+            "DeepAtroposHcpT1T2FAWeights_pytorch" : "https://figshare.com/ndownloader/files/58469134",
+            "deepFlashLeftT1Hierarchical_pytorch" : "https://figshare.com/ndownloader/files/58488766",
+            "deepFlashRightT1Hierarchical_pytorch" : "https://figshare.com/ndownloader/files/58488796",
+            "deepFlashLeftBothHierarchical_pytorch" : "https://figshare.com/ndownloader/files/58488715",
+            "deepFlashRightBothHierarchical_pytorch" : "https://figshare.com/ndownloader/files/58488772",
+            "deepFlashLeftT1Hierarchical_ri_pytorch" : "https://figshare.com/ndownloader/files/58488769",
+            "deepFlashRightT1Hierarchical_ri_pytorch" : "https://figshare.com/ndownloader/files/58488805",
+            "deepFlashLeftBothHierarchical_ri_pytorch" : "https://figshare.com/ndownloader/files/58488760",
+            "deepFlashRightBothHierarchical_ri_pytorch" : "https://figshare.com/ndownloader/files/58488778",
         }
         return(switcher.get(argument, "Invalid argument."))
 
@@ -75,6 +83,14 @@ def get_pretrained_network(file_id=None,
                   "DeepAtroposHcpT1T2Weights_pytorch",
                   "DeepAtroposHcpT1FAWeights_pytorch",
                   "DeepAtroposHcpT1T2FAWeights_pytorch",
+                  "deepFlashLeftT1Hierarchical_pytorch",
+                  "deepFlashRightT1Hierarchical_pytorch",
+                  "deepFlashLeftBothHierarchical_pytorch",
+                  "deepFlashRightBothHierarchical_pytorch",
+                  "deepFlashLeftT1Hierarchical_ri_pytorch",
+                  "deepFlashRightT1Hierarchical_ri_pytorch",
+                  "deepFlashLeftBothHierarchical_ri_pytorch",
+                  "deepFlashRightBothHierarchical_ri_pytorch",
                   "show")
 
     if not file_id in valid_list:

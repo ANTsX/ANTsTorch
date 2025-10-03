@@ -417,6 +417,101 @@ class Concat(nn.Module):
             skip = _align_leading_2d(skip, up.shape[-2:])
         return torch.cat([up, skip], dim=self.dim)
 
+# ---------- Wraps an existing UNet3D model ----------
+
+def _is_conv3d_like(m: nn.Module) -> bool:
+    W = getattr(m, "weight", None)
+    if W is not None:
+        try:
+            return W.dim() == 5  # (outC, inC, kD, kH, kW)
+        except Exception:
+            pass
+    return isinstance(m, nn.Conv3d)
+
+def _get_kernel_size(m: nn.Module):
+    ks = getattr(m, "kernel_size", None)
+    if ks is None:
+        W = getattr(m, "weight", None)
+        if W is not None and W.dim() == 5:
+            return tuple(W.shape[2:5])  # (kD, kH, kW)
+        return None
+    if isinstance(ks, int):
+        return (ks, ks, ks)
+    return tuple(ks)
+
+def _get_out_channels(m: nn.Module) -> int | None:
+    W = getattr(m, "weight", None)
+    return int(W.shape[0]) if (W is not None and W.dim() == 5) else None
+
+def _find_final_output_conv3d(module: nn.Module, n_main_outputs: int | None = None) -> nn.Module | None:
+    """
+    Find the final conv-like module, preferably the 1x1x1 main output head.
+    """
+    last_any = None
+    last_head = None
+    for m in module.modules():
+        if not _is_conv3d_like(m):
+            continue
+        last_any = m
+        ks = _get_kernel_size(m)
+        oc = _get_out_channels(m)
+        if ks == (1, 1, 1):
+            if n_main_outputs is None or (oc == n_main_outputs):
+                last_head = m
+    return last_head or last_any
+
+
+class create_multihead_unet_model_3d(nn.Module):
+    def __init__(self, base_unet: nn.Module, n_aux_heads: int,
+                 use_sigmoid: bool = True, n_main_outputs: int | None = None):
+        super().__init__()
+        self.base = base_unet
+        self.n_aux_heads = n_aux_heads
+        self._feat = None
+        self.heads = nn.ModuleList()
+        self._heads_built = False
+        self.activ = nn.Sigmoid() if use_sigmoid else nn.Identity()
+
+        # NEW: find the final 1x1x1 output conv and hook its *input*
+        last_conv = _find_final_output_conv3d(self.base, n_main_outputs)
+        if last_conv is None:
+            raise RuntimeError("Could not find a 3D conv in base_unet to hook as penultimate layer.")
+
+        def _grab_input(module, inp):
+            self._feat = inp[0]
+        self._hook = last_conv.register_forward_pre_hook(_grab_input)
+
+        # We'll lazily create the heads after we see the first forward pass
+        # (so we know feature channels). Alternatively, you can pass in_channels explicitly.
+        self._heads_built = False
+        self.heads = nn.ModuleList()
+        self.activ = nn.Sigmoid() if use_sigmoid else nn.Identity()
+
+    def _maybe_build_heads(self):
+        if self._heads_built:
+            return
+        if self._feat is None:
+            raise RuntimeError("Penultimate feature is not captured yet; run one forward pass first.")
+        in_ch = self._feat.shape[1]
+        for _ in range(self.n_aux_heads):
+            self.heads.append(nn.Conv3d(in_ch, 1, kernel_size=1, bias=True))
+        self._heads_built = True
+
+    @torch.no_grad()
+    def warmup(self, sample):
+        # One dry run to infer penultimate channels and build heads.
+        _ = self.base(sample)
+        self._maybe_build_heads()
+
+    def forward(self, x):
+        y_main = self.base(x)               # triggers the hook -> self._feat
+        if not self._heads_built:
+            self._maybe_build_heads()
+        aux = [self.activ(h(self._feat)) for h in self.heads]
+        # match Keras outputs order: [main, output1, (output2), (output3)]
+        return (y_main, *aux)
+
+
 # ---------- UNet 2D & 3D with centered alignment ----------
 
 class create_unet_model_2d(nn.Module):
