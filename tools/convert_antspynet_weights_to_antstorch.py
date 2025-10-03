@@ -1,414 +1,456 @@
 #!/usr/bin/env python3
-# See header in previous attempt; full, self-contained script below.
+"""
+convert_antspynet_weights_to_antstorch.py (clean, full, wrapper-aware)
+
+- Builds the Keras model (ANTsPyNet) and loads its H5 weights.
+- Builds the Torch model (ANTsTorch) via your factory (which may return a wrapper with base.* params).
+- Copies base UNet weights (encoding, deconv, decoding, main output) from Keras -> Torch.
+- Copies auxiliary 1x1x1 heads (off penultimate) when the Keras model exposes multiple outputs.
+- Robust to ".weight" vs ".conv.weight" naming and to "base." prefix (wrapper).
+
+CLI:
+  python convert_antspynet_weights_to_antstorch.py \
+    --task deep_flash_left_t1 \
+    --out-prefix ~/.antstorch/deepFlashLeftT1Hierarchical_pytorch \
+    --deconv-flip noflip \
+    --verbose
+"""
 
 import argparse
-import json
-import os
-from typing import Dict, List, Tuple, Optional
+import re
+import sys
+from typing import Dict, List, Tuple, Any
 
 import numpy as np
 import torch
-import tensorflow as tf
-from tensorflow.keras.layers import (
-    Conv2D, Conv2DTranspose, MaxPooling2D, UpSampling2D,
-    Conv3D, Conv3DTranspose, MaxPooling3D, UpSampling3D
-)
-from tensorflow.keras.models import Model
 
-def _dect_channel_profile_keras(k_dect):
-    # Returns list of (in_c, out_c) per deconv layer in stage order
-    prof = []
-    for s in sorted(k_dect.keys()):
-        stage = k_dect[s]
-        for name, w in stage:
-            # Keras Conv3DTranspose kernel: (kD,kH,kW,out_c,in_c)
-            ker = w[0]
-            if ker.ndim == 5:
-                out_c, in_c = ker.shape[3], ker.shape[4]
-            elif ker.ndim == 4:  # 2D
-                out_c, in_c = ker.shape[2], ker.shape[3]
-            else:
-                continue
-            prof.append((int(in_c), int(out_c)))
-    return prof
+# Factories you already have in your project (ensure PYTHONPATH has this dir)
+from return_antspynet_unet import return_antspynet_unet
+from return_antstorch_unet import return_antstorch_unet
 
-def _dect_channel_profile_torch(t_dect, state_dict):
-    prof = []
-    for s in range(len(t_dect)):
-        for tw, tb in t_dect[s]:
-            ker = state_dict[tw].cpu().numpy()
-            # Torch ConvTranspose3d weight: (in_c, out_c, kD,kH,kW)
-            if ker.ndim == 5:
-                in_c, out_c = ker.shape[0], ker.shape[1]
-            elif ker.ndim == 4:
-                in_c, out_c = ker.shape[0], ker.shape[1]
-            else:
-                continue
-            prof.append((int(in_c), int(out_c)))
-    return prof
-
-def _reindex_dect_by_inchannels_desc(dect_dict):
-    """Return a new dict with stages reindexed 0..n-1 ordered by decreasing in_channels."""
-    if not isinstance(dect_dict, dict) or not dect_dict:
-        return dect_dict
-    stage_info = []
-    for s in sorted(dect_dict.keys()):
-        stage = dect_dict[s]
-        in_c = -1
-        for _name, w in stage:
-            ker = w[0]
-            if ker.ndim == 5:
-                # Keras deconv: (kD,kH,kW,out_c,in_c)
-                in_c = int(ker.shape[4])
-                break
-            elif ker.ndim == 4:
-                in_c = int(ker.shape[3])
-                break
-        stage_info.append((s, in_c))
-    # Order deepest -> shallowest by in_channels
-    order = [s for (s, _ic) in sorted(stage_info, key=lambda x: -x[1])]
-    return {i: dect_dict[s] for i, s in enumerate(order)}
-
-def _reindex_consecutive_drop_empty(stage_dict):
-    """Return dict with stages reindexed 0..n-1 in ascending original key order, dropping empty blocks."""
-    if not isinstance(stage_dict, dict) or not stage_dict:
-        return stage_dict
-    ordered = []
-    for k in sorted(stage_dict.keys()):
-        block = stage_dict[k]
-        if block:  # drop empties
-            ordered.append(block)
-    return {i: ordered[i] for i in range(len(ordered))}
+# ---- KERAS/TENSORFLOW UTILITIES ----
+try:
+    import tensorflow as tf
+    from tensorflow.keras import Model
+    from tensorflow.keras.layers import Conv3D, Conv3DTranspose
+except Exception as e:
+    tf = None
+    Model = None
+    Conv3D = None
+    Conv3DTranspose = None
 
 
+def natural_key(s: str):
+    """Sort helper: split digits vs non-digits for natural ordering."""
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s)]
 
 
-def _import_factories():
-    try:
-        from return_antspynet_unet import return_antspynet_unet as k_fn
-    except Exception:
-        from return_antspynet_unet_for_task import return_antspynet_unet_for_task as k_fn
-    try:
-        from return_antstorch_unet import return_antstorch_unet as t_fn
-    except Exception:
-        from return_antstorch_unet_for_task import return_antstorch_unet_for_task as t_fn
-    return k_fn, t_fn
+# ---------- Key resolution & prefix helpers ----------
 
-def _np():
-    import numpy as _n
-    return _n
+def _resolve_tkey(t_key: str, sd: Dict[str, torch.Tensor]) -> str:
+    """
+    Resolve a target torch key to an actual key present in the state_dict `sd`.
+    Tries common variants (.weight -> .conv.weight / .bias -> .conv.bias)
+    and falls back to a short fuzzy search. Returns a key (may be original).
+    """
+    if t_key in sd:
+        return t_key
 
-def _to_torch_conv_weight_from_keras(w_keras: np.ndarray) -> np.ndarray:
-    w = _np().transpose(w_keras, (4, 3, 0, 1, 2))
-    return _np().ascontiguousarray(w)
+    # Common wrapped-conv variants
+    if t_key.endswith(".weight"):
+        alt = t_key[:-len(".weight")] + ".conv.weight"
+        if alt in sd:
+            return alt
+    if t_key.endswith(".bias"):
+        alt = t_key[:-len(".bias")] + ".conv.bias"
+        if alt in sd:
+            return alt
 
-def _to_torch_deconv_weight_from_keras(w_keras: np.ndarray, flip_xyz: bool = False) -> np.ndarray:
-    w = _np().flip(w_keras, axis=(0, 1, 2)) if flip_xyz else w_keras
-    w = _np().transpose(w, (3, 4, 0, 1, 2))  # (Cin, Cout, Kx, Ky, Kz)
-    return _np().ascontiguousarray(w)
+    # Fuzzy: same stem + common suffix
+    stem = t_key.rsplit(".", 1)[0]
+    suffixes = [".weight", ".conv.weight", ".bias", ".conv.bias"]
+    candidates = [k for k in sd.keys() if stem in k and any(k.endswith(suf) for suf in suffixes)]
+    if len(candidates) == 1:
+        return candidates[0]
 
-def _is_conv(layer) -> bool:
-    return isinstance(layer, (Conv2D, Conv3D))
+    # Broader fuzzy: last path tail
+    parts = t_key.split(".")
+    tail = ".".join(parts[-4:])
+    for k in sd.keys():
+        if k.endswith(tail) or k.endswith(tail.replace(".weight", ".conv.weight")) or k.endswith(tail.replace(".bias", ".conv.bias")):
+            return k
 
-def _is_deconv(layer) -> bool:
-    return isinstance(layer, (Conv2DTranspose, Conv3DTranspose))
+    return t_key  # let caller raise if missing
 
-def _is_pool(layer) -> bool:
-    return isinstance(layer, (MaxPooling2D, MaxPooling3D))
 
-def _is_upsample(layer) -> bool:
-    return isinstance(layer, (UpSampling2D, UpSampling3D))
+def _strip_base_prefix(sd: Dict[str, torch.Tensor], base_prefix: str) -> Dict[str, torch.Tensor]:
+    """Return a view of sd with base_prefix stripped from keys (for collection/profiling)."""
+    if not base_prefix:
+        return sd
+    return { (k[len(base_prefix):] if k.startswith(base_prefix) else k): v for k, v in sd.items() }
 
-def collect_keras_unet_ordered(model: Model):
-    enc = {}
-    dec = {}
-    dect = {}
-    out = []
 
-    in_decoder = False
-    enc_stage = 0
-    dec_stage = -1
-    last_spatial = None
+def _to_torch_conv_weight_from_keras(W: np.ndarray) -> np.ndarray:
+    """
+    Keras Conv3D kernel:          (kD, kH, kW, inC, outC)
+    Keras Conv3DTranspose kernel: (kD, kH, kW, outC, inC)
+    Torch Conv3d weight:          (outC, inC, kD, kH, kW)
+    Torch ConvTranspose3d weight: (inC, outC, kD, kH, kW)
 
-    for l in model.layers:
-        # Try to infer spatial dims from output shape
-        cur_shape = getattr(l, "output_shape", None)
-        if isinstance(cur_shape, (tuple, list)) and len(cur_shape) >= 4:
-            if len(cur_shape) == 5:
-                cur_spatial = tuple(cur_shape[1:4])  # 3D
-            else:
-                cur_spatial = tuple(cur_shape[1:3])  # 2D
+    For both, the correct transpose is (4, 3, 0, 1, 2) because the last two dims swap.
+    """
+    if W.ndim != 5:
+        raise ValueError(f"Expected 5D kernel, got {W.ndim}D with shape {W.shape}")
+    return np.transpose(W, (4, 3, 0, 1, 2)).astype(np.float32)
+
+
+def _maybe_flip_spatial(torch_weight: np.ndarray, do_flip: bool) -> np.ndarray:
+    """Optionally flip along spatial dims (kD, kH, kW) for ConvTranspose3d kernels after mapping."""
+    if not do_flip:
+        return torch_weight
+    return torch_weight[..., ::-1, ::-1, ::-1].copy()
+
+
+# ---------- Keras model inspection ----------
+
+def _keras_output_layer_names(kmodel: "Model") -> List[str]:
+    outs = kmodel.outputs if isinstance(kmodel.outputs, (list, tuple)) else [kmodel.outputs]
+    names = []
+    for t in outs:
+        kh = getattr(t, "_keras_history", None)
+        if kh is None:
+            # fallback: try tensor's originating layer name if present
+            try:
+                names.append(t.node.outbound_layer.name)
+            except Exception:
+                names.append(getattr(getattr(t, "op", None), "name", "unknown_output"))
         else:
-            cur_spatial = last_spatial
+            layer = getattr(kh, "layer", None) or (kh[0] if isinstance(kh, (list, tuple)) else None)
+            names.append(layer.name if layer is not None else str(kh))
+    return names
 
-        if _is_pool(l):
-            if not in_decoder:
-                enc_stage += 1
-            last_spatial = cur_spatial
-            continue
 
-        if _is_upsample(l):
-            if not in_decoder:
-                in_decoder = True
-            dec_stage += 1  # each upsample starts a new decoder stage
-            last_spatial = cur_spatial
-            continue
+def _collect_keras_convs_and_dect(kmodel: "Model",
+                                  exclude_layer_names: List[str]) -> Tuple[List[Tuple[str, np.ndarray, np.ndarray]],
+                                                                            List[Tuple[str, np.ndarray, np.ndarray]],
+                                                                            Tuple[str, np.ndarray, np.ndarray]]:
+    """
+    Return (conv_list, deconvtranspose_list, main_out) where each list contains tuples of (name, W, b).
 
-        if _is_deconv(l):
-            if not in_decoder:
-                in_decoder = True
-                dec_stage = 0
+    - conv_list: all Conv3D kernels EXCEPT the main output conv and any aux heads.
+    - deconvtranspose_list: all Conv3DTranspose kernels (in model order).
+    - main_out: (name, W, b) for the main output conv (the first output layer).
+    """
+    if tf is None or Conv3D is None:
+        raise RuntimeError("TensorFlow/Keras not available in environment.")
+
+    out_names = _keras_output_layer_names(kmodel)
+    main_out_name = out_names[0]  # first output is main head
+
+    conv_list: List[Tuple[str, np.ndarray, np.ndarray]] = []
+    deconv_list: List[Tuple[str, np.ndarray, np.ndarray]] = []
+    main_out: Tuple[str, np.ndarray, np.ndarray] | None = None
+
+    for layer in kmodel.layers:
+        if isinstance(layer, Conv3DTranspose):
+            weights = layer.get_weights()
+            if len(weights) == 2:
+                W, b = weights
+            elif len(weights) == 1:
+                W, b = weights[0], None
             else:
-                if last_spatial is not None and cur_spatial is not None and cur_spatial != last_spatial:
-                    dec_stage += 1
-            dect.setdefault(dec_stage, []).append((l.name, l.get_weights()))
-            last_spatial = cur_spatial
-            continue
+                continue
+            deconv_list.append((layer.name, W, b))
+        elif isinstance(layer, Conv3D):
+            weights = layer.get_weights()
+            if len(weights) == 2:
+                W, b = weights
+            elif len(weights) == 1:
+                W, b = weights[0], None
+            else:
+                continue
+            if layer.name == main_out_name:
+                main_out = (layer.name, W, b)
+            elif layer.name in exclude_layer_names:
+                # skip aux heads
+                continue
+            else:
+                conv_list.append((layer.name, W, b))
 
-        if _is_conv(l):
-            w = l.get_weights()
-            if w:
-                if not in_decoder:
-                    enc.setdefault(enc_stage, []).append((l.name, w))
+    if main_out is None:
+        # Fallback: try last Conv3D layer if outputs failed
+        for layer in reversed(kmodel.layers):
+            if isinstance(layer, Conv3D):
+                weights = layer.get_weights()
+                if len(weights) == 2:
+                    W, b = weights
+                elif len(weights) == 1:
+                    W, b = weights[0], None
                 else:
-                    dec.setdefault(max(dec_stage, 0), []).append((l.name, w))
-            last_spatial = cur_spatial
+                    continue
+                main_out = (layer.name, W, b)
+                break
+
+    if main_out is None:
+        raise RuntimeError("Could not find main output Conv3D layer in Keras model.")
+
+    return conv_list, deconv_list, main_out
+
+
+# ---------- Torch state_dict scanning ----------
+
+def _list_weight_keys(sd_view: Dict[str, torch.Tensor], contains: str) -> List[str]:
+    return sorted([k for k, v in sd_view.items()
+                   if contains in k and k.endswith(("weight", "conv.weight")) and v.ndim == 5],
+                  key=natural_key)
+
+
+def _list_deconv_keys(sd_view: Dict[str, torch.Tensor]) -> List[str]:
+    # typical pattern names
+    patterns = ["decoding_convolution_transpose_layers", "deconvolution", "up_convolution", "upconvolution", "transpose"]
+    keys = []
+    for p in patterns:
+        keys.extend(_list_weight_keys(sd_view, p))
+    # de-dup while keeping order
+    seen = set()
+    ordered = []
+    for k in keys:
+        if k not in seen:
+            seen.add(k)
+            ordered.append(k)
+    return ordered
+
+
+def _list_conv_keys(sd_view: Dict[str, torch.Tensor]) -> Tuple[List[str], List[str]]:
+    enc = _list_weight_keys(sd_view, "encoding_convolution_layers")
+    dec = _list_weight_keys(sd_view, "decoding_convolution_layers")
+    return enc, dec
+
+
+def _find_main_out_keys(sd_view: Dict[str, torch.Tensor], number_of_outputs: int) -> Tuple[str, str | None]:
+    """
+    Heuristic: choose the last 1x1x1 3D conv whose out_channels == number_of_outputs.
+    Return (weight_key, bias_key_or_None).
+    """
+    candidates = []
+    for k, v in sd_view.items():
+        if not (k.endswith(("weight", "conv.weight")) and v.ndim == 5):
             continue
+        shape = tuple(v.shape)
+        kD, kH, kW = shape[2:5]
+        outC = shape[0]
+        if (kD, kH, kW) == (1, 1, 1) and outC == number_of_outputs:
+            candidates.append(k)
+    if not candidates:
+        # fallback: pick the very last 1x1x1 conv by order
+        for k, v in sd_view.items():
+            if v.ndim == 5 and tuple(v.shape[2:5]) == (1, 1, 1):
+                candidates.append(k)
+    if not candidates:
+        raise RuntimeError("Could not locate main output 1x1x1 conv in Torch model.")
+    wkey = sorted(candidates, key=natural_key)[-1]
+    bkey = wkey.replace(".weight", ".bias")
+    if bkey not in sd_view:
+        # try conv.bias
+        alt = wkey.replace(".conv.weight", ".conv.bias")
+        bkey = alt if alt in sd_view else None
+    return wkey, bkey
 
-    # Try to peel off a 1x1 (2D) or 1x1x1 (3D) conv at the tail as output head
-    if dec:
-        last_stage = max(dec.keys())
-        last_block = dec.get(last_stage, [])
-        if last_block:
-            lname, lw = last_block[-1]
-            if lw and len(lw) > 0:
-                kshape = lw[0].shape
-                is_1x1_2d = (len(kshape) == 4 and kshape[0:2] == (1, 1))
-                is_1x1_3d = (len(kshape) == 5 and kshape[0:3] == (1, 1, 1))
-                if is_1x1_2d or is_1x1_3d:
-                    out.append((lname, lw))
-                    dec[last_stage] = last_block[:-1]
-    dect = _reindex_dect_by_inchannels_desc(dect)
-    enc = _reindex_consecutive_drop_empty(enc)
-    dec = _reindex_consecutive_drop_empty(dec)
-    return enc, dect, dec, out
 
-def collect_torch_unet_ordered(state_dict: Dict[str, torch.Tensor]):
-    sd = state_dict
-    def has_key(prefix: str) -> bool:
-        return any(k.startswith(prefix) for k in sd.keys())
-
-    groups = {"enc": [], "dect": [], "dec": [], "out": []}
-
-    i = 0
-    while has_key(f"encoding_convolution_layers.{i}"):
-        w0 = f"encoding_convolution_layers.{i}.0.weight"
-        b0 = f"encoding_convolution_layers.{i}.0.bias"
-        w1 = f"encoding_convolution_layers.{i}.2.weight"
-        b1 = f"encoding_convolution_layers.{i}.2.bias"
-        stage = []
-        if w0 in sd: stage.append((w0, b0 if b0 in sd else None))
-        if w1 in sd: stage.append((w1, b1 if b1 in sd else None))
-        if stage:
-            groups["enc"].append(stage)
-        i += 1
-
-    i = 0
-    while has_key(f"decoding_convolution_transpose_layers.{i}"):
-        wkey1 = f"decoding_convolution_transpose_layers.{i}.deconv.weight"
-        bkey1 = f"decoding_convolution_transpose_layers.{i}.deconv.bias"
-        wkey2 = f"decoding_convolution_transpose_layers.{i}.weight"
-        bkey2 = f"decoding_convolution_transpose_layers.{i}.bias"
-        if wkey1 in sd or wkey2 in sd:
-            w = wkey1 if wkey1 in sd else wkey2
-            b = bkey1 if wkey1 in sd else (bkey2 if bkey2 in sd else None)
-            groups["dect"].append([(w, b)])
-        i += 1
-
-    i = 0
-    while has_key(f"decoding_convolution_layers.{i}"):
-        w0 = f"decoding_convolution_layers.{i}.0.weight"
-        b0 = f"decoding_convolution_layers.{i}.0.bias"
-        w1 = f"decoding_convolution_layers.{i}.2.weight"
-        b1 = f"decoding_convolution_layers.{i}.2.bias"
-        stage = []
-        if w0 in sd: stage.append((w0, b0 if b0 in sd else None))
-        if w1 in sd: stage.append((w1, b1 if b1 in sd else None))
-        if stage:
-            groups["dec"].append(stage)
-        i += 1
-
-    if "output.0.weight" in sd:
-        groups["out"] = [("output.0.weight", "output.0.bias" if "output.0.bias" in sd else None)]
-    elif "output.weight" in sd:
-        groups["out"] = [("output.weight", "output.bias" if "output.bias" in sd else None)]
-    return groups
+# ---------- Main conversion ----------
 
 def convert_task(task: str, out_prefix: str, deconv_flip: bool = False, verbose: bool = True) -> str:
-    k_factory, t_factory = _import_factories()
+    # Build models
+    kmodel, kspec = return_antspynet_unet(task, load_weights=True, verbose=verbose)
+    tmodel, tspec = return_antstorch_unet(task, weights_path=None, strict=False, verbose=verbose)
 
-    kmodel, kmeta = k_factory(task, load_weights=True, verbose=verbose)
-    tmodel, tmeta = t_factory(task, weights_path=None, strict=False, verbose=verbose)
+    # Copy state_dict
+    tmodel = tmodel.to("cpu")
+    new_sd: Dict[str, torch.Tensor] = {k: v.clone().detach() for k, v in tmodel.state_dict().items()}
 
-    device = torch.device("cpu")
-    tmodel = tmodel.to(device)
+    # Wrapper awareness
+    base_prefix = "base." if any(k.startswith("base.") for k in new_sd.keys()) else ""
+    sd_view = _strip_base_prefix(new_sd, base_prefix)
 
-    # Work on a detached editable copy of the state_dict
-    new_sd = {k: v.clone().detach() for k, v in tmodel.state_dict().items()}
-
-
-    if verbose:
-        print(f"[convert] Converting weights for task='{task}'")
-
-    k_enc, k_dect, k_dec, k_out = collect_keras_unet_ordered(kmodel)
-    k_blocks = {'enc': k_enc, 'dect': k_dect, 'dec': k_dec, 'out': k_out}
-    t_sd = tmodel.state_dict()
-    t_blocks = collect_torch_unet_ordered(t_sd)
-
-    # --- Channel-profile diagnostic (helps spot factory width mismatches) ---
-    keras_dect_prof = _dect_channel_profile_keras(k_blocks['dect'])
-    torch_dect_prof = _dect_channel_profile_torch(t_blocks['dect'], new_sd)
-    if verbose:
-        print(f"[profile] Keras deconv (in->out) per layer: {keras_dect_prof}")
-        print(f"[profile] Torch  deconv (in->out) per layer: {torch_dect_prof}")
-    # Quick guard: compare multisets of (in,out) ignoring order within stages
-    if len(keras_dect_prof) == len(torch_dect_prof):
-        mismatches = [(k, t) for k, t in zip(keras_dect_prof, torch_dect_prof) if k != t]
-    else:
-        mismatches = [("len", (len(keras_dect_prof), len(torch_dect_prof)))]
-    if mismatches:
-        # If the first mismatch shows clear scale differences (e.g., 32->64 vs 128->64),
-        # it's almost always a width schedule mismatch between factories.
-        k_hint = sorted(set([k for k,_ in keras_dect_prof]))
-        # Suggest encoder base filters from Keras (first encoder conv out channels)
+    # Warmup (for wrappers that lazily build heads)
+    with torch.no_grad():
+        in_ch = int(tspec["input_image_size"][-1])
+        depth = len(tspec.get("number_of_filters", [])) or 5
+        min_side = 2 ** depth
         try:
-            first_enc = k_blocks['enc'][0][0][1][0]  # kernel for first conv in first stage
-            if first_enc.ndim == 5:
-                k_base = int(first_enc.shape[-1])
-            else:
-                k_base = int(first_enc.shape[-1])
+            _ = tmodel(torch.zeros(1, in_ch, min_side, min_side, min_side))
         except Exception:
-            k_base = None
+            # try a fixed small size if exact power-of-two fails
+            _ = tmodel(torch.zeros(1, in_ch, 32, 32, 32))
+
+    # Keras outputs and aux names
+    out_layer_names = _keras_output_layer_names(kmodel)
+    n_aux = max(0, len(out_layer_names) - 1)
+    if verbose:
+        print(f"[convert] Keras outputs: {out_layer_names} -> aux heads: {n_aux}")
+
+    aux_names = out_layer_names[1:]
+
+    # Collect Keras convs/deconvs and main output
+    k_convs, k_dect, k_main = _collect_keras_convs_and_dect(kmodel, exclude_layer_names=aux_names)
+
+    # Collect Torch keys
+    t_dect = _list_deconv_keys(sd_view)
+    t_enc, t_dec = _list_conv_keys(sd_view)
+    if verbose:
+        def prof_dect(lst):  # show (in->out) channel profile
+            out = []
+            for k in lst:
+                v = sd_view[k]
+                # ConvTranspose3d weight shape: (inC, outC, kD, kH, kW)
+                inC, outC = int(v.shape[0]), int(v.shape[1])
+                out.append((inC, outC))
+            return out
+        print(f"[profile] Keras deconv (in->out) per layer: {[(w.shape[3], w.shape[4]) for (_, w, _) in k_dect]}")
+        print(f"[profile] Torch  deconv (in->out) per layer: {prof_dect(t_dect)}")
+
+    # Basic sanity checks
+    if len(k_dect) != len(t_dect):
         raise RuntimeError(
-            "Channel profile mismatch between Keras and Torch UNet factories.\n"
-            f"Keras deconv (in->out): {keras_dect_prof}\n"
-            f"Torch  deconv (in->out): {torch_dect_prof}\n"
-            "Likely cause: Torch factory width schedule differs from Keras for this task.\n"
-            "Fix: Build the Torch UNet with the SAME per-stage filter widths as the Keras model.\n"
-            + (f"Hint: Keras base encoder out-ch seems to be ~{k_base}. Configure your antstorch factory accordingly." if k_base else "" ) + "\n"
-            "After aligning widths, rerun the converter."
+            f"Deconv count mismatch: Keras={len(k_dect)} vs Torch={len(t_dect)}. "
+            f"Patterns may differ; adjust _list_deconv_keys()."
         )
 
-    new_sd = dict(t_sd)
-    mapping = {"enc": [], "dect": [], "dec": [], "out": []}
+    total_t_convs = len(t_enc) + len(t_dec)
+    if len(k_convs) != total_t_convs:
+        raise RuntimeError(
+            f"Conv count mismatch: Keras(non-out, non-aux)={len(k_convs)} vs "
+            f"Torch enc+dec={total_t_convs}. Check ordering or patterns."
+        )
 
-    def assign(t_key: str, src_np: np.ndarray, what: str):
-        tgt = new_sd[t_key].cpu().numpy()
-        if tgt.shape != src_np.shape:
-            raise ValueError(f"Shape mismatch assigning {what}: target {t_key} {tgt.shape} vs src {src_np.shape}")
-        new_sd[t_key] = torch.from_numpy(src_np).to(new_sd[t_key].dtype)
+    # ---------- Assign deconv (ConvTranspose) weights ----------
+    for (lname, kW, kB), tkey in zip(k_dect, t_dect):
+        torchW = _to_torch_conv_weight_from_keras(kW)
+        torchW = _maybe_flip_spatial(torchW, deconv_flip)
+        assign_key = base_prefix + tkey
+        # shape guard
+        rk = _resolve_tkey(assign_key, new_sd)
+        tgt = new_sd[rk].cpu().numpy()
+        if torchW.shape != tgt.shape:
+            # Sometimes in/out reversed; try transpose last two dims
+            alt = torchW.transpose(1, 0, 2, 3, 4)
+            if alt.shape == tgt.shape:
+                torchW = alt
+        # assign
+        new_sd[rk] = torch.from_numpy(torchW).to(new_sd[rk].dtype)
+        # bias if exists
+        if kB is not None:
+            bkey = assign_key.replace(".weight", ".bias")
+            bkey = _resolve_tkey(bkey, new_sd)
+            if bkey in new_sd:
+                if new_sd[bkey].numel() == kB.size:
+                    new_sd[bkey] = torch.from_numpy(kB.astype(np.float32)).to(new_sd[bkey].dtype)
 
-    # enc
-    n_enc = min(len(k_blocks["enc"]), len(t_blocks["enc"]))
-    for s in range(n_enc):
-        k_stage = k_blocks["enc"][s]
-        t_stage = t_blocks["enc"][s]
-        n_slots = min(len(k_stage), len(t_stage))
-        for j in range(n_slots):
-            kname, kw = k_stage[j]
-            tw, tb = t_stage[j]
-            kmapped = _to_torch_conv_weight_from_keras(kw[0])
-            assign(tw, kmapped, f"enc[{s}].{j}.weight")
-            if len(kw) > 1 and tb is not None:
-                assign(tb, kw[1].astype(np.float32), f"enc[{s}].{j}.bias")
-            mapping["enc"].append({"keras": kname, "torch_w": tw, "torch_b": tb})
+    # ---------- Assign encoding convs then decoding convs ----------
+    # Map Keras convs in order to Torch enc then dec
+    idx = 0
+    for tkey in t_enc:
+        lname, kW, kB = k_convs[idx]
+        idx += 1
+        torchW = _to_torch_conv_weight_from_keras(kW)
+        assign_key = base_prefix + tkey
+        rk = _resolve_tkey(assign_key, new_sd)
+        tgt = new_sd[rk].cpu().numpy()
+        if torchW.shape != tgt.shape and torchW.transpose(1, 0, 2, 3, 4).shape == tgt.shape:
+            torchW = torchW.transpose(1, 0, 2, 3, 4)
+        new_sd[rk] = torch.from_numpy(torchW).to(new_sd[rk].dtype)
+        if kB is not None:
+            bkey = _resolve_tkey(assign_key.replace(".weight", ".bias"), new_sd)
+            if bkey in new_sd and new_sd[bkey].numel() == kB.size:
+                new_sd[bkey] = torch.from_numpy(kB.astype(np.float32)).to(new_sd[bkey].dtype)
 
-    # dect
-        n_dect = min(len(k_blocks["dect"]), len(t_blocks["dect"]))
-    for s in range(n_dect):
-        k_stage = k_blocks["dect"][s]
-        t_stage = t_blocks["dect"][s]
-        used = set()
-        for j, (kname, kw) in enumerate(k_stage):
-            km0 = _to_torch_deconv_weight_from_keras(kw[0], flip_xyz=deconv_flip)
-            km1 = km0.transpose(1, 0, 2, 3, 4)  # Cin<->Cout swap candidate
-            matched = False
-            for tidx, (tw, tb) in enumerate(t_stage):
-                if tidx in used:
-                    continue
-                t_weight = new_sd[tw].cpu().numpy()
-                if km0.shape == t_weight.shape:
-                    assign(tw, km0, f"dect[{s}].{j}.weight")
-                    if len(kw) > 1 and tb is not None:
-                        assign(tb, kw[1].astype(np.float32), f"dect[{s}].{j}.bias")
-                    mapping["dect"].append({"keras": kname, "torch_w": tw, "torch_b": tb})
-                    used.add(tidx)
-                    matched = True
-                    break
-                if km1.shape == t_weight.shape:
-                    assign(tw, km1, f"dect[{s}].{j}.weight")
-                    if len(kw) > 1 and tb is not None:
-                        assign(tb, kw[1].astype(np.float32), f"dect[{s}].{j}.bias")
-                    mapping["dect"].append({"keras": kname, "torch_w": tw, "torch_b": tb})
-                    used.add(tidx)
-                    matched = True
-                    break
-            if not matched:
-                # Helpful diagnostics
-                t_shapes = [new_sd[tw].cpu().numpy().shape for (tw, _tb) in t_stage if t_stage.index((tw, _tb)) not in used]
-                raise ValueError(
-                    f"Could not match Keras deconv at stage {s}, idx {j} (km0 {km0.shape} / km1 {km1.shape}) "
-                    f"to any remaining Torch shapes {t_shapes}"
-                )
+    for tkey in t_dec:
+        lname, kW, kB = k_convs[idx]
+        idx += 1
+        torchW = _to_torch_conv_weight_from_keras(kW)
+        assign_key = base_prefix + tkey
+        rk = _resolve_tkey(assign_key, new_sd)
+        tgt = new_sd[rk].cpu().numpy()
+        if torchW.shape != tgt.shape and torchW.transpose(1, 0, 2, 3, 4).shape == tgt.shape:
+            torchW = torchW.transpose(1, 0, 2, 3, 4)
+        new_sd[rk] = torch.from_numpy(torchW).to(new_sd[rk].dtype)
+        if kB is not None:
+            bkey = _resolve_tkey(assign_key.replace(".weight", ".bias"), new_sd)
+            if bkey in new_sd and new_sd[bkey].numel() == kB.size:
+                new_sd[bkey] = torch.from_numpy(kB.astype(np.float32)).to(new_sd[bkey].dtype)
 
-    # dec
-    n_dec = min(len(k_blocks["dec"]), len(t_blocks["dec"]))
-    for s in range(n_dec):
-        k_stage = k_blocks["dec"][s]
-        t_stage = t_blocks["dec"][s]
-        n_slots = min(len(k_stage), len(t_stage))
-        for j in range(n_slots):
-            kname, kw = k_stage[j]
-            tw, tb = t_stage[j]
-            kmapped = _to_torch_conv_weight_from_keras(kw[0])
-            assign(tw, kmapped, f"dec[{s}].{j}.weight")
-            if len(kw) > 1 and tb is not None:
-                assign(tb, kw[1].astype(np.float32), f"dec[{s}].{j}.bias")
-            mapping["dec"].append({"keras": kname, "torch_w": tw, "torch_b": tb})
+    # ---------- Assign main output head ----------
+    main_name, kW_main, kB_main = k_main
+    out_wkey_view, out_bkey_view = _find_main_out_keys(sd_view, int(tspec["number_of_outputs"]))
+    out_wkey = base_prefix + out_wkey_view
+    out_bkey = base_prefix + out_bkey_view if out_bkey_view else None
 
-    # out
-    if k_blocks["out"] and t_blocks["out"]:
-        kname, kw = k_blocks["out"][-1]
-        tw, tb = t_blocks["out"][-1]
-        kmapped = _to_torch_conv_weight_from_keras(kw[0])
-        t_weight = new_sd[tw].cpu().numpy()
-        if kmapped.shape != t_weight.shape and kmapped.transpose(1,0,2,3,4).shape == t_weight.shape:
-            kmapped = kmapped.transpose(1,0,2,3,4)
-        assign(tw, kmapped, "out.weight")
-        if len(kw) > 1 and tb is not None:
-            assign(tb, kw[1].astype(np.float32), "out.bias")
-        mapping["out"].append({"keras": kname, "torch_w": tw, "torch_b": tb})
+    torchW = _to_torch_conv_weight_from_keras(kW_main)
+    rk_out = _resolve_tkey(out_wkey, new_sd)
+    tgt = new_sd[rk_out].cpu().numpy()
+    if torchW.shape != tgt.shape and torchW.transpose(1, 0, 2, 3, 4).shape == tgt.shape:
+        torchW = torchW.transpose(1, 0, 2, 3, 4)
+    new_sd[rk_out] = torch.from_numpy(torchW).to(new_sd[rk_out].dtype)
+    if kB_main is not None and out_bkey is not None:
+        rb = _resolve_tkey(out_bkey, new_sd)
+        if rb in new_sd and new_sd[rb].numel() == kB_main.size:
+            new_sd[rb] = torch.from_numpy(kB_main.astype(np.float32)).to(new_sd[rb].dtype)
 
-    # strict load
-    tmodel.load_state_dict(new_sd, strict=True)
+    # ---------- Assign auxiliary heads (heads.0/1/2 ...) ----------
+    if n_aux > 0:
+        for i, lname in enumerate(aux_names):
+            layer = kmodel.get_layer(name=lname)
+            weights = layer.get_weights()
+            if len(weights) == 2:
+                kW, kB = weights
+            elif len(weights) == 1:
+                kW, kB = weights[0], None
+            else:
+                continue
+            torchW = _to_torch_conv_weight_from_keras(kW)
+            wkey = f"heads.{i}.weight"
+            rk = _resolve_tkey(wkey, new_sd)
+            if rk not in new_sd:
+                raise KeyError(f"Aux head #{i} weight key not found: {wkey}")
+            tgt = new_sd[rk].cpu().numpy()
+            if torchW.shape != tgt.shape and torchW.transpose(1, 0, 2, 3, 4).shape == tgt.shape:
+                torchW = torchW.transpose(1, 0, 2, 3, 4)
+            new_sd[rk] = torch.from_numpy(torchW).to(new_sd[rk].dtype)
+            if kB is not None:
+                bkey = f"heads.{i}.bias"
+                rb = _resolve_tkey(bkey, new_sd)
+                if rb in new_sd and new_sd[rb].numel() == kB.size:
+                    new_sd[rb] = torch.from_numpy(kB.astype(np.float32)).to(new_sd[rb].dtype)
 
-    out_path = f"{out_prefix}.pt"
+    # Load into model (non-strict to tolerate any unused buffers) then save just the state_dict
+    missing, unexpected = tmodel.load_state_dict(new_sd, strict=False)
+    if verbose:
+        if isinstance(missing, (list, tuple)) and isinstance(unexpected, (list, tuple)):
+            print(f"[load_state_dict] missing={len(missing)} unexpected={len(unexpected)}")
+            if missing[:5] or unexpected[:5]:
+                print("  e.g. missing[:5]   =", missing[:5])
+                print("  e.g. unexpected[:5]=", unexpected[:5])
+
+    out_path = out_prefix
+    if not out_path.endswith(".pt"):
+        out_path += ".pt"
     torch.save(tmodel.state_dict(), out_path)
-    with open(f"{out_prefix}_mapping.json", "w") as f:
-        json.dump(mapping, f, indent=2)
+    if verbose:
+        print(f"Saved: {out_path}")
     return out_path
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--task", required=True)
-    ap.add_argument("--out-prefix", required=True)
-    ap.add_argument("--deconv-flip", choices=["flip", "noflip"], default="noflip")
-    ap.add_argument("--verbose", action="store_true")
-    args = ap.parse_args()
 
-    out = convert_task(args.task, args.out_prefix, deconv_flip=(args.deconv_flip == "flip"), verbose=args.verbose)
-    print(f"[convert] Saved: {out}")
-    print(f"[convert] Mapping JSON: {args.out_prefix}_mapping.json")
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--task", type=str, required=True)
+    p.add_argument("--out-prefix", type=str, required=True)
+    p.add_argument("--deconv-flip", type=str, default="noflip", choices=["flip", "noflip"])
+    p.add_argument("--verbose", action="store_true")
+    args = p.parse_args()
+
+    deconv_flip = (args.deconv_flip == "flip")
+    convert_task(args.task, args.out_prefix, deconv_flip=deconv_flip, verbose=args.verbose)
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

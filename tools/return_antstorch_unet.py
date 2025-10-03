@@ -7,67 +7,60 @@ Build a PyTorch (ANTsTorch) U-Net from a shared task registry and optionally loa
 
 from __future__ import annotations
 
-from typing import Dict, Any, Tuple, Optional
-
-import torch
+from tasks_registry import get_task_spec
+from antstorch import create_unet_model_3d, create_multihead_unet_model_3d  # adjust import path to yours
 import torch.nn as nn
+import torch
 
-from tasks_registry import get_task_spec, weights_prefix_for
-from antstorch.architectures import create_unet_model_3d
-
-
-def _create_unet_from_spec(spec: Dict[str, Any]) -> nn.Module:
-    # spec["input_image_size"] mirrors Keras, i.e., (D, H, W, C_in)
+def return_antstorch_unet(task: str, weights_path: str | None = None, strict: bool = True, verbose: bool = False):
+    spec = get_task_spec(task)
+    in_ch = int(spec["input_image_size"][-1])
     spatial = tuple(spec["input_image_size"][:3])
-    in_channels = int(spec["input_image_size"][-1])
+    n_aux = int(spec.get("n_aux_heads", 0) or 0)
 
-    # Delegate to generic creator with dimensions=3
-    return create_unet_model_3d(
-        input_channel_size=in_channels,        # C_in
+    # 1) build base UNet (single-head) exactly as you already do
+    base = create_unet_model_3d(
+        input_channel_size=in_ch,
         number_of_outputs=spec["number_of_outputs"],
-        number_of_filters=spec["number_of_filters"],
-        convolution_kernel_size=spec["convolution_kernel_size"],
-        deconvolution_kernel_size=spec["deconvolution_kernel_size"],
-        pool_size=spec["pool_size"],
-        strides=spec["strides"],
-        dropout_rate=spec["dropout_rate"],
+        number_of_filters=tuple(spec["number_of_filters"]),
+        convolution_kernel_size=tuple(spec["convolution_kernel_size"]),
+        deconvolution_kernel_size=tuple(spec["deconvolution_kernel_size"]),
+        pool_size=tuple(spec["pool_size"]),
+        strides=tuple(spec["strides"]),
+        dropout_rate=float(spec["dropout_rate"]),
         mode=spec["mode"],
-        pad_crop="keras"
+        pad_crop="keras",
     )
 
+    # 2) wrap with the multi-head class if needed
+    if n_aux > 0:
+        if verbose:
+            print(f"[antstorch] Wrapping base UNet with {n_aux} aux head(s)")
+            n_main = int(spec["number_of_outputs"])
+            model = create_multihead_unet_model_3d(
+                base_unet=base,
+                n_aux_heads=n_aux,
+                use_sigmoid=True,
+                n_main_outputs=n_main
+            )        
+        # 3) run a tiny warmup forward ONCE so the heads are instantiated
+        with torch.no_grad():
+            dummy = torch.zeros(1, in_ch, *spatial)
+            _ = model(dummy)  # this triggers the hook and builds heads
+    else:
+        model = base
 
-def return_antstorch_unet(
-    task: str,
-    weights_path: Optional[str] = None,
-    device: Optional[torch.device] = None,
-    strict: bool = True,
-    verbose: bool = True,
-) -> Tuple[nn.Module, Dict[str, Any]]:
-    spec = get_task_spec(task)
-    model = _create_unet_from_spec(spec)
+    # 4) load weights if provided
+    if weights_path:
+        sd = torch.load(weights_path, map_location="cpu")
+        missing, unexpected = model.load_state_dict(sd, strict=strict)
+        if verbose:
+            print(f"[antstorch] load_state_dict: missing={len(missing)} unexpected={len(unexpected)}")
+            if missing[:5] or unexpected[:5]:
+                print("  e.g. missing[:5]   =", missing[:5])
+                print("  e.g. unexpected[:5]=", unexpected[:5])
 
-    dev = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = model.to(dev)
-
-    resolved = weights_path
-    if resolved is None:
-        resolved = weights_prefix_for(task, "antstorch")  # e.g., deepAtropos_pytorch.pt
-
-    if isinstance(resolved, str):
-        try:
-            sd = torch.load(resolved, map_location=dev)
-            if isinstance(sd, dict) and "state_dict" in sd:
-                sd = sd["state_dict"]
-            if verbose:
-                print(f"[ANTsTorch] Loading weights for task='{task}' from: {resolved}")
-            model.load_state_dict(sd, strict=strict)
-        except FileNotFoundError:
-            if verbose:
-                print(f"[ANTsTorch] Weights file not found: {resolved}. Returning uninitialized model.")
-
-    meta = dict(task=task, spec=spec, weights_path=resolved)
-    return model, meta
-
+    return model, spec
 
 if __name__ == "__main__":
     m, meta = return_antstorch_unet("deep_atropos", weights_path=None, verbose=True)

@@ -14,6 +14,29 @@ from tensorflow.keras import Model
 
 from tasks_registry import get_task_spec, weights_prefix_for
 
+# --- helper: add N aux 1x1x1 heads off the penultimate tensor ---
+def _attach_aux_heads_keras(unet_model, n_aux_heads: int):
+    """
+    Returns a new Keras Model whose outputs are:
+      [unet_model.output, output1, output2, ...]
+    where each output_i is Conv3D(1x1x1, filters=1, activation='sigmoid')
+    applied to the penultimate tensor (input to the final conv).
+    """
+    from tensorflow.keras.layers import Conv3D
+    from tensorflow.keras.models import Model
+
+    # penultimate = input to last Conv3D in the UNet (i.e., second to last layer's output)
+    penultimate = unet_model.layers[-2].output
+
+    aux_outs = []
+    for i in range(n_aux_heads):
+        aux = Conv3D(
+            filters=1, kernel_size=(1, 1, 1),
+            activation='sigmoid', name=f'aux_head_{i+1}'
+        )(penultimate)
+        aux_outs.append(aux)
+
+    return Model(inputs=unet_model.input, outputs=[unet_model.output, *aux_outs])
 
 def _create_unet_from_spec(spec: Dict[str, Any]) -> Model:
     return antspynet.architectures.create_unet_model_3d(
@@ -28,15 +51,21 @@ def _create_unet_from_spec(spec: Dict[str, Any]) -> Model:
         mode=spec["mode"]
     )
 
-
 def return_antspynet_unet(
     task: str,
     load_weights: bool = True,
     weights_file: str | None = None,
     verbose: bool = True,
 ) -> Tuple[Model, Dict[str, Any]]:
+
     spec = get_task_spec(task)
     kmodel = _create_unet_from_spec(spec)
+
+    n_aux = int(spec.get("n_aux_heads", 0) or 0)
+    if n_aux > 0:
+        if verbose:
+            print(f"[antspynet] Attaching {n_aux} auxiliary head(s) for '{task}'")
+        kmodel = _attach_aux_heads_keras(kmodel, n_aux)
 
     resolved_weights = None
     if load_weights:

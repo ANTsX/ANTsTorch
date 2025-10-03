@@ -114,7 +114,6 @@ def deep_flash(t1,
     from ..architectures import create_unet_model_3d
     from ..architectures import create_multihead_unet_model_3d
 
-
     def _batch_from_crops(
         t1_cropped, priors_list, image_size, use_contralaterality,
         t1_cropped_flipped=None, t2_cropped=None, t2_cropped_flipped=None
