@@ -219,7 +219,7 @@ def brain_extraction(image, modality, verbose: bool = False):
 
     for i in range(len(input_images)):
         warped_image = ants.apply_ants_transform_to_image(xfrm, input_images[i], reorient_template)
-        if is_standard_network and modality != "t1.v1":
+        if is_standard_network:
             batchX[0, :, :, :, i] = ants.iMath(warped_image, "Normalize").numpy().astype(np.float32)
         else:
             warped_array = warped_image.numpy().astype(np.float32)

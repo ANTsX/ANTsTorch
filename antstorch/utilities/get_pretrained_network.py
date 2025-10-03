@@ -47,7 +47,11 @@ def get_pretrained_network(file_id=None,
             "brainExtractionMra_pytorch": "https://figshare.com/ndownloader/files/58439560",
             "brainExtractionRobustFA_pytorch": "https://figshare.com/ndownloader/files/58436695",
             "brainExtractionT1Hemi_pytorch" : "https://figshare.com/ndownloader/files/58439605",
-            "brainExtractionT1Lobes_pytorch" : "https://figshare.com/ndownloader/files/58439629"
+            "brainExtractionT1Lobes_pytorch" : "https://figshare.com/ndownloader/files/58439629",
+            "DeepAtroposHcpT1Weights_pytorch" : "https://figshare.com/ndownloader/files/58468954",
+            "DeepAtroposHcpT1T2Weights_pytorch" : "https://figshare.com/ndownloader/files/58468960",
+            "DeepAtroposHcpT1FAWeights_pytorch" : "https://figshare.com/ndownloader/files/58469074",
+            "DeepAtroposHcpT1T2FAWeights_pytorch" : "https://figshare.com/ndownloader/files/58469134"
         }
         return(switcher.get(argument, "Invalid argument."))
 
@@ -67,6 +71,10 @@ def get_pretrained_network(file_id=None,
                   "brainExtractionRobustFA_pytorch",
                   "brainExtractionT1Hemi_pytorch",
                   "brainExtractionT1Lobes_pytorch",
+                  "DeepAtroposHcpT1Weights_pytorch",
+                  "DeepAtroposHcpT1T2Weights_pytorch",
+                  "DeepAtroposHcpT1FAWeights_pytorch",
+                  "DeepAtroposHcpT1T2FAWeights_pytorch",
                   "show")
 
     if not file_id in valid_list:

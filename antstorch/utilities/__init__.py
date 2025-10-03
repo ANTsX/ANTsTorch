@@ -2,7 +2,8 @@ from .get_pretrained_network import get_pretrained_network
 from .get_antstorch_data import get_antstorch_data
 
 from .brain_extraction import brain_extraction
-from .preprocess_image import preprocess_image
+from .preprocess_image import preprocess_brain_image
+from .deep_atropos import deep_atropos
 
 from .mri_modality_classification import mri_modality_classification
 
