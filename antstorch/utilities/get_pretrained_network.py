@@ -60,7 +60,8 @@ def get_pretrained_network(file_id=None,
             "deepFlashRightT1Hierarchical_ri_pytorch" : "https://figshare.com/ndownloader/files/58488805",
             "deepFlashLeftBothHierarchical_ri_pytorch" : "https://figshare.com/ndownloader/files/58488760",
             "deepFlashRightBothHierarchical_ri_pytorch" : "https://figshare.com/ndownloader/files/58488778",
-            "HarvardOxfordAtlasSubcortical_pytorch": "https://figshare.com/ndownloader/files/58488943"
+            "HarvardOxfordAtlasSubcortical_pytorch": "https://figshare.com/ndownloader/files/58488943",
+            "DesikanKillianyTourvilleOuter_pytorch": "https://figshare.com/ndownloader/files/58494949",
         }
         return(switcher.get(argument, "Invalid argument."))
 
@@ -93,6 +94,7 @@ def get_pretrained_network(file_id=None,
                   "deepFlashLeftBothHierarchical_ri_pytorch",
                   "deepFlashRightBothHierarchical_ri_pytorch",
                   "HarvardOxfordAtlasSubcortical_pytorch",
+                  "DesikanKillianyTourvilleOuter_pytorch",
                   "show")
 
     if not file_id in valid_list:

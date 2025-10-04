@@ -7,65 +7,6 @@ import torch.nn.functional as F
 
 # ---------- Helpers: centered pad/crop to avoid spatial shift ----------
 
-
-def _keras_pad_crop(dec: torch.Tensor, target_spatial):
-    """
-    Keras-align `dec` to `target_spatial` with asymmetric (right/back-heavy) pad/crop.
-    For each spatial dim: if dec is larger, take a *leading* slice [0:target];
-    if smaller, pad zeros on the *end* only. This emulates TF/Keras 'same' behavior
-    for even kernels and avoids cumulative half-voxel drift across decoder stages.
-    Works for 2D (NCHW) and 3D (NCDHW).
-    """
-    if dec.dim() not in (4, 5):
-        raise ValueError(f"Expected NCHW/NCDHW, got shape {dec.shape}")
-    spatial = dec.shape[-2:] if dec.dim() == 4 else dec.shape[-3:]
-    target = tuple(int(t) for t in target_spatial)
-    if spatial == target:
-        return dec
-
-    if dec.dim() == 4:
-        H, W = spatial
-        tH, tW = target
-        # Crop or pad height (end-only)
-        if H > tH:
-            dec = dec[:, :, 0:tH, :]
-        elif H < tH:
-            pad_h = tH - H
-            dec = F.pad(dec, (0, 0, 0, pad_h))  # (W_left, W_right, H_top, H_bottom)
-        # Crop or pad width (end-only)
-        if W > tW:
-            dec = dec[:, :, :, 0:tW]
-        elif W < tW:
-            pad_w = tW - W
-            dec = F.pad(dec, (0, pad_w, 0, 0))
-        return dec
-
-    # 3D
-    D, H, W = spatial
-    tD, tH, tW = target
-    # Depth
-    if D > tD:
-        dec = dec[:, :, 0:tD, :, :]
-    elif D < tD:
-        pad_d = tD - D
-        dec = F.pad(dec, (0, 0, 0, 0, 0, pad_d))  # (W_l,W_r,H_t,H_b,D_front,D_back)
-    # Height
-    if H > tH:
-        dec = dec[:, :, :, 0:tH, :]
-    elif H < tH:
-        pad_h = tH - H
-        dec = F.pad(dec, (0, 0, 0, pad_h, 0, 0))
-    # Width
-    if W > tW:
-        dec = dec[:, :, :, :, 0:tW]
-    elif W < tW:
-        pad_w = tW - W
-        dec = F.pad(dec, (0, pad_w, 0, 0, 0, 0))
-    return dec
-
-import torch
-import torch.nn.functional as F
-
 def _center_pad_crop(x: torch.Tensor, target_spatial):
     """
     Center-align `x` to `target_spatial` by symmetric pad/crop.
@@ -167,8 +108,6 @@ def _deconv_same_params(kernel_size):
     pad = tuple(int(k // 2) for k in ks)
     outpad = tuple(0 for _ in ks)
     return pad, outpad
-
-import torch.nn.functional as F
 
 # 3D: F.pad takes (W_left, W_right, H_top, H_bottom, D_front, D_back)
 def _align_leading_3d(x, target_spatial):
@@ -403,6 +342,52 @@ class _ConvTranspose3dSame(nn.Module):
         return _same_align_deconv_3d_keras(y, x.shape[-3:], self.kernel_size)
 
 
+# ---------- Attention Gates (2D/3D) ----------
+
+class AttentionGate2d(nn.Module):
+    """Replicates ANTsPyNet attention_gate_2d:
+    x_theta = Conv2D(1x1)(x); g_phi = Conv2D(1x1)(g);
+    f = ReLU(x_theta + g_phi); f_psi = Conv2D(1x1, filters=1)(f);
+    alpha = Sigmoid(f_psi); return x * alpha  (alpha broadcast over channels).
+    """
+    def __init__(self, in_ch_x: int, in_ch_g: int, inter_ch: int):
+        super().__init__()
+        inter_ch = max(1, int(inter_ch))
+        self.theta = _Conv2dSame(in_ch_x, inter_ch, kernel_size=1, stride=1, bias=True)
+        self.phi   = _Conv2dSame(in_ch_g, inter_ch, kernel_size=1, stride=1, bias=True)
+        self.psi   = _Conv2dSame(inter_ch, 1, kernel_size=1, stride=1, bias=True)
+        self.relu  = nn.ReLU()
+        self.sig   = nn.Sigmoid()
+
+    def forward(self, x, g):
+        # Ensure spatial alignment (match g to x by leading-side rule like Keras)
+        if x.shape[-2:] != g.shape[-2:]:
+            g = _align_leading_2d(g, x.shape[-2:])
+        f = self.relu(self.theta(x) + self.phi(g))
+        alpha = self.sig(self.psi(f))
+        return x * alpha  # broadcast over channel dim
+
+
+class AttentionGate3d(nn.Module):
+    """Replicates ANTsPyNet attention_gate_3d (same as 2D but in 3D)."""
+    def __init__(self, in_ch_x: int, in_ch_g: int, inter_ch: int):
+        super().__init__()
+        inter_ch = max(1, int(inter_ch))
+        self.theta = _Conv3dSame(in_ch_x, inter_ch, kernel_size=1, stride=1, bias=True)
+        self.phi   = _Conv3dSame(in_ch_g, inter_ch, kernel_size=1, stride=1, bias=True)
+        self.psi   = _Conv3dSame(inter_ch, 1, kernel_size=1, stride=1, bias=True)
+        self.relu  = nn.ReLU()
+        self.sig   = nn.Sigmoid()
+
+    def forward(self, x, g):
+        # Ensure spatial alignment (match g to x by leading-side rule like Keras)
+        if x.shape[-3:] != g.shape[-3:]:
+            g = _align_leading_3d(g, x.shape[-3:])
+        f = self.relu(self.theta(x) + self.phi(g))
+        alpha = self.sig(self.psi(f))
+        return x * alpha  # broadcast over channel dim
+
+
 # ---------- Concat module to expose in CSV ----------
 
 class Concat(nn.Module):
@@ -533,6 +518,17 @@ class create_unet_model_2d(nn.Module):
     ):
         super().__init__()
 
+        # Parse additional options
+        add_attention_gating = False
+        if additional_options is not None:
+            if isinstance(additional_options, (list, tuple, set)):
+                opts = set(additional_options)
+            else:
+                opts = {additional_options}
+            # support both ANTsPyNet "attentionGating" and a snake_case variant
+            if ("attentionGating" in opts) or ("attention_gating" in opts):
+                add_attention_gating = True
+
         if number_of_filters is not None:
             number_of_filters = list(number_of_filters)
             number_of_layers = len(number_of_filters)
@@ -556,19 +552,28 @@ class create_unet_model_2d(nn.Module):
         self.decoding_convolution_transpose_layers = nn.ModuleList()
         self.concat_layers = nn.ModuleList()
         self.decoding_convolution_layers = nn.ModuleList()
+        self.add_attention_gating_2d = add_attention_gating
+        if self.add_attention_gating_2d:
+            self.attn_gates_2d = nn.ModuleList()
 
         for i in range(1, number_of_layers):
+            out_ch = number_of_filters[number_of_layers - i - 1]
+            in_ch_deconv = number_of_filters[number_of_layers - i]
             deconv = _ConvTranspose2dSame(
-                in_ch=number_of_filters[number_of_layers - i],
-                out_ch=number_of_filters[number_of_layers - i - 1],
+                in_ch=in_ch_deconv,
+                out_ch=out_ch,
                 kernel_size=deconvolution_kernel_size,
                 bias=True,
             )
             self.decoding_convolution_transpose_layers.append(deconv)
             self.concat_layers.append(Concat(dim=1))
 
+            # Attention gate for this level (if enabled)
+            if self.add_attention_gating_2d:
+                inter = max(1, out_ch // 4)
+                self.attn_gates_2d.append(AttentionGate2d(in_ch_x=out_ch, in_ch_g=out_ch, inter_ch=inter))
+
             # After concat: channels double -> 2 * out_ch
-            out_ch = number_of_filters[number_of_layers - i - 1]
             in_ch_post_concat = 2 * out_ch
             conv1 = _Conv2dSame(in_ch_post_concat, out_ch,
                                 kernel_size=convolution_kernel_size, stride=1, bias=True)
@@ -610,18 +615,21 @@ class create_unet_model_2d(nn.Module):
 
             # 3) final safety align to exact skip size (handles odd dims)
             if self.pad_crop == "keras":
-                dec = _align_leading_3d(dec, skip.shape[-2:])
+                dec = _align_leading_2d(dec, skip.shape[-2:])
             elif self.pad_crop == "center":    
                 dec = _center_pad_crop(dec, skip.shape[-2:])
             else:
                 raise ValueError("Unrecognized pad_crop option.")    
 
-            # 4) concat in Keras order [up, skip] along channels
-            dec = self.concat_layers[i - 1](dec, skip)
+            if self.add_attention_gating_2d:
+                gated = self.attn_gates_2d[i - 1](dec, skip)  # follow ANTsPyNet calling (x=deconv, g=skip)
+                dec = torch.cat([dec, gated], dim=1)
+            else:
+                # concat in Keras order [up, skip] along channels
+                dec = self.concat_layers[i - 1](dec, skip)
 
             # 5) two convs
             dec = self.decoding_convolution_layers[i - 1](dec)
-
 
         return self.output(dec)
 
@@ -643,6 +651,16 @@ class create_unet_model_3d(nn.Module):
         additional_options=None,
     ):
         super().__init__()
+
+        # Parse additional options
+        add_attention_gating = False
+        if additional_options is not None:
+            if isinstance(additional_options, (list, tuple, set)):
+                opts = set(additional_options)
+            else:
+                opts = {additional_options}
+            if ("attentionGating" in opts) or ("attention_gating" in opts):
+                add_attention_gating = True
 
         if number_of_filters is not None:
             number_of_filters = list(number_of_filters)
@@ -667,19 +685,28 @@ class create_unet_model_3d(nn.Module):
         self.decoding_convolution_transpose_layers = nn.ModuleList()
         self.concat_layers = nn.ModuleList()
         self.decoding_convolution_layers = nn.ModuleList()
+        self.add_attention_gating_3d = add_attention_gating
+        if self.add_attention_gating_3d:
+            self.attn_gates_3d = nn.ModuleList()
 
         for i in range(1, number_of_layers):
+            out_ch = number_of_filters[number_of_layers - i - 1]
+            in_ch_deconv = number_of_filters[number_of_layers - i]
             deconv = _ConvTranspose3dSame(
-                in_ch=number_of_filters[number_of_layers - i],
-                out_ch=number_of_filters[number_of_layers - i - 1],
+                in_ch=in_ch_deconv,
+                out_ch=out_ch,
                 kernel_size=deconvolution_kernel_size,
                 bias=True,
             )
             self.decoding_convolution_transpose_layers.append(deconv)
             self.concat_layers.append(Concat(dim=1))
 
+            # Attention gate for this level (if enabled)
+            if self.add_attention_gating_3d:
+                inter = max(1, out_ch // 4)
+                self.attn_gates_3d.append(AttentionGate3d(in_ch_x=out_ch, in_ch_g=out_ch, inter_ch=inter))
+
             # After concat: channels double -> 2 * out_ch
-            out_ch = number_of_filters[number_of_layers - i - 1]
             in_ch_post_concat = 2 * out_ch
             conv1 = _Conv3dSame(in_ch_post_concat, out_ch,
                                 kernel_size=convolution_kernel_size, stride=1, bias=True)
@@ -728,8 +755,12 @@ class create_unet_model_3d(nn.Module):
             else:
                 raise ValueError("Unrecognized pad_crop option.")
 
-            # 4) concat in Keras order [up, skip] along channels
-            dec = self.concat_layers[i - 1](dec, skip)
+            if self.add_attention_gating_3d:
+                gated = self.attn_gates_3d[i - 1](dec, skip)  # follow ANTsPyNet calling (x=deconv, g=skip)
+                dec = torch.cat([dec, gated], dim=1)
+            else:
+                # concat in Keras order [up, skip] along channels
+                dec = self.concat_layers[i - 1](dec, skip)
 
             # 5) two convs
             dec = self.decoding_convolution_layers[i - 1](dec)
