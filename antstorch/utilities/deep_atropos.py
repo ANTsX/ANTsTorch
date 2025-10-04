@@ -218,9 +218,6 @@ def deep_atropos(
             xt = xt.to(device=device, dtype=torch.float32)
 
             yt = model(xt)  # (1, C_out, D, H, W), logits or probs depending on head
-            # Ensure probabilities
-            if yt.shape[1] == n_classes:
-                yt = torch.softmax(yt, dim=1)
             y_np = yt.squeeze(0).permute(1, 2, 3, 0).cpu().numpy()  # (D,H,W,C_out)
             predicted_data[h, ...] = y_np
 

@@ -9,6 +9,7 @@ from .cortical_thickness import longitudinal_cortical_thickness
 from .deep_flash import deep_flash
 from .harvard_oxford_atlas_labeling import harvard_oxford_atlas_labeling
 from .desikan_killiany_tourville_labeling import desikan_killiany_tourville_labeling
+from .cerebellum_morphology import cerebellum_morphology
 
 from .mri_modality_classification import mri_modality_classification
 

@@ -316,7 +316,7 @@ def desikan_killiany_tourville_labeling(t1,
         x = torch.from_numpy(batchX).to(device)  # N,C,D,H,W
         y_main, y_aux = unet_model(x)           # shapes: (N, C_out, D,H,W) and (N,1,D,H,W)
         # Move to CPU numpy for downstream ANTs ops
-        main_np = F.softmax(y_main, dim=1).cpu().numpy()  # ensure classification probas
+        main_np = y_main.cpu().numpy() 
         aux_np  = y_aux.cpu().numpy()
 
     labels_sorted = sorted((*dkt_lateral_labels, *dkt_left_labels))
