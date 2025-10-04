@@ -17,6 +17,7 @@ from typing import Dict, Any, List, Optional
 _DEFAULTS: Dict[str, Any] = {
     "n_aux_heads": 0,
     "aux_head_names": None,  # or [] if you prefer strict lists
+    "additional_options": None,
 }
 
 def _with_defaults(d: Dict[str, Any]) -> Dict[str, Any]:
@@ -214,6 +215,66 @@ _TASKS: Dict[str, Dict[str, Any]] = {
         n_aux_heads=1,          
         aux_head_names=[],  # optional, purely metadata
     )),  
+    "dkt_labeling": _with_defaults(dict(
+        dimension=3,
+        input_image_size=(160, 192, 160, 1),
+        number_of_outputs=38,  
+        number_of_filters=(16, 32, 64, 128),
+        convolution_kernel_size=(3, 3, 3),
+        deconvolution_kernel_size=(2, 2, 2),
+        pool_size=(2, 2, 2),
+        strides=(2, 2, 2),
+        dropout_rate=0.0,
+        mode="classification",
+        additional_options=[],   
+        n_aux_heads=1,       
+        aux_head_names=[],  # optional, purely metadata
+    )),  
+    "cerebellum_whole": _with_defaults(dict(
+        dimension=3,
+        input_image_size=(240, 144, 144, 2),
+        number_of_outputs=2,  
+        number_of_filters=(32, 64, 96, 128, 256),
+        convolution_kernel_size=(3, 3, 3),
+        deconvolution_kernel_size=(2, 2, 2),
+        pool_size=(2, 2, 2),
+        strides=(2, 2, 2),
+        dropout_rate=0.0,
+        mode="classification",
+        additional_options=['attentionGating'],   
+        n_aux_heads=0,       
+        aux_head_names=[],  # optional, purely metadata
+    )),  
+    "cerebellum_tissue": _with_defaults(dict(
+        dimension=3,
+        input_image_size=(240, 144, 144, 4),
+        number_of_outputs=4,  
+        number_of_filters=(32, 64, 96, 128, 256),
+        convolution_kernel_size=(3, 3, 3),
+        deconvolution_kernel_size=(2, 2, 2),
+        pool_size=(2, 2, 2),
+        strides=(2, 2, 2),
+        dropout_rate=0.0,
+        mode="classification",
+        additional_options=[],   
+        n_aux_heads=0,       
+        aux_head_names=[],  # optional, purely metadata
+    )),  
+    "cerebellum_labels": _with_defaults(dict(
+        dimension=3,
+        input_image_size=(240, 144, 144, 25),
+        number_of_outputs=25,  
+        number_of_filters=(32, 64, 96, 128, 256),
+        convolution_kernel_size=(3, 3, 3),
+        deconvolution_kernel_size=(2, 2, 2),
+        pool_size=(2, 2, 2),
+        strides=(2, 2, 2),
+        dropout_rate=0.0,
+        mode="classification",
+        additional_options=['attentionGating'],   
+        n_aux_heads=0,       
+        aux_head_names=[],  # optional, purely metadata
+    )),  
 
 }
 
@@ -234,6 +295,10 @@ _ANTSPYNET_PREFIX: Dict[str, str] = {
     "deep_flash_left_both_ri": "deepFlashLeftBothHierarchical_ri",
     "deep_flash_right_both_ri": "deepFlashRightBothHierarchical_ri",
     "hoa_labeling": "HarvardOxfordAtlasSubcortical",
+    "dkt_labeling": "DesikanKillianyTourvilleOuter",
+    "cerebellum_whole": "cerebellumWhole",
+    "cerebellum_tissue": "cerebellumTissue",
+    "cerebellum_labels": "cerebellumLabels",
 }
 
 # For ANTsTorch (PyTorch), we standardize on "<prefix>_pytorch.pt"

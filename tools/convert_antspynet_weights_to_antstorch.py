@@ -131,9 +131,11 @@ def _keras_output_layer_names(kmodel: "Model") -> List[str]:
 
 
 def _collect_keras_convs_and_dect(kmodel: "Model",
-                                  exclude_layer_names: List[str]) -> Tuple[List[Tuple[str, np.ndarray, np.ndarray]],
+                                  exclude_layer_names: List[str],
+                                  attention_gating: bool = False) -> Tuple[List[Tuple[str, np.ndarray, np.ndarray]],
                                                                             List[Tuple[str, np.ndarray, np.ndarray]],
-                                                                            Tuple[str, np.ndarray, np.ndarray]]:
+                                                                            Tuple[str, np.ndarray, np.ndarray],
+                                                                            List[Tuple[str, np.ndarray, np.ndarray]]]:
     """
     Return (conv_list, deconvtranspose_list, main_out) where each list contains tuples of (name, W, b).
 
@@ -149,6 +151,7 @@ def _collect_keras_convs_and_dect(kmodel: "Model",
 
     conv_list: List[Tuple[str, np.ndarray, np.ndarray]] = []
     deconv_list: List[Tuple[str, np.ndarray, np.ndarray]] = []
+    attn_list: List[Tuple[str, np.ndarray, np.ndarray]] = []
     main_out: Tuple[str, np.ndarray, np.ndarray] | None = None
 
     for layer in kmodel.layers:
@@ -175,7 +178,11 @@ def _collect_keras_convs_and_dect(kmodel: "Model",
                 # skip aux heads
                 continue
             else:
-                conv_list.append((layer.name, W, b))
+                # if attention enabled, siphon off 1x1x1 convs (excluding main/aux) as attention layers
+                if attention_gating and tuple(getattr(layer, 'kernel_size', ())) == (1, 1, 1):
+                    attn_list.append((layer.name, W, b))
+                else:
+                    conv_list.append((layer.name, W, b))
 
     if main_out is None:
         # Fallback: try last Conv3D layer if outputs failed
@@ -194,7 +201,7 @@ def _collect_keras_convs_and_dect(kmodel: "Model",
     if main_out is None:
         raise RuntimeError("Could not find main output Conv3D layer in Keras model.")
 
-    return conv_list, deconv_list, main_out
+    return conv_list, deconv_list, main_out, attn_list
 
 
 # ---------- Torch state_dict scanning ----------
@@ -227,6 +234,60 @@ def _list_conv_keys(sd_view: Dict[str, torch.Tensor]) -> Tuple[List[str], List[s
     return enc, dec
 
 
+
+
+def _list_attention_keys(sd_view: Dict[str, torch.Tensor]) -> List[Dict[str, str]]:
+    """
+    Return a list of dictionaries per decoder level with expected keys for attention gates:
+      {"theta_w": "...", "theta_b": "...", "phi_w": "...", "phi_b": "...", "psi_w": "...", "psi_b": "..."}
+    Searches for modules under 'attn_gates_3d.<i>.(theta|phi|psi)' (and 2d variant).
+    """
+    out = []
+    # find whether we have 3d or 2d
+    prefixes = set()
+    for k in sd_view.keys():
+        if k.startswith("attn_gates_3d."):
+            prefixes.add("attn_gates_3d")
+        if k.startswith("attn_gates_2d."):
+            prefixes.add("attn_gates_2d")
+    for pref in sorted(prefixes):
+        # find indices
+        idxs = sorted({ int(m.group(1)) for k in sd_view.keys() for m in [re.search(rf"^{pref}\.(\d+)\.", k)] if m })
+        for i in idxs:
+            # weight keys might be '.weight' or '.conv.weight'
+            def _find_key(stem):
+                # prefer '.weight' direct, otherwise '.conv.weight'
+                k1 = f"{pref}.{i}.{stem}.weight"
+                if k1 in sd_view:
+                    return k1
+                k2 = f"{pref}.{i}.{stem}.conv.weight"
+                if k2 in sd_view:
+                    return k2
+                # bias
+                b1 = f"{pref}.{i}.{stem}.bias"
+                if b1 in sd_view:
+                    return b1  # caller will use replace()
+                b2 = f"{pref}.{i}.{stem}.conv.bias"
+                if b2 in sd_view:
+                    return b2
+                return None
+
+            tw = _find_key("theta")
+            pw = _find_key("phi")
+            qw = _find_key("psi")
+            # derive bias keys
+            tb = tw.replace(".weight", ".bias") if tw else None
+            if tb and tb not in sd_view:
+                tb = tw.replace(".conv.weight", ".conv.bias")
+            pb = pw.replace(".weight", ".bias") if pw else None
+            if pb and pb not in sd_view:
+                pb = pw.replace(".conv.weight", ".conv.bias")
+            qb = qw.replace(".weight", ".bias") if qw else None
+            if qb and qb not in sd_view:
+                qb = qw.replace(".conv.weight", ".conv.bias")
+            if tw and pw and qw:
+                out.append(dict(theta_w=tw, theta_b=tb, phi_w=pw, phi_b=pb, psi_w=qw, psi_b=qb))
+    return out
 def _find_main_out_keys(sd_view: Dict[str, torch.Tensor], number_of_outputs: int) -> Tuple[str, str | None]:
     """
     Heuristic: choose the last 1x1x1 3D conv whose out_channels == number_of_outputs.
@@ -259,10 +320,17 @@ def _find_main_out_keys(sd_view: Dict[str, torch.Tensor], number_of_outputs: int
 
 # ---------- Main conversion ----------
 
-def convert_task(task: str, out_prefix: str, deconv_flip: bool = False, verbose: bool = True) -> str:
+def convert_task(task: str, out_prefix: str, deconv_flip: bool = False, verbose: bool = True, attention_gating: bool | None = None) -> str:
     # Build models
     kmodel, kspec = return_antspynet_unet(task, load_weights=True, verbose=verbose)
     tmodel, tspec = return_antstorch_unet(task, weights_path=None, strict=False, verbose=verbose)
+
+    # Determine attention from spec unless explicitly provided
+    if attention_gating is None:
+        opts = tspec.get("additional_options") or []
+        if isinstance(opts, str):
+            opts = [opts]
+        attention_gating = any(o in ("attentionGating", "attention_gating") for o in opts)
 
     # Copy state_dict
     tmodel = tmodel.to("cpu")
@@ -292,11 +360,12 @@ def convert_task(task: str, out_prefix: str, deconv_flip: bool = False, verbose:
     aux_names = out_layer_names[1:]
 
     # Collect Keras convs/deconvs and main output
-    k_convs, k_dect, k_main = _collect_keras_convs_and_dect(kmodel, exclude_layer_names=aux_names)
+    k_convs, k_dect, k_main, k_attn = _collect_keras_convs_and_dect(kmodel, exclude_layer_names=aux_names, attention_gating=attention_gating)
 
     # Collect Torch keys
     t_dect = _list_deconv_keys(sd_view)
     t_enc, t_dec = _list_conv_keys(sd_view)
+    t_attn = _list_attention_keys(sd_view) if attention_gating else []
     if verbose:
         def prof_dect(lst):  # show (in->out) channel profile
             out = []
@@ -318,10 +387,14 @@ def convert_task(task: str, out_prefix: str, deconv_flip: bool = False, verbose:
 
     total_t_convs = len(t_enc) + len(t_dec)
     if len(k_convs) != total_t_convs:
-        raise RuntimeError(
-            f"Conv count mismatch: Keras(non-out, non-aux)={len(k_convs)} vs "
-            f"Torch enc+dec={total_t_convs}. Check ordering or patterns."
-        )
+        if attention_gating:
+            # often extra 1x1x1 convs in Keras were siphoned into k_attn; allow mismatch here
+            pass
+        else:
+            raise RuntimeError(
+                f"Conv count mismatch: Keras(non-out, non-aux)={len(k_convs)} vs "
+                f"Torch enc+dec={total_t_convs}. Check ordering or patterns."
+            )
 
     # ---------- Assign deconv (ConvTranspose) weights ----------
     for (lname, kW, kB), tkey in zip(k_dect, t_dect):
@@ -423,6 +496,64 @@ def convert_task(task: str, out_prefix: str, deconv_flip: bool = False, verbose:
                     new_sd[rb] = torch.from_numpy(kB.astype(np.float32)).to(new_sd[rb].dtype)
 
     # Load into model (non-strict to tolerate any unused buffers) then save just the state_dict
+    
+    # ---------- Assign attention gate weights ----------
+    if attention_gating:
+        if verbose:
+            print(f"[convert] Attention gating detected. Keras attn convs: {len(k_attn)}, Torch gates: {len(t_attn)}")
+        # Expect triplets per level: theta (inter), phi (inter), psi (1)
+        if len(t_attn) * 3 != len(k_attn):
+            # Best-effort: continue if numbers differ, but warn.
+            print(f"[warn] Attention conv count mismatch: keras={len(k_attn)} vs torch triplets={len(t_attn)*3}")
+        # Assign in order; try to pair by expected out_channels (psi has outC==1)
+        ki = 0
+        for lvl, keys in enumerate(t_attn):
+            # theta
+            if ki < len(k_attn):
+                _, kW, kB = k_attn[ki]; ki += 1
+                torchW = _to_torch_conv_weight_from_keras(kW)
+                rk = _resolve_tkey(base_prefix + keys["theta_w"], new_sd)
+                tgt = new_sd[rk].cpu().numpy()
+                if torchW.shape != tgt.shape and torchW.transpose(1,0,2,3,4).shape == tgt.shape:
+                    torchW = torchW.transpose(1,0,2,3,4)
+                new_sd[rk] = torch.from_numpy(torchW).to(new_sd[rk].dtype)
+                if kB is not None and keys["theta_b"] and keys["theta_b"] in new_sd and new_sd[keys["theta_b"]].numel() == kB.size:
+                    new_sd[keys["theta_b"]] = torch.from_numpy(kB.astype(np.float32)).to(new_sd[keys["theta_b"]].dtype)
+            # phi
+            if ki < len(k_attn):
+                _, kW, kB = k_attn[ki]; ki += 1
+                torchW = _to_torch_conv_weight_from_keras(kW)
+                rk = _resolve_tkey(base_prefix + keys["phi_w"], new_sd)
+                tgt = new_sd[rk].cpu().numpy()
+                if torchW.shape != tgt.shape and torchW.transpose(1,0,2,3,4).shape == tgt.shape:
+                    torchW = torchW.transpose(1,0,2,3,4)
+                new_sd[rk] = torch.from_numpy(torchW).to(new_sd[rk].dtype)
+                if kB is not None and keys["phi_b"] and keys["phi_b"] in new_sd and new_sd[keys["phi_b"]].numel() == kB.size:
+                    new_sd[keys["phi_b"]] = torch.from_numpy(kB.astype(np.float32)).to(new_sd[keys["phi_b"]].dtype)
+            # psi (filters=1)
+            if ki < len(k_attn):
+                # attempt to pick the next 1-filter conv among the next two if ordering differs
+                cand_idx = ki
+                chosen = cand_idx
+                for j in range(ki, min(ki+2, len(k_attn))):
+                    _, kWcand, _ = k_attn[j]
+                    if int(kWcand.shape[-1]) == 1:  # Keras Conv3D kernel: (..., inC, outC)
+                        chosen = j
+                        break
+                name, kW, kB = k_attn[chosen]
+                # swap if chose the second in the window
+                if chosen != ki:
+                    k_attn[ki], k_attn[chosen] = k_attn[chosen], k_attn[ki]
+                ki += 1
+                torchW = _to_torch_conv_weight_from_keras(kW)
+                rk = _resolve_tkey(base_prefix + keys["psi_w"], new_sd)
+                tgt = new_sd[rk].cpu().numpy()
+                if torchW.shape != tgt.shape and torchW.transpose(1,0,2,3,4).shape == tgt.shape:
+                    torchW = torchW.transpose(1,0,2,3,4)
+                new_sd[rk] = torch.from_numpy(torchW).to(new_sd[rk].dtype)
+                if kB is not None and keys["psi_b"] and keys["psi_b"] in new_sd and new_sd[keys["psi_b"]].numel() == kB.size:
+                    new_sd[keys["psi_b"]] = torch.from_numpy(kB.astype(np.float32)).to(new_sd[keys["psi_b"]].dtype
+                                                                                       )
     missing, unexpected = tmodel.load_state_dict(new_sd, strict=False)
     if verbose:
         if isinstance(missing, (list, tuple)) and isinstance(unexpected, (list, tuple)):
@@ -446,10 +577,12 @@ def main():
     p.add_argument("--out-prefix", type=str, required=True)
     p.add_argument("--deconv-flip", type=str, default="noflip", choices=["flip", "noflip"])
     p.add_argument("--verbose", action="store_true")
+    p.add_argument("--attention-gating", type=str, default="auto", choices=["auto","on","off"], help="Convert attention-gating weights if present.")
     args = p.parse_args()
 
     deconv_flip = (args.deconv_flip == "flip")
-    convert_task(args.task, args.out_prefix, deconv_flip=deconv_flip, verbose=args.verbose)
+    attn_flag = None if args.attention_gating == "auto" else (args.attention_gating == "on")
+    convert_task(args.task, args.out_prefix, deconv_flip=deconv_flip, verbose=args.verbose, attention_gating=attn_flag)
 
 
 if __name__ == "__main__":

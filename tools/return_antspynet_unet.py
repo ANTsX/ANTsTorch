@@ -48,7 +48,8 @@ def _create_unet_from_spec(spec: Dict[str, Any]) -> Model:
         pool_size=spec["pool_size"],
         strides=spec["strides"],
         dropout_rate=spec["dropout_rate"],
-        mode=spec["mode"]
+        mode=spec["mode"],
+        additional_options=spec.get("additional_options")
     )
 
 def return_antspynet_unet(

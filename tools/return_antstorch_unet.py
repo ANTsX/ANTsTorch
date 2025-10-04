@@ -30,6 +30,7 @@ def return_antstorch_unet(task: str, weights_path: str | None = None, strict: bo
         dropout_rate=float(spec["dropout_rate"]),
         mode=spec["mode"],
         pad_crop="keras",
+        additional_options=spec.get("additional_options"),
     )
 
     # 2) wrap with the multi-head class if needed
