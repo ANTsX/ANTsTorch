@@ -43,19 +43,26 @@ python -m pip install .
 </details>
 
 <details>
-<summary>Applications (ANTsXNet port WIP)</summary>
+<summary>Applications</summary>
 
-ANTsTorch supports the same wide range of applications as ANTsPyNet (brain, lung, mouse, general), including:
+ANTsTorch supports several applications (ANTsPyNet weights):
 
 - Multi-modal brain extraction
+  - T1 (brain-only, three-tissue, hemisphere, lobes)
+  - T2
+  - T2star
+  - FA
+  - FLAIR
+  - MRA
 - Cortical thickness estimation
 - Deep Atropos (six-tissue brain segmentation)
-- Hippocampal, claustrum, hypothalamus, cerebellum parcellations
-- White matter hyperintensities, lesion, and tumor segmentation
-- Lung extraction and functional segmentation
-- Mouse brain extraction, parcellation, and cortical thickness
-- MRI super-resolution
-- Data augmentation utilities
+- Desikan-Killiany-Tourville cortical labeling
+- Harvard-Oxford-Atlas labeling
+- Deep FLASH
+- Cerebellar morphology
+- Data augmentation and preprocessing utilities
+
+Other ANTsPyNet ports are a WIP.  
 
 </details>
 
