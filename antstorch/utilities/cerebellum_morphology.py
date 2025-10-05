@@ -84,7 +84,6 @@ def cerebellum_morphology(t1,
     from ..utilities.get_antstorch_data import get_antstorch_data
     from ..utilities.brain_extraction import brain_extraction
 
-
     if t1.dimension != 3:
         raise ValueError("Image dimension must be 3.")
     t1 = ants.image_clone(t1, pixeltype='float')
@@ -257,16 +256,16 @@ def cerebellum_morphology(t1,
         if verbose:
             print("Prediction.")
 
-        t1_work = t1_preprocessed_in_cerebellum_space.clone()
-        if m > 0 and t1_preprocessed_mask_in_cerebellum_space is not None:
-            t1_work *= t1_preprocessed_mask_in_cerebellum_space
+        if m > 0:
+            t1_preprocessed_in_cerebellum_space *= t1_preprocessed_mask_in_cerebellum_space
 
-        # Normalize to [0,1]
-        t1_work = (t1_work - t1_work.min()) / (t1_work.max() - t1_work.min())
+        t1_preprocessed_in_cerebellum_space = \
+            ((t1_preprocessed_in_cerebellum_space - t1_preprocessed_in_cerebellum_space.min()) /
+             (t1_preprocessed_in_cerebellum_space.max() - t1_preprocessed_in_cerebellum_space.min()))
 
         # Build batch: original + flipped (depth axis)
         batchX = np.zeros((2, channel_size, *image_size), dtype=np.float32)
-        t1_resamp = ants.pad_or_crop_image_to_size(t1_work, image_size).numpy().astype(np.float32)
+        t1_resamp = ants.pad_or_crop_image_to_size(t1_preprocessed_in_cerebellum_space, image_size).numpy().astype(np.float32)
         batchX[0, 0, :, :, :] = t1_resamp
         batchX[1, 0, :, :, :] = np.flip(t1_resamp, axis=0)
 
@@ -301,12 +300,8 @@ def cerebellum_morphology(t1,
 
         if m == 0:
             # Foreground channel is index 1 in labels (0,1)
-            probability_image = ants.from_numpy(
-                0.5 * (
-                    np.squeeze(predicted_data[0, :, :, :, 1]) +
-                    np.flip(np.squeeze(predicted_data[1, :, :, :, 1]), axis=0)
-                )
-            )
+            probability_image = ants.from_numpy(0.5 * (np.squeeze(predicted_data[0,:,:,:,1]) +
+                                                np.flip(np.squeeze(predicted_data[1,:,:,:,1]), axis=0)))
             probability_image = decrop_to_cerebellum_template_space(probability_image, t1_cerebellum_template)
             t1_preprocessed_mask_in_cerebellum_space = ants.threshold_image(probability_image, 0.5, 1, 1, 0)
             probability_image = ants.apply_transforms(
@@ -335,6 +330,12 @@ def cerebellum_morphology(t1,
                 )
                 tissue_probability_images.append(probability_image)
 
+            for i, label in enumerate(tissue_labels):
+                if label == 0:
+                    tissue_probability_images[i] = tissue_probability_images[i] * (cerebellum_probability_image * -1 + 1)
+                else:
+                    tissue_probability_images[i] = tissue_probability_images[i] * cerebellum_probability_image
+
         else:
             # Region labels: swap left/right blocks for the flipped view
             for i in range(1, 13):
@@ -357,6 +358,13 @@ def cerebellum_morphology(t1,
                     singleprecision=True, verbose=verbose
                 )
                 region_probability_images.append(probability_image)
+
+            for i, label in enumerate(region_labels):
+                if label == 0:
+                    region_probability_images[i] = region_probability_images[i] * (cerebellum_probability_image * -1 + 1)
+                else:
+                    region_probability_images[i] = region_probability_images[i] * cerebellum_probability_image
+
 
     ################################
     # Convert probabilities to segmentations
