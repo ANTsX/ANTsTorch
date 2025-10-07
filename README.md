@@ -24,15 +24,9 @@ ANTsTorch provides several high-level features:
 
 ### Binaries
 
-The easiest way to install ANTsTorch is via pip.
-
-```
-python -m pip install antstorch
-```
-
 ### From Source
 
-Alternatively, you can download and install from source.
+Download and install from source:
 
 ```
 git clone https://github.com/ANTsX/ANTsTorch
@@ -40,6 +34,11 @@ cd ANTsTorch
 python -m pip install .
 ```
 
+or 
+
+```
+python3 -m pip install git+https://github.com/ANTsX/ANTsTorch.git
+```
 </details>
 
 <details>
