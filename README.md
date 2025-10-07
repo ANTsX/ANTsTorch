@@ -22,8 +22,6 @@ ANTsTorch provides several high-level features:
 <details>
 <summary>Installation</summary>
 
-### Binaries
-
 ### From Source
 
 Download and install from source:
