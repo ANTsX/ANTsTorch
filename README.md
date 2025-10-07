@@ -47,6 +47,7 @@ python -m pip install .
 
 ANTsTorch supports several applications (ANTsPyNet weights):
 
+- Data augmentation and preprocessing utilities
 - Multi-modal brain extraction
   - T1 (brain-only, three-tissue, hemisphere, lobes)
   - T2
@@ -60,7 +61,7 @@ ANTsTorch supports several applications (ANTsPyNet weights):
 - Harvard-Oxford-Atlas labeling
 - Deep FLASH
 - Cerebellar morphology
-- Data augmentation and preprocessing utilities
+- MRI modality classification
 
 Other ANTsPyNet ports are a WIP.  
 
