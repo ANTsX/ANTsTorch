@@ -13,10 +13,11 @@ ANTsTorch provides several high-level features:
 - Utility functions to improve training and evaluating of deep learning models on medical images
 - Normalizing flows
 
+<!--
 <p align="middle">
   <img src="docs/figures/coreANTsXNetTools.png" width="600" />
 </p>
-
+-->
 ## Overview 
 
 <details>
@@ -42,6 +43,7 @@ python3 -m pip install git+https://github.com/ANTsX/ANTsTorch.git
 <details>
 <summary>Applications</summary>
 
+  
 ANTsTorch supports several applications (ANTsPyNet weights):
 
 - Data augmentation and preprocessing utilities
