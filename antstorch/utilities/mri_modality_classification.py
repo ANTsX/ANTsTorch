@@ -1,6 +1,5 @@
 import ants
 import torch
-import antspynet
 
 import numpy as np
 import pandas as pd
@@ -58,7 +57,7 @@ def mri_modality_classification(image,
 
     template = ants.image_read(get_antstorch_data("kirby"))
     template = ants.resample_image(template, resample_size)
-    template = antspynet.pad_or_crop_image_to_size(template, image_size)
+    template = ants.pad_or_crop_image_to_size(template, image_size)
     direction = template.direction
     direction[0, 0] = 1.0
     ants.set_direction(template, direction)
