@@ -7,7 +7,7 @@ python3 train.py \
   --L 4 --K 2 --hidden-channels 64 \
   --resampled-size 128 128 \
   --batch-size 128 \
-  --max-iter 200000 \
+  --max-iter 500000 \
   --eval-interval 1000 --plot-interval 1000 \
   --early-stopping-patience 100000 --min-delta 0.0000001 \
   --base glow --out-dir runs --actnorm-init \
@@ -19,5 +19,4 @@ python3 train.py \
   --sentry-sample-quantile 0.9995 \
   --sentry-sample-absmax 0.98 \
   --sentry-sample-space tanh \
-  --sentry-strikes 2
-  
+  --sentry-strikes 3
