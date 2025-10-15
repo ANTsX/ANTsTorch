@@ -239,7 +239,8 @@ def create_glow_normalizing_flow_model_2d(
         flows.append(level_flows)
 
         # Latent peeled at level i: channels = 2 * c_in, spatial halved at this level
-        lat_shape = (2 * c_in, H // (2 ** (i + 1)), W // (2 ** (i + 1)))
+        lat_ch = (4 * c_in) if i == 0 else (2 * c_in)
+        lat_shape = (lat_ch, H // (2 ** (i + 1)), W // (2 ** (i + 1)))
         q0.append(
             nfd.GlowBase(
                 lat_shape,
@@ -372,13 +373,9 @@ def create_glow_normalizing_flow_model_3d(
         level_flows.append(nf.flows.Squeeze3d())
         flows.append(level_flows)
 
-        # Latent peeled at this level (matches your runtime): 4 * c_in channels
-        lat_shape = (
-            4 * c_in,
-            D // (2 ** (i + 1)),
-            H // (2 ** (i + 1)),
-            W // (2 ** (i + 1)),
-        )
+        lat_ch = (8 * c_in) if i == 0 else (4 * c_in)
+        s_div = 2 ** (L - i)
+        lat_shape = (lat_ch, D // s_div, H // s_div, W // s_div)
         q0.append(
             nfd.GlowBase(
                 lat_shape,
@@ -386,8 +383,7 @@ def create_glow_normalizing_flow_model_3d(
                 min_log=glowbase_min_log,
                 max_log=glowbase_max_log,
             )
-            if base == "glow"
-            else nfd.DiagGaussian(lat_shape)
+            if base == "glow" else nfd.DiagGaussian(lat_shape)
         )
 
         if i > 0:
