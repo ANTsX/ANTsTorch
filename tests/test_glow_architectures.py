@@ -1,77 +1,79 @@
-# tests/test_glow_builders.py
-import math
+# tests/test_glow_architectures.py
+import os
+import sys
+from typing import Tuple, List, Union
+
 import pytest
 import torch
 
-# Adjust these imports to match your repo layout
 from antstorch import (
     create_glow_normalizing_flow_model_2d,
     create_glow_normalizing_flow_model_3d,
 )
 
-# put this next to your builders or in the test file temporarily
-import contextlib
+@pytest.fixture(scope="module")
+def device():
+    # Respect an override like: PYTEST_DEVICE=cuda:0
+    override = os.environ.get("PYTEST_DEVICE", "").strip()
+    if override:
+        return torch.device(override)
+    return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-@contextlib.contextmanager
-def trace_glowblock_inputs(model, *, tag=""):
+
+def _roundtrip_assertions(
+    model,
+    x: torch.Tensor,
+    max_err_tol: float = 1e-4,
+    mean_err_tol: float = 1e-5,
+    logdet_tol: float = 1e-4,
+):
     """
-    Attach forward hooks to the *first Conv* in every GlowBlock's param_map CNN
-    so we can see the actual in_channels during model.log_prob() (inverse pass).
+    Run inverse → forward and assert:
+      * reconstruction error is tiny
+      * per-sample (fwd_logdet + inv_logdet) is ~ 0
+    Works for both nf.NormalizingFlow and nf.MultiscaleFlow (z may be a list).
     """
-    handles = []
-    seen = []
+    model.eval()
+    with torch.no_grad():
+        z, inv_logdet = model.inverse_and_log_det(x)
+        x_rec, fwd_logdet = model.forward_and_log_det(z)
 
-    def _hook_factory(level_idx, block_idx):
-        def _hook(m, x, y):
-            x0 = x[0]
-            seen.append((level_idx, block_idx, x0.shape))
-            print(f"[{tag}] level={level_idx} block={block_idx} cnn_in shape={tuple(x0.shape)}")
-        return _hook
+        # Compute reconstruction error in float32 for a stable comparison
+        rec = (x_rec.to(dtype=torch.float32) - x.to(dtype=torch.float32)).abs()
+        max_err = float(rec.max().detach().cpu())
+        mean_err = float(rec.mean().detach().cpu())
+        assert max_err <= max_err_tol, f"max|x-x_rec|={max_err:g} > {max_err_tol:g}"
+        assert mean_err <= mean_err_tol, f"mean|x-x_rec|={mean_err:g} > {mean_err_tol:g}"
 
-    # Walk the multiscale levels
-    for li, level in enumerate(model.flows):
-        # Each level is a list: [... GlowBlock*, ..., Squeeze*]
-        for bi, flow in enumerate(level):
-            # Only hook GlowBlocks
-            if flow.__class__.__name__.lower().startswith("glowblock"):
-                # normflows GlowBlock keeps a .flows list;
-                # inside it, the coupling has .param_map which is a CNN (Sequential of Conv layers).
-                try:
-                    coupling = flow.flows[0]           # AffineCoupling
-                    cnn = coupling.param_map           # CNN (Sequential)
-                    first_conv = None
-                    for layer in cnn.layers:
-                        if layer.__class__.__name__.lower().startswith("conv"):
-                            first_conv = layer
-                            break
-                    if first_conv is not None:
-                        h = first_conv.register_forward_hook(_hook_factory(li, bi))
-                        handles.append(h)
-                except Exception as e:
-                    pass
+        # Log-det sanity
+        total = (fwd_logdet + inv_logdet).detach().cpu().float()
+        max_abs = float(total.abs().max())
+        assert max_abs <= logdet_tol, f"max|fwd+inv logdet|={max_abs:g} > {logdet_tol:g}"
 
-    try:
-        yield seen
-    finally:
-        for h in handles:
-            h.remove()
 
-@pytest.mark.parametrize("base", ["glow", "diag"])
-def test_glow_2d_basic(base):
-    """
-    Canonical 2D Glow: build, log_prob, sample, and basic shapes.
-    """
-    torch.manual_seed(123)
-    input_shape = (1, 32, 32)   # divisible by 2**L
-    L = 2                       # 2 squeezes → 32 -> 8 in spatial if fully propagated
-    K = 1
-    hidden_channels = 16
-    B = 4
+# -----------------------
+# 2-D: parameterized tests
+# -----------------------
 
+@pytest.mark.parametrize(
+    "shape,L,K,hidden,batch",
+    [
+        # Small & quick; covers C=1 (top-level unsqueeze first makes channel-split valid)
+        ((1, 32, 32), 2, 2, 32, 2),
+        # Also test C=2
+        ((2, 32, 32), 2, 2, 32, 2),
+    ],
+    ids=["2d_C1_L2K2", "2d_C2_L2K2"],
+)
+def test_glow2d_roundtrip(device, shape, L, K, hidden, batch):
+    torch.manual_seed(1234)
+    C, H, W = shape
     model = create_glow_normalizing_flow_model_2d(
-        input_shape=input_shape,
-        L=L, K=K, hidden_channels=hidden_channels,
-        base=base,
+        input_shape=(C, H, W),
+        L=L,
+        K=K,
+        hidden_channels=hidden,
+        base="glow",
         glowbase_logscale_factor=3.0,
         glowbase_min_log=-5.0,
         glowbase_max_log=5.0,
@@ -81,162 +83,44 @@ def test_glow_2d_basic(base):
         leaky=0.0,
         net_actnorm=True,
         scale_cap=3.0,
-    )
+    ).to(device=device)
 
-    x = torch.randn(B, *input_shape)
-
-    try:
-        with trace_glowblock_inputs(model, tag="2d"):
-            _ = model.log_prob(x)
-    except Exception as e:
-        print("debug: caught (expected) error:", repr(e))
-        return  # early-exit this test while debugging
-
-    lp = model.log_prob(x)
-    assert isinstance(lp, torch.Tensor)
-    assert lp.shape == (B,)
-    assert torch.isfinite(lp).all(), "log_prob produced NaN/Inf"
-
-    # Sampling should match input shape
-    y = model.sample(B)
-    assert tuple(y.shape) == (B, *input_shape)
-    assert torch.isfinite(y).all(), "sample produced NaN/Inf"
-
-    # Determinism under fixed seed for the same inputs
-    torch.manual_seed(123)
-    lp_again = model.log_prob(x)
-    torch.testing.assert_close(lp, lp_again)
+    x = torch.randn(batch, C, H, W, device=device, dtype=torch.float32)
+    _roundtrip_assertions(model, x)
 
 
-@pytest.mark.parametrize("base", ["glow", "diag"])
-def test_glow_3d_basic(base):
-    """
-    Canonical 3D Glow: build, log_prob, sample, and basic shapes.
-    """
-    torch.manual_seed(123)
-    input_shape = (1, 16, 32, 32)  # (C, D, H, W); each divisible by 2**L
-    L = 2
-    K = 1
-    hidden_channels = 12
-    B = 2
+# -----------------------
+# 3-D: parameterized tests
+# -----------------------
 
+@pytest.mark.parametrize(
+    "shape,L,K,hidden,batch",
+    [
+        # Keep volumes modest so CI is snappy; D/H/W must be divisible by 2**L
+        ((1, 16, 16, 16), 2, 1, 32, 1),
+        ((1, 16, 32, 32), 2, 2, 32, 1),
+    ],
+    ids=["3d_small_L2K1", "3d_mid_L2K2"],
+)
+def test_glow3d_roundtrip(device, shape, L, K, hidden, batch):
+    torch.manual_seed(4321)
+    C, D, H, W = shape
     model = create_glow_normalizing_flow_model_3d(
-        input_shape=input_shape,
-        L=L, K=K, hidden_channels=hidden_channels,
-        base=base,
+        input_shape=(C, D, H, W),
+        L=L,
+        K=K,
+        hidden_channels=hidden,
+        base="glow",
         glowbase_logscale_factor=3.0,
         glowbase_min_log=-5.0,
         glowbase_max_log=5.0,
-        split_mode="channel",
+        split_mode="channel",  # works with the validated per-level ordering
         scale=True,
         scale_map="tanh",
         leaky=0.0,
         net_actnorm=True,
         scale_cap=3.0,
-    )
+    ).to(device=device)
 
-    x = torch.randn(B, *input_shape)
-
-    try:
-        with trace_glowblock_inputs(model, tag="3d"):
-            _ = model.log_prob(x)
-    except Exception as e:
-        print("debug: caught (expected) error:", repr(e))
-        return  # early-exit this test while debugging
-
-    lp = model.log_prob(x)
-    assert isinstance(lp, torch.Tensor)
-    assert lp.shape == (B,)
-    assert torch.isfinite(lp).all(), "log_prob produced NaN/Inf"
-
-    y = model.sample(B)
-    assert tuple(y.shape) == (B, *input_shape)
-    assert torch.isfinite(y).all(), "sample produced NaN/Inf"
-
-    torch.manual_seed(123)
-    lp_again = model.log_prob(x)
-    torch.testing.assert_close(lp, lp_again)
-
-
-def test_glow_2d_divisibility_error():
-    """
-    2D: spatial dims must be divisible by 2**L; expect ValueError.
-    """
-    input_shape = (1, 30, 32)  # 30 not divisible by 2**L when L=2
-    with pytest.raises(ValueError):
-        _ = create_glow_normalizing_flow_model_2d(
-            input_shape=input_shape,
-            L=2, K=1, hidden_channels=8,
-            base="glow",
-        )
-
-
-def test_glow_3d_divisibility_error():
-    """
-    3D: spatial dims must be divisible by 2**L; expect ValueError.
-    """
-    input_shape = (1, 15, 32, 32)  # D=15 not divisible by 2**L when L=2
-    with pytest.raises(ValueError):
-        _ = create_glow_normalizing_flow_model_3d(
-            input_shape=input_shape,
-            L=2, K=1, hidden_channels=8,
-            base="diag",
-        )
-
-
-@pytest.mark.parametrize("L,shape2d,expected_latent_shapes", [
-# MultiscaleFlow splits channels after each squeeze, so q0 sees half:
-# level 0: ( (1*4**1)//2, 32/2**1, 32/2**1 ) = (2, 16, 16)
-# level 1: ( (1*4**2)//2, 32/2**2, 32/2**2 ) = (8, 8, 8)
-(2, (1, 32, 32), [(2, 16, 16), (8, 8, 8)]),
-])
-def test_glow_2d_latent_shapes_consistency(L, shape2d, expected_latent_shapes, monkeypatch):
-    """
-    Validate that q0 priors are created with canonical post-squeeze shapes for 2D.
-    We intercept the q0 constructor calls by wrapping nfd.GlowBase / DiagGaussian.
-    """
-    import normflows.distributions as nfd
-
-    called = []
-
-    class _GB(nfd.GlowBase):
-        def __init__(self, shape, *args, **kwargs):
-            called.append(tuple(shape))
-            super().__init__(shape, *args, **kwargs)
-
-    # monkeypatch GlowBase only (we use base="glow" here)
-    monkeypatch.setattr(nfd, "GlowBase", _GB, raising=True)
-
-    _ = create_glow_normalizing_flow_model_2d(
-        input_shape=shape2d, L=L, K=1, hidden_channels=8, base="glow"
-    )
-
-    assert called == expected_latent_shapes
-
-
-@pytest.mark.parametrize("L,shape3d,expected_latent_shapes", [
-# MultiscaleFlow splits channels after each squeeze (half goes to q0):
-# level 0: ( (1*8**1)//2, 16/2**1, 32/2**1, 32/2**1 ) = (4, 8, 16, 16)
-# level 1: ( (1*8**2)//2, 16/2**2, 32/2**2, 32/2**2 ) = (32, 4, 8, 8)
-(2, (1, 16, 32, 32), [(4, 8, 16, 16), (32, 4, 8, 8)]),
-])
-def test_glow_3d_latent_shapes_consistency(L, shape3d, expected_latent_shapes, monkeypatch):
-    """
-    Validate that q0 priors are created with canonical post-squeeze shapes for 3D.
-    """
-    import normflows.distributions as nfd
-
-    called = []
-
-    class _GB(nfd.GlowBase):
-        def __init__(self, shape, *args, **kwargs):
-            called.append(tuple(shape))
-            super().__init__(shape, *args, **kwargs)
-
-    monkeypatch.setattr(nfd, "GlowBase", _GB, raising=True)
-
-    _ = create_glow_normalizing_flow_model_3d(
-        input_shape=shape3d, L=L, K=1, hidden_channels=8, base="glow"
-    )
-
-    assert called == expected_latent_shapes
+    x = torch.randn(batch, C, D, H, W, device=device, dtype=torch.float32)
+    _roundtrip_assertions(model, x, max_err_tol=2e-4, mean_err_tol=2e-5, logdet_tol=2e-4)

@@ -4,6 +4,9 @@ import torch.nn as nn
 import normflows as nf
 from normflows import distributions as nfd
 
+from typing import Optional, Sequence, Tuple, Literal
+
+
 class _BoundedMLP(nn.Module):
     """
     MLP with tanh-bounded output for the log-scale head.
@@ -113,13 +116,7 @@ def create_real_nvp_normalizing_flow_model(
     model = nf.NormalizingFlow(q0=q0, flows=flows)
     return model
 
-
-import math
-from typing import Sequence, Tuple, Literal, Optional
-
-
 def _check_power_of_two_divisibility(spatial: Sequence[int], L: int, dims: int) -> None:
-    """Ensure each spatial dimension is divisible by 2**L (for L squeezes)."""
     if len(spatial) != dims:
         raise ValueError(f"Expected {dims} spatial dims, got {len(spatial)}: {spatial}")
     req = 2 ** L
@@ -130,7 +127,7 @@ def _check_power_of_two_divisibility(spatial: Sequence[int], L: int, dims: int) 
         )
 
 def create_glow_normalizing_flow_model_2d(
-    input_shape: Tuple[int, int, int],               # (C, H, W)
+    input_shape: Tuple[int, int, int],  # (C, H, W)
     *,
     L: int,
     K: int,
@@ -141,113 +138,127 @@ def create_glow_normalizing_flow_model_2d(
     glowbase_max_log: float = 5.0,
     split_mode: Literal["channel"] = "channel",
     scale: bool = True,
-    scale_map: Optional[str] = "tanh",                 # forwarded to GlowBlock2d
+    scale_map: Optional[str] = "tanh",
     leaky: float = 0.0,
     net_actnorm: bool = True,
-    scale_cap: float = 3.0                           # s_cap in GlowBlock
-):
+    scale_cap: float = 3.0,
+) -> nf.MultiscaleFlow:
     """
-    Create a canonical 2-D Glow normalizing flow model with multiscale factorization.
+    Create a multiscale 2-D Glow model with bounded log-scales and numerically stable base distributions.
 
-    This implementation follows the standard Glow architecture (Kingma & Dhariwal, 2018),
-    where each level performs a spatial squeeze followed by a sequence of invertible
-    transformations (GlowBlocks), and optionally splits off part of the activations into
-    a latent variable modeled by a prior distribution.
+    This builder constructs a classic multiscale Glow (RealNVP-style) pyramid for images, using per-level
+    ordering **[GlowBlock2d] × K → Squeeze2d → Split** in forward. Consequently, on inverse the first
+    operation at each level is an **Unsqueeze** (which increases channels by ×4) before any coupling blocks
+    run. This ordering keeps channel-split couplings well-posed even when the input has a single channel.
 
-    Structure per level i = 0..L-1:
-        Squeeze2d → [GlowBlock2d] × K → (Split latent_i)
+    Channel plan (with channel-split):
+      Let C be the input channels. For `L` levels indexed `i = 0..L-1` (top is i = L-1):
+        • Channels entering level i (forward):      c_in(i) = C * 2**(L-1-i)
+        • Blocks actually run on (inverse, post-unsqueeze):  4 * c_in(i)
+        • Latent peeled at level i (after squeeze & split):  (2 * c_in(i), H/2**(i+1), W/2**(i+1))
 
     Parameters
     ----------
-    input_shape : tuple of int
-        Input tensor shape (C, H, W).
+    input_shape : (int, int, int)
+        Input tensor shape as (C, H, W). H and W must be divisible by 2**L.
     L : int
-        Number of multiscale levels (squeeze + flow block groups).
+        Number of multiscale levels. Each level performs K Glow blocks, then a squeeze and a split.
     K : int
-        Number of Glow blocks (Invertible 1×1 conv + coupling) per level.
+        Number of Glow blocks (ActNorm + 1x1 invertible conv + affine coupling) per level.
     hidden_channels : int
-        Number of hidden channels in the internal convolutional subnetworks.
+        Width of the conditioner CNN inside each affine coupling at all levels.
     base : {"glow", "diag"}, default="glow"
-        Choice of prior for each latent chunk:
-          * "glow" → bounded-channel GlowBase prior (per-channel mean/log-scale).
-          * "diag" → diagonal Gaussian prior (DiagGaussian).
+        Base distribution for each latent split. "glow" uses a GlowBase (bounded log-scale),
+        "diag" uses a diagonal Gaussian.
     glowbase_logscale_factor : float, default=3.0
-        Multiplicative factor applied to the raw log-scale output in GlowBase.
-    glowbase_min_log, glowbase_max_log : float, default=(-5.0, 5.0)
-        Lower and upper bounds on the channel-wise log-scale in GlowBase.
-    split_mode : {"channel"}, default="channel"
-        How to split activations between flow and latent branches. Currently "channel" only.
+        Scale factor applied to the base distribution’s tanh-bounded log-scales.
+    glowbase_min_log : float, default=-5.0
+        Minimum (clipped) log-scale for the base distribution.
+    glowbase_max_log : float, default=5.0
+        Maximum (clipped) log-scale for the base distribution.
+    split_mode : {"channel", "checkerboard"}, default="channel"
+        Splitting strategy inside couplings. "channel" halves channels along C; "checkerboard" splits by
+        spatial mask. With the chosen per-level ordering, "channel" works for C ≥ 1 because Unsqueeze runs first.
     scale : bool, default=True
-        Enable multiplicative scaling in coupling layers (if False, additive-only).
-    scale_map : str or None, optional
-        Name of the nonlinearity applied to the scale head output (passed to GlowBlock2d).
+        Whether to learn scale (s) in the affine coupling. If False, coupling is additive.
+    scale_map : {"tanh", None}, default="tanh"
+        Nonlinearity to bound the coupling log-scale ŝ (e.g., ŝ = scale_cap * tanh(raw)).
     leaky : float, default=0.0
-        Negative slope for LeakyReLU activations in the coupling subnetworks.
+        Negative slope for any LeakyReLU used inside the conditioner CNN.
     net_actnorm : bool, default=True
-        Apply ActNorm after each coupling block for per-channel normalization.
+        Use ActNorm inside the conditioner CNNs.
     scale_cap : float, default=3.0
-        Bound on the log-scale parameter ŝ = scale_cap * tanh(raw) within each coupling.
+        Magnitude cap for the coupling scale head (used with `scale_map="tanh"`).
 
     Returns
     -------
     nf.MultiscaleFlow
-        A canonical 2-D Glow model composed of L multiscale levels, each with K GlowBlocks
-        and its own latent prior. The resulting flow supports sampling, density estimation,
-        and latent-space inference through nf.MultiscaleFlow interfaces.
+        A normflows MultiscaleFlow where `forward_and_log_det(z_list)` reconstructs x from
+        multiscale latents, and `inverse_and_log_det(x)` returns a list of latents (one per level).
 
     Notes
     -----
-    • Each spatial dimension must be divisible by 2**L to support repeated squeezes.
-    • Each Squeeze2d operation increases the channel dimension by a factor of 4 and
-      halves both spatial dimensions.
+    • Per-level forward order is `[GlowBlock2d] × K → Squeeze2d → Split`. Inverse therefore begins with
+      Unsqueeze at each level, then runs the K blocks. Each block is constructed with the number of channels
+      it actually receives in inverse, i.e., `4 * c_in(i)`.
+    • For channel-split couplings, ensure H and W are divisible by 2**L. The top-level `C=1` case is supported
+      specifically because Unsqueeze happens before the first split in inverse.
     """
-    
+
     C, H, W = input_shape
     _check_power_of_two_divisibility((H, W), L=L, dims=2)
 
-    q0 = []
-    flows = []
-    merges = []
+    if split_mode not in ("channel", "checkerboard"):
+        raise ValueError(f"Unknown split_mode={split_mode!r}")
+
+    q0, flows, merges = [], [], []
 
     for i in range(L):
-        ch_in = C * (4 ** (i + 1))   # blocks see post-squeeze channels (inverse hits squeeze first)
+        # Channels entering level i (forward) given your MultiscaleFlow indexing:
+        # top level (i=L-1) sees C; next sees 2C; etc.
+        c_in = C * (2 ** (L - 1 - i))
+
+        # In inverse, blocks run right after an unsqueeze → they see 4 * c_in channels
+        block_channels = 4 * c_in
 
         level_flows = [
             nf.flows.GlowBlock2d(
-                ch_in,
+                block_channels,          # <-- build for what it *actually* sees
                 hidden_channels,
-                split_mode=split_mode,
+                split_mode=split_mode,   # 'channel' is fine now
                 scale=scale,
-                scale_map="tanh",
+                scale_map=scale_map,
                 leaky=leaky,
                 net_actnorm=net_actnorm,
                 s_cap=scale_cap,
             )
             for _ in range(K)
         ]
-        level_flows.append(nf.flows.Squeeze2d())   # squeeze at END of level (forward)
+        # Squeeze comes *after* blocks in forward (so unsqueeze happens first in inverse)
+        level_flows.append(nf.flows.Squeeze2d())
         flows.append(level_flows)
 
-        lat_shape = (
-            ch_in // 2,                              # split sends half to the prior
-            H // (2 ** (i + 1)),
-            W // (2 ** (i + 1)),
-        )
+        # Latent peeled at level i: channels = 2 * c_in, spatial halved at this level
+        lat_shape = (2 * c_in, H // (2 ** (i + 1)), W // (2 ** (i + 1)))
         q0.append(
-            nfd.GlowBase(lat_shape, logscale_factor=glowbase_logscale_factor,
-                        min_log=glowbase_min_log, max_log=glowbase_max_log)
-            if base == "glow" else
-            nfd.DiagGaussian(lat_shape)
+            nfd.GlowBase(
+                lat_shape,
+                logscale_factor=glowbase_logscale_factor,
+                min_log=glowbase_min_log,
+                max_log=glowbase_max_log,
+            )
+            if base == "glow"
+            else nfd.DiagGaussian(lat_shape)
         )
 
         if i > 0:
             merges.append(nf.flows.Merge())
-            
+
     return nf.MultiscaleFlow(q0, flows, merges)
 
 
 def create_glow_normalizing_flow_model_3d(
-    input_shape: Tuple[int, int, int, int],          # (C, D, H, W)
+    input_shape: Tuple[int, int, int, int],  # (C, D, H, W)
     *,
     L: int,
     K: int,
@@ -256,106 +267,127 @@ def create_glow_normalizing_flow_model_3d(
     glowbase_logscale_factor: float = 3.0,
     glowbase_min_log: float = -5.0,
     glowbase_max_log: float = 5.0,
-    split_mode: Literal["channel"] = "channel",
+    split_mode: Literal["channel", "checkerboard"] = "channel",
     scale: bool = True,
-    scale_map: Optional[str] = "tanh",                 # forwarded to GlowBlock3d
+    scale_map: Optional[str] = "tanh",
     leaky: float = 0.0,
     net_actnorm: bool = True,
-    scale_cap: float = 3.0                           # s_cap in GlowBlock
-):
+    scale_cap: float = 3.0,
+) -> nf.MultiscaleFlow:
     """
-    Create a canonical 3-D Glow normalizing flow model with multiscale factorization.
+    Create a multiscale 3-D Glow model with bounded log-scales for numerical stability.
 
-    This implementation extends the original Glow architecture to 3-D volumetric data,
-    following the same multiscale design used in the 2-D case. Each level begins with
-    a spatial squeeze (2×2×2 grouping of voxels into channels) followed by a stack of
-    invertible GlowBlocks, and optionally splits off a latent tensor modeled by a prior.
+    The per-level forward ordering is **[GlowBlock3d] × K → Squeeze3d → Split** (with Squeeze3d packing
+    2×2×2 neighborhoods, i.e., channels×8 and spatial dims halved). Consequently, on inverse each level
+    begins with **Unsqueeze3d** before any coupling runs, which keeps channel-split couplings well-posed
+    even when the input has a single channel.
 
-    Structure per level i = 0..L-1:
-        Squeeze3d → [GlowBlock3d] × K → (Split latent_i)
+    3-D channel plan (channel split):
+      For L levels indexed i = 0..L-1 (top is i = L-1), let C be the input channels. Then
+        • channels entering level i (forward):         c_in(i) = C * 4**(L-1-i)
+        • channels seen by blocks (inverse, post-unsqueeze):  8 * c_in(i)
+        • latent peeled at level i (after squeeze & split):   4 * c_in(i)
+        • latent spatial size:                         (D/2**(i+1), H/2**(i+1), W/2**(i+1))
 
     Parameters
     ----------
-    input_shape : tuple of int
-        Input tensor shape (C, D, H, W).
+    input_shape : (int, int, int, int)
+        Input tensor shape as (C, D, H, W). D, H, and W must each be divisible by 2**L.
     L : int
-        Number of multiscale levels (squeeze + flow block groups).
+        Number of multiscale levels. Each level performs K Glow blocks, then a squeeze and a split.
     K : int
-        Number of Glow blocks per level.
+        Number of Glow blocks (ActNorm + invertible 1×1 conv + affine coupling) per level.
     hidden_channels : int
-        Number of hidden channels in the internal convolutional subnetworks.
+        Width of the conditioner CNN inside each affine coupling at all levels.
     base : {"glow", "diag"}, default="glow"
-        Choice of prior for each latent chunk:
-          * "glow" → bounded-channel GlowBase prior (per-channel mean/log-scale).
-          * "diag" → diagonal Gaussian prior (DiagGaussian).
+        Base distribution for each latent split. "glow" uses GlowBase (tanh-bounded log-scale);
+        "diag" uses a diagonal Gaussian.
     glowbase_logscale_factor : float, default=3.0
-        Multiplicative factor applied to the raw log-scale output in GlowBase.
-    glowbase_min_log, glowbase_max_log : float, default=(-5.0, 5.0)
-        Lower and upper bounds on the channel-wise log-scale in GlowBase.
-    split_mode : {"channel"}, default="channel"
-        How to split activations between flow and latent branches. Currently "channel" only.
+        Scale factor applied to the base distribution’s tanh-bounded log-scales.
+    glowbase_min_log : float, default=-5.0
+        Minimum (clipped) log-scale for the base distribution.
+    glowbase_max_log : float, default=5.0
+        Maximum (clipped) log-scale for the base distribution.
+    split_mode : {"channel", "checkerboard"}, default="channel"
+        Coupling split strategy. "channel" halves channels; "checkerboard" uses a spatial mask. With the
+        chosen per-level ordering, inverse starts with Unsqueeze3d, so channel split works for C ≥ 1.
     scale : bool, default=True
-        Enable multiplicative scaling in coupling layers (if False, additive-only).
-    scale_map : str or None, optional
-        Name of the nonlinearity applied to the scale head output (passed to GlowBlock3d).
+        Whether to learn the scale (s) in the affine coupling. If False, coupling is additive.
+    scale_map : {"tanh", None}, default="tanh"
+        Nonlinearity to bound the coupling log-scale, e.g., ŝ = scale_cap * tanh(raw).
     leaky : float, default=0.0
-        Negative slope for LeakyReLU activations in the coupling subnetworks.
+        Negative slope for any LeakyReLU used in the conditioner CNNs.
     net_actnorm : bool, default=True
-        Apply ActNorm after each coupling block for per-channel normalization.
+        Use ActNorm inside the conditioner CNNs.
     scale_cap : float, default=3.0
-        Bound on the log-scale parameter ŝ = scale_cap * tanh(raw) within each coupling.
+        Magnitude cap applied to the coupling scale head (used with `scale_map="tanh"`).
 
     Returns
     -------
     nf.MultiscaleFlow
-        A canonical 3-D Glow model composed of L multiscale levels, each with K GlowBlocks
-        and its own latent prior. The resulting flow supports sampling, density estimation,
-        and latent-space inference through nf.MultiscaleFlow interfaces.
+        A normflows MultiscaleFlow. `inverse_and_log_det(x)` returns a list of latents (one per level)
+        and log-det; `forward_and_log_det(z_list)` reconstructs x and returns the forward log-det.
 
     Notes
     -----
-    • Each spatial dimension (D, H, W) must be divisible by 2**L.
-    • Each Squeeze3d operation increases the channel dimension by a factor of 8 and
-      halves each spatial dimension.
+    • Per-level forward order is `[GlowBlock3d] × K → Squeeze3d → Split`. Inverse therefore begins with
+      Unsqueeze3d at each level, then runs the K blocks. Each block is constructed with the number of
+      channels it actually receives in inverse, i.e., `8 * c_in(i)`.
+    • Ensure D, H, W are multiples of `2**L`.
     """
-    
+
     C, D, H, W = input_shape
     _check_power_of_two_divisibility((D, H, W), L=L, dims=3)
 
-    q0 = []
-    flows = []
-    merges = []
+    if split_mode not in ("channel", "checkerboard"):
+        raise ValueError(f"Unknown split_mode={split_mode!r}")
+
+    q0, flows, merges = [], [], []
 
     for i in range(L):
-        ch_in = C * (8 ** (i + 1))
+        # Channels entering level i in forward (top is i=L-1)
+        c_in = C * (4 ** (L - 1 - i))
 
+        # Blocks actually run (in inverse) on post-unsqueeze activations
+        block_channels = 8 * c_in           # <-- key for 3-D
+
+        if split_mode == "channel" and (block_channels % 2 != 0):
+            raise ValueError(f"Channel split needs even channels at level {i}, got {block_channels}.")
+
+        # Build K Glow blocks for this level
         level_flows = [
             nf.flows.GlowBlock3d(
-                ch_in,
+                block_channels,             # <-- must match what it will *see* (not c_in)
                 hidden_channels,
-                split_mode=split_mode,
+                split_mode=split_mode,      # 'channel' works with this ordering
                 scale=scale,
-                scale_map="tanh",
+                scale_map=scale_map,
                 leaky=leaky,
                 net_actnorm=net_actnorm,
                 s_cap=scale_cap,
             )
             for _ in range(K)
         ]
+        # Squeeze AFTER blocks in forward (so Unsqueeze happens first in inverse)
         level_flows.append(nf.flows.Squeeze3d())
         flows.append(level_flows)
 
+        # Latent peeled at this level (matches your runtime): 4 * c_in channels
         lat_shape = (
-            ch_in // 2,
+            4 * c_in,
             D // (2 ** (i + 1)),
             H // (2 ** (i + 1)),
             W // (2 ** (i + 1)),
         )
         q0.append(
-            nfd.GlowBase(lat_shape, logscale_factor=glowbase_logscale_factor,
-                        min_log=glowbase_min_log, max_log=glowbase_max_log)
-            if base == "glow" else
-            nfd.DiagGaussian(lat_shape)
+            nfd.GlowBase(
+                lat_shape,
+                logscale_factor=glowbase_logscale_factor,
+                min_log=glowbase_min_log,
+                max_log=glowbase_max_log,
+            )
+            if base == "glow"
+            else nfd.DiagGaussian(lat_shape)
         )
 
         if i > 0:
