@@ -129,39 +129,41 @@ def _check_power_of_two_divisibility(spatial: Sequence[int], L: int, dims: int) 
         )
 
 @torch.no_grad()
-def _print_latent_and_base_shapes(model, input_shape, batch=2):
-    # 1) clone to avoid touching the real model's ActNorm state
-    m = copy.deepcopy(model).cpu().eval()
+def _print_model_summary(model, input_shape, batch=2):
 
-    # 2) non-degenerate probe (avoid std==0)
+    def _collect_bases(model):
+        if hasattr(model, "q0"):
+            b = model.q0
+        elif hasattr(model, "q0s"):
+            b = model.q0s
+        else:
+            return []
+        return list(b) if isinstance(b, (list, tuple, nn.ModuleList)) else [b]
+
+    # (Optional: deepcopy + randn probe to avoid ActNorm side-effects)
     x = torch.randn(batch, *tuple(input_shape), dtype=torch.float32)
-
-    # 3) actual shapes from the cloned graph
-    z_list, _ = m.inverse_and_log_det(x)
+    z_list, _ = model.inverse_and_log_det(x)
     zs = z_list if isinstance(z_list, (list, tuple)) else [z_list]
     latent_shapes = [tuple(z.shape[1:]) for z in zs]
 
-    # 4) base shapes (prefer declared .shape, else sample 1 from the clone)
-    if hasattr(m, "q0"):
-        bases = list(m.q0) if isinstance(m.q0, (list, tuple, nn.ModuleList)) else [m.q0]
-    elif hasattr(m, "q0s"):
-        bases = list(m.q0s) if isinstance(m.q0s, (list, tuple, nn.ModuleList)) else [m.q0s]
-    else:
-        bases = []
-
+    bases = _collect_bases(model)
     base_shapes = []
+    base_names  = []
     for b in bases:
+        # prefer declared shape; else sample one
         shp = getattr(b, "shape", None)
-        if shp is not None:
-            base_shapes.append(tuple(shp))
-        else:
+        if shp is None:
             s, _ = (b(1) if callable(b) else b.sample(1))
-            base_shapes.append(tuple(s.shape[1:]))
+            shp = tuple(s.shape[1:])
+        base_shapes.append(tuple(shp))
+        # distribution “name”
+        base_names.append(getattr(b, "name", None) or b.__class__.__name__)
 
     print(f"[model] input_shape={tuple(input_shape)} | levels={len(latent_shapes)}")
-    for i, (ls, bs) in enumerate(zip(latent_shapes, base_shapes)):
-        status = "OK" if (isinstance(bs, tuple) and bs == ls) else "MISMATCH"
-        print(f"  level {i:02d}: latent={ls}  base={bs}  -> {status}")
+    for i, (ls, bs, bn) in enumerate(zip(latent_shapes, base_shapes, base_names)):
+        status = "OK" if bs == ls else "MISMATCH"
+        print(f"  level {i:02d}: latent={ls}  base={bs}  dist={bn}  -> {status}")
+
 
 def create_glow_normalizing_flow_model_2d(
     input_shape: Tuple[int, int, int],  # (C, H, W)
@@ -296,7 +298,7 @@ def create_glow_normalizing_flow_model_2d(
 
     if verbose:
         print("Created the following 2D GLOW model:")
-        _print_latent_and_base_shapes(model, input_shape=input_shape)
+        _print_model_summary(model, input_shape=input_shape)
 
     return model
 
@@ -436,6 +438,6 @@ def create_glow_normalizing_flow_model_3d(
 
     if verbose:
         print("Created the following 3D GLOW model:")
-        _print_latent_and_base_shapes(model, input_shape=input_shape)
+        _print_model_summary(model, input_shape=input_shape)
 
     return model
