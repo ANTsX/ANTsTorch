@@ -6,6 +6,7 @@ from normflows import distributions as nfd
 
 from typing import Optional, Sequence, Tuple, Literal
 
+import os
 
 class _BoundedMLP(nn.Module):
     """
@@ -234,13 +235,12 @@ def create_glow_normalizing_flow_model_2d(
             )
             for _ in range(K)
         ]
-        # Squeeze comes *after* blocks in forward (so unsqueeze happens first in inverse)
         level_flows.append(nf.flows.Squeeze2d())
         flows.append(level_flows)
 
-        # Latent peeled at level i: channels = 2 * c_in, spatial halved at this level
         lat_ch = (4 * c_in) if i == 0 else (2 * c_in)
-        lat_shape = (lat_ch, H // (2 ** (i + 1)), W // (2 ** (i + 1)))
+        lat_shape = (lat_ch, H // (2 ** (L - i)), W // (2 ** (L - i)))
+
         q0.append(
             nfd.GlowBase(
                 lat_shape,
@@ -255,7 +255,9 @@ def create_glow_normalizing_flow_model_2d(
         if i > 0:
             merges.append(nf.flows.Merge())
 
-    return nf.MultiscaleFlow(q0, flows, merges)
+    model = nf.MultiscaleFlow(q0, flows, merges)
+
+    return model
 
 
 def create_glow_normalizing_flow_model_3d(
@@ -369,13 +371,12 @@ def create_glow_normalizing_flow_model_3d(
             )
             for _ in range(K)
         ]
-        # Squeeze AFTER blocks in forward (so Unsqueeze happens first in inverse)
         level_flows.append(nf.flows.Squeeze3d())
         flows.append(level_flows)
 
         lat_ch = (8 * c_in) if i == 0 else (4 * c_in)
-        s_div = 2 ** (L - i)
-        lat_shape = (lat_ch, D // s_div, H // s_div, W // s_div)
+        lat_shape = (lat_ch, D // (2 ** (L - i)), H // (2 ** (L - i)), W // (2 ** (L - i)))
+
         q0.append(
             nfd.GlowBase(
                 lat_shape,
@@ -389,4 +390,6 @@ def create_glow_normalizing_flow_model_3d(
         if i > 0:
             merges.append(nf.flows.Merge())
 
-    return nf.MultiscaleFlow(q0, flows, merges)
+    model = nf.MultiscaleFlow(q0, flows, merges)
+
+    return model

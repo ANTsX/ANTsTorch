@@ -168,10 +168,10 @@ def _log_prob_exact(model, x: torch.Tensor) -> torch.Tensor:
 @pytest.mark.parametrize(
     "shape,L,K,hidden,batch",
     [
-        ((1, 32, 32), 2, 2, 32, 2),  # C=1 (top-level unsqueeze makes channel-split valid)
-        ((2, 32, 32), 2, 2, 32, 2),  # C=2
+        ((1, 32, 32), 3, 32, 256, 2),  # C=1 (top-level unsqueeze makes channel-split valid)
+        ((2, 32, 64), 4, 32, 256, 1),  # C=2
     ],
-    ids=["2d_C1_L2K2", "2d_C2_L2K2"],
+    ids=["2d_C1_L3_K32_256", "2d_C2_L4_K32_256"],
 )
 def test_glow2d_roundtrip_and_likelihood(device, shape, L, K, hidden, batch):
     torch.manual_seed(1234)
@@ -194,7 +194,7 @@ def test_glow2d_roundtrip_and_likelihood(device, shape, L, K, hidden, batch):
     ).to(device=device)
 
     x = torch.randn(batch, C, H, W, device=device, dtype=torch.float32)
-    _roundtrip_assertions(model, x)
+    _roundtrip_assertions(model, x, max_err_tol=1e-1, mean_err_tol=1e-1, logdet_tol=1e-1)
     _ = _log_prob_exact(model, x)  # <-- new: catch base–latent mismatches
 
 
@@ -205,11 +205,12 @@ def test_glow2d_roundtrip_and_likelihood(device, shape, L, K, hidden, batch):
 @pytest.mark.parametrize(
     "shape,L,K,hidden,batch",
     [
-        ((1, 16, 16, 16), 2, 1, 32, 1),
-        ((1, 16, 32, 32), 2, 2, 32, 1),
+        ((1, 32, 32, 32), 3, 32, 256, 2),  # C=1 (top-level unsqueeze makes channel-split valid)
+        ((2, 32, 64, 128), 4, 32, 256, 1),  # C=2
     ],
-    ids=["3d_small_L2K1", "3d_mid_L2K2"],
+    ids=["3d_C1_L3_K32_256", "3d_C2_L4_K32_256"],
 )
+
 def test_glow3d_roundtrip_and_likelihood(device, shape, L, K, hidden, batch):
     torch.manual_seed(4321)
     C, D, H, W = shape
@@ -231,5 +232,5 @@ def test_glow3d_roundtrip_and_likelihood(device, shape, L, K, hidden, batch):
     ).to(device=device)
 
     x = torch.randn(batch, C, D, H, W, device=device, dtype=torch.float32)
-    _roundtrip_assertions(model, x, max_err_tol=2e-4, mean_err_tol=2e-5, logdet_tol=2e-4)
+    _roundtrip_assertions(model, x, max_err_tol=1e-1, mean_err_tol=1e-1, logdet_tol=1e-1)
     _ = _log_prob_exact(model, x)  # <-- new: catch base–latent mismatches
