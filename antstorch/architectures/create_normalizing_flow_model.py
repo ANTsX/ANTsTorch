@@ -4,9 +4,10 @@ import torch.nn as nn
 import normflows as nf
 from normflows import distributions as nfd
 
-from typing import Optional, Sequence, Tuple, Literal
+import copy
 
-import os
+from typing import Optional, Sequence, Tuple, Literal
+from itertools import zip_longest
 
 class _BoundedMLP(nn.Module):
     """
@@ -127,6 +128,41 @@ def _check_power_of_two_divisibility(spatial: Sequence[int], L: int, dims: int) 
             f"Each spatial dim must be divisible by 2**L={req}. Got {spatial} with L={L}."
         )
 
+@torch.no_grad()
+def _print_latent_and_base_shapes(model, input_shape, batch=2):
+    # 1) clone to avoid touching the real model's ActNorm state
+    m = copy.deepcopy(model).cpu().eval()
+
+    # 2) non-degenerate probe (avoid std==0)
+    x = torch.randn(batch, *tuple(input_shape), dtype=torch.float32)
+
+    # 3) actual shapes from the cloned graph
+    z_list, _ = m.inverse_and_log_det(x)
+    zs = z_list if isinstance(z_list, (list, tuple)) else [z_list]
+    latent_shapes = [tuple(z.shape[1:]) for z in zs]
+
+    # 4) base shapes (prefer declared .shape, else sample 1 from the clone)
+    if hasattr(m, "q0"):
+        bases = list(m.q0) if isinstance(m.q0, (list, tuple, nn.ModuleList)) else [m.q0]
+    elif hasattr(m, "q0s"):
+        bases = list(m.q0s) if isinstance(m.q0s, (list, tuple, nn.ModuleList)) else [m.q0s]
+    else:
+        bases = []
+
+    base_shapes = []
+    for b in bases:
+        shp = getattr(b, "shape", None)
+        if shp is not None:
+            base_shapes.append(tuple(shp))
+        else:
+            s, _ = (b(1) if callable(b) else b.sample(1))
+            base_shapes.append(tuple(s.shape[1:]))
+
+    print(f"[model] input_shape={tuple(input_shape)} | levels={len(latent_shapes)}")
+    for i, (ls, bs) in enumerate(zip(latent_shapes, base_shapes)):
+        status = "OK" if (isinstance(bs, tuple) and bs == ls) else "MISMATCH"
+        print(f"  level {i:02d}: latent={ls}  base={bs}  -> {status}")
+
 def create_glow_normalizing_flow_model_2d(
     input_shape: Tuple[int, int, int],  # (C, H, W)
     *,
@@ -143,6 +179,7 @@ def create_glow_normalizing_flow_model_2d(
     leaky: float = 0.0,
     net_actnorm: bool = True,
     scale_cap: float = 3.0,
+    verbose: bool = False,
 ) -> nf.MultiscaleFlow:
     """
     Create a multiscale 2-D Glow model with bounded log-scales and numerically stable base distributions.
@@ -257,6 +294,10 @@ def create_glow_normalizing_flow_model_2d(
 
     model = nf.MultiscaleFlow(q0, flows, merges)
 
+    if verbose:
+        print("Created the following 2D GLOW model:")
+        _print_latent_and_base_shapes(model, input_shape=input_shape)
+
     return model
 
 
@@ -276,6 +317,7 @@ def create_glow_normalizing_flow_model_3d(
     leaky: float = 0.0,
     net_actnorm: bool = True,
     scale_cap: float = 3.0,
+    verbose: bool = False,
 ) -> nf.MultiscaleFlow:
     """
     Create a multiscale 3-D Glow model with bounded log-scales for numerical stability.
@@ -391,5 +433,9 @@ def create_glow_normalizing_flow_model_3d(
             merges.append(nf.flows.Merge())
 
     model = nf.MultiscaleFlow(q0, flows, merges)
+
+    if verbose:
+        print("Created the following 3D GLOW model:")
+        _print_latent_and_base_shapes(model, input_shape=input_shape)
 
     return model

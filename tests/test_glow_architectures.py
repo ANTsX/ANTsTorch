@@ -191,6 +191,7 @@ def test_glow2d_roundtrip_and_likelihood(device, shape, L, K, hidden, batch):
         leaky=0.0,
         net_actnorm=True,
         scale_cap=3.0,
+        verbose=True,
     ).to(device=device)
 
     x = torch.randn(batch, C, H, W, device=device, dtype=torch.float32)
@@ -229,6 +230,7 @@ def test_glow3d_roundtrip_and_likelihood(device, shape, L, K, hidden, batch):
         leaky=0.0,
         net_actnorm=True,
         scale_cap=3.0,
+        verbose=True,
     ).to(device=device)
 
     x = torch.randn(batch, C, D, H, W, device=device, dtype=torch.float32)
