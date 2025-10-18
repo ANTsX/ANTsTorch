@@ -383,32 +383,6 @@ def _save_samples_grid(model, n, temp, out_path, nrow=10, target_hw=None):
     except Exception as e:
         return False, str(e)
 
-@torch.no_grad()
-def _save_batch_grid_from_loader(val_loader, view_idx, out_path, n=100, nrow=10, target_hw=None, device=None):
-    """
-    Draw images from val_loader for a given view and save a grid.
-    """
-    try:
-        xs = []
-        for batch in val_loader:
-            x = batch[:, view_idx:view_idx+1, :, :]
-            if device is not None:
-                x = x.to(device)
-            x = to01(x.float())
-            if target_hw is not None:
-                x = F.interpolate(x, size=target_hw, mode="bilinear", align_corners=False)
-            xs.append(x.cpu())
-            if sum(b.size(0) for b in xs) >= n:
-                break
-        if not xs:
-            return False, "val_loader empty"
-        x = torch.cat(xs, dim=0)[:n]
-        grid = _make_grid_canvas(x, nrow=nrow)
-        tv.utils.save_image(grid, str(out_path))
-        return True, None
-    except Exception as e:
-        return False, str(e)
-
 def _save_metric_plots(csv_path: Path, out_dir: Path):
     """
     Reads metrics.csv and writes loss and bpd line plots as PNGs.
