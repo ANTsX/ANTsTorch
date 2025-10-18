@@ -17,4 +17,9 @@
 from .normalizing_simr_flows_whitener import normalizing_simr_flows_whitener
 from .apply_normalizing_simr_flows_whitener import apply_normalizing_simr_flows_whitener
 
-
+from .latent_alignment import pearson_multi
+from .latent_alignment import info_nce_multi
+from .latent_alignment import barlow_twins_multi
+from .latent_alignment import vicreg_multi
+from .latent_alignment import hsic_biased
+from .latent_alignment import hsic_multi

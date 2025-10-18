@@ -4,42 +4,7 @@ import torch.nn as nn
 import normflows as nf
 from normflows import distributions as nfd
 
-import copy
-
 from typing import Optional, Sequence, Tuple, Literal
-from itertools import zip_longest
-
-class _BoundedMLP(nn.Module):
-    """
-    MLP with tanh-bounded output for the log-scale head.
-    - Keeps last Linear zero-initialized (identity start).
-    - Optional spectral norm on hidden (pre-final) Linear layers.
-    """
-    def __init__(self, layers, leaky: float, scale_cap: float = 3.0,
-                 init_zeros: bool = True, spectral_norm: bool = False):
-        super().__init__()
-        mlp = nf.nets.MLP(layers, leaky=leaky, init_zeros=init_zeros)
-        if spectral_norm:
-            linears = [m for m in mlp.modules() if isinstance(m, nn.Linear)]
-            for i, lin in enumerate(linears):
-                if i < len(linears) - 1:  # apply to hidden layers only
-                    nn.utils.parametrizations.spectral_norm(lin)
-        self.mlp = mlp
-        self.scale_cap = float(scale_cap)
-
-    def forward(self, x):
-        raw = self.mlp(x)
-        return self.scale_cap * torch.tanh(raw)
-
-
-def _make_masks(latent_size: int, mode: str = "alternating", rolls: int = 0):
-    """
-    Build binary masks (b, 1-b). Optionally roll the mask by 'rolls' to change which dims are active.
-    """
-    b = torch.tensor([1 if i % 2 == 0 else 0 for i in range(latent_size)], dtype=torch.float32)
-    if mode == "rolling" and rolls:
-        b = torch.roll(b, shifts=rolls, dims=0)
-    return b, (1.0 - b)
 
 
 def create_real_nvp_normalizing_flow_model(
@@ -82,6 +47,39 @@ def create_real_nvp_normalizing_flow_model(
     -------
     normflows.NormalizingFlow
     """
+
+    class _BoundedMLP(nn.Module):
+        """
+        MLP with tanh-bounded output for the log-scale head.
+        - Keeps last Linear zero-initialized (identity start).
+        - Optional spectral norm on hidden (pre-final) Linear layers.
+        """
+        def __init__(self, layers, leaky: float, scale_cap: float = 3.0,
+                    init_zeros: bool = True, spectral_norm: bool = False):
+            super().__init__()
+            mlp = nf.nets.MLP(layers, leaky=leaky, init_zeros=init_zeros)
+            if spectral_norm:
+                linears = [m for m in mlp.modules() if isinstance(m, nn.Linear)]
+                for i, lin in enumerate(linears):
+                    if i < len(linears) - 1:  # apply to hidden layers only
+                        nn.utils.parametrizations.spectral_norm(lin)
+            self.mlp = mlp
+            self.scale_cap = float(scale_cap)
+
+        def forward(self, x):
+            raw = self.mlp(x)
+            return self.scale_cap * torch.tanh(raw)
+
+
+    def _make_masks(latent_size: int, mode: str = "alternating", rolls: int = 0):
+        """
+        Build binary masks (b, 1-b). Optionally roll the mask by 'rolls' to change which dims are active.
+        """
+        b = torch.tensor([1 if i % 2 == 0 else 0 for i in range(latent_size)], dtype=torch.float32)
+        if mode == "rolling" and rolls:
+            b = torch.roll(b, shifts=rolls, dims=0)
+        return b, (1.0 - b)
+
 
     flows = []
     b0, b1 = _make_masks(latent_size, mode=mask_mode, rolls=0)
