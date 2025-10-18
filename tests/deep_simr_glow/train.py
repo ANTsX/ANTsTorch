@@ -164,205 +164,6 @@ def _flatten_latents(z):
     zs = z if isinstance(z, (list, tuple)) else [z]
     return torch.cat([zi.flatten(1) for zi in zs], dim=1)  # [B, sum_i CiHiWi]
 
-def info_nce_multi(views_feats: List[torch.Tensor], T: float):
-    """
-    views_feats: list of [B, D] tensors (v0, v1, ...).
-    Multi-positive NT-Xent: each row’s positives are same-sample in other views.
-    """
-    feats = [nn.functional.normalize(f, dim=1) for f in views_feats]
-    B = feats[0].size(0)
-    V = len(feats)
-    X = torch.cat(feats, dim=0)               # [V*B, D]
-    sim = X @ X.t() / max(T, 1e-8)            # [VB, VB]
-    mask = torch.eye(V*B, device=X.device, dtype=torch.bool)
-    sim.masked_fill_(mask, -1e9)              # remove self
-
-    ids = torch.arange(B, device=X.device).repeat(V)  # [VB]
-    loss_rows = []
-    arange_vb = torch.arange(V*B, device=X.device)
-    for i in range(V*B):
-        pos = (ids == ids[i]) & (arange_vb != i)
-        denom = torch.logsumexp(sim[i], dim=0)
-        numer = torch.logsumexp(sim[i][pos], dim=0)
-        loss_rows.append(-(numer - denom))
-    return torch.stack(loss_rows, dim=0).mean()
-
-def barlow_pairs(views_feats: List[torch.Tensor], lam: float):
-    """
-    Pairwise Barlow Twins across all (i<j) view pairs; average the loss.
-    Each feats: [B,D]. Follows BT: diag->1, off-diag->0.
-    """
-    B = views_feats[0].size(0)
-    losses = []
-    eye_cache = None
-    for i in range(len(views_feats)):
-        Zi = (views_feats[i] - views_feats[i].mean(0)) / (views_feats[i].std(0) + 1e-5)
-        Zi = torch.nan_to_num(Zi)
-        for j in range(i+1, len(views_feats)):
-            Zi = torch.nan_to_num(Zi)
-            Zj = (views_feats[j] - views_feats[j].mean(0)) / (views_feats[j].std(0) + 1e-5)
-            Zj = torch.nan_to_num(Zj)
-            C = (Zi.t() @ Zj) / max(B, 1)
-            C = torch.nan_to_num(C)
-            if eye_cache is None or eye_cache.size(0) != C.size(0):
-                eye_cache = torch.eye(C.size(0), device=C.device, dtype=C.dtype)
-            on = (C.diag() - 1).pow(2).sum()
-            off = (C - eye_cache).pow(2).sum() - (C.diag() - 1).pow(2).sum()
-            losses.append(on + lam * off)
-    return torch.stack(losses).mean() if losses else torch.tensor(0.0, device=views_feats[0].device)
-
-def _offdiag(x: torch.Tensor) -> torch.Tensor:
-    # return the off-diagonal elements of a square matrix
-    n, m = x.shape
-    assert n == m
-    return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
-
-def vicreg_multi(views_feats: List[torch.Tensor],
-                 w_inv: float = 25.0,
-                 w_var: float = 25.0,
-                 w_cov: float = 1.0,
-                 gamma: float = 1.0) -> torch.Tensor:
-    """
-    Multi-view VICReg:
-      - invariance: average MSE over all (i<j) pairs
-      - variance:   per-view std >= gamma (penalize relu(gamma - std)^2)
-      - covariance: per-view off-diagonal covariance squared sum
-    Returns a scalar loss.
-    """
-    V = len(views_feats)
-    B = views_feats[0].size(0)
-    eps = 1e-4
-
-    # Invariance (pairwise MSE)
-    inv = torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
-    n_pairs = 0
-    for i in range(V):
-        for j in range(i + 1, V):
-            inv = inv + F.mse_loss(views_feats[i], views_feats[j])
-            n_pairs += 1
-    if n_pairs > 0:
-        inv = inv / float(n_pairs)
-
-    # Variance & Covariance (per view)
-    var_acc = torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
-    cov_acc = torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
-    for v in range(V):
-        z = views_feats[v]
-        # variance
-        std = z.std(dim=0) + eps
-        var = torch.relu(gamma - std).pow(2).mean()
-        var_acc = var_acc + var
-        # covariance
-        zc = z - z.mean(dim=0, keepdim=True)
-        cov = (zc.t() @ zc) / max(B - 1, 1)
-        cov = _offdiag(cov).pow(2).sum() / cov.size(0)
-        cov_acc = cov_acc + cov
-
-    var_acc = var_acc / float(V)
-    cov_acc = cov_acc / float(V)
-
-    return w_inv * inv + w_var * var_acc + w_cov * cov_acc
-
-def _pairwise_sq_dists(x: torch.Tensor) -> torch.Tensor:
-    # x: [B,D]
-    x_norm = (x * x).sum(dim=1, keepdim=True)  # [B,1]
-    d2 = x_norm + x_norm.t() - 2.0 * (x @ x.t())
-    d2 = torch.clamp(d2, min=0.0)
-    return d2
-
-def _median_heuristic_sigma(x: torch.Tensor) -> float:
-    # median of upper-triangular pairwise distances (sqrt of squared distances)
-    with torch.no_grad():
-        d2 = _pairwise_sq_dists(x)
-        triu = d2.triu(diagonal=1)
-        vals = triu[triu > 0].flatten()
-        if vals.numel() == 0:
-            return 1.0
-        med = torch.median(torch.sqrt(vals)).item()
-        if med <= 0 or not (med == med):  # NaN check
-            return 1.0
-        return med
-
-def _rbf_gram(x: torch.Tensor, sigma: float) -> torch.Tensor:
-    d2 = _pairwise_sq_dists(x)
-    if sigma <= 0:
-        sigma = _median_heuristic_sigma(x)
-    gamma = 1.0 / (2.0 * (sigma ** 2) + 1e-12)
-    K = torch.exp(-gamma * d2)
-    return K
-
-def hsic_biased(x: torch.Tensor, y: torch.Tensor, sigma_x: float = 0.0, sigma_y: float = 0.0) -> torch.Tensor:
-    """
-    Biased HSIC estimator with RBF kernels.
-    HSIC = (1/(n-1)^2) * trace(K H L H), where H = I - 1/n 11^T
-    """
-    assert x.size(0) == y.size(0), "Batch sizes must match for HSIC."
-    n = x.size(0)
-    if n < 2:
-        return torch.tensor(0.0, device=x.device, dtype=x.dtype)
-
-    K = _rbf_gram(x, sigma_x)
-    L = _rbf_gram(y, sigma_y)
-
-    I = torch.eye(n, device=x.device, dtype=x.dtype)
-    H = I - (1.0 / n) * torch.ones_like(I)
-    KH = K @ H
-    HLH = H @ L @ H
-    hsic = torch.trace(KH @ HLH) / max((n - 1) ** 2, 1)
-    return hsic
-
-def hsic_pairs(views_feats: List[torch.Tensor], sigma: float = 0.0) -> torch.Tensor:
-    """
-    Average negative HSIC (so it's a loss) over all (i<j) view pairs.
-    If sigma==0, uses median heuristic per view for the RBF bandwidths.
-    """
-    V = len(views_feats)
-    if V < 2:
-        return torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
-
-    loss = torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
-    n_pairs = 0
-    for i in range(V):
-        for j in range(i + 1, V):
-            # separate bandwidths for each view improve stability
-            sig_i = sigma if sigma > 0 else 0.0
-            sig_j = sigma if sigma > 0 else 0.0
-            hs = hsic_biased(views_feats[i], views_feats[j], sigma_x=sig_i, sigma_y=sig_j)
-            loss = loss - hs  # negative to maximize dependence
-            n_pairs += 1
-    if n_pairs > 0:
-        loss = loss / float(n_pairs)
-    return loss
-
-def pearson_pairs(views_feats: List[torch.Tensor]) -> torch.Tensor:
-    """
-    Pearson correlation baseline (maximize average diagonal correlation).
-    For each pair of views z_i, z_j (B,D):
-      1) Standardize each feature across the batch.
-      2) Compute cross-correlation matrix C = X^T Y / (B-1).
-      3) Take mean of the diagonal of C (feature-aligned corr).
-    Loss = -mean_diag_corr averaged over all (i<j) pairs.
-    """
-    V = len(views_feats)
-    if V < 2:
-        return torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
-
-    eps = 1e-6
-    total = torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
-    n_pairs = 0
-    for i in range(V):
-        for j in range(i + 1, V):
-            x = views_feats[i]
-            y = views_feats[j]
-            B = x.size(0)
-            # standardize along batch
-            x = (x - x.mean(dim=0)) / (x.std(dim=0) + eps)
-            y = (y - y.mean(dim=0)) / (y.std(dim=0) + eps)
-            C = (x.t() @ y) / max(B - 1, 1)  # [D,D]
-            diag_mean = torch.diag(C).mean()
-            total = total - diag_mean  # negative to maximize correlation
-            n_pairs += 1
-    return total / float(n_pairs) if n_pairs > 0 else total
 
 # ------------------------- viz helpers -------------------------
 
@@ -997,9 +798,9 @@ def main():
             feats = [f.float() for f in feats]  # keep loss math in fp32
 
             if args.align == "barlow":
-                L_align = barlow_pairs(feats, lam=float(args.barlow_lambda))
+                L_align = antstorch.barlow_twins_multi(feats, lam=float(args.barlow_lambda))
             elif args.align == "vicreg":
-                L_align = vicreg_multi(
+                L_align = antstorch.vicreg_multi(
                     feats,
                     w_inv=float(args.vicreg_inv),
                     w_var=float(args.vicreg_var),
@@ -1007,11 +808,11 @@ def main():
                     gamma=float(args.vicreg_gamma),
                 )
             elif args.align == "infonce":
-                L_align = info_nce_multi(feats, T=float(args.temperature))
+                L_align = antstorch.info_nce_multi(feats, T=float(args.temperature))
             elif args.align == "hsic":
-                L_align = hsic_pairs(feats, sigma=float(args.hsic_sigma))
+                L_align = antstorch.hsic_multi(feats, sigma=float(args.hsic_sigma))
             elif args.align == "pearson":
-                L_align = pearson_pairs(feats)
+                L_align = antstorch.pearson_multi(feats)
 
         # Combine with fixed or Kendall weighting
         if args.weighting == "fixed" or args.align == "none":

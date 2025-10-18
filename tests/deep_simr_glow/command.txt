@@ -54,3 +54,17 @@ python train.py \
   --out-dir runs/t1_t2_fa_32x32_hsic \
   --align hsic
 
+
+python train.py \
+  --modalities T1 T2 FA \
+  --H 32 --W 32 --L 3 --K 4 --hidden 64 \
+  --batch 64 \
+  --devices cuda:0 --precision mixed --ema \
+  --lr 1e-4 --warmup-iters 400 \
+  --train-samples 3000 --val-samples 128 \
+  --max-iter 30000 --eval-interval 500 \
+  --smooth-alpha 0.05 \
+  --sample-mode model \
+  --sample-temp 1.0 \
+  --out-dir runs/t1_t2_fa_32x32_pearson \
+  --align pearson
