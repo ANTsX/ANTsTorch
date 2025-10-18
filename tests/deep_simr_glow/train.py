@@ -1,102 +1,145 @@
-# train_glow_model_joint_2d_uncertainty_es_plus_dir_safeguarded.py
-# ----------------------------------------------------------------------------
-# Based on: train_glow_model_joint_2d_uncertainty_es_plus_dir.py
-# Adds the requested "minimal first-step" stability trio:
-#   1) NaN/Inf sentry checks (loss, grads, probe forward pass) with diagnostics
-#   2) Gradient clipping (correctly ordered with AMP) + grad-norm logging
-#   3) LR warmup (existing) + ReduceLROnPlateau on avg RAW val_bpd
-# Plus:
-#   - Numeric explosion sentries on |z| and |sample|
-#   - CSV logging for z_abs_max
-# ----------------------------------------------------------------------------
+#!/usr/bin/env python3
+"""
+Glow 2D trainer (ANTsTorch builder) with:
+  • Multi-view (T2/T1/FA), exact log-likelihood
+  • Warmup + ReduceLROnPlateau, grad clip, AMP (bf16/fp16), EMA
+  • Resume, CSV logging, preview grids (model or val data)
+  • Alignment across views: --align {none,infonce,barlow,vicreg,hsic,pearson}
+  • Optional Kendall & Gal uncertainty weighting: --weighting {fixed,kendall}
+  • Synthetic data fallback: --data synthetic
+"""
 
-import os, json, math, csv, shutil, traceback
+import argparse
 from pathlib import Path
-from datetime import datetime
+from typing import List, Tuple
 
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset
 import torchvision as tv
-from torch.utils.data import DataLoader
 
+from tqdm.auto import tqdm
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import csv
+
+import ants
+import antstorch
 import normflows as nf
-from normflows import distributions as nfd
 
-import ants, antstorch
+from contextlib import nullcontext
 
-from tqdm import tqdm
-from matplotlib import pyplot as plt
-from matplotlib import ticker as mtick
+def _no_autocast_for(device_type: str):
+    # keep NF math in FP32 for stability under AMP
+    try:
+        return torch.autocast(device_type=device_type, enabled=False)
+    except Exception:
+        return nullcontext()
 
-import warnings
-warnings.filterwarnings("ignore", category=UserWarning)
+# ------------------------- small utils -------------------------
 
-# ---------------------------
-# Helpers
-# ---------------------------
-
-def set_deterministic(seed: int = 0):
+def set_deterministic(seed: int):
     torch.manual_seed(seed)
     np.random.seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def nonfinite_and_outlier_clean(x: torch.Tensor, clamp_abs: float = 1e6):
-    x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
-    if clamp_abs is not None:
-        x = torch.clamp(x, -clamp_abs, clamp_abs)
-    return x
+def _check_hw_divisible(H: int, W: int, L: int):
+    r = 2 ** L
+    if (H % r) or (W % r):
+        raise ValueError(f"H and W must be divisible by 2**L={r}. Got H={H}, W={W}, L={L}")
 
-def per_sample_minmax01(x: torch.Tensor, eps: float = 1e-8):
+def to01(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     x_min = x.amin(dim=(2, 3), keepdim=True)
     x_max = x.amax(dim=(2, 3), keepdim=True)
     return (x - x_min) / (x_max - x_min + eps)
 
-def bits_per_dim_from_kld(model, x: torch.Tensor, num_dims: int):
-    b = x.shape[0]
-    total = 0.0
-    with torch.no_grad():
-        for i in range(b):
-            loss_i = model.forward_kld(x[i:i+1, ...])
-            total += float(loss_i.detach().cpu().item())
-    avg = total / b
-    return avg / (np.log(2.0) * num_dims)
+def bits_per_dim(logp: torch.Tensor, num_dims: int) -> torch.Tensor:
+    return -logp / (np.log(2.0) * float(num_dims))  # [B]
 
-def simple_moving_average(x, w=200):
-    x = np.asarray(x, dtype=float)
-    if w <= 1 or len(x) < w:
-        return x
-    k = np.ones(w, dtype=float) / w
-    y = np.convolve(x, k, mode="valid")            # length N-w+1
-    return np.concatenate([np.full(w-1, np.nan), y])  # length N
+def n_params(m: nn.Module) -> int:
+    return sum(p.numel() for p in m.parameters())
 
-def evaluate_val_bpd(models, loader, device, num_dims, max_batches=10):
-    for m in range(len(models)): models[m].eval()
-    view_sums = [0.0 for _ in models]; view_counts = [0 for _ in models]
-    batches_done = 0
-    for x in loader:
-        if batches_done >= max_batches: break
-        for m in range(len(models)):
-            x_m = x[:, m:m+1, :, :].to(device)
-            x_m = per_sample_minmax01(nonfinite_and_outlier_clean(x_m)).to(next(models[m].parameters()).dtype)
-            bpd = bits_per_dim_from_kld(models[m], x_m, num_dims)
-            view_sums[m] += bpd; view_counts[m] += 1
-        batches_done += 1
-    vals = [ (view_sums[m] / max(1, view_counts[m])) for m in range(len(models)) ]
-    for m in range(len(models)): models[m].train()
-    return vals
+# Ensure ActNorm init & inverse happen in FP32 (safe w/ AMP)
+def flow_inverse_fp32(model, x, dev_type):
+    with _no_autocast_for(dev_type):     # you already have this context helper
+        z_list, ldj = model.inverse_and_log_det(x.float())
+    return z_list, ldj
 
-def ensure_dir(p: Path): p.mkdir(parents=True, exist_ok=True); return p
-
-def make_warmup_scheduler(optimizer, warmup_iters:int, decay_gamma:float, decay_steps:int):
+# Put this helper near your other utils (top-level)
+def build_lat_flat_fp32(models, batch_views, dev_type, device):
     """
-    Keeps previous LambdaLR behavior for warmup (and optional exp decay).
-    This plays fine with an additional ReduceLROnPlateau that we step at eval.
+    batch_views: (B, V, H, W) tensor from your train loader (same one used for log_prob)
+    Returns: list of flattened z per view in FP32
     """
-    if warmup_iters<=0 and (decay_gamma==1.0 or decay_steps<=0):
+    lat_flat = []
+    for vi, m in enumerate(models):
+        xv = to01(batch_views[:, vi:vi+1, :, :].to(device)).to(torch.float32)
+        with _no_autocast_for(dev_type):                # <-- force FP32 for ActNorm/init
+            z_list, _ = m.inverse_and_log_det(xv)
+        z_last = torch.flatten(z_list[-1], 1)           # or however you pick/aggregate z
+        lat_flat.append(z_last)
+    return lat_flat
+
+
+# --- helpers (put near imports) ---
+@torch.no_grad()
+def _copy_actnorm_state(src, dst):
+    for ms, md in zip(src.modules(), dst.modules()):
+        if "actnorm" in ms.__class__.__name__.lower():
+            for fld in ("logs","log_scale","scale","weight"):
+                if hasattr(ms, fld) and hasattr(md, fld):
+                    getattr(md, fld).data.copy_(getattr(ms, fld).data)
+            for fld in ("bias","b"):
+                if hasattr(ms, fld) and hasattr(md, fld):
+                    getattr(md, fld).data.copy_(getattr(ms, fld).data)
+            for fld in ("initialized","is_initialized","inited"):
+                if hasattr(ms, fld) and hasattr(md, fld):
+                    try: getattr(md, fld).data.copy_(getattr(ms, fld).data)
+                    except Exception: setattr(md, fld, bool(getattr(ms, fld)))
+
+# Robust, version-agnostic exact log p(x)
+def log_prob_exact(model, x: torch.Tensor) -> torch.Tensor:
+    """
+    Exact log p(x) = Σ_i log p_i(z_i) + log|det J|.
+    Works for nf.MultiscaleFlow (z is list) and single-scale (z is tensor).
+    """
+    z, logdet = model.inverse_and_log_det(x)
+
+    def bases_of(m):
+        if hasattr(m, "q0s"):
+            q0s = getattr(m, "q0s")
+            if isinstance(q0s, (list, tuple, nn.ModuleList)):
+                return list(q0s)
+        if hasattr(m, "q0"):
+            q0 = getattr(m, "q0")
+            if isinstance(q0, (list, tuple, nn.ModuleList)):
+                return list(q0)
+            if q0 is not None:
+                return [q0]
+        raise RuntimeError("No base distribution(s) on model (q0/q0s)")
+
+    if isinstance(z, (list, tuple)):
+        bases = bases_of(model)
+        if len(bases) == 1 and len(z) > 1:
+            bases = bases * len(z)
+        if len(bases) != len(z):
+            raise RuntimeError(f"bases ({len(bases)}) != latents ({len(z)})")
+        base_lp = sum(b.log_prob(zi) for b, zi in zip(bases, z))
+    else:
+        base_lp = bases_of(model)[0].log_prob(z)
+
+    return base_lp + logdet  # shape [B]
+
+def make_warmup(optimizer, warmup_iters: int, decay_gamma: float, decay_steps: int):
+    if warmup_iters <= 0 and (decay_gamma == 1.0 or decay_steps <= 0):
         return None
     def lr_lambda(step):
-        s = max(1, step)  # 1-based for stability
+        s = max(1, step)
         scale = 1.0
         if warmup_iters > 0 and s < warmup_iters:
             scale *= s / float(warmup_iters)
@@ -105,753 +148,1067 @@ def make_warmup_scheduler(optimizer, warmup_iters:int, decay_gamma:float, decay_
         return scale
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
-def clone_ema_model(model):
-    import copy as _copy
-    ema = _copy.deepcopy(model)
-    for p in ema.parameters():
-        p.requires_grad_(False)
-    ema.eval()
-    return ema
+# ------------------------- alignment helpers -------------------------
+class Projector(nn.Module):
+    def __init__(self, in_dim: int, hidden: int, out_dim: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, out_dim),
+        )
+    def forward(self, x):  # [B, D]
+        return self.net(x)
+
+def _flatten_latents(z):
+    zs = z if isinstance(z, (list, tuple)) else [z]
+    return torch.cat([zi.flatten(1) for zi in zs], dim=1)  # [B, sum_i CiHiWi]
+
+def info_nce_multi(views_feats: List[torch.Tensor], T: float):
+    """
+    views_feats: list of [B, D] tensors (v0, v1, ...).
+    Multi-positive NT-Xent: each row’s positives are same-sample in other views.
+    """
+    feats = [nn.functional.normalize(f, dim=1) for f in views_feats]
+    B = feats[0].size(0)
+    V = len(feats)
+    X = torch.cat(feats, dim=0)               # [V*B, D]
+    sim = X @ X.t() / max(T, 1e-8)            # [VB, VB]
+    mask = torch.eye(V*B, device=X.device, dtype=torch.bool)
+    sim.masked_fill_(mask, -1e9)              # remove self
+
+    ids = torch.arange(B, device=X.device).repeat(V)  # [VB]
+    loss_rows = []
+    arange_vb = torch.arange(V*B, device=X.device)
+    for i in range(V*B):
+        pos = (ids == ids[i]) & (arange_vb != i)
+        denom = torch.logsumexp(sim[i], dim=0)
+        numer = torch.logsumexp(sim[i][pos], dim=0)
+        loss_rows.append(-(numer - denom))
+    return torch.stack(loss_rows, dim=0).mean()
+
+def barlow_pairs(views_feats: List[torch.Tensor], lam: float):
+    """
+    Pairwise Barlow Twins across all (i<j) view pairs; average the loss.
+    Each feats: [B,D]. Follows BT: diag->1, off-diag->0.
+    """
+    B = views_feats[0].size(0)
+    losses = []
+    eye_cache = None
+    for i in range(len(views_feats)):
+        Zi = (views_feats[i] - views_feats[i].mean(0)) / (views_feats[i].std(0) + 1e-5)
+        Zi = torch.nan_to_num(Zi)
+        for j in range(i+1, len(views_feats)):
+            Zi = torch.nan_to_num(Zi)
+            Zj = (views_feats[j] - views_feats[j].mean(0)) / (views_feats[j].std(0) + 1e-5)
+            Zj = torch.nan_to_num(Zj)
+            C = (Zi.t() @ Zj) / max(B, 1)
+            C = torch.nan_to_num(C)
+            if eye_cache is None or eye_cache.size(0) != C.size(0):
+                eye_cache = torch.eye(C.size(0), device=C.device, dtype=C.dtype)
+            on = (C.diag() - 1).pow(2).sum()
+            off = (C - eye_cache).pow(2).sum() - (C.diag() - 1).pow(2).sum()
+            losses.append(on + lam * off)
+    return torch.stack(losses).mean() if losses else torch.tensor(0.0, device=views_feats[0].device)
+
+def _offdiag(x: torch.Tensor) -> torch.Tensor:
+    # return the off-diagonal elements of a square matrix
+    n, m = x.shape
+    assert n == m
+    return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
+
+def vicreg_multi(views_feats: List[torch.Tensor],
+                 w_inv: float = 25.0,
+                 w_var: float = 25.0,
+                 w_cov: float = 1.0,
+                 gamma: float = 1.0) -> torch.Tensor:
+    """
+    Multi-view VICReg:
+      - invariance: average MSE over all (i<j) pairs
+      - variance:   per-view std >= gamma (penalize relu(gamma - std)^2)
+      - covariance: per-view off-diagonal covariance squared sum
+    Returns a scalar loss.
+    """
+    V = len(views_feats)
+    B = views_feats[0].size(0)
+    eps = 1e-4
+
+    # Invariance (pairwise MSE)
+    inv = torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
+    n_pairs = 0
+    for i in range(V):
+        for j in range(i + 1, V):
+            inv = inv + F.mse_loss(views_feats[i], views_feats[j])
+            n_pairs += 1
+    if n_pairs > 0:
+        inv = inv / float(n_pairs)
+
+    # Variance & Covariance (per view)
+    var_acc = torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
+    cov_acc = torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
+    for v in range(V):
+        z = views_feats[v]
+        # variance
+        std = z.std(dim=0) + eps
+        var = torch.relu(gamma - std).pow(2).mean()
+        var_acc = var_acc + var
+        # covariance
+        zc = z - z.mean(dim=0, keepdim=True)
+        cov = (zc.t() @ zc) / max(B - 1, 1)
+        cov = _offdiag(cov).pow(2).sum() / cov.size(0)
+        cov_acc = cov_acc + cov
+
+    var_acc = var_acc / float(V)
+    cov_acc = cov_acc / float(V)
+
+    return w_inv * inv + w_var * var_acc + w_cov * cov_acc
+
+def _pairwise_sq_dists(x: torch.Tensor) -> torch.Tensor:
+    # x: [B,D]
+    x_norm = (x * x).sum(dim=1, keepdim=True)  # [B,1]
+    d2 = x_norm + x_norm.t() - 2.0 * (x @ x.t())
+    d2 = torch.clamp(d2, min=0.0)
+    return d2
+
+def _median_heuristic_sigma(x: torch.Tensor) -> float:
+    # median of upper-triangular pairwise distances (sqrt of squared distances)
+    with torch.no_grad():
+        d2 = _pairwise_sq_dists(x)
+        triu = d2.triu(diagonal=1)
+        vals = triu[triu > 0].flatten()
+        if vals.numel() == 0:
+            return 1.0
+        med = torch.median(torch.sqrt(vals)).item()
+        if med <= 0 or not (med == med):  # NaN check
+            return 1.0
+        return med
+
+def _rbf_gram(x: torch.Tensor, sigma: float) -> torch.Tensor:
+    d2 = _pairwise_sq_dists(x)
+    if sigma <= 0:
+        sigma = _median_heuristic_sigma(x)
+    gamma = 1.0 / (2.0 * (sigma ** 2) + 1e-12)
+    K = torch.exp(-gamma * d2)
+    return K
+
+def hsic_biased(x: torch.Tensor, y: torch.Tensor, sigma_x: float = 0.0, sigma_y: float = 0.0) -> torch.Tensor:
+    """
+    Biased HSIC estimator with RBF kernels.
+    HSIC = (1/(n-1)^2) * trace(K H L H), where H = I - 1/n 11^T
+    """
+    assert x.size(0) == y.size(0), "Batch sizes must match for HSIC."
+    n = x.size(0)
+    if n < 2:
+        return torch.tensor(0.0, device=x.device, dtype=x.dtype)
+
+    K = _rbf_gram(x, sigma_x)
+    L = _rbf_gram(y, sigma_y)
+
+    I = torch.eye(n, device=x.device, dtype=x.dtype)
+    H = I - (1.0 / n) * torch.ones_like(I)
+    KH = K @ H
+    HLH = H @ L @ H
+    hsic = torch.trace(KH @ HLH) / max((n - 1) ** 2, 1)
+    return hsic
+
+def hsic_pairs(views_feats: List[torch.Tensor], sigma: float = 0.0) -> torch.Tensor:
+    """
+    Average negative HSIC (so it's a loss) over all (i<j) view pairs.
+    If sigma==0, uses median heuristic per view for the RBF bandwidths.
+    """
+    V = len(views_feats)
+    if V < 2:
+        return torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
+
+    loss = torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
+    n_pairs = 0
+    for i in range(V):
+        for j in range(i + 1, V):
+            # separate bandwidths for each view improve stability
+            sig_i = sigma if sigma > 0 else 0.0
+            sig_j = sigma if sigma > 0 else 0.0
+            hs = hsic_biased(views_feats[i], views_feats[j], sigma_x=sig_i, sigma_y=sig_j)
+            loss = loss - hs  # negative to maximize dependence
+            n_pairs += 1
+    if n_pairs > 0:
+        loss = loss / float(n_pairs)
+    return loss
+
+def pearson_pairs(views_feats: List[torch.Tensor]) -> torch.Tensor:
+    """
+    Pearson correlation baseline (maximize average diagonal correlation).
+    For each pair of views z_i, z_j (B,D):
+      1) Standardize each feature across the batch.
+      2) Compute cross-correlation matrix C = X^T Y / (B-1).
+      3) Take mean of the diagonal of C (feature-aligned corr).
+    Loss = -mean_diag_corr averaged over all (i<j) pairs.
+    """
+    V = len(views_feats)
+    if V < 2:
+        return torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
+
+    eps = 1e-6
+    total = torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
+    n_pairs = 0
+    for i in range(V):
+        for j in range(i + 1, V):
+            x = views_feats[i]
+            y = views_feats[j]
+            B = x.size(0)
+            # standardize along batch
+            x = (x - x.mean(dim=0)) / (x.std(dim=0) + eps)
+            y = (y - y.mean(dim=0)) / (y.std(dim=0) + eps)
+            C = (x.t() @ y) / max(B - 1, 1)  # [D,D]
+            diag_mean = torch.diag(C).mean()
+            total = total - diag_mean  # negative to maximize correlation
+            n_pairs += 1
+    return total / float(n_pairs) if n_pairs > 0 else total
+
+# ------------------------- viz helpers -------------------------
+
+def _make_grid_canvas(x, nrow=10):
+    """
+    x: Tensor (N,C,H,W). Returns a single (C, H_total, W_total) canvas.
+    """
+    assert torch.is_tensor(x) and x.dim() == 4, "x must be (N,C,H,W) tensor"
+    N, C, H, W = x.shape
+    cols = int(nrow)
+    rows = (N + cols - 1) // cols
+    canvas = x.new_zeros(C, rows * H, cols * W)
+    for idx in range(N):
+        r = idx // cols
+        c = idx % cols
+        canvas[:, r*H:(r+1)*H, c*W:(c+1)*W] = x[idx]
+    return canvas
+
+def _coerce_nchw_4d(x, target_hw=None):
+    """
+    Ensure x is a 4D float tensor (N,C,H,W), optionally resized to target_hw=(H,W).
+    Handles: tensor, (tensor, logw), list/tuple of tensors (picks largest H*W).
+    Converts channel-last to channel-first, clamps to [0,1], reduces odd C to 1.
+    """
+    # If list/tuple, pick largest candidate (by spatial area) after normalizing shapes
+    if isinstance(x, (list, tuple)):
+        cands = [t for t in x if torch.is_tensor(t) and t.dim() in (3,4)]
+        if not cands:
+            raise ValueError("No tensor candidates in sample output.")
+        areas, fixed = [], []
+        for t in cands:
+            if t.dim() == 3:  # CHW or HWC
+                if t.shape[-1] in (1,3) and (t.shape[0] not in (1,3)):
+                    t = t.permute(2,0,1).contiguous()
+                t = t.unsqueeze(0)  # NCHW
+            elif t.dim() == 4:
+                if t.shape[-1] in (1,3) and t.shape[1] not in (1,3):
+                    t = t.permute(0,3,1,2).contiguous()
+            fixed.append(t)
+            areas.append(int(t.shape[-1]) * int(t.shape[-2]))
+        x = fixed[int(torch.tensor(areas).argmax().item())]
+
+    # Tensor path
+    if not torch.is_tensor(x):
+        raise ValueError(f"Sample output is not a tensor: {type(x)}")
+
+    if x.dim() == 3:
+        if x.shape[-1] in (1,3) and x.shape[0] not in (1,3):
+            x = x.permute(2,0,1).contiguous()
+        x = x.unsqueeze(0)
+
+    if x.dim() == 4 and x.shape[-1] in (1,3) and x.shape[1] not in (1,3):
+        x = x.permute(0,3,1,2).contiguous()
+
+    if x.size(1) not in (1,3):
+        x = x.mean(dim=1, keepdim=True)
+
+    x = torch.clamp(x, 0, 1).float()
+
+    if target_hw is not None:
+        Ht, Wt = int(target_hw[0]), int(target_hw[1])
+        H, W = int(x.shape[-2]), int(x.shape[-1])
+        if (H, W) != (Ht, Wt):
+            x = F.interpolate(x, size=(Ht, Wt), mode="bilinear", align_corners=False)
+
+    return x
 
 @torch.no_grad()
-def ema_update(ema_model, model, decay: float):
-    for p_ema, p in zip(ema_model.parameters(), model.parameters()):
-        p_ema.data.mul_(decay).add_(p.data, alpha=1.0 - decay)
-
-# ---- Sentry tools -----------------------------------------------------------
-
-def grad_is_finite_and_below(param_list, max_abs: float = 1e6):
-    for p in param_list:
-        if p.grad is None: 
-            continue
-        g = p.grad
-        if not torch.isfinite(g).all():
-            return False
-        if torch.isnan(g).any() or torch.isinf(g).any():
-            return False
-        if g.abs().max().item() > max_abs:
-            return False
-    return True
-
-@torch.no_grad()
-def probe_forward(models, x_probe, device, model_dtype,
-                  z_absmax_thresh=None,
-                  sample_absmax_thresh=None,
-                  sample_quantile: float = 0.999):
+def _save_samples_grid(model, n, temp, out_path, nrow=10, target_hw=None):
     """
-    Quantile-based sample sentry: robust to lone extreme pixels.
-    Also reports z-abs-max (strict) for visibility.
+    Try model.sample; coerce to (N,C,H,W); tile; save.
     """
-    stats = {"ok": True, "per_view": []}
     try:
-        for m in range(len(models)):
-            x_m = per_sample_minmax01(nonfinite_and_outlier_clean(
-                x_probe[:, m:m+1, :, :].to(device)
-            )).to(model_dtype)
-
-            # Smoke-test core ops
-            z_m, _ = models[m].inverse_and_log_det(x_m)
-            kld = models[m].forward_kld(x_m)
-            xs, _ = models[m].sample(x_m.shape[0])
-
-            # z stats (strict max for observability)
-            zs = torch.cat([z_m[p].reshape(z_m[p].shape[0], -1) for p in range(len(z_m))], dim=1)
-            z_abs_max = float(zs.abs().max().item())
-            z_mean = float(zs.mean().item())
-
-            # replace the block that builds `flat = xs.abs().reshape(...)` and quantiles with:
-            q = float(sample_quantile)
-
-            # choose sample space
-            mode = getattr(args, "sentry_sample_space", "tanh")  # default "tanh" if flag not present
-
-            if mode == "tanh":
-                xs_meas = torch.tanh(xs)                     # compress dynamic range
-            elif mode == "robust":
-                flat = xs.reshape(xs.shape[0], -1)
-                med = flat.median(dim=1, keepdim=True).values
-                mad = (flat - med).abs().median(dim=1, keepdim=True).values + 1e-6
-                xs_meas = ((flat - med) / mad).reshape_as(xs)  # per-sample robust standardization
-            else:
-                xs_meas = xs  # "raw"
-
-            flat_meas = xs_meas.abs().reshape(xs_meas.shape[0], -1)
-
-            if q >= 1.0:
-                x_q_stat = float(flat_meas.max().item())
-            else:
-                xq = torch.quantile(flat_meas, q, dim=1)   # per-sample q; then max across batch
-                x_q_stat = float(xq.max().item())
-
-
-            stats["per_view"].append({
-                "z_abs_max": z_abs_max,
-                "z_mean": z_mean,
-                "x_q_stat": x_q_stat,
-                "kld": float(kld.detach().cpu().item())
-            })
-
-            if (not np.isfinite(z_abs_max)) or (not np.isfinite(z_mean)) or (not np.isfinite(x_q_stat)):
-                stats["ok"] = False
-            if (z_absmax_thresh is not None) and (z_abs_max > float(z_absmax_thresh)):
-                stats["ok"] = False
-            if (sample_absmax_thresh is not None) and (x_q_stat > float(sample_absmax_thresh)):
-                stats["ok"] = False
-    except Exception as e:
-        stats["ok"] = False
-        stats["error"] = str(e)
-    return stats
-
-def dump_sentry_package(trial_dir: Path, it: int, models, optimizer, loss_val: float, extra: dict):
-    dump_dir = ensure_dir(trial_dir / f"SENTRY_DUMP_iter{it:07d}")
-    # Save model weights
-    for mi, mod in enumerate(extra.get("modalities", [f"view{mi}" for mi in range(len(models))])):
         try:
-            models[mi].save(str(dump_dir / f"model_{mod}.pt"))
+            s = model.sample(n, temperature=temp)   
+        except TypeError:
+            s = model.sample(n)                     
+        x = s[0] if isinstance(s, (list, tuple)) else s
+        x = _coerce_nchw_4d(x, target_hw=target_hw)
+        # If std is suspiciously tiny, retry with manual latent sampling
+        try:
+            _std = x.std().item()
         except Exception:
-            torch.save(models[mi].state_dict(), dump_dir / f"model_{mod}_state_dict.pt")
-    # Save optimizer state
+            _std = 0.0
+        if _std < 1e-5:
+            try:
+                x = _manual_prior_sample(model, n, temp, x_template=None)
+                x = _coerce_nchw_4d(x, target_hw=target_hw)
+            except Exception:
+                pass
+        # If std is suspiciously tiny, retry with manual latent sampling
+        if torch.isfinite(x).all():
+            _std = x.std().item()
+            if _std < 1e-5:
+                try:
+                    x = _manual_prior_sample(model, n, temp)
+                    x = _coerce_nchw_4d(x, target_hw=target_hw)
+                except Exception:
+                    pass
+        x = to01(x)
+        assert torch.isfinite(x).all(), "non-finite in sample grid"
+        if x.shape[0] < n:
+            reps = (n + x.shape[0] - 1) // x.shape[0]
+            x = x.repeat(reps, 1, 1, 1)
+        x = x[:n]
+        grid = _make_grid_canvas(x, nrow=nrow)
+        tv.utils.save_image(grid, str(out_path))
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+@torch.no_grad()
+def _save_batch_grid_from_loader(val_loader, view_idx, out_path, n=100, nrow=10, target_hw=None, device=None):
+    """
+    Draw images from val_loader for a given view and save a grid.
+    """
     try:
-        torch.save(optimizer.state_dict(), dump_dir / "optimizer_state.pt")
+        xs = []
+        for batch in val_loader:
+            x = batch[:, view_idx:view_idx+1, :, :]
+            if device is not None:
+                x = x.to(device)
+            x = to01(x.float())
+            if target_hw is not None:
+                x = F.interpolate(x, size=target_hw, mode="bilinear", align_corners=False)
+            xs.append(x.cpu())
+            if sum(b.size(0) for b in xs) >= n:
+                break
+        if not xs:
+            return False, "val_loader empty"
+        x = torch.cat(xs, dim=0)[:n]
+        grid = _make_grid_canvas(x, nrow=nrow)
+        tv.utils.save_image(grid, str(out_path))
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+def _save_metric_plots(csv_path: Path, out_dir: Path):
+    """
+    Reads metrics.csv and writes loss and bpd line plots as PNGs.
+    """
+    if not csv_path.exists():
+        return
+    iters, losses, bpds = [], [], []
+    try:
+        with open(csv_path, "r") as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            for row in reader:
+                if len(row) < 4:
+                    continue
+                it, loss, bpd = int(float(row[0])), float(row[1]), float(row[2])
+                iters.append(it); losses.append(loss); bpds.append(bpd)
+        if len(iters) < 2:
+            return
+        # Loss
+        plt.figure()
+        plt.plot(iters, losses)
+        plt.xlabel("iter"); plt.ylabel("loss"); plt.title("Training loss")
+        plt.tight_layout()
+        plt.savefig(out_dir / "loss_curve.png")
+        plt.close()
+        # BPD
+        plt.figure()
+        plt.plot(iters, bpds)
+        plt.xlabel("iter"); plt.ylabel("sum_bpd"); plt.title("Sum BPD (training batches)")
+        plt.tight_layout()
+        plt.savefig(out_dir / "bpd_curve.png")
+        plt.close()
     except Exception:
         pass
-    # Save meta JSON
-    meta = {
-        "iter": it,
-        "loss": float(loss_val) if np.isfinite(loss_val) else str(loss_val),
-        "extra": extra,
-    }
-    with open(dump_dir/"meta.json","w") as f:
-        json.dump(meta, f, indent=2)
-    return dump_dir
 
-# ---------------------------
-# CLI
-# ---------------------------
+# ------------------------- data -------------------------
 
-import argparse
-parser = argparse.ArgumentParser(description="Glow 2D with learned uncertainty, early stopping + AMP/EMA/scheduler/init/resume + penalty direction + sentry checks.")
-parser.add_argument("--devices", type=str, default="cuda:0")
-parser.add_argument("--modalities", type=str, nargs="+", default=["T2","T1","FA"])
-parser.add_argument("--L", type=int, default=4)
-parser.add_argument("--K", type=int, default=2)
-parser.add_argument("--hidden-channels", type=int, default=64)
-parser.add_argument("--resampled-size", type=int, nargs=2, default=[128,128])
-parser.add_argument("--batch-size", type=int, default=128)
-parser.add_argument("--max-iter", type=int, default=100000)
-parser.add_argument("--plot-interval", type=int, default=1000)
-parser.add_argument("--eval-interval", type=int, default=1000)
-parser.add_argument("--num-workers", type=int, default=4)
-parser.add_argument("--train-samples", type=int, default=100)
-parser.add_argument("--val-samples", type=int, default=16)
-parser.add_argument("--lr", type=float, default=1e-4)
-parser.add_argument("--min-lr", type=float, default=1e-6, help="Floor LR for Plateau scheduler.")
-parser.add_argument("--weight-decay", type=float, default=1e-5)
-parser.add_argument("--penalty", type=str, default="pearson", choices=["pearson","mine"], help="Cross-view dependence measure.")
-# NEW: Direction + targets
-parser.add_argument("--penalty-direction", type=str, default="separate", choices=["separate","align"],
-                    help="'separate' = decorrelate/independence; 'align' = encourage correlation/MI")
-parser.add_argument("--mi-target", type=float, default=0.2, help="Target MI for align mode with MINE (hinge at tau).")
-parser.add_argument("--mine-lr", type=float, default=1e-6)
-parser.add_argument("--mine-update-freq", type=int, default=10)
-parser.add_argument("--out-dir", type=str, default="runs")
-parser.add_argument("--seed", type=int, default=0)
-parser.add_argument("--grad-clip", type=float, default=1.0)
-parser.add_argument("--val-max-batches", type=int, default=10)
-parser.add_argument("--init-log-sigma-kld", type=float, default=0.0)
-parser.add_argument("--init-log-sigma-pen", type=float, default=0.0)
-# Early stopping
-parser.add_argument("--early-stopping-patience", type=int, default=0, help="Patience in eval steps; 0 disables early stopping")
-parser.add_argument("--min-delta", type=float, default=0.0, help="Minimum improvement in avg val_bpd to reset patience")
-# Precision / AMP
-parser.add_argument("--precision", type=str, default="double", choices=["double","float","mixed"], help="Compute precision: double=fp64, float=fp32, mixed=AMP on fp32 weights")
-# EMA
-parser.add_argument("--ema", action="store_true", help="Enable EMA evaluation/sampling")
-parser.add_argument("--ema-decay", type=float, default=0.999)
-# LR schedule (warmup retained; exp decay optional)
-parser.add_argument("--warmup-iters", type=int, default=400)
-parser.add_argument("--lr-decay-gamma", type=float, default=1.0, help="Exp decay gamma per (steps/decay_steps). Set 1.0 to disable.")
-parser.add_argument("--lr-decay-steps", type=int, default=0)
-# NEW: ReduceLROnPlateau on avg RAW val_bpd
-parser.add_argument("--plateau-factor", type=float, default=0.5, help="Multiply LR by this factor on plateau.")
-parser.add_argument("--plateau-patience", type=int, default=3, help="Eval windows to wait before reducing LR.")
-parser.add_argument("--plateau-threshold", type=float, default=1e-4, help="Min improvement to reset plateau patience.")
-parser.add_argument("--plateau-cooldown", type=int, default=0)
-# Init & resume
-parser.add_argument("--actnorm-init", action="store_true", help="Run a data-dependent init pass for ActNorm on first batch")
-parser.add_argument("--resume", type=str, default="", help="Path to an existing run dir to resume from (expects training_state.pt)")
-parser.add_argument("--base", type=str, default="diag", choices=["diag","glow"])
-parser.add_argument("--glowbase-logscale-factor", type=float, default=3.0)
-parser.add_argument("--glowbase-min-log", type=float, default=-5.0)
-parser.add_argument("--glowbase-max-log", type=float, default=5.0)
-parser.add_argument("--scale-map", type=str, default="tanh", choices=["tanh","exp","sigmoid","sigmoid_inv"], help="Coupling scale map for Glow blocks")
-parser.add_argument("--scale-cap", type=float, default=3.0, help="Clamp on log-scale (|s|<=cap) inside coupling when scale-map uses tanh-bound")
-parser.add_argument("--net-actnorm", action="store_true", help="Enable ActNorm in coupling subnets (ConvNet2d/3d)")
-parser.add_argument("--net-leaky", type=float, default=0.1, help="Leaky slope for coupling subnets")
-# NEW: Sentry controls
-parser.add_argument("--sentry-interval", type=int, default=200, help="How often (iters) to run sentry checks. 0 disables.")
-parser.add_argument("--sentry-grad-absmax", type=float, default=1e6, help="Declares non-finite if any grad has abs() > this.")
-parser.add_argument("--sentry-sample-quantile", type=float, default=0.999, help="Quantile of |sample| used for sentry (1.0 = strict max).")
-parser.add_argument("--sentry-probe-batchsize", type=int, default=4, help="Mini-batch size for probe forward.")
-parser.add_argument("--sentry-dump", action="store_true", help="Dump models/optimizer/meta if a sentry fails.")
-parser.add_argument("--sentry-z-absmax", type=float, default=1e3, help="Fail sentry if any |z| exceeds this.")
-parser.add_argument("--sentry-sample-absmax", type=float, default=10.0, help="Fail sentry if any sample pixel exceeds this (pre-clamp).")
-parser.add_argument("--sentry-sample-space", type=str, default="tanh", choices=["tanh", "robust", "raw"], help="Space to measure sample magnitudes for the sentry (tanh|robust|raw).")
-parser.add_argument("--sentry-strikes", type=int, default=1, help="Consecutive sentry failures required before aborting.")
-args = parser.parse_args()
+def load_hcpya_slices(mods: List[str], H: int, W: int, slice_idx=120):
+    keys = dict(T2="hcpyaT2Template", T1="hcpyaT1Template", FA="hcpyaFATemplate")
+    imgs = [ants.image_read(antstorch.get_antstorch_data(keys[m])) for m in mods]
+    slcs = [ants.slice_image(im, axis=2, idx=slice_idx, collapse_strategy=1) for im in imgs]
+    tmpl = ants.resample_image(slcs[0], (H, W), use_voxels=True)
+    return slcs, tmpl
 
-set_deterministic(args.seed)
+def build_loaders(mods, H, W, train_samples, val_samples, batch, num_workers, do_aug=True):
+    slcs, tmpl = load_hcpya_slices(mods, H, W)
+    train = antstorch.ImageDataset(
+        images=[slcs],
+        template=tmpl,
+        do_data_augmentation=do_aug,
+        data_augmentation_transform_type="affineAndDeformation",
+        data_augmentation_sd_affine=0.02,
+        data_augmentation_sd_deformation=10.0,
+        number_of_samples=int(train_samples),
+    )
+    val = antstorch.ImageDataset(
+        images=[slcs],
+        template=tmpl,
+        do_data_augmentation=True,
+        data_augmentation_transform_type="affineAndDeformation",
+        data_augmentation_sd_affine=0.05,
+        data_augmentation_sd_deformation=0.2,
+        data_augmentation_noise_model="additivegaussian",
+        data_augmentation_sd_simulated_bias_field=1.0,
+        data_augmentation_sd_histogram_warping=0.05,
+        number_of_samples=int(val_samples),
+    )
+    train_loader = DataLoader(train, batch_size=batch, shuffle=True, num_workers=num_workers)
+    val_loader   = DataLoader(val,   batch_size=min(16, batch), shuffle=False, num_workers=max(1, num_workers // 2))
+    return train_loader, val_loader
 
-# Devices
-dev_list = [d.strip() for d in args.devices.split(",")]
-device = torch.device("cpu") if dev_list[0].lower()=="cpu" else torch.device(dev_list[0])
+class _SyntheticDataset(Dataset):
+    def __init__(self, n_samples:int, views:int, H:int, W:int, seed:int=0):
+        self.n = int(n_samples); self.v = int(views); self.H = int(H); self.W = int(W)
+        g = torch.Generator().manual_seed(seed)
+        self.data = torch.rand((self.n, self.v, self.H, self.W), generator=g)
+    def __len__(self): return self.n
+    def __getitem__(self, i): return self.data[i]
 
-# Precision setup
-if args.precision == "double":
-    model_dtype = torch.float64
-    amp_enabled = False
-elif args.precision == "float":
-    model_dtype = torch.float32
-    amp_enabled = False
-else:  # mixed
-    model_dtype = torch.float32
-    amp_enabled = True
-    amp_dtype = torch.float16  # safe default
-scaler_flow = torch.amp.GradScaler('cuda', enabled=amp_enabled)
-scaler_mine = torch.amp.GradScaler('cuda', enabled=amp_enabled)
-
-# ---------------------------
-# Define flow arch per view
-# ---------------------------
-
-channels = 1; resampled_image_size = tuple(args.resampled_size)
-input_shape = (channels, *resampled_image_size); n_dims = int(np.prod(input_shape))
-L,K,hidden_channels = args.L, args.K, args.hidden_channels
-split_mode, scale = 'channel', True
-use_mutual_information_penalty = (args.penalty == "mine")
-
-models = []; combined_model_parameters=[]; mine_latent_dim=0
-print(f"[GlowConfig] scale_map={args.scale_map} scale_cap={args.scale_cap} net_actnorm={args.net_actnorm} net_leaky={args.net_leaky}")
-for m in range(len(args.modalities)):
-    q0=[]; merges=[]; flows=[]
-    for i in range(L):
-        flows_ = [nf.flows.GlowBlock2d(channels * 2 ** (L+1-i), hidden_channels, split_mode=split_mode, scale=scale,
-                                scale_map=args.scale_map, leaky=args.net_leaky, net_actnorm=args.net_actnorm,
-                                s_cap=args.scale_cap) for j in range(K)]
-        flows_ += [nf.flows.Squeeze2d()]; flows += [flows_]
-        latent_shape = (input_shape[0] * 2 ** (L-i if i>0 else L+1),
-                        input_shape[1] // 2 ** (L-i if i>0 else L),
-                        input_shape[2] // 2 ** (L-i if i>0 else L))
-        if m==0: mine_latent_dim += math.prod(latent_shape)
-        if args.base == "glow":
-            q0 += [nfd.GlowBase(
-                latent_shape,
-                logscale_factor=args.glowbase_logscale_factor,
-                min_log=args.glowbase_min_log,
-                max_log=args.glowbase_max_log
-            )]
-        else:
-            q0 += [nfd.DiagGaussian(latent_shape)]
-        if i>0: merges += [nf.flows.Merge()]
-    model = nf.MultiscaleFlow(q0, flows, merges)
-    models.append(model); combined_model_parameters+=list(model.parameters())
-for m in range(len(models)):
-    models[m]=models[m].to(device).to(model_dtype).train()
-
-# Learnable log-sigmas (match model dtype)
-log_sigma_kld = torch.nn.Parameter(torch.tensor(float(args.init_log_sigma_kld), dtype=model_dtype, device=device))
-log_sigma_pen = torch.nn.Parameter(torch.tensor(float(args.init_log_sigma_pen), dtype=model_dtype, device=device))
-combined_model_parameters += [log_sigma_kld, log_sigma_pen]
-
-# EMA setup (flow models only)
-ema_models = None
-if args.ema:
-    ema_models = [clone_ema_model(models[m]) for m in range(len(models))]
-
-# Penalty setup
-if use_mutual_information_penalty:
-    penalty_string="Mutual information"; mine_nets=[]; ma_ets=[]; combined_penalty_parameters=[]
-    for n in range(sum(1 for m in range(len(models)) for n in range(m+1,len(models)))):
-        net=antstorch.MINE(mine_latent_dim,mine_latent_dim).to(device).to(model_dtype)
-        mine_nets.append(net); combined_penalty_parameters+=list(net.parameters()); ma_ets.append(None)
-else: penalty_string="Pearson Correlation"; mine_nets=None; ma_ets=None; combined_penalty_parameters=[]
-
-# Data
-hcpya_images=[ants.image_read(antstorch.get_antstorch_data("hcpyaT2Template")),
-              ants.image_read(antstorch.get_antstorch_data("hcpyaT1Template")),
-              ants.image_read(antstorch.get_antstorch_data("hcpyaFATemplate"))]
-hcpya_slices=[ants.slice_image(im,axis=2,idx=120,collapse_strategy=1) for im in hcpya_images]
-template=ants.resample_image(hcpya_slices[0],resampled_image_size,use_voxels=True)
-train_loader=DataLoader(antstorch.ImageDataset(images=[hcpya_slices],template=template,do_data_augmentation=True,
-            data_augmentation_transform_type="affineAndDeformation",
-            data_augmentation_sd_affine=0.02,data_augmentation_sd_deformation=10.0,
-            number_of_samples=int(args.train_samples)),
-            batch_size=args.batch_size,shuffle=True,num_workers=args.num_workers)
-val_loader=DataLoader(antstorch.ImageDataset(images=[hcpya_slices],template=template,do_data_augmentation=True,
-            data_augmentation_transform_type="affineAndDeformation",
-            data_augmentation_sd_affine=0.05,data_augmentation_sd_deformation=0.2,
-            data_augmentation_noise_model="additivegaussian",data_augmentation_sd_simulated_bias_field=1.0,
-            data_augmentation_sd_histogram_warping=0.05,number_of_samples=int(args.val_samples)),
-            batch_size=min(16,args.batch_size),shuffle=False,num_workers=max(1,args.num_workers//2))
-train_iter=iter(train_loader)
-
-# Trial dir & resume
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-if args.resume:
-    trial_dir = Path(args.resume)
-    if not trial_dir.exists(): raise FileNotFoundError(f"--resume path not found: {trial_dir}")
-else:
-    trial_dir=ensure_dir(Path(args.out_dir)/f"glow_joint2d_uncertES_plus_dir_safeguarded_{timestamp}")
-
-state_path = trial_dir/"training_state.pt"
-log_path=trial_dir/"metrics_log.csv"
-config_path = trial_dir/"config.json"
-
-# Save/merge config
-config = {
-    "timestamp": timestamp,
-    "devices": args.devices,
-    "modalities": args.modalities,
-    "L": L, "K": K, "hidden_channels": hidden_channels,
-    "resampled_size": resampled_image_size,
-    "batch_size": args.batch_size,
-    "max_iter": args.max_iter,
-    "plot_interval": args.plot_interval,
-    "eval_interval": args.eval_interval,
-    "train_samples": args.train_samples,
-    "val_samples": args.val_samples,
-    "lr": args.lr, "weight_decay": args.weight_decay,
-    "penalty": args.penalty,
-    "penalty_direction": args.penalty_direction,
-    "mi_target": args.mi_target,
-    "mine_lr": args.mine_lr, "mine_update_freq": args.mine_update_freq,
-    "seed": args.seed,
-    "precision": args.precision,
-    "ema": args.ema, "ema_decay": args.ema_decay,
-    "warmup_iters": args.warmup_iters,
-    "lr_decay_gamma": args.lr_decay_gamma, "lr_decay_steps": args.lr_decay_steps,
-    "plateau": {
-        "factor": args.plateau_factor,
-        "patience": args.plateau_patience,
-        "threshold": args.plateau_threshold,
-        "cooldown": args.plateau_cooldown,
-        "min_lr": args.min_lr,
-    },
-    "actnorm_init": args.actnorm_init,
-    "init_log_sigma_kld": args.init_log_sigma_kld,
-    "init_log_sigma_pen": args.init_log_sigma_pen,
-    "sentry": {
-        "interval": args.sentry_interval,
-        "grad_absmax": args.sentry_grad_absmax,
-        "probe_batchsize": args.sentry_probe_batchsize,
-        "dump": bool(args.sentry_dump),
-        "z_absmax": args.sentry_z_absmax,
-        "sample_absmax": args.sentry_sample_absmax,
-    },
-    "normflows_version": getattr(nf, "__version__", "unknown"),
-    "torch_version": torch.__version__
-}
-# On fresh run, write config; on resume, do not overwrite
-if not args.resume:
-    with open(config_path, "w") as f: json.dump(config, f, indent=2)
-
-# CSV header
-if not args.resume or not log_path.exists():
-    with open(log_path,"w",newline="") as f:
-        writer=csv.writer(f)
-        header=["iter","loss_total","loss_kld","penalty_term","log_sigma_kld","log_sigma_pen",
-                "w_kld","w_pen",
-                "avg_val_bpd_raw","avg_val_bpd_ema","lr","grad_norm","z_abs_max","sentry_ok"]
-        for m in range(len(models)): header+=[f"val_bpd_{args.modalities[m]}"]
-        writer.writerow(header)
-
-# Checkpoints
-last_ckpts=[trial_dir/f"model_{mod}_last.pt" for mod in args.modalities]
-best_ckpts=[trial_dir/f"model_{mod}_best.pt" for mod in args.modalities]
-best_val_bpd=[float("inf")]*len(models)  # per view
-best_avg=float("inf"); no_improve=0
-start_iter = 1
-
-# Optimizers
-flow_optimizer=torch.optim.Adamax(combined_model_parameters,lr=float(args.lr),weight_decay=float(args.weight_decay))
-mine_optimizer=torch.optim.Adamax(combined_penalty_parameters,lr=float(args.mine_lr),weight_decay=float(args.weight_decay)) if use_mutual_information_penalty else None
-
-# Schedulers
-warmup_sched = make_warmup_scheduler(flow_optimizer, args.warmup_iters, args.lr_decay_gamma, args.lr_decay_steps)
-plateau_sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    flow_optimizer, mode="min", factor=args.plateau_factor, patience=args.plateau_patience,
-    threshold=args.plateau_threshold, cooldown=args.plateau_cooldown, min_lr=args.min_lr, verbose=True
-)
-
-# ---------------------------
-# Resume logic (if any)
-# ---------------------------
-if args.resume and state_path.exists():
-    ckpt = torch.load(state_path, map_location=device, weights_only=False)
-    # Load flow weights if last exists
-    for m in range(len(models)):
-        model_path = trial_dir / f"model_{args.modalities[m]}_last.pt"
-        if model_path.exists():
-            models[m].load_state_dict(torch.load(model_path, map_location=device, weights_only=False))
-    # Load optimizers/scheduler/scalers/state
-    flow_optimizer.load_state_dict(ckpt.get("flow_optimizer", flow_optimizer.state_dict()))
-    if mine_optimizer and "mine_optimizer" in ckpt and ckpt["mine_optimizer"] is not None: mine_optimizer.load_state_dict(ckpt["mine_optimizer"])
-    if warmup_sched and "scheduler" in ckpt and ckpt["scheduler"] is not None: warmup_sched.load_state_dict(ckpt["scheduler"])
-    if "best_val_bpd" in ckpt: best_val_bpd = ckpt["best_val_bpd"]
-    if "best_avg" in ckpt: best_avg = ckpt["best_avg"]
-    if "no_improve" in ckpt: no_improve = ckpt["no_improve"]
-    if "iter" in ckpt: start_iter = ckpt["iter"]
-    # EMA
-    if args.ema and "ema_state_dicts" in ckpt and ckpt["ema_state_dicts"] is not None:
-        ema_models = [clone_ema_model(models[m]) for m in range(len(models))]  # ensure same arch
-        for m, sd in enumerate(ckpt["ema_state_dicts"]):
-            ema_models[m].load_state_dict(sd)
-    print(f"Resumed from {state_path}, starting at iter {start_iter}")
-
-# ---------------------------
-# ActNorm data-dependent init
-# ---------------------------
-if args.actnorm_init and not args.resume:
-    try:
-        with torch.no_grad():
-            x_init = next(train_iter)
-            for m in range(len(models)):
-                x_m = per_sample_minmax01(nonfinite_and_outlier_clean(x_init[:,m:m+1,:,:].to(device))).to(model_dtype)
-                _ = models[m].forward_kld(x_m)  # one pass to set ActNorm stats
-        print("ActNorm data-dependent init done.")
-    except Exception as e:
-        print(f"ActNorm init skipped due to: {e}")
-
-# ---------------------------
-# Training loop
-# ---------------------------
-
-loss_iter = []; loss_kld_hist = []; penalty_hist = []; loss_hist = []; loss_conv = []
-grad_norm_hist = []; sentry_ok_hist = []; z_abs_max_hist = []
-w_kld_hist, w_pen_hist = [], []
-sentry_strikes = 0
-
-for it in tqdm(range(start_iter, int(args.max_iter)+1)):
-    flow_optimizer.zero_grad()
-    if mine_optimizer: mine_optimizer.zero_grad()
-
-    # Fetch batch
-    try: x = next(train_iter)
-    except StopIteration: train_iter = iter(train_loader); x = next(train_iter)
-
-    # Encode each view
-    z=[]; loss_kld = torch.tensor(0.0, device=device, dtype=model_dtype)
-    with torch.amp.autocast('cuda', enabled=amp_enabled, dtype=(amp_dtype if amp_enabled else None)):
-        for m in range(len(models)):
-            x_m = per_sample_minmax01(nonfinite_and_outlier_clean(x[:,m:m+1,:,:].to(device))).to(model_dtype)
-            z_m, _ = models[m].inverse_and_log_det(x_m)
-            z.append(z_m)
-            loss_kld = loss_kld + models[m].forward_kld(x_m)
-
-    # Quick z explosion guard (per batch) — use 99.9% quantile of |z| instead of strict max
-    try:
-        q = 0.999  # quantile for the z-stat guard
-        z_view_stats = []
-        for m in range(len(z)):
-            # Flatten multiscale latents for this view and compute per-sample |z|
-            flat_m = torch.cat(
-                [z[m][p].reshape(z[m][p].shape[0], -1).to(torch.float32) for p in range(len(z[m]))],
-                dim=1,
-            ).abs()
-            # Per-sample quantile, then take batch max for this view
-            zq_m = torch.quantile(flat_m, q, dim=1)  # shape: [batch]
-            z_view_stats.append(zq_m.max())
-        # Max across views → single batch statistic
-        z_abs_max = float(torch.stack(z_view_stats).max().item())
-    except Exception:
-        z_abs_max = float("nan")
-
-    if np.isfinite(z_abs_max) and z_abs_max > float(args.sentry_z_absmax):
-        extra = {
-            "why": f"z |.| q{q*100:.1f} over threshold",
-            "z_q": float(z_abs_max),
-            "modalities": args.modalities,
-        }
-        if args.sentry_dump:
-            dump_dir = dump_sentry_package(trial_dir, it, models, flow_optimizer, float("nan"), extra)
-            print(f"[SENTRY] z quantile guard at iter {it}. Dumped to: {dump_dir}")
-        raise FloatingPointError(
-            f"z |.| q{q*100:.1f} = {z_abs_max} exceeds threshold {args.sentry_z_absmax} at iter {it}"
-        )
-
-    # Cross-view penalty (depends on direction)
-    penalty_term = torch.tensor(0.0, device=device, dtype=model_dtype)
-    pair_idx = 0
-    for m in range(len(models)):
-        for n in range(m+1,len(models)):
-            zm = torch.cat([z[m][p].reshape(z[m][p].shape[0],-1).to(torch.float32) for p in range(len(z[m]))],dim=1)
-            zn = torch.cat([z[n][p].reshape(z[n][p].shape[0],-1).to(torch.float32) for p in range(len(z[n]))],dim=1)
-            if use_mutual_information_penalty:
-                with torch.amp.autocast('cuda',enabled=amp_enabled, dtype=(amp_dtype if amp_enabled else None)):
-                    mi_est, ma_ets[pair_idx] = antstorch.mutual_information_mine(zm, zn, mine_nets[pair_idx], ma_ets[pair_idx], alpha=0.0001, loss_type='fdiv')
-                # Train MINE periodically (maximize MI)
-                if it % args.mine_update_freq == 0:
-                    scaler_mine.scale(-mi_est).backward(retain_graph=True)
-                    # Clip MINE grads
-                    torch.nn.utils.clip_grad_norm_(mine_nets[pair_idx].parameters(), max_norm=float(args.grad_clip))
-                    scaler_mine.step(mine_optimizer); scaler_mine.update(); mine_optimizer.zero_grad()
-                # Direction shaping
-                if args.penalty_direction == "separate":
-                    term = mi_est
-                else:  # align
-                    tau = float(args.mi_target)
-                    tau_t = torch.tensor(tau, device=mi_est.device, dtype=mi_est.dtype)
-                    term = torch.relu(tau_t - mi_est)
-                penalty_term = penalty_term + term.to(model_dtype)
-            else:
-                corr_value = antstorch.absolute_pearson_correlation(zm, zn, 1e-6)  # in [0,1]
-                if args.penalty_direction == "separate":
-                    term = corr_value
-                else:  # align
-                    term = torch.clamp(1.0 - corr_value, min=0.0)
-                penalty_term = penalty_term + term.to(model_dtype)
-            pair_idx += 1
-
-    # Learned-uncertainty combination
-    clamped_lsig_kld = torch.clamp(log_sigma_kld, -5.0, 5.0)
-    clamped_lsig_pen = torch.clamp(log_sigma_pen, -5.0, 5.0)
-
-    w_kld = 0.5 * torch.exp(-2*clamped_lsig_kld)  # scalar
-    w_pen = 0.5 * torch.exp(-2*clamped_lsig_pen)  # scalar
-    w_kld_hist.append(float(w_kld.detach().cpu().item()))
-    w_pen_hist.append(float(w_pen.detach().cpu().item()))
-
-    with torch.amp.autocast('cuda', enabled=amp_enabled, dtype=(amp_dtype if amp_enabled else None)):
-        loss = (0.5 * torch.exp(-2*clamped_lsig_kld) * loss_kld + clamped_lsig_kld) \
-             + (0.5 * torch.exp(-2*clamped_lsig_pen) * penalty_term + clamped_lsig_pen)
-
-    # Sentry pre-check on loss
-    if not torch.isfinite(loss):
-        extra = {"why": "non-finite loss", "modalities": args.modalities}
-        if args.sentry_dump:
-            dump_dir = dump_sentry_package(trial_dir, it, models, flow_optimizer, float("nan"), extra)
-            print(f"[SENTRY] Non-finite loss at iter {it}. Dumped to: {dump_dir}")
-        raise FloatingPointError(f"Non-finite loss at iter {it}")
-
-    # Backprop + clip + step
-    if amp_enabled:
-        scaler_flow.scale(loss).backward()
-        # Unscale gradients before clipping so max_norm is meaningful
-        scaler_flow.unscale_(flow_optimizer)
-        total_grad_norm = float(torch.nn.utils.clip_grad_norm_(combined_model_parameters, max_norm=float(args.grad_clip)))
-        scaler_flow.step(flow_optimizer); scaler_flow.update()
+def build_loaders2(mods, H, W, train_samples, val_samples, batch, num_workers, data_source="hcpya", seed=0):
+    if data_source == "synthetic":
+        views = len(mods)
+        train = _SyntheticDataset(n_samples=int(train_samples), views=views, H=int(H), W=int(W), seed=seed)
+        val   = _SyntheticDataset(n_samples=int(val_samples),   views=views, H=int(H), W=int(W), seed=seed+1)
+        train_loader = DataLoader(train, batch_size=batch, shuffle=True,  num_workers=0)
+        val_loader   = DataLoader(val,   batch_size=min(16, batch), shuffle=False, num_workers=0)
+        return train_loader, val_loader
     else:
-        loss.backward()
-        total_grad_norm = float(torch.nn.utils.clip_grad_norm_(combined_model_parameters, max_norm=float(args.grad_clip)))
-        flow_optimizer.step()
+        return build_loaders(mods, H, W, train_samples, val_samples, batch, num_workers, do_aug=True)
 
-    # Sentry gradient check (every N steps)
-    sentry_ok = True
-    if (args.sentry_interval > 0) and (it % args.sentry_interval == 0) and (it >= int(getattr(args, "sentry_begin", 0))):
-        # 1) gradient sentry
-        grad_ok = grad_is_finite_and_below(
-            combined_model_parameters,
-            max_abs=float(args.sentry_grad_absmax)
-        )
-        sentry_ok = sentry_ok and grad_ok
-
-        # 2) probe-forward sentry on a tiny batch from val set
+def ensure_shapes_cached(model, x_template: torch.Tensor):
+    """
+    Make sure MultiscaleFlow has cached latent shapes for sampling.
+    If sample() complains, do a 1-sample forward to populate cache.
+    """
+    try:
+        _ = model.sample(1)  # if cache exists this is a no-op
+        return
+    except Exception:
+        pass
+    with torch.no_grad():
+        x1 = x_template[:1].to(next(model.parameters()).device).to(torch.float32)
         try:
-            x_probe = next(iter(val_loader))
-            if isinstance(x_probe, (tuple, list)):
-                x_probe = x_probe[0]
-            x_probe = x_probe[:max(1, int(args.sentry_probe_batchsize))]
-            pf_stats = probe_forward(
-                models, x_probe, device, model_dtype,
-                z_absmax_thresh=args.sentry_z_absmax,
-                sample_absmax_thresh=args.sentry_sample_absmax,
-                sample_quantile=float(getattr(args, "sentry_sample_quantile", 0.999))
-                # if you added sample-space, also pass:
-                # , sample_space=getattr(args, "sentry_sample_space", "tanh")
-            )
-        except Exception as e:
-            pf_stats = {"ok": False, "error": str(e)}
+            _ = model.log_prob(x1)
+        except Exception:
+            _ = model.inverse_and_log_det(x1)
 
-        sentry_ok = sentry_ok and bool(pf_stats.get("ok", False))
+@torch.no_grad()
+def warmup_actnorm_with_real_batch(model, x_real: torch.Tensor):
+    """
+    Ensures ActNorm in `model` is data-initialized using REAL data.
+    Does a 1-sample likelihood pass; safe to call once per model/view.
+    """
+    dev = next(model.parameters()).device
+    x1 = x_real[:1].to(dev, torch.float32)
+    # Prefer a path that triggers ActNorm data-init
+    for fn in ("log_prob", "inverse_and_log_det", "__call__"):
+        if hasattr(model, fn):
+            try:
+                getattr(model, fn)(x1)
+                break
+            except Exception:
+                continue
 
-        # 3) handle strikes / optional dump / single raise point
-        if not sentry_ok:
-            sentry_strikes += 1
-            extra = {
-                "why": "sentry failure (grad or probe forward)",
-                "grad_ok": bool(grad_ok),
-                "probe": pf_stats,
-                "lr": float(flow_optimizer.param_groups[0]["lr"]),
-                "modalities": args.modalities,
-            }
-            if args.sentry_dump:
-                dump_dir = dump_sentry_package(
-                    trial_dir, it, models, flow_optimizer,
-                    float(loss.detach().cpu().item()), extra
-                )
-                print(f"[SENTRY] Failure at iter {it} (strike {sentry_strikes}/{int(getattr(args,'sentry_strikes',1))}). Dumped to: {dump_dir}")
+@torch.no_grad()
+def _manual_prior_sample(model, n: int, temp: float = 1.0, x_template: torch.Tensor = None):
+    """
+    Fallback sampler that:
+      1) infers latent shapes via inverse on a REAL template,
+      2) draws Gaussian latents scaled by temp,
+      3) maps z -> x via model's 'forward_from_latents' (or similar).
+    Returns an (N,C,H,W) tensor.
+    """
+    # Device/dtype
+    p = next(model.parameters())
+    dev, dt = p.device, torch.float32
 
-            if sentry_strikes >= int(getattr(args, "sentry_strikes", 1)):
-                raise FloatingPointError(f"Sentry failure at iter {it}: {extra}")
+    # Build a template if none provided
+    if x_template is None:
+        H = W = 64
+        if hasattr(model, "input_shape") and isinstance(model.input_shape, (tuple, list)) and len(model.input_shape) >= 3:
+            H, W = int(model.input_shape[-2]), int(model.input_shape[-1])
+        x_template = torch.randn(1, 1, H, W, device=dev, dtype=dt) * 0.1
+
+    # 1) infer latent list via inverse pass
+    z_tmpl, _ = model.inverse_and_log_det(x_template[:1].to(dev, dt))
+    if isinstance(z_tmpl, torch.Tensor):
+        z_tmpl = [z_tmpl]
+
+    # 2) sample latents with temperature
+    z_list = [torch.randn(n, *z.shape[1:], device=dev, dtype=z.dtype) * float(temp) for z in z_tmpl]
+
+    # 3) map latents to x using best-available API
+    for fn in ("forward_from_latents", "forward", "sample_from_latents", "_forward"):
+        if hasattr(model, fn):
+            out = getattr(model, fn)(z_list)
+            return out[0] if isinstance(out, (list, tuple)) else out
+
+    # Last resort: now that shapes exist, try model.sample
+    s = model.sample(n, T=temp) if hasattr(model, "sample") and ("T" in model.sample.__code__.co_varnames) else model.sample(n)
+    return s[0] if isinstance(s, (list, tuple)) else s
+
+# ------------------------- main -------------------------
+
+
+def main():
+    ap = argparse.ArgumentParser("Glow 2D (builder) trainer")
+    ap.add_argument("--modalities", nargs="+", default=["T2"], choices=["T2","T1","FA"])
+    ap.add_argument("--H", type=int, default=128)
+    ap.add_argument("--W", type=int, default=128)
+    ap.add_argument("--L", type=int, default=4)
+    ap.add_argument("--K", type=int, default=3)
+    ap.add_argument("--hidden", type=int, default=96)
+
+    ap.add_argument("--base", type=str, default="glow", choices=["glow","diag"])
+    ap.add_argument("--glowbase-logscale-factor", type=float, default=3.0)
+    ap.add_argument("--glowbase-min-log", type=float, default=-5.0)
+    ap.add_argument("--glowbase-max-log", type=float, default=5.0)
+    ap.add_argument("--scale-map", type=str, default="tanh", choices=["tanh","exp","sigmoid","sigmoid_inv"])
+    ap.add_argument("--scale-cap", type=float, default=3.0)
+    ap.add_argument("--net-actnorm", action="store_true", help="ActNorm in coupling subnets")
+
+    ap.add_argument("--batch", type=int, default=32)
+    ap.add_argument("--train-samples", type=int, default=6000)
+    ap.add_argument("--val-samples", type=int, default=256)
+    ap.add_argument("--max-iter", type=int, default=30000, help="Target total iterations for this run")
+    ap.add_argument("--extra-iters", type=int, default=0, help="If >0, ignore --max-iter and run this many more iterations from the resume point")
+    ap.add_argument("--eval-interval", type=int, default=1000)
+    ap.add_argument("--plot-interval", type=int, default=1000)
+    ap.add_argument("--num-workers", type=int, default=4)
+
+    ap.add_argument("--devices", type=str, default="cuda:0")
+    ap.add_argument("--precision", type=str, default="mixed", choices=["double","float","mixed"])
+    ap.add_argument("--amp-dtype", type=str, default="bf16", choices=["bf16","fp16"])
+    ap.add_argument("--seed", type=int, default=0)
+
+    ap.add_argument("--lr", type=float, default=1e-4)
+    ap.add_argument("--weight-decay", type=float, default=1e-5)
+    ap.add_argument("--warmup-iters", type=int, default=800)
+    ap.add_argument("--lr-decay-gamma", type=float, default=1.0)
+    ap.add_argument("--lr-decay-steps", type=int, default=0)
+    ap.add_argument("--plateau-factor", type=float, default=0.5)
+    ap.add_argument("--plateau-patience", type=int, default=4)
+    ap.add_argument("--plateau-threshold", type=float, default=1e-4)
+    ap.add_argument("--plateau-cooldown", type=int, default=0)
+    ap.add_argument("--min-lr", type=float, default=1e-6)
+
+    ap.add_argument("--grad-clip", type=float, default=1.0)
+    ap.add_argument("--ema", action="store_true")
+    ap.add_argument("--ema-decay", type=float, default=0.9995)
+
+    ap.add_argument("--resume", type=str, default="", help="Path to checkpoint .pt to resume from")
+    ap.add_argument("--auto-resume", action="store_true", help="If set, try <out-dir>/training_state.pt when --resume is not provided")
+    ap.add_argument("--out-dir", type=str, default="runs_glow2d_builder")
+    ap.add_argument("--data", type=str, choices=["hcpya","synthetic"], default="hcpya", help="Use HCP-YA slices or synthetic noise data")
+    ap.add_argument("--synthetic-samples", type=int, default=8192, help="Dataset size per split when using synthetic data")
+    ap.add_argument("--smooth-alpha", type=float, default=0.1, help="EMA smoothing factor in (0,1]; higher = faster")
+
+    # Alignment & weighting
+    ap.add_argument("--align", choices=["none","infonce","barlow","vicreg","hsic","pearson"], default="none", help="Latent alignment loss across views")
+    ap.add_argument("--align-weight", type=float, default=0.05, help="Fixed weight for alignment loss (if --weighting=fixed)")
+    ap.add_argument("--align-warmup", type=int, default=500, help="Number of warm-up alignment its")
+    ap.add_argument("--proj-dim", type=int, default=256, help="Projection head output dim")
+    ap.add_argument("--proj-hidden", type=int, default=512, help="Projection MLP hidden dim")
+    ap.add_argument("--temperature", type=float, default=0.1, help="InfoNCE temperature")
+    ap.add_argument("--barlow-lambda", type=float, default=5e-3, help="Off-diagonal weight (lambda) for Barlow Twins")
+    ap.add_argument("--weighting", choices=["fixed","kendall"], default="fixed", help="Loss weighting strategy")
+    ap.add_argument("--init-logvar-nll", type=float, default=0.0, help="Init log variance (s) for NLL in Kendall weighting")
+    ap.add_argument("--init-logvar-align", type=float, default=0.0, help="Init log variance (s) for ALIGN in Kendall weighting")
+    # VICReg hyperparameters
+    ap.add_argument("--vicreg-inv", type=float, default=25.0, help="VICReg invariance weight (MSE between views)")
+    ap.add_argument("--vicreg-var", type=float, default=25.0, help="VICReg variance weight (keep per-dim std above gamma)")
+    ap.add_argument("--vicreg-cov", type=float, default=1.0,  help="VICReg covariance weight (penalize off-diagonals)")
+    ap.add_argument("--vicreg-gamma", type=float, default=1.0, help="VICReg variance floor (target std per feature)")
+
+    # HSIC hyperparameters (RBF kernel)
+    ap.add_argument("--hsic-sigma", type=float, default=0.0, help="RBF bandwidth; 0 -> median heuristic per batch")
+
+    # Preview grids
+    ap.add_argument("--sample-mode", type=str, choices=["model","data","off"], default="model",
+                    help="How to produce preview grids during eval: model sampling, random val batch, or skip")
+    ap.add_argument("--sample-temp", type=float, default=1.0,
+                help="Sampling temperature: scales prior noise (z = T·ε) when --sample-mode model")
+
+    args = ap.parse_args()
+
+    # Device + precision
+    set_deterministic(args.seed)
+    dev = torch.device("cpu") if args.devices.lower() == "cpu" else torch.device(args.devices.split(",")[0])
+
+    if args.precision == "double":
+        model_dtype = torch.float64
+        amp_enabled = False
+        amp_dtype = None
+    elif args.precision == "float":
+        model_dtype = torch.float32
+        amp_enabled = False
+        amp_dtype = None
+    else:
+        model_dtype = torch.float32  # keep params in FP32
+        amp_enabled = True
+        if args.amp_dtype == "bf16" and dev.type == "cuda" and torch.cuda.is_bf16_supported():
+            amp_dtype = torch.bfloat16
         else:
-            sentry_strikes = 0  # reset on pass
+            amp_dtype = torch.float16
 
-    # EMA update after optimizer step
-    if ema_models is not None:
-        for m in range(len(models)):
-            ema_update(ema_models[m], models[m], decay=float(args.ema_decay))
+    # GradScaler: enable only for fp16 (bf16 doesn't need scaling)
+    scaler = torch.amp.GradScaler(enabled=(amp_enabled and amp_dtype == torch.float16))
 
-    # Scheduler step (warmup/exp-decay)
-    if warmup_sched is not None:
-        warmup_sched.step()
+    # Sizes
+    _check_hw_divisible(args.H, args.W, args.L)
+    C = 1
+    input_shape = (C, args.H, args.W)
+    n_dims = int(np.prod(input_shape))
 
-    # Track
-    curr_loss = float(loss.detach().cpu().item())
-    loss_hist.append(curr_loss)
-    loss_kld_hist.append(float(loss_kld.detach().cpu().item()))
-    penalty_hist.append(float(penalty_term.detach().cpu().item()))
-    loss_iter.append(it)
-    grad_norm_hist.append(total_grad_norm)
-    z_abs_max_hist.append(float(z_abs_max))
-    sentry_ok_hist.append(bool(sentry_ok))
-    try: loss_conv.append(float(ants.convergence_monitoring(np.array(loss_hist), 100)))
-    except Exception: loss_conv.append(np.nan)
+    # Data
+    try:
+        train_loader, val_loader = build_loaders2(
+            args.modalities, args.H, args.W,
+            args.train_samples if args.data!="synthetic" else args.synthetic_samples,
+            args.val_samples if args.data!="synthetic" else max(256, args.batch*4),
+            args.batch, args.num_workers,
+            data_source=args.data, seed=args.seed
+        )
+    except Exception as e:
+        import traceback
+        print("[data] failed to build loaders:", repr(e))
+        traceback.print_exc()
+        print("Hint: try --data synthetic to verify training loop independent of ANTs/ANTsTorch data availability.")
+        raise
+    train_iter = iter(train_loader)
+    input_data_sampled = False
 
-    # Periodic evaluation
-    write_state = False
-    if it % args.eval_interval == 0:
-        val_bpds_raw = evaluate_val_bpd(models, val_loader, device, n_dims, max_batches=args.val_max_batches)
-        avg_val_raw = float(np.mean(val_bpds_raw))
+    # Build models using the builder
+    from antstorch import create_glow_normalizing_flow_model_2d
 
-        # EMA eval
-        avg_val_ema = float("nan")
-        if ema_models is not None:
-            val_bpds_ema = evaluate_val_bpd(ema_models, val_loader, device, n_dims, max_batches=args.val_max_batches)
-            avg_val_ema = float(np.mean(val_bpds_ema))
+    models: List[nf.Flow] = []
+    for _ in args.modalities:
+        m = create_glow_normalizing_flow_model_2d(
+            input_shape=input_shape,
+            L=args.L, K=args.K, hidden_channels=args.hidden,
+            base=args.base,
+            glowbase_logscale_factor=args.glowbase_logscale_factor,
+            glowbase_min_log=args.glowbase_min_log,
+            glowbase_max_log=args.glowbase_max_log,
+            split_mode="channel",
+            scale=True,
+            scale_map=args.scale_map,
+            leaky=0.0,
+            net_actnorm=bool(args.net_actnorm),
+            scale_cap=args.scale_cap,
+        ).to(dev).float().train()  # force FP32 params
+        for name, p in m.named_parameters():
+            if p.dtype != torch.float32:
+                print(f"[warn] casting param {name} from {p.dtype} -> float32")
+                p.data = p.data.float()
+        if not hasattr(m, 'input_shape'):
+            m.input_shape = input_shape
+        models.append(m)
 
-        # Save last + best-per-view (raw)
-        for m in range(len(models)):
-            models[m].save(str(last_ckpts[m]))
-            if val_bpds_raw[m] < best_val_bpd[m]:
-                best_val_bpd[m] = val_bpds_raw[m]
-                models[m].save(str(best_ckpts[m]))
+    # ---------------- EMA (lazy init) ----------------
+    ema_models = None  # will be created after the first real optimizer step
 
-        # ReduceLROnPlateau step on RAW avg val_bpd
-        plateau_sched.step(avg_val_raw)
+    # ---- One-time ActNorm warmup on REAL data (before projectors) ----
+    with torch.no_grad():
+        warm_batch = next(iter(train_loader))               # (B, V, H, W)
+        for vi, m in enumerate(models):
+            xv0 = to01(warm_batch[:, vi:vi+1].to(dev)).to(torch.float32)
+            warmup_actnorm_with_real_batch(m, xv0)          # uses log_prob/inverse internally
 
-        # Log row
-        with open(log_path,"a",newline="") as f:
-            writer=csv.writer(f)
-            lr_now = flow_optimizer.param_groups[0]["lr"]
-            row=[it,
-                 curr_loss,
-                 float(loss_kld_hist[-1]) if len(loss_kld_hist) else float("nan"),
-                 float(penalty_hist[-1]) if len(penalty_hist) else float("nan"),
-                 float(clamped_lsig_kld.detach().cpu().item()),
-                 float(clamped_lsig_pen.detach().cpu().item()),
-                 float(w_kld.detach().cpu().item()),
-                 float(w_pen.detach().cpu().item()),
-                 avg_val_raw, avg_val_ema, lr_now, float(grad_norm_hist[-1]), float(z_abs_max_hist[-1]), int(sentry_ok_hist[-1])] + [float(v) for v in val_bpds_raw]
-            writer.writerow(row)
+    # --- projection heads for alignment ---
+    projectors = None
+    if args.align != "none":
+        with torch.no_grad():
+            # use the same warmed real batch as template (any view is fine for dim)
+            x_tmpl = to01(warm_batch[:, 0:1].to(dev)).to(torch.float32)
+            with _no_autocast_for(dev.type):                # force FP32
+                z_probe, _ = models[0].inverse_and_log_det(x_tmpl[:1])
+            flat_dim = _flatten_latents(z_probe).size(1)
+        projectors = nn.ModuleList([
+            Projector(flat_dim, args.proj_hidden, args.proj_dim).to(dev).train()
+            for _ in range(len(models))
+        ])
 
-        # Early stopping on RAW avg val_bpd
-        if args.early_stopping_patience>0:
-            if avg_val_raw < best_avg - args.min_delta:
-                best_avg = avg_val_raw; no_improve = 0
-            else:
-                no_improve += 1
-                if no_improve >= args.early_stopping_patience:
-                    with open(trial_dir/"EARLY_STOPPING.txt","w") as f:
-                        f.write(f"Stopped at iter {it}, best RAW avg val_bpd {best_avg}\n")
-                    print("Early stopping triggered.")
-                    write_state = True
+    # --- Kendall & Gal weighting scalars ---
+    s_nll = s_align = None
+    if args.weighting == "kendall" and args.align != "none":
+        s_nll   = nn.Parameter(torch.tensor([args.init_logvar_nll], device=dev))
+        s_align = nn.Parameter(torch.tensor([args.init_logvar_align], device=dev))
+
+    # Optimizer + schedulers
+    param_groups = [{"params": [p for m in models for p in m.parameters()]}]
+    if projectors is not None:
+        param_groups.append({"params": [p for p in projectors.parameters()]})
+    if s_nll is not None:
+        param_groups.append({"params": [s_nll, s_align], "weight_decay": 0.0})
+    opt = torch.optim.Adamax(param_groups, lr=args.lr, weight_decay=args.weight_decay)
+
+    warm = make_warmup(opt, args.warmup_iters, args.lr_decay_gamma, args.lr_decay_steps)
+    plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        opt, mode="min", factor=args.plateau_factor,
+        patience=args.plateau_patience, threshold=args.plateau_threshold,
+        cooldown=args.plateau_cooldown, min_lr=args.min_lr
+    )
+
+    # Out dir, resume
+    run_dir = Path(args.out_dir); run_dir.mkdir(parents=True, exist_ok=True)
+    state_path = run_dir / "training_state.pt"
+    csv_path   = run_dir / "metrics.csv"
+
+    start_iter = 1
+    resume_path = None
+    if args.resume:
+        rp = Path(args.resume)
+        if rp.exists():
+            resume_path = rp
+        else:
+            raise FileNotFoundError(f"--resume specified but file not found: {rp}")
+    elif args.auto_resume and state_path.exists():
+        resume_path = state_path
+
+    if resume_path is not None:
+        blob = torch.load(resume_path, map_location=dev, weights_only=False)
+        start_iter = int(blob.get("iter", 1))
+        opt.load_state_dict(blob.get("opt", opt.state_dict()))
+        if warm and blob.get("warm") is not None:
+            warm.load_state_dict(blob["warm"])
+        if blob.get("models") is not None:
+            for m, sd in zip(models, blob["models"]):
+                m.load_state_dict(sd)
+        # EMA: create lazily and then load if present
+        if args.ema and blob.get("ema") is not None:
+            import copy
+            ema_models = [copy.deepcopy(m).eval().to(dev) for m in models]
+            for em in ema_models:
+                for p in em.parameters():
+                    p.requires_grad_(False)
+            for em, sd in zip(ema_models, blob["ema"]):
+                em.load_state_dict(sd)
+        # restore projectors if present
+        if blob.get("proj") is not None and projectors is not None:
+            try:
+                projectors.load_state_dict(blob["proj"])
+                tqdm.write("[resume] restored projectors")
+            except Exception as e:
+                tqdm.write(f"[resume] warning: could not load projectors: {e}")
+        # restore Kendall scalars
+        if blob.get("kendall") is not None and s_nll is not None:
+            try:
+                kd = blob["kendall"]
+                if kd.get("s_nll") is not None:  s_nll.data.fill_(float(kd["s_nll"]))
+                if kd.get("s_align") is not None: s_align.data.fill_(float(kd["s_align"]))
+                tqdm.write(f"[resume] restored Kendall s_nll={float(s_nll.item()):.3f}, s_align={float(s_align.item()):.3f}")
+            except Exception as e:
+                tqdm.write(f"[resume] warning: could not load Kendall scalars: {e}")
+        tqdm.write(f"[resume] from {str(resume_path)} @ iter {start_iter}")
+
+    # If user asked for extra iters, override max-iter to be (already_done + extra)
+    if args.extra_iters > 0:
+        args.max_iter = (start_iter - 1) + args.extra_iters
+
+    if not csv_path.exists():
+        with open(csv_path, "w") as f:
+            f.write("iter,loss,sum_bpd,lr\n")
+
+    # ------------------------- train loop -------------------------
+    n_views = len(models)
+    tqdm.write(f"[info] training {n_views} view(s); params per view: {[n_params(m) for m in models]}")
+
+    # Running averages (EMA) display (simple, not saved)
+    alpha = float(args.smooth_alpha)
+    ema_loss_disp = None
+    ema_sum_bpd_disp = None
+    ema_bpd_views_disp = [None] * n_views
+
+    pbar = tqdm(total=args.max_iter, initial=start_iter - 1, dynamic_ncols=True, desc="train")
+
+    for it in range(start_iter, args.max_iter + 1):
+        opt.zero_grad(set_to_none=True)
+        try:
+            x = next(train_iter)
+        except StopIteration:
+            train_iter = iter(train_loader)
+            x = next(train_iter)
+
+        # Forward
+        L_nll = torch.tensor(0.0, device=dev, dtype=torch.float32)
+        curr_bpd_views = []
+        sum_bpd = 0.0
+
+        lat_flat = []
+
+        if amp_enabled:
+            from contextlib import nullcontext
+            ctx = torch.amp.autocast(dev.type, dtype=amp_dtype)
+        else:
+            from contextlib import nullcontext
+            ctx = nullcontext()
+
+        with ctx:
+            bad_batch = False
+            for vi, m in enumerate(models):
+                x_v = to01(x[:, vi:vi+1, :, :].to(dev)).float()
+
+                # Keep NF math in FP32 for stability, and let the model do log_prob
+                with _no_autocast_for(dev.type):
+                    logp_v = m.log_prob(x_v.float())            # <-- model computes base+logdet
+                    z_v, _ = m.inverse_and_log_det(x_v.float()) # <-- still get latents for alignment
+
+                if not torch.isfinite(logp_v).all():
+                    tqdm.write(f"[nan] non-finite logp in view {vi} at iter {it}; skipping step")
+                    bad_batch = True
                     break
 
-        write_state = True
+                bpd_v   = -logp_v / (np.log(2.0) * float(n_dims))
+                bpd_mean = float(bpd_v.mean().detach().cpu().item())
+                curr_bpd_views.append(bpd_mean)
+                sum_bpd += bpd_mean
 
-    # Periodic plotting & sampling
-    if it % args.plot_interval == 0:
+                L_nll = L_nll - logp_v.mean()
+                if isinstance(z_v, (list, tuple)):
+                    zflat = torch.cat([zi.flatten(1) for zi in z_v], dim=1)
+                else:
+                    zflat = z_v.flatten(1)
+                lat_flat.append(torch.nan_to_num(zflat))
 
-        # Loss plots
-        plt.figure(figsize=(40,10))
+        if bad_batch or (not torch.isfinite(L_nll)):
+            tqdm.write(f"[nan] skipping iter {it} (bad_batch={bad_batch}, L_nll finite={torch.isfinite(L_nll).item()})")
+            continue
 
-        kld_bpd = (-np.array(loss_kld_hist, dtype=float)) / (np.log(2.0) * n_dims)
-        tot_bpd = (-np.array(loss_hist, dtype=float)) / (np.log(2.0) * n_dims)
+        # Alignment loss (if requested)
+        L_align = torch.tensor(0.0, device=dev)
+        if args.align != "none" and it >= args.align_warmup:
+            feats = [projectors[i](lat_flat[i]) for i in range(len(lat_flat))]
+            feats = [f.float() for f in feats]  # keep loss math in fp32
 
-        # Panel 1 — KLD (bits/dim), smoothed
-        ax1 = plt.subplot(1,4,1)
-        ax1.plot(loss_iter, simple_moving_average(kld_bpd, w=200), label='−KLD (bits/dim, SMA)')
-        ax1.set_xlabel('Iteration'); ax1.set_ylabel('bits/dim'); ax1.set_title('KLD (per-dim)')
-        ax1.grid(True); ax1.legend(); ax1.ticklabel_format(style='plain', axis='y')
-        ax1.yaxis.set_major_formatter(mtick.FormatStrFormatter('%.3f'))
+            if args.align == "barlow":
+                L_align = barlow_pairs(feats, lam=float(args.barlow_lambda))
+            elif args.align == "vicreg":
+                L_align = vicreg_multi(
+                    feats,
+                    w_inv=float(args.vicreg_inv),
+                    w_var=float(args.vicreg_var),
+                    w_cov=float(args.vicreg_cov),
+                    gamma=float(args.vicreg_gamma),
+                )
+            elif args.align == "infonce":
+                L_align = info_nce_multi(feats, T=float(args.temperature))
+            elif args.align == "hsic":
+                L_align = hsic_pairs(feats, sigma=float(args.hsic_sigma))
+            elif args.align == "pearson":
+                L_align = pearson_pairs(feats)
 
-        # Panel 2 — Penalty term (smoothed)
-        ax2 = plt.subplot(1,4,2)
-        ax2.plot(loss_iter, simple_moving_average(penalty_hist, w=200), label='Penalty (SMA)')
-        ax2.set_xlabel('Iteration'); ax2.set_ylabel('value'); ax2.set_title('Penalty term')
-        ax2.grid(True); ax2.legend(); ax2.ticklabel_format(style='plain', axis='y')
+        # Combine with fixed or Kendall weighting
+        if args.weighting == "fixed" or args.align == "none":
+            loss_total = L_nll + (args.align_weight * L_align if args.align != "none" else 0.0)
+            w_nll = 1.0
+            w_align = float(args.align_weight if args.align != "none" else 0.0)
+        else:
+            s_nll_eff   = torch.clamp(torch.nan_to_num(s_nll,   nan=0.0, posinf=5.0, neginf=-5.0), -5.0, 5.0)
+            s_align_eff = torch.clamp(torch.nan_to_num(s_align, nan=0.0, posinf=5.0, neginf=-5.0), -5.0, 5.0)
+            L_align = torch.nan_to_num(L_align, nan=0.0, posinf=0.0, neginf=0.0)
+            L_nll   = torch.nan_to_num(L_nll,   nan=0.0, posinf=0.0, neginf=0.0)
+            loss_total = torch.exp(-s_nll_eff) * L_nll + s_nll_eff
+            loss_total = loss_total + torch.exp(-s_align_eff) * L_align + s_align_eff
+            if not torch.isfinite(loss_total):
+                tqdm.write(f"[nan] loss_total non-finite at iter {it}; skipping step")
+                continue
+            w_nll   = float(torch.exp(-s_nll_eff).detach().cpu().item())
+            w_align = float(torch.exp(-s_align_eff).detach().cpu().item())
 
-        # Panel 3 — Total (≈NLL) as bits/dim, smoothed
-        ax3 = plt.subplot(1,4,3)
-        ax3.plot(loss_iter, simple_moving_average(tot_bpd, w=200), label='Total (≈NLL) BPD (SMA)')
-        ax3.set_xlabel('Iteration'); ax3.set_ylabel('bits/dim'); ax3.set_title('Total (per-dim)')
-        ax3.grid(True); ax3.legend(); ax3.ticklabel_format(style='plain', axis='y')
-        ax3.yaxis.set_major_formatter(mtick.FormatStrFormatter('%.3f'))
+        # Backprop + clip + step
+        all_params = []
+        for g in param_groups:
+            for p in g["params"]:
+                if isinstance(p, torch.Tensor) and p.grad is not None:
+                    all_params.append(p)
+        if scaler.is_enabled():
+            scaler.scale(loss_total).backward()
+            scaler.unscale_(opt)  # grads must be FP32
+            torch.nn.utils.clip_grad_norm_(all_params, max_norm=float(args.grad_clip))
+            scaler.step(opt)
+            scaler.update()
+        else:
+            loss_total.backward()
+            torch.nn.utils.clip_grad_norm_(all_params, max_norm=float(args.grad_clip))
+            opt.step()
 
-        # Panel 4 — Grad norm (log) with clip line
-        ax4 = plt.subplot(1,4,4)
-        g = np.asarray(grad_norm_hist, dtype=float)
-        ax4.semilogy(loss_iter[-len(g):], g, label='||grad|| (pre-clip)')
-        ax4.axhline(y=max(float(args.grad_clip), 1e-12), linestyle='--', linewidth=1.5, label=f'clip={args.grad_clip}')
-        ax4.set_xlabel('Iteration'); ax4.set_ylabel('||grad||'); ax4.set_title('Grad Norm (log)')
-        ax4.grid(True, which='both'); ax4.legend()
-
-        plt.tight_layout()
-        plt.savefig(str(trial_dir / "loss_hist_glow_2d_uncertES_plus_dir_safeguarded.pdf"))
-        plt.close()
-
-        # Samples per model (RAW)
-        for m in range(len(models)):
-            nf.utils.clear_grad(models[m])
+        # -------- Lazy EMA init right after the first real update --------
+        if args.ema and ema_models is None:
+            import copy
+            ema_models = [copy.deepcopy(m).eval().to(dev) for m in models]
+            for em in ema_models:
+                for p in em.parameters():
+                    p.requires_grad_(False)
+            # copy ActNorm state from base → EMA, then warm on REAL batch
             with torch.no_grad():
-                x_s, _ = models[m].sample(100)
-                x_s = torch.clamp(x_s, 0, 1)
-                grid = tv.utils.make_grid(x_s.to(torch.float32), nrow=10)
-                plt.figure(figsize=(10,10)); plt.imshow(np.transpose(grid.cpu().numpy(), (1,2,0))); plt.axis("off")
-                plt.savefig(str(trial_dir / f"samples_glow_2d_model_{args.modalities[m]}_safeguarded.pdf")); plt.close()
+                for vi, (m, em) in enumerate(zip(models, ema_models)):
+                    _copy_actnorm_state(m, em)  # <-- helper you added
+                    xv_real = to01(x[:, vi:vi+1, :, :].to(dev)).float()
+                    warmup_actnorm_with_real_batch(em, xv_real)  # <-- helper you added
+            tqdm.write("[ema] initialized from base after first update")
 
-        # Samples per model (EMA) if enabled
+        # EMA update each step
         if ema_models is not None:
-            for m in range(len(ema_models)):
-                with torch.no_grad():
-                    x_s, _ = ema_models[m].sample(100)
-                    x_s = torch.clamp(x_s, 0, 1)
-                    grid = tv.utils.make_grid(x_s.to(torch.float32), nrow=10)
-                    plt.figure(figsize=(10,10)); plt.imshow(np.transpose(grid.cpu().numpy(), (1,2,0))); plt.axis("off")
-                    plt.savefig(str(trial_dir / f"samples_glow_2d_model_{args.modalities[m]}_EMA_safeguarded.pdf")); plt.close()
+            with torch.no_grad():
+                for em, m in zip(ema_models, models):
+                    for p_em, p in zip(em.parameters(), m.parameters()):
+                        p_em.data.mul_(args.ema_decay).add_(p.data, alpha=1.0 - args.ema_decay)
 
-    # Save state periodically (after evals)
-    if (it % args.eval_interval == 0) or write_state:
-        save_blob = {
-            "iter": it+1,
-            "flow_optimizer": flow_optimizer.state_dict(),
-            "mine_optimizer": (mine_optimizer.state_dict() if mine_optimizer else None),
-            "scheduler": (warmup_sched.state_dict() if warmup_sched is not None else None),
-            "best_val_bpd": best_val_bpd,
-            "best_avg": best_avg,
-            "no_improve": no_improve,
-            "ema_state_dicts": ([ema_models[m].state_dict() for m in range(len(ema_models))] if ema_models is not None else None),
+        # Warmup/exp decay
+        if warm is not None:
+            warm.step()
+
+        # Update tqdm with live metrics
+        lr_now = opt.param_groups[0]["lr"]
+
+        # EMA smoothing for display
+        curr_loss = float(loss_total.detach().cpu().item())
+        if ema_loss_disp is None:
+            ema_loss_disp = curr_loss
+            ema_sum_bpd_disp = sum_bpd
+            for i in range(n_views):
+                ema_bpd_views_disp[i] = curr_bpd_views[i]
+        else:
+            a = alpha
+            ema_loss_disp = (1.0 - a) * ema_loss_disp + a * curr_loss
+            ema_sum_bpd_disp = (1.0 - a) * ema_sum_bpd_disp + a * sum_bpd
+            for i in range(n_views):
+                ema_bpd_views_disp[i] = (1.0 - a) * ema_bpd_views_disp[i] + a * curr_bpd_views[i]
+
+        postfix = {
+            "iter": it,
+            "loss": f"{curr_loss:.4f}",
+            "loss~": f"{ema_loss_disp:.4f}",
+            "bpd": f"{sum_bpd:.3f}",
+            "bpd~": f"{ema_sum_bpd_disp:.3f}",
+            "lr": f"{lr_now:.2e}",
+            "align": f"{float(L_align.detach().cpu().item()):.4f}",
+            "mode": args.align,
+            "w_nll": f"{w_nll:.2f}",
+            "w_aln": f"{w_align:.2f}",
         }
-        torch.save(save_blob, state_path)
+        for i in range(n_views):
+            postfix[f"v{i}"] = f"{curr_bpd_views[i]:.3f}/{ema_bpd_views_disp[i]:.3f}"
 
-# Finalize: write BEST checkpoints as *_final.pt
-for m,mod in enumerate(args.modalities):
-    final_path = trial_dir/f"model_{mod}_final.pt"
-    if Path(best_ckpts[m]).exists():
-        shutil.copy2(best_ckpts[m], final_path)
-        print(f"Wrote final (best) checkpoint for {mod} -> {final_path}")
-    else:
-        models[m].save(str(final_path))
-        print(f"No best found for {mod}; saved current model as final -> {final_path}")
+        pbar.set_postfix(postfix)
+        pbar.update(1)
 
-print("Training complete. Run dir:",trial_dir)
+
+        # Sample the input data for reference
+        if not input_data_sampled:
+            with torch.no_grad():
+                eval_models = ema_models if ema_models is not None else models
+                any_ok = False
+                for vi, _ in enumerate(eval_models):
+                    ok, err = _save_batch_grid_from_loader(val_loader, vi, run_dir / f"input_data_view{vi}.png", n=100, nrow=10, target_hw=(args.H, args.W), device=dev)
+                    if not ok:
+                        tqdm.write(f"[warn] input data grid failed for view {vi} at iter {it}: {err}")
+                    any_ok = any_ok or ok
+                if any_ok:
+                    tqdm.write(f"[samples] saved input data grids @ iter {it}")
+                    input_data_sampled = True
+
+        # Eval + plateau + sampling
+        if it % args.eval_interval == 0:
+            with torch.no_grad():
+                eval_models = ema_models if ema_models is not None else models
+                bpd_acc = []
+                tmpl_by_view = [None] * len(eval_models)
+                vbar = tqdm(total=10, leave=False, dynamic_ncols=True, desc=f"val@{it}")
+                for j, batch_val in enumerate(val_loader):
+                    bpd_views = []
+                    for vi, m in enumerate(eval_models):
+                        xv = to01(batch_val[:, vi:vi+1, :, :].to(dev)).to(torch.float32)
+                        tmpl_by_view[vi] = xv
+                        with _no_autocast_for(dev.type):
+                            lp = m.log_prob(xv.float())
+                        lp = torch.nan_to_num(lp, nan=-1e9, posinf=-1e9, neginf=-1e9)
+                        bpd_views.append(bits_per_dim(lp, n_dims).mean().item())
+                    bpd_acc.append(np.mean(bpd_views))
+                    vbar.update(1)
+                    if len(bpd_acc) >= 10:
+                        break
+                vbar.close()
+                avg_bpd = float(np.mean(bpd_acc)) if bpd_acc else float("nan")
+            plateau.step(avg_bpd)
+            tqdm.write(f"[eval] iter={it} avg_bpd={avg_bpd:.4f} lr={lr_now:.2e}")
+
+            # preview grids + metric plots
+            with torch.no_grad():
+                if args.sample_mode == "model":
+                    any_ok = False
+                    for vi, m in enumerate(eval_models):
+                        if tmpl_by_view[vi] is None:
+                            tqdm.write(f"[warn] no real template available for view {vi}; skipping model samples this eval")
+                            continue
+
+                        # Warm ActNorm on REAL data for the exact model we will sample (EMA or base)
+                        warmup_actnorm_with_real_batch(m, tmpl_by_view[vi])
+
+                        ok, err = _save_samples_grid(
+                            m, 100, args.sample_temp, run_dir / f"samples_view{vi}_it{it:06d}.png",
+                            nrow=10, target_hw=(args.H, args.W)
+                        )
+                        if not ok:
+                            tqdm.write(f"[warn] model sampling failed for view {vi} at iter {it}: {err}")
+                        any_ok = any_ok or ok
+                    if any_ok:
+                        tqdm.write(f"[samples] saved model sample grids @ iter {it}")
+                elif args.sample_mode == "data":
+                    any_ok = False
+                    for vi, _ in enumerate(eval_models):
+                        ok, err = _save_batch_grid_from_loader(val_loader, vi, run_dir / f"val_view{vi}_it{it:06d}.png", n=100, nrow=10, target_hw=(args.H, args.W), device=dev)
+                        if not ok:
+                            tqdm.write(f"[warn] val-batch grid failed for view {vi} at iter {it}: {err}")
+                        any_ok = any_ok or ok
+                    if any_ok:
+                        tqdm.write(f"[samples] saved validation-batch grids @ iter {it}")
+                else:
+                    tqdm.write("[samples] skipping previews (--sample-mode off)")
+            _save_metric_plots(csv_path, run_dir)
+
+        # CSV log
+        with open(csv_path, "a") as f:
+            f.write(f"{it},{curr_loss:.6f},{sum_bpd:.6f},{lr_now:.6g}\n")
+
+        # Lightweight checkpoint
+        if it % args.eval_interval == 0:
+            blob = {
+                "iter": it + 1,
+                "opt": opt.state_dict(),
+                "warm": (warm.state_dict() if warm else None),
+                "models": [m.state_dict() for m in models],
+                "ema": ([em.state_dict() for em in ema_models] if ema_models is not None else None),
+                "proj": (projectors.state_dict() if projectors is not None else None),
+                "kendall": ({
+                    "s_nll": float(s_nll.detach().cpu()) if s_nll is not None else None,
+                    "s_align": float(s_align.detach().cpu()) if s_align is not None else None,
+                }),
+                "config": vars(args),
+            }
+            torch.save(blob, state_path)
+            tqdm.write(f"[ckpt] saved: {str(state_path)}")
+
+    pbar.close()
+    print("Done. Run dir:", str(run_dir))
+
+
+
+if __name__ == "__main__":
+    main()

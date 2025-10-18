@@ -1,22 +1,56 @@
-python3 train.py \
-  --resume runs/glow_joint2d_uncertES_plus_dir_safeguarded_20250924_185659 \
-  --devices cuda:1 \
-  --modalities T2 T1 FA \
-  --precision mixed --ema --ema-decay 0.999 \
-  --penalty pearson --penalty-direction align \
-  --L 4 --K 2 --hidden-channels 64 \
-  --resampled-size 128 128 \
-  --batch-size 128 \
-  --max-iter 500000 \
-  --eval-interval 1000 --plot-interval 1000 \
-  --early-stopping-patience 100000 --min-delta 0.0000001 \
-  --base glow --out-dir runs --actnorm-init \
-  --warmup-iters 400 \
-  --plateau-factor 0.5 --plateau-patience 3 --plateau-threshold 1e-4 --min-lr 1e-6 \
-  --sentry-interval 500 --sentry-dump --grad-clip 1.0 \
-  --sentry-z-absmax 1e3 \
-  --scale-map tanh --scale-cap 3.0 --net-actnorm --net-leaky 0.1 \
-  --sentry-sample-quantile 0.9995 \
-  --sentry-sample-absmax 0.98 \
-  --sentry-sample-space tanh \
-  --sentry-strikes 3
+python train.py \
+  --modalities T1 \
+  --H 32 --W 32 --L 3 --K 4 --hidden 64 \
+  --batch 64 \
+  --devices cuda:0 --precision mixed --ema \
+  --lr 1e-4 --warmup-iters 400 \
+  --train-samples 3000 --val-samples 128 \
+  --max-iter 30000 --eval-interval 500 \
+  --smooth-alpha 0.05 \
+  --sample-mode model \
+  --sample-temp 1.0 \
+  --out-dir runs/t1_only_32x32 \
+  --align none
+
+python train.py \
+  --modalities T1 T2 FA \
+  --H 32 --W 32 --L 3 --K 4 --hidden 64 \
+  --batch 64 \
+  --devices cuda:0 --precision mixed --ema \
+  --lr 1e-4 --warmup-iters 400 \
+  --train-samples 3000 --val-samples 128 \
+  --max-iter 30000 --eval-interval 500 \
+  --smooth-alpha 0.05 \
+  --sample-mode model \
+  --sample-temp 1.0 \
+  --out-dir runs/t1_t2_fa_32x32_none \
+  --align none
+
+python train.py \
+  --modalities T1 T2 FA \
+  --H 32 --W 32 --L 3 --K 4 --hidden 64 \
+  --batch 64 \
+  --devices cuda:1 --precision mixed --ema \
+  --lr 1e-4 --warmup-iters 400 \
+  --train-samples 3000 --val-samples 128 \
+  --max-iter 30000 --eval-interval 500 \
+  --smooth-alpha 0.05 \
+  --sample-mode model \
+  --sample-temp 1.0 \
+  --out-dir runs/t1_t2_fa_32x32_barlow \
+  --align barlow
+
+python train.py \
+  --modalities T1 T2 FA \
+  --H 32 --W 32 --L 3 --K 4 --hidden 64 \
+  --batch 64 \
+  --devices cuda:1 --precision mixed --ema \
+  --lr 1e-4 --warmup-iters 400 \
+  --train-samples 3000 --val-samples 128 \
+  --max-iter 30000 --eval-interval 500 \
+  --smooth-alpha 0.05 \
+  --sample-mode model \
+  --sample-temp 1.0 \
+  --out-dir runs/t1_t2_fa_32x32_hsic \
+  --align hsic
+
