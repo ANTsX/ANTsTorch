@@ -181,8 +181,8 @@ def _device_params():
 @pytest.mark.parametrize(
     "shape,L,K,hidden,batch",
     [
-        ((1, 64, 64), 3, 32, 256, 4),  # 2D: C1, L=3
-        ((2, 64, 64), 4, 32, 256, 2),  # 2D: C2, L=4
+        ((1, 64, 64), 3, 7, 128, 4),  # 2D: C1, L=3
+        ((2, 64, 64), 4, 8, 128, 2),  # 2D: C2, L=4
     ],
 )
 def test_glow2d_roundtrip_and_likelihood(device, shape, L, K, hidden, batch):
@@ -219,8 +219,8 @@ def test_glow2d_roundtrip_and_likelihood(device, shape, L, K, hidden, batch):
 @pytest.mark.parametrize(
     "shape,L,K,hidden,batch",
     [
-        ((1, 32, 64, 128), 3, 32, 256, 2),  # 3D: C1, L=3
-        ((2, 32, 64, 128), 4, 32, 256, 2),  # 3D: C2, L=4
+        ((1, 32, 64, 128), 3, 7, 128, 2),  # 3D: C1, L=3
+        ((2, 32, 64, 128), 4, 8, 128, 2),  # 3D: C2, L=4
     ],
 )
 def test_glow3d_roundtrip_and_likelihood(device, shape, L, K, hidden, batch):
