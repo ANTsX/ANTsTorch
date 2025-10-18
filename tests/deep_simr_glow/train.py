@@ -20,6 +20,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 import torchvision as tv
 
+
 from tqdm.auto import tqdm
 
 import matplotlib
@@ -166,6 +167,113 @@ def _flatten_latents(z):
 
 
 # ------------------------- viz helpers -------------------------
+
+def _extract_views_from_batch(batch, num_views: int | None = None):
+    """
+    Normalize a multi-view batch into a list [x_view0, x_view1, ...], each (B,C,H,W).
+
+    Supported input forms:
+      - dict with 'x' or 'views' (list/tuple of tensors)
+      - list/tuple of per-view tensors
+      - tuple like (x, y, ...) where x is a tensor or multi-view container
+      - torch.Tensor of shape:
+          (B, V, C, H, W)  -> unstack along V
+          (B, C_total, H, W) with C_total % num_views == 0 -> split channels
+    """
+    import torch
+
+    # If it's a (inputs, labels, ...) style tuple, peel off the first element.
+    if isinstance(batch, tuple) and len(batch) > 0 and (
+        torch.is_tensor(batch[0]) or isinstance(batch[0], (list, tuple, dict))
+    ):
+        return _extract_views_from_batch(batch[0], num_views=num_views)
+
+    # Dict-based batches
+    if isinstance(batch, dict):
+        if 'x' in batch:
+            return _extract_views_from_batch(batch['x'], num_views=num_views)
+        if 'views' in batch:
+            vs = batch['views']
+            if isinstance(vs, (list, tuple)) and len(vs) > 0 and torch.is_tensor(vs[0]):
+                return list(vs)
+            raise ValueError("Batch['views'] not in expected list/tuple[tensor] format.")
+        # Try any list/tuple-of-tensors value
+        for v in batch.values():
+            if isinstance(v, (list, tuple)) and len(v) > 0 and torch.is_tensor(v[0]):
+                return list(v)
+        raise ValueError("Batch dict format not recognized for multi-view data.")
+
+    # Already a list/tuple of per-view tensors
+    if isinstance(batch, (list, tuple)) and len(batch) > 0 and torch.is_tensor(batch[0]):
+        return list(batch)
+
+    # Tensor formats
+    if torch.is_tensor(batch):
+        if batch.ndim == 5:
+            # (B, V, C, H, W)
+            B, V, C, H, W = batch.shape
+            return [batch[:, vi, :, :, :] for vi in range(V)]
+        elif batch.ndim == 4:
+            # (B, C_total, H, W) possibly packed views
+            if num_views is None or num_views <= 1:
+                return [batch]
+            B, Ctot, H, W = batch.shape
+            if Ctot % num_views != 0:
+                raise ValueError(
+                    f"Cannot split (B,C,H,W)=({B},{Ctot},{H},{W}) into {num_views} views: "
+                    f"C ({Ctot}) not divisible by num_views."
+                )
+            Cpv = Ctot // num_views
+            return [batch[:, vi*Cpv:(vi+1)*Cpv, :, :] for vi in range(num_views)]
+        else:
+            raise ValueError(f"Unsupported tensor ndim={batch.ndim}; expected 4 or 5.")
+
+    raise ValueError(f"Unsupported batch type for multi-view extraction: {type(batch)}")
+
+def _save_grid_from_tensor(x, out_path: Path, nrow: int, target_hw=None, value_range=None):
+    """
+    Save a grid image from a tensor x of shape (N,C,H,W).
+    """
+    x = x.detach().cpu()
+    if target_hw is not None and (x.shape[-2] != target_hw[0] or x.shape[-1] != target_hw[1]):
+        x = F.interpolate(x, size=target_hw, mode='bilinear', align_corners=False)
+    grid = tv.utils.make_grid(x, nrow=nrow, normalize=(value_range is None), value_range=value_range)
+    tv.utils.save_image(grid, str(out_path))
+
+def save_coordinated_input_grids(val_loader, num_views: int, out_dir: Path,
+                                 n: int = 100, nrow: int = 10, target_hw=None, device="cpu"):
+    """
+    Collect exactly the SAME n samples (subjects) once and write one grid per view.
+    Returns (ok: bool, err: Optional[str]).
+    """
+    samples_per_view = [ [] for _ in range(num_views) ]
+    collected = 0
+
+    # Single pass over the loader to lock subject alignment
+    for batch in val_loader:
+        xs = _extract_views_from_batch(batch, num_views=num_views)  # [x_v0, x_v1, ...]
+        if len(xs) != num_views:
+            return False, f"Expected {num_views} views, got {len(xs)}."
+        B = xs[0].shape[0]
+        take = min(n - collected, B)
+        if take <= 0:
+            break
+        for vi in range(num_views):
+            xvi = xs[vi][:take].to(device, non_blocking=True)
+            samples_per_view[vi].append(xvi)
+        collected += take
+        if collected >= n:
+            break
+
+    if collected == 0:
+        return False, "val_loader yielded no samples."
+
+    for vi in range(num_views):
+        x = torch.cat(samples_per_view[vi], dim=0)[:n]  # (n,C,H,W)
+        out_path = out_dir / f"input_data_view{vi}.png"
+        _save_grid_from_tensor(x, out_path, nrow=nrow, target_hw=target_hw)
+
+    return True, None
 
 def _make_grid_canvas(x, nrow=10):
     """
@@ -915,15 +1023,23 @@ def main():
         if not input_data_sampled:
             with torch.no_grad():
                 eval_models = ema_models if ema_models is not None else models
-                any_ok = False
-                for vi, _ in enumerate(eval_models):
-                    ok, err = _save_batch_grid_from_loader(val_loader, vi, run_dir / f"input_data_view{vi}.png", n=100, nrow=10, target_hw=(args.H, args.W), device=dev)
-                    if not ok:
-                        tqdm.write(f"[warn] input data grid failed for view {vi} at iter {it}: {err}")
-                    any_ok = any_ok or ok
-                if any_ok:
-                    tqdm.write(f"[samples] saved input data grids @ iter {it}")
+                num_views = len(eval_models)
+
+                ok, err = save_coordinated_input_grids(
+                    val_loader,
+                    num_views=num_views,
+                    out_dir=run_dir,
+                    n=100,
+                    nrow=10,
+                    target_hw=(args.H, args.W),
+                    device=dev,
+                )
+
+                if ok:
+                    tqdm.write(f"[samples] saved coordinated input data grids @ iter {it}")
                     input_data_sampled = True
+                else:
+                    tqdm.write(f"[warn] input data grid failed @ iter {it}: {err}")
 
         # Eval + plateau + sampling
         if it % args.eval_interval == 0:
@@ -952,8 +1068,13 @@ def main():
 
             # preview grids + metric plots
             with torch.no_grad():
+                eval_models = ema_models if ema_models is not None else models
+
                 if args.sample_mode == "model":
                     any_ok = False
+                    n_samples, nrow = 100, 10
+                    shared_seed = int(getattr(args, "seed", 12345)) + int(it)  # vary across evals but match across views
+
                     for vi, m in enumerate(eval_models):
                         if tmpl_by_view[vi] is None:
                             tqdm.write(f"[warn] no real template available for view {vi}; skipping model samples this eval")
@@ -962,24 +1083,51 @@ def main():
                         # Warm ActNorm on REAL data for the exact model we will sample (EMA or base)
                         warmup_actnorm_with_real_batch(m, tmpl_by_view[vi])
 
-                        ok, err = _save_samples_grid(
-                            m, 100, args.sample_temp, run_dir / f"samples_view{vi}_it{it:06d}.png",
-                            nrow=10, target_hw=(args.H, args.W)
-                        )
+                        # Snapshot RNG state (CPU + CUDA) so we can reseed for coordination and then restore.
+                        cpu_state = torch.random.get_rng_state()
+                        cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+
+                        try:
+                            # Reseed so every view draws the *same* z for sample index i.
+                            torch.manual_seed(shared_seed)
+
+                            ok, err = _save_samples_grid(
+                                m,
+                                n_samples,
+                                args.sample_temp,
+                                run_dir / f"samples_view{vi}_it{it:06d}.png",
+                                nrow=nrow,
+                                target_hw=(args.H, args.W),
+                            )
+                        finally:
+                            # Restore RNG states to avoid side effects on the rest of training/eval.
+                            torch.random.set_rng_state(cpu_state)
+                            if cuda_states is not None:
+                                torch.cuda.set_rng_state_all(cuda_states)
+
                         if not ok:
                             tqdm.write(f"[warn] model sampling failed for view {vi} at iter {it}: {err}")
                         any_ok = any_ok or ok
+
                     if any_ok:
-                        tqdm.write(f"[samples] saved model sample grids @ iter {it}")
+                        tqdm.write(f"[samples] saved *coordinated* model sample grids @ iter {it}")
+
                 elif args.sample_mode == "data":
-                    any_ok = False
-                    for vi, _ in enumerate(eval_models):
-                        ok, err = _save_batch_grid_from_loader(val_loader, vi, run_dir / f"val_view{vi}_it{it:06d}.png", n=100, nrow=10, target_hw=(args.H, args.W), device=dev)
-                        if not ok:
-                            tqdm.write(f"[warn] val-batch grid failed for view {vi} at iter {it}: {err}")
-                        any_ok = any_ok or ok
-                    if any_ok:
-                        tqdm.write(f"[samples] saved validation-batch grids @ iter {it}")
+                    # Coordinate the subjects across views by collecting once and writing per-view grids
+                    ok, err = save_coordinated_input_grids(
+                        val_loader,
+                        num_views=len(eval_models),
+                        out_dir=run_dir,
+                        n=100,
+                        nrow=10,
+                        target_hw=(args.H, args.W),
+                        device=dev,
+                    )
+                    if ok:
+                        tqdm.write(f"[samples] saved *coordinated* validation-batch grids @ iter {it}")
+                    else:
+                        tqdm.write(f"[warn] val-batch grid failed at iter {it}: {err}")
+
                 else:
                     tqdm.write("[samples] skipping previews (--sample-mode off)")
             _save_metric_plots(csv_path, run_dir)
