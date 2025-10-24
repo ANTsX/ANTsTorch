@@ -1,11 +1,15 @@
 
 for i in barlow hsic infonce none pearson vicreg; 
   do 
+    echo "$i"
     python eval_conditional_gaussian.py \
         --run-dir runs/t1_t2_fa_128x128_${i} \
         --use-ema \
-        --gauss-samples 2000 \
+        --gauss-samples 10000 \
         --eval-samples 256 \
         --batch 64 \
+        --cov-mode perlevel \
+        --shrinkage 1e-4 \
+        --jitter 1e-3 \
         --device cuda:0
   done  
