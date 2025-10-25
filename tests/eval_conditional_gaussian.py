@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import List, Tuple, Dict
 import math
 import csv
+import scipy
 
 import torch
 import torch.nn as nn
@@ -164,12 +165,24 @@ def flatten_from_models(models: List[nn.Module], batch_views: List[torch.Tensor]
         latents_flat.append(zflat)
     return latents_flat
 
-def psnr(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-8) -> float:
-    # expects in [0,1]
-    mse = torch.mean((a - b) ** 2).item()
-    if mse <= 0: 
-        return float("inf")
-    return 10.0 * math.log10(1.0 / max(mse, eps))
+@torch.no_grad()
+def psnr(x: torch.Tensor, y: torch.Tensor, data_range: float = 1.0, eps: float = 1e-8) -> float:
+    # clamp to [0,1] for stability if your pipeline is in [0,1]
+    x = torch.clamp(x, 0.0, 1.0)
+    y = torch.clamp(y, 0.0, 1.0)
+
+    # batch-safe MSE (averaged over all dims and batch)
+    mse_t = torch.mean((x - y) ** 2)
+
+    # guard: replace non-finite with +inf so PSNR becomes 0 dB, not an exception
+    if not torch.isfinite(mse_t):
+        return float('nan')  # we'll nan-mean later
+
+    mse = float(mse_t.item())
+    if mse <= 0.0:
+        # perfect match or numeric underflow -> treat as very high PSNR
+        return 99.0
+    return 10.0 * math.log10((data_range * data_range) / max(mse, eps))
 
 def save_grid(x: torch.Tensor, path: Path, nrow: int = 8):
     x = torch.clamp(x.detach().cpu().float(), 0, 1)
@@ -379,31 +392,174 @@ def fit_cov_oas(Z):  # Z: (N, D) CPU tensor
     Sigma = (1 - alpha) * S + alpha * (trS / D) * I
     return mu, Sigma
 
+# ------------------------- level weighting & CCA helpers -------------------------
+def compute_level_weights(obs, mis, L, level_stats, level_rel_per_view, mode="none"):
+    """
+    Returns list w_l (length L). If mode='corr': w_l ∝ ||Σ_MO^l||_F and normalized to sum=1.
+    """
+    if mode == "none":
+        return [1.0 for _ in range(L)]
+    ws = []
+    for l in range(L):
+        S = level_stats[l]["Sigma"]  # CPU
+        idx_obs_rel = torch.cat([level_rel_per_view[l][v].cpu() for v in obs], dim=0)
+        idx_mis_rel = torch.cat([level_rel_per_view[l][v].cpu() for v in mis], dim=0)
+        if idx_obs_rel.numel() == 0 or idx_mis_rel.numel() == 0:
+            ws.append(0.0); continue
+        block = S[idx_mis_rel][:, idx_obs_rel]
+        ws.append(float(torch.linalg.matrix_norm(block, ord='fro').item()))
+    s = sum(ws)
+    if s <= 0:
+        return [1.0 for _ in range(L)]
+    return [w/s for w in ws]
+
+def fit_cca_ridge(X, Y, k=128, alpha=1e-2, eps=1e-6):
+    """
+    X: (N, dx), Y: (N, dy) CPU tensors, centered.
+    Returns: {"A","W","k_eff","cond_XtX"}; A in R^{dx×k_eff}, W in R^{k_eff×dy}.
+    """
+    N, dx = X.shape; dy = Y.shape[1]
+    Cxx = (X.T @ X) / max(1, N - 1) + eps * torch.eye(dx)
+    Cyy = (Y.T @ Y) / max(1, N - 1) + eps * torch.eye(dy)
+    Cxy = (X.T @ Y) / max(1, N - 1)
+
+    Lx = torch.linalg.cholesky(Cxx)
+    Ly = torch.linalg.cholesky(Cyy)
+
+    # T = Lx^{-1} Cxy Ly^{-T}
+    Z = torch.linalg.solve_triangular(Lx, Cxy, upper=False)
+    T = torch.linalg.solve_triangular(Ly.T, Z.T, upper=True).T
+
+    U, S, Vh = torch.linalg.svd(T, full_matrices=False)
+
+    # SVD truncation (keep reliable canonical directions)
+    svd_eps = 1e-3
+    mask = (S > svd_eps)
+    k_eff = int(torch.count_nonzero(mask).item())
+    k_eff = max(0, min(k_eff, k))
+
+    if k_eff == 0:
+        # No reliable canonical directions; return a dummy mapping
+        return {"A": None, "W": None, "k_eff": 0, "cond_XtX": float("inf")}
+
+    U_k = U[:, :k_eff]
+    A = torch.linalg.solve_triangular(Lx, U_k, upper=False)    # Cxx^{-1/2} U_k
+    Xk = X @ A                                                 # (N, k_eff)
+
+    # Ridge solve
+    XtX = Xk.T @ Xk
+    cond_XtX = float(torch.linalg.cond(XtX + eps * torch.eye(k_eff)).item())
+    W = torch.linalg.solve(XtX + alpha * torch.eye(k_eff), Xk.T @ Y)
+
+    return {"A": A, "W": W, "k_eff": k_eff, "cond_XtX": cond_XtX}
+
+def apply_cca_ridge(mapping, z_obs, mu_O, mu_M):
+    """z_obs on device; mu_* on device. Returns predicted z_M."""
+    A = mapping["A"].to(z_obs.device); W = mapping["W"].to(z_obs.device)
+    Xk = (z_obs - mu_O) @ A
+    Yc = Xk @ W
+    return Yc + mu_M
+
+def safe_latent(z_pred, mu, Sigma, mode="clamp", clamp_k=3.0, gamma=0.7, mahal_pct=0.99):
+    """
+    z_pred, mu: (B,d) on device. Sigma: (d,d) on device.
+    mode:
+      - "clamp": elementwise clamp to mu ± k*std
+      - "shrink": z = mu + gamma*(z_pred - mu)
+      - "mahal": shrink into ellipsoid with radius at desired percentile
+    """
+    if mode == "none":
+        return z_pred
+    d = z_pred.shape[1]
+    if mode == "clamp":
+        std = torch.sqrt(torch.clamp(torch.diag(Sigma), min=1e-12)).unsqueeze(0)
+        lo = mu.unsqueeze(0) - clamp_k * std
+        hi = mu.unsqueeze(0) + clamp_k * std
+        return torch.max(torch.min(z_pred, hi), lo)
+    if mode == "shrink":
+        return mu.unsqueeze(0) + gamma * (z_pred - mu.unsqueeze(0))
+    if mode == "mahal":
+        # shrink to lie within a chi-square radius (approx) for percentile
+        r2_target = torch.tensor(scipy.stats.chi2.ppf(mahal_pct, df=d), device=z_pred.device, dtype=z_pred.dtype)
+        L = torch.linalg.cholesky(Sigma + 1e-6*torch.eye(d, device=Sigma.device, dtype=Sigma.dtype))
+        resid = z_pred - mu.unsqueeze(0)          # (B,d)
+        t = torch.linalg.solve_triangular(L, resid.T, upper=False)  # (d,B)
+        r2 = (t*t).sum(dim=0)                     # (B,)
+        scale = torch.sqrt(r2_target / torch.clamp(r2, min=1.0))    # <= 1 for r2>target
+        return mu.unsqueeze(0) + (resid * scale.unsqueeze(1))
+    return z_pred
+
+def perm_energy(obs, mis, L, level_stats, level_rel_per_view):
+    E = 0.0
+    for l in range(L):
+        S = level_stats[l]["Sigma"]  # CPU
+        idx_obs_rel = torch.cat([level_rel_per_view[l][v].cpu() for v in obs], 0)
+        idx_mis_rel = torch.cat([level_rel_per_view[l][v].cpu() for v in mis], 0)
+        if idx_obs_rel.numel()==0 or idx_mis_rel.numel()==0: 
+            continue
+        E += torch.linalg.matrix_norm(S[idx_mis_rel][:, idx_obs_rel], ord='fro').item()
+    return E
 
 # ------------------------- main pipeline -------------------------
 
 def main():
     ap = argparse.ArgumentParser("Conditional-Gaussian evaluation for Glow runs")
-    ap.add_argument("--run-dir", type=str, required=True, help="Directory containing training_state.pt")
-    ap.add_argument("--checkpoint", type=str, default="", help="Optional explicit checkpoint path; defaults to <run-dir>/training_state.pt")
-    ap.add_argument("--use-ema", action="store_true", help="Use EMA weights if available")
-    ap.add_argument("--gauss-samples", type=int, default=2000, help="Number of augmented samples to fit the Gaussian")
-    ap.add_argument("--eval-samples", type=int, default=256, help="Number of samples for metric evaluation")
+    ap.add_argument("--run-dir", type=str, required=True, 
+                    help="Directory containing training_state.pt")
+    ap.add_argument("--checkpoint", type=str, default="", 
+                    help="Optional explicit checkpoint path; defaults to <run-dir>/training_state.pt")
+    ap.add_argument("--use-ema", action="store_true", 
+                    help="Use EMA weights if available")
+    ap.add_argument("--gauss-samples", type=int, default=2000, 
+                    help="Number of augmented samples to fit the Gaussian")
+    ap.add_argument("--eval-samples", type=int, default=256, 
+                    help="Number of samples for metric evaluation")
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--num-workers", type=int, default=2)
-    ap.add_argument("--shrinkage", type=float, default=1e-3, help="Ridge shrinkage lambda for Sigma")
-    ap.add_argument("--jitter", type=float, default=1e-4, help="PD jitter added to Sigma blocks for solves")
-    ap.add_argument("--sample", action="store_true", help="Draw stochastic samples instead of mean imputation")
-    ap.add_argument("--tau", type=float, default=1.0, help="Sampling temperature for stochastic imputation")
-    ap.add_argument("--cov-mode", type=str, default="perlevel", choices=["global","perlevel"], help="Use one global Gaussian or per-latent-level Gaussians (recommended).")
+    ap.add_argument("--shrinkage", type=float, default=1e-3, 
+                    help="Ridge shrinkage lambda for Sigma")
+    ap.add_argument("--jitter", type=float, default=1e-4, 
+                    help="PD jitter added to Sigma blocks for solves")
+    ap.add_argument("--sample", action="store_true", 
+                    help="Draw stochastic samples instead of mean imputation")
+    ap.add_argument("--tau", type=float, default=1.0, 
+                    help="Sampling temperature for stochastic imputation")
+    ap.add_argument("--cov-mode", type=str, default="perlevel", choices=["global","perlevel"], 
+                    help="Use one global Gaussian or per-latent-level Gaussians (recommended).")
     ap.add_argument("--device", type=str, default="cuda:0")
+    ap.add_argument("--level-weights", type=str, default="none", choices=["none","corr"],
+                    help="Scale per-level cross-covariance by a weight; 'corr' uses Frobenius norm of Σ_MO per level.")
+    ap.add_argument("--cca", type=str, default="off", choices=["off","global","perlevel"],
+                    help="Use CCA-ridge mapping z_O→z_M instead of Gaussian conditioning.")
+    ap.add_argument("--cca-k", type=int, default=128,
+                    help="Top-k canonical components for CCA-ridge.")
+    ap.add_argument("--cca-alpha", type=float, default=1e-2,
+                    help="Ridge regularization for the regression in the CCA head.")
+    ap.add_argument("--cca-safe", type=str, default="clamp", choices=["none","clamp","shrink","mahal"],
+                    help="Safety for CCA predictions in latent space.")
+    ap.add_argument("--cca-clamp-k", type=float, default=3.0, 
+                    help="Std devs for clamp mode.")
+    ap.add_argument("--cca-gamma", type=float, default=0.7, 
+                    help="Shrink factor for shrink mode.")
+    ap.add_argument("--cca-mahal-pct", type=float, default=0.99, 
+                    help="Target ellipsoid percentile for mahal mode.")
+    ap.add_argument("--cca-perm-min-energy", type=float, default=40.0,
+                    help="If sum_l ||Σ_MO^l||_F < this, skip CCA and use Gaussian for the whole permutation.")
+    ap.add_argument("--cca-min-k", type=int, default=8,
+                    help="Skip CCA at a level if effective k after truncation is below this.")
+    ap.add_argument("--cca-max-cond", type=float, default=1e6,
+                    help="Skip CCA at a level if cond(Xk^T Xk) exceeds this.")
+
+    ap.add_argument("--eval-tag", type=str, default="", 
+                    help="Append a tag to eval_gaussian output dir.")
+
     args = ap.parse_args()
 
     device = torch.device("cpu") if args.device.lower() == "cpu" else torch.device(args.device)
 
     run_dir = Path(args.run_dir)
     ckpt_path = Path(args.checkpoint) if args.checkpoint else (run_dir / "training_state.pt")
-    out_dir = run_dir / "eval_gaussian"
+    out_dir = run_dir / ("eval_gaussian" + (f"_{args.eval_tag}" if args.eval_tag else ""))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     assert ckpt_path.exists(), f"Checkpoint not found: {ckpt_path}"
@@ -560,8 +716,60 @@ def main():
             idx_obs = torch.cat([torch.arange(view_slices[v].start, view_slices[v].stop) for v in obs]).to(device)
             idx_mis = torch.cat([torch.arange(view_slices[v].start, view_slices[v].stop) for v in mis]).to(device)
 
+            E_perm = perm_energy(obs, mis, L, level_stats, level_rel_per_view)
+            use_cca_perm = (args.cca != "off") and (E_perm >= float(args.cca_perm_min_energy))
+
+            # Per-permutation level weights (if perlevel and weighted)
+            level_w = None
+            if args.cov_mode == "perlevel" and args.level_weights != "none":
+                level_w = compute_level_weights(obs, mis, L, level_stats, level_rel_per_view, mode=args.level_weights)
+
+            # Optional CCA-ridge mapping(s) from training latents Z (CPU)
+            cca_maps = None
+            if use_cca_perm:
+                cca_maps = {}
+                if args.cca == "global":
+                    X = Z[:, idx_obs.cpu()] - mu[idx_obs.cpu()]
+                    Y = Z[:, idx_mis.cpu()] - mu[idx_mis.cpu()]
+                    cca_maps["global"] = fit_cca_ridge(X, Y, k=int(args.cca_k), alpha=float(args.cca_alpha))
+                else:  # perlevel
+                    for l in range(L):
+                        idx_obs_rel = torch.cat([level_rel_per_view[l][v].cpu() for v in obs], dim=0)
+                        idx_mis_rel = torch.cat([level_rel_per_view[l][v].cpu() for v in mis], dim=0)
+                        if idx_obs_rel.numel() == 0 or idx_mis_rel.numel() == 0:
+                            continue
+
+                        idx_obs_glb = level_all_glb[l].cpu()[idx_obs_rel]   # 1D LongTensor (CPU)
+                        idx_mis_glb = level_all_glb[l].cpu()[idx_mis_rel]
+
+                        # Now index CPU latent chunks
+                        X = torch.cat([Zb[:, idx_obs_glb] for Zb in z_all_views], dim=0)  # (N, d_obs_l), CPU
+                        Y = torch.cat([Zb[:, idx_mis_glb] for Zb in z_all_views], dim=0)  # (N, d_mis_l), CPU
+
+                        # Center per level (explicit Xc, Yc)
+                        mu_O_l = X.mean(dim=0)
+                        mu_M_l = Y.mean(dim=0)
+                        Xc = X - mu_O_l
+                        Yc = Y - mu_M_l
+
+                        # Fit CCA-ridge and keep diagnostics
+                        m = fit_cca_ridge(Xc, Yc, k=int(args.cca_k), alpha=float(args.cca_alpha))
+                        k_eff = int(m.get("k_eff", m.get("k", 0)))
+                        cond = float(m.get("cond_XtX", float("inf")))
+
+                        # Gate by thresholds (add these CLI args if you haven't yet)
+                        #   --cca-min-k 8   --cca-max-cond 1e6
+                        ok = (k_eff >= int(args.cca_min_k)) and (cond <= float(args.cca_max_cond)) and (m.get("A") is not None) and (m.get("W") is not None)
+
+                        cca_maps[l] = {
+                            "map": m,          # dict with A, W, k_eff, cond_XtX
+                            "mu_O": mu_O_l,    # CPU means
+                            "mu_M": mu_M_l,
+                            "ok": ok
+                        }
+
             psnrs, mses = [], []
-            ssims, nlls = [], []
+            ssims, nlls, nlls_per_dim = [], [], []
             # also save example grids
             examples_gt = []
             examples_hat = []
@@ -583,6 +791,9 @@ def main():
                             idx_obs=idx_obs, idx_mis=idx_mis,
                             mu=mu.to(device), Sigma=Sigma.to(device), jitter=float(args.jitter))
                         nlls.extend(nll_batch.detach().cpu().tolist())
+                        dmis = idx_mis.numel()
+                        nlls_per_dim.extend((nll_batch / max(1, dmis)).detach().cpu().tolist())
+
                     else:
                         nll_sum = torch.zeros(z_full.shape[0], device=device)
                         for l in range(L):
@@ -601,24 +812,99 @@ def main():
                                 mu=mu_l, Sigma=Sig_l, jitter=float(args.jitter))
                             nll_sum = nll_sum + nll_l
                         nlls.extend(nll_sum.detach().cpu().tolist())
+                        dmis_total = 0
+                        for l in range(L):
+                            idx_mis_rel = torch.cat([level_rel_per_view[l][v] for v in mis], dim=0)
+                            dmis_total += int(idx_mis_rel.numel())
+                        dmis_total = max(1, dmis_total)
+                        nlls_per_dim.extend((nll_sum / dmis_total).detach().cpu().tolist())
 
-                    # Impute missing block
-                    z_mis = conditional_gaussian_impute(
-                        z_obs=z_obs, idx_obs=idx_obs, idx_mis=idx_mis,
-                        mu=mu.to(device), Sigma=Sigma.to(device),
-                        jitter=float(args.jitter), sample=bool(args.sample), tau=float(args.tau)
-                    )  # (B, d_mis)
+                    # --- before the imputation branch ---
+                    z_mis = None
+                    z_full_hat = None
 
-                    # after computing z_mis and with z_full (true latents)
-                    # z_true = z_full[:, idx_mis]               # ground-truth z_M
-                    # mu_M = mu[idx_mis.cpu()].to(device)  # shape: (d_mis,)
-                    # mean_pull = (z_mis - mu_M).norm(dim=1).mean().item()
-                    # true_pull = (z_true - mu_M).norm(dim=1).mean().item()
-                    # print(f"mean-pull ratio = {mean_pull/true_pull:.3f}")
+                    # Impute missing block(s): choose imputer
+                    if args.cca == "global":
+                        mu_O = mu[idx_obs.cpu()].to(device); mu_M = mu[idx_mis.cpu()].to(device)
+                        z_mis = apply_cca_ridge(cca_maps["global"], z_obs, mu_O, mu_M)
+                        z_mis = safe_latent(z_mis, mu_M, Sigma[idx_mis][:, idx_mis].to(device),
+                                            mode=args.cca_safe, clamp_k=args.cca_clamp_k,
+                                            gamma=args.cca_gamma, mahal_pct=args.cca_mahal_pct)
+                        z_full_hat = z_full.clone()
+                        z_full_hat[:, idx_mis] = z_mis
 
-                    # Assemble full flat latent by replacing missing slice(s)
-                    z_full_hat = z_full.clone()
-                    z_full_hat[:, idx_mis] = z_mis
+                    elif args.cca == "perlevel":
+                        z_full_hat = z_full.clone()
+                        for l in range(L):
+                            idx_obs_rel = torch.cat([level_rel_per_view[l][v] for v in obs], dim=0)
+                            idx_mis_rel = torch.cat([level_rel_per_view[l][v] for v in mis], dim=0)
+                            if (l not in cca_maps) or idx_mis_rel.numel() == 0:
+                                continue
+                            mu_O_l = cca_maps[l]["mu_O"].to(device); mu_M_l = cca_maps[l]["mu_M"].to(device)
+                            z_lvl_full = z_full[:, level_all_glb[l]]
+                            z_obs_l = z_lvl_full[:, idx_obs_rel]
+                            m = cca_maps.get(l, None)
+                            use_cca = (m is not None) and m.get("ok", False) and (idx_mis_rel.numel() > 0)
+
+                            if use_cca:
+                                z_mis_l_cca = apply_cca_ridge(m["map"], z_obs_l, m["mu_O"].to(device), m["mu_M"].to(device))
+                                # optional: safety + blend here
+                                z_mis_l = z_mis_l_cca
+                            else:
+                                # fall back to Gaussian for this level
+                                z_mis_l = conditional_gaussian_impute(
+                                    z_obs=z_lvl_full[:, idx_obs_rel],
+                                    idx_obs=idx_obs_rel, idx_mis=idx_mis_rel,
+                                    mu=mu_l, Sigma=level_stats[l]["Sigma"].to(device),
+                                    jitter=float(args.jitter), sample=bool(args.sample), tau=float(args.tau)
+                                )
+                            S_MM_l = level_stats[l]["Sigma"].to(device)[idx_mis_rel][:, idx_mis_rel]
+                            z_mis_l = safe_latent(z_mis_l, mu_M_l, S_MM_l,
+                                                mode=args.cca_safe, clamp_k=args.cca_clamp_k,
+                                                gamma=args.cca_gamma, mahal_pct=args.cca_mahal_pct)
+                            idx_mis_glb = torch.cat([level_glb_per_view[l][v] for v in mis], dim=0)
+                            z_full_hat[:, idx_mis_glb] = z_mis_l
+
+                    else:
+                        if args.cov_mode == "global":
+                            z_mis = conditional_gaussian_impute(
+                                z_obs=z_obs, idx_obs=idx_obs, idx_mis=idx_mis,
+                                mu=mu.to(device), Sigma=Sigma.to(device),
+                                jitter=float(args.jitter), sample=bool(args.sample), tau=float(args.tau)
+                            )  # (B, d_mis)
+                            z_full_hat = z_full.clone()
+                            z_full_hat[:, idx_mis] = z_mis
+                        else:
+                            # Per-level Gaussian (optionally with level weights)
+                            z_full_hat = z_full.clone()
+                            for l in range(L):
+                                z_lvl_full = z_full[:, level_all_glb[l]]
+                                idx_obs_rel = torch.cat([level_rel_per_view[l][v] for v in obs], dim=0)
+                                idx_mis_rel = torch.cat([level_rel_per_view[l][v] for v in mis], dim=0)
+                                if idx_mis_rel.numel() == 0: 
+                                    continue
+                                mu_l = level_stats[l]["mu"].to(device)
+                                S_l = level_stats[l]["Sigma"].clone()
+                                if level_w is not None:
+                                    wl = level_w[l]
+                                    io = idx_mis_rel.cpu(); jo = idx_obs_rel.cpu()
+                                    S_l[io[:,None], jo] = S_l[io[:,None], jo] * wl
+                                    S_l[jo[:,None], io] = S_l[jo[:,None], io] * wl
+                                z_mis_l = conditional_gaussian_impute(
+                                    z_obs=z_lvl_full[:, idx_obs_rel],
+                                    idx_obs=idx_obs_rel, idx_mis=idx_mis_rel,
+                                    mu=mu_l, Sigma=S_l.to(device),
+                                    jitter=float(args.jitter), sample=bool(args.sample), tau=float(args.tau)
+                                )
+                                idx_mis_glb = torch.cat([level_glb_per_view[l][v] for v in mis], dim=0)
+                                z_full_hat[:, idx_mis_glb] = z_mis_l
+
+                    # --- unify outputs for downstream metrics ---
+                    if z_full_hat is None:
+                        raise RuntimeError("Imputation branch did not produce z_full_hat.")
+                    if z_mis is None:
+                        # derive flat predicted missing slice from the assembled vector
+                        z_mis = z_full_hat[:, idx_mis]
 
                     # Split back into per-view flats
                     z_view_flat_hat = {}
@@ -683,13 +969,22 @@ def main():
             if len(psnrs) == 0:
                 print(f"[warn] no eval samples for obs={obs}->mis={mis}")
                 continue
-            PS = float(np.mean(psnrs))
-            PSs = float(np.std(psnrs))
-            ME = float(np.mean(mses))
-            MEs = float(np.std(mses))
-            w.writerow(["+".join(obs), "+".join(mis), len(psnrs), f"{PS:.4f}", f"{PSs:.4f}", f"{(np.mean(ssims) if ssims else float('nan')):.4f}", f"{(np.std(ssims) if ssims else float('nan')):.4f}", f"{ME:.6f}", f"{MEs:.6f}", f"{(np.mean(nlls) if nlls else float('nan')):.6f}", f"{(np.std(nlls) if nlls else float('nan')):.6f}"])
-            print(f"[{'+'.join(obs)} -> {'+'.join(mis)}] PSNR={PS:.2f}±{PSs:.2f}  MSE={ME:.5f}±{MEs:.5f} (N={len(psnrs)})")
 
+            PS  = float(np.nanmean(psnrs));   PSs = float(np.nanstd(psnrs))
+            ME  = float(np.nanmean(mses));    MEs = float(np.nanstd(mses))
+
+            w.writerow(["observed","missing","N",
+                        "PSNR_mean","PSNR_std",
+                        "SSIM_mean","SSIM_std",
+                        "MSE_mean","MSE_std",
+                        "zNLL_mean","zNLL_std",
+                        "zNLL_per_dim_mean","zNLL_per_dim_std","d_mis"])
+            print(f"[{'+'.join(obs)} -> {'+'.join(mis)}] "
+                f"PSNR={PS:.2f}±{PSs:.2f}  "
+                f"SSIM={(np.mean(ssims) if ssims else float('nan')):.3f}  "
+                f"zNLL/d={(np.mean(nlls_per_dim) if nlls_per_dim else float('nan')):.3f}  "
+                f"MSE={ME:.5f}±{MEs:.5f} (N={len(psnrs)})")
+            
             # Save example grids
             if examples_gt and examples_hat:
                 gt = torch.cat(examples_gt, dim=0)[:32]

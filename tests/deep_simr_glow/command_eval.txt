@@ -8,8 +8,32 @@ for i in barlow hsic infonce none pearson vicreg;
         --gauss-samples 10000 \
         --eval-samples 256 \
         --batch 64 \
-        --cov-mode perlevel \
-        --shrinkage 1e-4 \
         --jitter 1e-3 \
+        --eval-tag gauss_wcorr \
+        --cov-mode perlevel \
+        --level-weights corr \
+        --shrinkage 1e-4 \
         --device cuda:0
   done  
+
+
+
+for i in hsic infonce none barlow pearson vicreg; do
+  echo "$i"
+  python eval_conditional_gaussian.py \
+    --run-dir runs/t1_t2_fa_128x128_${i} \
+    --use-ema \
+    --gauss-samples 10000 \
+    --eval-samples 256 \
+    --batch 64 \
+    --jitter 1e-3 \
+    --eval-tag cca \
+    --cca perlevel \
+    --cca-k 16 \
+    --cca-alpha 0.5 \
+    --cca-safe clamp --cca-clamp-k 2.0 \
+    --cca-perm-min-energy 60 \
+    --cca-min-k 8 \
+    --cca-max-cond 1e6 \
+    --device cuda:1
+done
