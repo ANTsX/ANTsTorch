@@ -44,6 +44,16 @@ class ImageDataset(Dataset):
         at random with reasonable, randomized parameters.  Note that the "speckle" model
         takes much longer than the others.
 
+    data_augmentation_noise_parameters : float or tuple
+        'additivegaussian': (mean, standardDeviation)
+        'saltandpepper': (probability, saltValue, pepperValue)
+        'shot': scale
+        'speckle': standardDeviation
+        Note that the standard deviation, scale, and probability values are *max* values
+        and are randomly selected in the range [0, noise_parameter].  Also, the "mean",
+        "saltValue" and "pepperValue" are assumed to be in the intensity normalized range
+        of [0, 1].
+        
     data_augmentation_sd_simulated_bias_field : float
         Characterize the standard deviation of the amplitude.
 
@@ -72,6 +82,7 @@ class ImageDataset(Dataset):
                  data_augmentation_sd_affine=0.05,
                  data_augmentation_sd_deformation=0.2,
                  data_augmentation_noise_model="additivegaussian",
+                 data_augmentation_noise_parameters=(0.0, 0.05),
                  data_augmentation_sd_simulated_bias_field=1.0,
                  data_augmentation_sd_histogram_warping=0.05,
                  is_output_segmentation=False,
@@ -89,6 +100,7 @@ class ImageDataset(Dataset):
         self.data_augmentation_sd_affine = data_augmentation_sd_affine
         self.data_augmentation_sd_deformation = data_augmentation_sd_deformation
         self.data_augmentation_noise_model = data_augmentation_noise_model
+        self.data_augmentation_noise_parameters = data_augmentation_noise_parameters
         self.data_augmentation_sd_simulated_bias_field = data_augmentation_sd_simulated_bias_field
         self.data_augmentation_sd_histogram_warping = data_augmentation_sd_histogram_warping
         self.is_output_segmentation = is_output_segmentation
@@ -132,6 +144,7 @@ class ImageDataset(Dataset):
                                                 reference_image=self.template,
                                                 transform_type=self.data_augmentation_transform_type,
                                                 noise_model=self.data_augmentation_noise_model,
+                                                noise_parameters=self.data_augmentation_noise_parameters,
                                                 sd_simulated_bias_field=self.data_augmentation_sd_simulated_bias_field,
                                                 sd_histogram_warping=self.data_augmentation_sd_histogram_warping,
                                                 sd_affine=self.data_augmentation_sd_affine,
