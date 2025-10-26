@@ -178,7 +178,7 @@ def create_glow_normalizing_flow_model_2d(
     scale_map: Optional[str] = "tanh",
     leaky: float = 0.0,
     net_actnorm: bool = True,
-    scale_cap: float = 3.0,
+    scale_cap: float = 2.0,
     verbose: bool = False,
 ) -> nf.MultiscaleFlow:
     """
@@ -316,7 +316,7 @@ def create_glow_normalizing_flow_model_3d(
     scale_map: Optional[str] = "tanh",
     leaky: float = 0.0,
     net_actnorm: bool = True,
-    scale_cap: float = 3.0,
+    scale_cap: float = 2.0,
     verbose: bool = False,
 ) -> nf.MultiscaleFlow:
     """
