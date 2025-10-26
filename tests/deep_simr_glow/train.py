@@ -434,8 +434,12 @@ def build_loaders(mods, H, W, train_samples, val_samples, batch, num_workers, do
         template=tmpl,
         do_data_augmentation=do_aug,
         data_augmentation_transform_type="affineAndDeformation",
-        data_augmentation_sd_affine=0.02,
+        data_augmentation_sd_affine=0.05,
         data_augmentation_sd_deformation=10.0,
+        data_augmentation_noise_model="additivegaussian",
+        data_augmentation_noise_parameters=(0.0, 0.05),
+        data_augmentation_sd_simulated_bias_field=0.00000001,
+        data_augmentation_sd_histogram_warping=0.025,
         number_of_samples=int(train_samples),
     )
     val = antstorch.ImageDataset(
@@ -444,10 +448,11 @@ def build_loaders(mods, H, W, train_samples, val_samples, batch, num_workers, do
         do_data_augmentation=True,
         data_augmentation_transform_type="affineAndDeformation",
         data_augmentation_sd_affine=0.05,
-        data_augmentation_sd_deformation=0.2,
+        data_augmentation_sd_deformation=10.0,
         data_augmentation_noise_model="additivegaussian",
-        data_augmentation_sd_simulated_bias_field=1.0,
-        data_augmentation_sd_histogram_warping=0.05,
+        data_augmentation_noise_parameters=(0.0, 0.05),
+        data_augmentation_sd_simulated_bias_field=0.00000001,
+        data_augmentation_sd_histogram_warping=0.025,
         number_of_samples=int(val_samples),
     )
     train_loader = DataLoader(train, batch_size=batch, shuffle=True, num_workers=num_workers)
@@ -562,7 +567,7 @@ def main():
     ap.add_argument("--glowbase-min-log", type=float, default=-5.0)
     ap.add_argument("--glowbase-max-log", type=float, default=5.0)
     ap.add_argument("--scale-map", type=str, default="tanh", choices=["tanh","exp","sigmoid","sigmoid_inv"])
-    ap.add_argument("--scale-cap", type=float, default=3.0)
+    ap.add_argument("--scale-cap", type=float, default=2.0)
     ap.add_argument("--net-actnorm", action="store_true", help="ActNorm in coupling subnets")
 
     ap.add_argument("--batch", type=int, default=32)
@@ -590,7 +595,7 @@ def main():
     ap.add_argument("--plateau-cooldown", type=int, default=0)
     ap.add_argument("--min-lr", type=float, default=1e-6)
 
-    ap.add_argument("--grad-clip", type=float, default=1.0)
+    ap.add_argument("--grad-clip", type=float, default=2.0)
     ap.add_argument("--ema", action="store_true")
     ap.add_argument("--ema-decay", type=float, default=0.9995)
 
@@ -920,15 +925,24 @@ def main():
             for p in g["params"]:
                 if isinstance(p, torch.Tensor) and p.grad is not None:
                     all_params.append(p)
+
         if scaler.is_enabled():
             scaler.scale(loss_total).backward()
-            scaler.unscale_(opt)  # grads must be FP32
-            torch.nn.utils.clip_grad_norm_(all_params, max_norm=float(args.grad_clip))
+            scaler.unscale_(opt)  # grads are now FP32
+
+            params_to_clip = []
+            for g in opt.param_groups:
+                params_to_clip.extend(g["params"])
+            torch.nn.utils.clip_grad_norm_(params_to_clip, max_norm=float(args.grad_clip))
+
             scaler.step(opt)
             scaler.update()
         else:
             loss_total.backward()
-            torch.nn.utils.clip_grad_norm_(all_params, max_norm=float(args.grad_clip))
+            params_to_clip = []
+            for g in opt.param_groups:
+                params_to_clip.extend(g["params"])
+            torch.nn.utils.clip_grad_norm_(params_to_clip, max_norm=float(args.grad_clip))
             opt.step()
 
         # -------- Lazy EMA init right after the first real update --------
