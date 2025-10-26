@@ -65,28 +65,6 @@ def bits_per_dim(logp: torch.Tensor, num_dims: int) -> torch.Tensor:
 def n_params(m: nn.Module) -> int:
     return sum(p.numel() for p in m.parameters())
 
-# Ensure ActNorm init & inverse happen in FP32 (safe w/ AMP)
-def flow_inverse_fp32(model, x, dev_type):
-    with _no_autocast_for(dev_type):     # you already have this context helper
-        z_list, ldj = model.inverse_and_log_det(x.float())
-    return z_list, ldj
-
-# Put this helper near your other utils (top-level)
-def build_lat_flat_fp32(models, batch_views, dev_type, device):
-    """
-    batch_views: (B, V, H, W) tensor from your train loader (same one used for log_prob)
-    Returns: list of flattened z per view in FP32
-    """
-    lat_flat = []
-    for vi, m in enumerate(models):
-        xv = to01(batch_views[:, vi:vi+1, :, :].to(device)).to(torch.float32)
-        with _no_autocast_for(dev_type):                # <-- force FP32 for ActNorm/init
-            z_list, _ = m.inverse_and_log_det(xv)
-        z_last = torch.flatten(z_list[-1], 1)           # or however you pick/aggregate z
-        lat_flat.append(z_last)
-    return lat_flat
-
-
 # --- helpers (put near imports) ---
 @torch.no_grad()
 def _copy_actnorm_state(src, dst):
@@ -724,8 +702,7 @@ def main():
         with torch.no_grad():
             # use the same warmed real batch as template (any view is fine for dim)
             x_tmpl = to01(warm_batch[:, 0:1].to(dev)).to(torch.float32)
-            with _no_autocast_for(dev.type):                # force FP32
-                z_probe, _ = models[0].inverse_and_log_det(x_tmpl[:1])
+            z_probe, _ = models[0].inverse_and_log_det(x_tmpl[:1])
             flat_dim = _flatten_latents(z_probe).size(1)
         projectors = nn.ModuleList([
             Projector(flat_dim, args.proj_hidden, args.proj_dim).to(dev).train()
@@ -850,12 +827,10 @@ def main():
         with ctx:
             bad_batch = False
             for vi, m in enumerate(models):
-                x_v = to01(x[:, vi:vi+1, :, :].to(dev)).float()
+                x_v = to01(x[:, vi:vi+1, :, :].to(dev))
 
-                # Keep NF math in FP32 for stability, and let the model do log_prob
-                with _no_autocast_for(dev.type):
-                    logp_v = m.log_prob(x_v.float())            # <-- model computes base+logdet
-                    z_v, _ = m.inverse_and_log_det(x_v.float()) # <-- still get latents for alignment
+                logp_v = m.log_prob(x_v.float())            # <-- model computes base+logdet
+                z_v, _ = m.inverse_and_log_det(x_v.float()) # <-- still get latents for alignment
 
                 if not torch.isfinite(logp_v).all():
                     tqdm.write(f"[nan] non-finite logp in view {vi} at iter {it}; skipping step")
@@ -1039,10 +1014,9 @@ def main():
                 for j, batch_val in enumerate(val_loader):
                     bpd_views = []
                     for vi, m in enumerate(eval_models):
-                        xv = to01(batch_val[:, vi:vi+1, :, :].to(dev)).to(torch.float32)
+                        xv = to01(batch_val[:, vi:vi+1, :, :].to(dev))
                         tmpl_by_view[vi] = xv
-                        with _no_autocast_for(dev.type):
-                            lp = m.log_prob(xv.float())
+                        lp = m.log_prob(xv.float())
                         lp = torch.nan_to_num(lp, nan=-1e9, posinf=-1e9, neginf=-1e9)
                         bpd_views.append(bits_per_dim(lp, n_dims).mean().item())
                     bpd_acc.append(np.mean(bpd_views))
