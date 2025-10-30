@@ -6,6 +6,9 @@ import torch
 import numpy as np
 import random
 
+from typing import Callable, Dict, Optional
+
+
 class ImageDataset(Dataset):
 
     """
@@ -87,7 +90,8 @@ class ImageDataset(Dataset):
                  data_augmentation_sd_histogram_warping=0.05,
                  is_output_segmentation=False,
                  duplicate_channels=None,
-                 number_of_samples=1):
+                 number_of_samples=1,
+                 aug_scheduler: Optional[Callable[[int], Dict[str, float]]] = None):
 
         self.images = images
         self.number_of_modalities = 1
@@ -106,9 +110,15 @@ class ImageDataset(Dataset):
         self.is_output_segmentation = is_output_segmentation
         self.number_of_samples = number_of_samples
         self.duplicate_channels = duplicate_channels
+        self.aug_scheduler = aug_scheduler
+        self.global_step_ref = None   
+        self._global_step = 0         
 
     def __len__(self):
         return self.number_of_samples
+
+    def set_global_step(self, step: int):
+        self._global_step = int(step)
 
     def __getitem__(self, idx):
         if torch.is_tensor(idx):
@@ -135,22 +145,57 @@ class ImageDataset(Dataset):
                 output = ants.image_clone(self.outputs[random_index])
             else:  
                 output = ants.image_read(self.outputs[random_index])
-            
+
+        sd_affine = self.data_augmentation_sd_affine
+        sd_deformation = self.data_augmentation_sd_deformation
+        sd_bf = self.data_augmentation_sd_simulated_bias_field
+        sd_hist = self.data_augmentation_sd_histogram_warping
+        noise_params = self.data_augmentation_noise_parameters
+
         if self.do_data_augmentation:
-            data_aug = ants.data_augmentation(input_image_list=[image],
-                                                segmentation_image_list=output,
-                                                pointset_list=None,
-                                                number_of_simulations=1,
-                                                reference_image=self.template,
-                                                transform_type=self.data_augmentation_transform_type,
-                                                noise_model=self.data_augmentation_noise_model,
-                                                noise_parameters=self.data_augmentation_noise_parameters,
-                                                sd_simulated_bias_field=self.data_augmentation_sd_simulated_bias_field,
-                                                sd_histogram_warping=self.data_augmentation_sd_histogram_warping,
-                                                sd_affine=self.data_augmentation_sd_affine,
-                                                sd_deformation=self.data_augmentation_sd_deformation,
-                                                output_numpy_file_prefix=None,
-                                                verbose=False)
+            # defaults from ctor
+            sd_affine = self.data_augmentation_sd_affine
+            sd_deformation = self.data_augmentation_sd_deformation
+            sd_bf = self.data_augmentation_sd_simulated_bias_field
+            sd_hist = self.data_augmentation_sd_histogram_warping
+            noise_params = self.data_augmentation_noise_parameters
+
+            # optional annealing override
+            if self.aug_scheduler is not None:
+                cur_step = int(self.global_step_ref.value) if self.global_step_ref is not None else self._global_step
+                vals = self.aug_scheduler(cur_step)  # expects keys listed below
+
+                sd_affine      = vals.get("sd_affine", sd_affine)
+                sd_deformation = vals.get("sd_deformation", sd_deformation)
+                sd_bf          = vals.get("sd_simulated_bias_field", sd_bf)
+                sd_hist        = vals.get("sd_histogram_warping", sd_hist)
+
+                # noise: treat as max std that decays to 0
+                if self.data_augmentation_noise_model == "additivegaussian":
+                    base_mean = 0.0
+                    if isinstance(noise_params, (tuple, list)) and len(noise_params) > 0:
+                        base_mean = float(noise_params[0])
+                    base_std = float(noise_params[1] if isinstance(noise_params, (tuple, list)) and len(noise_params) > 1 else noise_params)
+                    noise_std = float(vals.get("noise_std", base_std))
+                    noise_params = (base_mean, max(0.0, noise_std))
+
+            data_aug = ants.data_augmentation(
+                input_image_list=[image],
+                segmentation_image_list=output,
+                pointset_list=None,
+                number_of_simulations=1,
+                reference_image=self.template,
+                transform_type=self.data_augmentation_transform_type,
+                noise_model=self.data_augmentation_noise_model,
+                noise_parameters=noise_params,
+                sd_simulated_bias_field=sd_bf,
+                sd_histogram_warping=sd_hist,
+                sd_affine=sd_affine,
+                sd_deformation=sd_deformation,
+                output_numpy_file_prefix=None,
+                verbose=False
+            )
+
             image = data_aug['simulated_images'][0]
             if output is not None: 
                 output = data_aug['simulated_segmentation_images'][0]
@@ -162,7 +207,10 @@ class ImageDataset(Dataset):
                 center=np.asarray(center_of_mass_template), translation=translation)
             for i in range(self.number_of_modalities):
                 image[i] = ants.apply_ants_transform_to_image(xfrm, image[i], self.template)
-            output = ants.apply_ants_transform_to_image(xfrm, output, self.template, interpolation="nearestneighbor")
+            if output is not None:
+                output = ants.apply_ants_transform_to_image(
+                    xfrm, output, self.template, interpolation="nearestneighbor"
+                )
 
         for i in range(self.number_of_modalities):
             image[i] = ants.iMath_normalize(image[i])
@@ -174,12 +222,12 @@ class ImageDataset(Dataset):
                 image_array[:,:,:,i] = image[i].numpy()
 
         if self.duplicate_channels is not None:
-            if image.dimension == 2:
+            if image[0].dimension == 2:
                 image_array = np.tile(image_array, (1, 1, self.duplicate_channels))
-            elif image.dimension == 3:    
+            elif image[0].dimension == 3:
                 image_array = np.tile(image_array, (1, 1, 1, self.duplicate_channels))
             else:
-                raise ValueError("Unrecognized dimension.")    
+                raise ValueError("Unrecognized dimension.")
 
         # swap color axis because
         # numpy image: H x W x D x C
@@ -211,3 +259,4 @@ class ImageDataset(Dataset):
             return image_tensor
         else:
             return image_tensor, output
+
