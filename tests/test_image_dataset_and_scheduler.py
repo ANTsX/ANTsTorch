@@ -1,5 +1,4 @@
 # tests/test_image_dataset_and_scheduler.py
-import math
 import random
 from typing import List
 
@@ -11,7 +10,19 @@ import antstorch
 import ants
 from torch.utils.data import DataLoader
 
+# # Quick run:
+# pytest -q tests/test_image_dataset_and_scheduler.py -vv
+#
+# # Save results:
+# pytest -q -s tests/test_image_dataset_and_scheduler.py -vv \
+#   --aug-schedules "noise_std:cos:0.05->0.00@150k,sd_affine:linear:0.05->0.00@80k,sd_deformation:cos:10.0->0.00@100k,sd_simulated_bias_field:cos:1e-8->0.00@120k,sd_histogram_warping:exp:0.025->0.00@120k" \
+#   --aug-steps 6 --dump-aug-samples --grid 10 --tile-size 128 --preview-channel 0
 
+
+
+# -----------------------------
+# Robust CLI option getter
+# -----------------------------
 def _opt(request, name: str, default):
     try:
         return request.config.getoption(name, default=default)
@@ -19,6 +30,9 @@ def _opt(request, name: str, default):
         return default
 
 
+# -----------------------------
+# Data helpers
+# -----------------------------
 def load_hcpya_slices(mods: List[str], H: int, W: int, slice_idx: int = 120):
     keys = dict(T2="hcpyaT2Template", T1="hcpyaT1Template", FA="hcpyaFATemplate")
     imgs = [ants.image_read(antstorch.get_antstorch_data(keys[m])) for m in mods]
@@ -28,7 +42,7 @@ def load_hcpya_slices(mods: List[str], H: int, W: int, slice_idx: int = 120):
 
 
 def _normalize01(x: np.ndarray) -> np.ndarray:
-    """Per-image robust min-max to [0,1] using 1-99% percentiles."""
+    """Per-image robust min-max to [0,1] using 1–99%."""
     x = x.astype(np.float32)
     lo, hi = np.percentile(x, 1), np.percentile(x, 99)
     if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
@@ -39,7 +53,7 @@ def _normalize01(x: np.ndarray) -> np.ndarray:
     return x
 
 
-def _to_images_from_batch(bchw: torch.Tensor, channel: int = 0) -> List[np.ndarray]:
+def _to_images_from_batch(bchw: torch.Tensor, channel: int = 0):
     """Split a (B,C,H,W) tensor into a list of 2D float32 images in [0,1]."""
     x = bchw.detach().cpu().numpy()
     imgs = [x[i, channel] for i in range(x.shape[0])]
@@ -47,7 +61,7 @@ def _to_images_from_batch(bchw: torch.Tensor, channel: int = 0) -> List[np.ndarr
 
 
 def _resample_to_size(im01: np.ndarray, tile_size: int) -> np.ndarray:
-    """Resample a [0,1] image to (tile_size, tile_size) using ANTs (linear)."""
+    """Resample a [0,1] image to (tile_size, tile_size) via ANTs linear."""
     if im01.shape == (tile_size, tile_size):
         return im01
     ref = ants.from_numpy(np.zeros((tile_size, tile_size), dtype=np.float32))
@@ -56,57 +70,76 @@ def _resample_to_size(im01: np.ndarray, tile_size: int) -> np.ndarray:
     return r.numpy().astype(np.float32)
 
 
-def _save_mosaic_png(images01: List[np.ndarray], rows: int, cols: int,
-                     tile_size: int, out_path: str):
-    """
-    Tile per-image [0,1] arrays into a rows×cols mosaic and save as PNG (uint8).
-    Falls back to ANTs writer if Pillow is unavailable.
-    """
-    # Resample tiles if needed
+def _save_mosaic_png(images01, rows: int, cols: int, tile_size: int, out_path: str):
+    """Tile per-image [0,1] arrays into rows×cols, save PNG (uint8)."""
     tiles = [(_resample_to_size(im, tile_size) if im.shape != (tile_size, tile_size) else im)
              for im in images01]
 
-    # Assemble float mosaic in [0,1]
     mosaic = np.zeros((rows * tile_size, cols * tile_size), dtype=np.float32)
     k = 0
     for r in range(rows):
         for c in range(cols):
             if k >= len(tiles):
                 break
-            rr = r * tile_size
-            cc = c * tile_size
+            rr, cc = r * tile_size, c * tile_size
             mosaic[rr:rr + tile_size, cc:cc + tile_size] = tiles[k]
             k += 1
 
-    # Convert to uint8 [0,255] for PNG
+    # [0,1] -> uint8
     mosaic_u8 = np.clip(mosaic * 255.0 + 0.5, 0, 255).astype(np.uint8)
 
-    # Prefer Pillow (PNG-native, robust)
     try:
         from PIL import Image
-        Image.fromarray(mosaic_u8, mode='L').save(out_path)
+        Image.fromarray(mosaic_u8, mode="L").save(out_path)
         return
     except Exception:
-        pass  # fall back to ANTs
-
-    # Fallback: ANTs writer (must be uint8/uint16 for PNG)
+        pass
     ants.image_write(ants.from_numpy(mosaic_u8), out_path)
 
 
+# -----------------------------
+# Test
+# -----------------------------
 def test_image_dataset_with_scheduler_integration(tmp_path, request):
+    # General knobs
     dump = bool(_opt(request, "--dump-aug-samples", False))
-    steps = int(_opt(request, "--aug-steps", 4))
-    mods = [m.strip() for m in str(_opt(request, "--mods", "T1")).split(",") if m.strip()]
-    grid = int(_opt(request, "--grid", 10))           # rows=cols=grid
-    tile = int(_opt(request, "--tile-size", 128))     # tile (and dataset) size
+    grid = int(_opt(request, "--grid", 10))              # rows=cols
+    tile = int(_opt(request, "--tile-size", 128))        # tile (and dataset) size
     channel_to_show = int(_opt(request, "--preview-channel", 0))
+    mods = [m.strip() for m in str(_opt(request, "--mods", "T2")).split(",") if m.strip()]
+
+    # Anneal spec (DSL) like the trainer; if empty, we synthesize a tiny default
+    aug_spec = str(_opt(request, "--aug-schedules", "")).strip()
+
+    # If user provided a spec, we’ll parse it and infer a nice loop length.
+    # If not, fall back to a tiny cosine default driven by --aug-steps (default 4).
+    aug_steps_opt = int(_opt(request, "--aug-steps", 4))
+
+    if aug_spec:
+        schedules = antstorch.parse_schedules(aug_spec)
+        # Derive a reasonable loop length; keep tests snappy unless user overrides --aug-steps
+        implied = max(max(1, s.total_steps) + max(0, s.delay) for s in schedules)
+        steps = aug_steps_opt if aug_steps_opt > 0 else min(implied, 12)  # cap to keep CI quick
+    else:
+        steps = max(1, aug_steps_opt)
+        schedules = antstorch.parse_schedules(
+            ",".join([
+                f"noise_std:cos:0.02->0.00@{steps}",
+                f"sd_affine:cos:0.02->0.00@{steps}",
+                f"sd_deformation:cos:1.00->0.00@{steps}",
+                f"sd_simulated_bias_field:cos:1e-8->0.00@{steps}",
+                f"sd_histogram_warping:cos:0.02->0.00@{steps}",
+            ])
+        )
+
+    mp = antstorch.MultiParamScheduler(schedules)
 
     np.random.seed(1234); random.seed(1234); torch.manual_seed(1234)
 
+    # Build data (H=W=tile to match mosaic tiles)
     H = W = tile
     slcs, tmpl = load_hcpya_slices(mods, H, W)
 
-    # Ensure enough samples if dumping full mosaics (grid^2 per step)
     tiles_needed = grid * grid
     n_samples = steps * tiles_needed if dump else max(steps * 2, 8)
 
@@ -126,31 +159,20 @@ def test_image_dataset_with_scheduler_integration(tmp_path, request):
 
     batch_size = min(32, tiles_needed) if dump else 2
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=False)
-
-    # Linear anneal to 0 for all five ANTs knobs over 'steps'
-    spec = (
-        f"noise_std:linear:0.02->0.00@{steps},"
-        f"sd_affine:linear:0.02->0.00@{steps},"
-        f"sd_deformation:linear:1.00->0.00@{steps},"
-        f"sd_simulated_bias_field:linear:1e-8->0.00@{steps},"
-        f"sd_histogram_warping:linear:0.02->0.00@{steps}"
-    )
-    mp = antstorch.MultiParamScheduler(antstorch.parse_schedules(spec))
-
     it = iter(loader)
-    prev_vals = None
 
+    prev_vals = None
     for step in range(steps):
         vals = mp.step(step)
 
-        # Drive the dataset's ANTs knobs each step
-        ds.data_augmentation_sd_affine = float(vals["sd_affine"])
-        ds.data_augmentation_sd_deformation = float(vals["sd_deformation"])
-        ds.data_augmentation_sd_simulated_bias_field = float(vals["sd_simulated_bias_field"])
-        ds.data_augmentation_sd_histogram_warping = float(vals["sd_histogram_warping"])
-        ds.data_augmentation_noise_parameters = (0.0, float(vals["noise_std"]))
+        # Drive ANTs knobs
+        ds.data_augmentation_sd_affine = float(vals.get("sd_affine", 0.0))
+        ds.data_augmentation_sd_deformation = float(vals.get("sd_deformation", 0.0))
+        ds.data_augmentation_sd_simulated_bias_field = float(vals.get("sd_simulated_bias_field", 0.0))
+        ds.data_augmentation_sd_histogram_warping = float(vals.get("sd_histogram_warping", 0.0))
+        ds.data_augmentation_noise_parameters = (0.0, float(vals.get("noise_std", 0.0)))
 
-        batch = next(it)
+        batch = next(it)  # (B,C,H,W)
         assert isinstance(batch, torch.Tensor)
         assert batch.ndim == 4 and batch.shape[1] == len(mods)
         assert batch.shape[2:] == (H, W)
@@ -169,16 +191,35 @@ def test_image_dataset_with_scheduler_integration(tmp_path, request):
 
             out_path = tmp_path / f"aug_step{step:03d}.png"
             _save_mosaic_png(imgs, rows=grid, cols=grid, tile_size=tile, out_path=str(out_path))
-            print(f"[dump] saved mosaic: {out_path}")
 
-        # monotone towards 0.0
+            aug_vals = {
+                "noise_std": float(
+                    ds.data_augmentation_noise_parameters[1]
+                    if isinstance(ds.data_augmentation_noise_parameters, (tuple, list))
+                    else ds.data_augmentation_noise_parameters
+                ),
+                "sd_affine": float(ds.data_augmentation_sd_affine),
+                "sd_deformation": float(ds.data_augmentation_sd_deformation),
+                "sd_simulated_bias_field": float(ds.data_augmentation_sd_simulated_bias_field),
+                "sd_histogram_warping": float(ds.data_augmentation_sd_histogram_warping),
+            }
+
+            # Nice, parseable one-liner
+            kv = ", ".join(f"{k}={v:.6g}" for k, v in aug_vals.items())
+            print(f"[dump] step={step:03d} -> {out_path} | {kv}")
+
+        # Non-increasing toward targets for common decay schedules
         if prev_vals is not None:
-            assert vals["sd_affine"] <= prev_vals["sd_affine"] + 1e-12
-            assert vals["sd_deformation"] <= prev_vals["sd_deformation"] + 1e-12
-            assert vals["sd_histogram_warping"] <= prev_vals["sd_histogram_warping"] + 1e-12
-            assert vals["noise_std"] <= prev_vals["noise_std"] + 1e-12
+            for k in ("sd_affine", "sd_deformation", "sd_histogram_warping", "noise_std"):
+                if k in vals and k in prev_vals:
+                    assert vals[k] <= prev_vals[k] + 1e-12
         prev_vals = vals
 
+    # Endpoint consistency: compare against schedule-defined value at the same step
+    # (works even if we capped steps for speed or the user provided delays/floors)
     end_vals = mp.step(steps)
-    for k in ("sd_affine", "sd_deformation", "sd_simulated_bias_field", "sd_histogram_warping", "noise_std"):
-        assert end_vals[k] == pytest.approx(0.0, abs=1e-12)
+    for s in schedules:
+        expect = s.value_at(steps)  # authoritative
+        got = end_vals.get(s.name)
+        if got is not None:
+            assert got == pytest.approx(expect, rel=1e-7, abs=1e-9)
