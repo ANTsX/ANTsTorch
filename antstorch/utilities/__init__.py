@@ -23,3 +23,5 @@ from .mutual_information import mutual_information_mine
 from .mutual_information import mutual_information_kde
 
 from .correlation import absolute_pearson_correlation
+
+from .schedulers import ParamSchedule, MultiParamScheduler, parse_schedules
