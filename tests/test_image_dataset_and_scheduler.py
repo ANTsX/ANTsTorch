@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 #
 # # Save results:
 # pytest -q -s tests/test_image_dataset_and_scheduler.py -vv \
-#   --aug-schedules "noise_std:cos:0.05->0.00@150k,sd_affine:linear:0.05->0.00@80k,sd_deformation:cos:10.0->0.00@100k,sd_simulated_bias_field:cos:1e-8->0.00@120k,sd_histogram_warping:exp:0.025->0.00@120k" \
+#   --aug-schedules "noise_std:cos:0.1->0.00@10,sd_affine:cos:0.05->0.00@10,sd_deformation:cos:15.0->0.0@10,sd_simulated_bias_field:cos:0.5->0.0@10,sd_histogram_warping:cos:0.05->0.0@10" \
 #   --aug-steps 6 --dump-aug-samples --grid 10 --tile-size 128 --preview-channel 0
 
 
