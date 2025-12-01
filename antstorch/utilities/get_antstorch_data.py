@@ -4,14 +4,46 @@ from urllib.parse import urlparse
 from typing import Optional
 from torchvision.datasets.utils import download_url
 
+_antstorch_cache_directory = os.path.join(os.path.expanduser('~'), '.antstorch')
+
+
+def get_antstorch_cache_directory():
+    """Get the cache directory for ANTsTorch data. Data and pre-trained models will be
+    downloaded here.
+
+    The default directory is ~/.antstorch.
+
+    Returns
+    -------
+    antstorch_cache_directory string
+        The directory to store ANTsTorch data.
+
+    """
+    return(_antstorch_cache_directory)
+
+
+def set_antstorch_cache_directory(antstorch_cache_dir: str):
+    """Set the cache directory for ANTsTorch data. Data and pre-trained models will be
+    downloaded here.
+
+    Arguments
+    ---------
+    antstorch_cache_dir string
+        The directory to store ANTsTorch data. It will be created if it does not exist.
+    """
+    global _antstorch_cache_directory
+    _antstorch_cache_directory = os.path.abspath(antstorch_cache_dir)
+
+    if not os.path.exists(_antstorch_cache_directory):
+        os.makedirs(_antstorch_cache_directory)
+
 
 def get_antstorch_data(
     file_id: Optional[str] = None,
     target_file_name: Optional[str] = None,
-    antstorch_cache_directory: Optional[str] = None,
 ):
     """
-    Download ANTsTorch data (templates, priors, etc.) from the Figshare repo.
+    Download ANTsTorch data (templates, priors, etc.) from the Figshare repo, or from the local cache.
 
     Parameters
     ----------
@@ -20,9 +52,6 @@ def get_antstorch_data(
         Note that most require internet access to download.
     target_file_name : str, optional
         Optional target filename. If omitted, a sensible default is inferred from `file_id`.
-    antstorch_cache_directory : str, optional
-        Optional target output directory. If not specified these data will be downloaded
-        to the subdirectory ~/.antstorch/. The directory will be created if needed.
 
     Returns
     -------
@@ -104,10 +133,11 @@ def get_antstorch_data(
     if file_id not in _switcher:
         raise ValueError('No data with the id you passed - try "show" to get list of valid ids.')
 
-    # Default cache directory
-    if antstorch_cache_directory is None:
-        antstorch_cache_directory = os.path.join(os.path.expanduser("~"), ".antstorch/")
-    os.makedirs(antstorch_cache_directory, exist_ok=True)
+    # get the cache directory - create if it does not exist
+    antstorch_cache_directory = get_antstorch_cache_directory()
+
+    if not os.path.exists(antstorch_cache_directory):
+        os.makedirs(antstorch_cache_directory, exist_ok=True)
 
     url = _switcher[file_id]
 

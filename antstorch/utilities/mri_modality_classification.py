@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 
 def mri_modality_classification(image,
-                                antstorch_cache_directory=None,
                                 verbose=False):
 
     """
@@ -78,8 +77,7 @@ def mri_modality_classification(image,
     #
     ################################
 
-    weights_file_name = get_pretrained_network("mriModalityClassification",
-                                               antstorch_cache_directory=antstorch_cache_directory)
+    weights_file_name = get_pretrained_network("mriModalityClassification")
 
     modality_types = ["T1", "T2", "FLAIR", "T2Star", "Mean DWI", "Mean Bold", "ASL Perfusion"]
 
