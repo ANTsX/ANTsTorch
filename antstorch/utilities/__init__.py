@@ -1,5 +1,5 @@
 from .get_pretrained_network import get_pretrained_network
-from .get_antstorch_data import get_antstorch_data
+from .get_antstorch_data import get_antstorch_data, get_antstorch_cache_directory, set_antstorch_cache_directory
 
 from .brain_extraction import brain_extraction
 from .preprocess_image import preprocess_brain_image

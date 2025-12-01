@@ -1,9 +1,10 @@
 import torchvision
 import os
 
+from .get_antstorch_data import get_antstorch_cache_directory
+
 def get_pretrained_network(file_id=None,
-                           target_file_name=None,
-                           antstorch_cache_directory=None):
+                           target_file_name=None):
 
     """
     Download (or resolve cached) pretrained network/weights.
@@ -15,15 +16,9 @@ def get_pretrained_network(file_id=None,
     One of the permitted ids (see `show`) or any custom id ending in
     `_pytorch` for cache‑only use. Pass "show" to list known ids.
 
-
     target_file_name : str, optional
     Target filename. If omitted, defaults to `<file_id>.pt` for ids ending
     in `_pytorch`, otherwise `<file_id>.h5`.
-
-
-    antstorch_cache_directory : str, optional
-    Cache directory (defaults to `~/.antstorch/`).
-
 
     Returns
     -------
@@ -63,7 +58,7 @@ def get_pretrained_network(file_id=None,
             "HarvardOxfordAtlasSubcortical_pytorch": "https://figshare.com/ndownloader/files/58488943",
             "DesikanKillianyTourvilleOuter_pytorch": "https://figshare.com/ndownloader/files/58494949",
             "cerebellumWhole_pytorch": "https://figshare.com/ndownloader/files/58495219",
-            "cerebellumTissue_pytorch": "https://figshare.com/ndownloader/files/58495210", 
+            "cerebellumTissue_pytorch": "https://figshare.com/ndownloader/files/58495210",
             "cerebellumLabels_pytorch": "https://figshare.com/ndownloader/files/58495102"
         }
         return(switcher.get(argument, "Invalid argument."))
@@ -104,7 +99,7 @@ def get_pretrained_network(file_id=None,
                   "show")
 
     if not file_id in valid_list:
-        raise ValueError(("No data with the id you passed, ", file_id,   
+        raise ValueError(("No data with the id you passed, ", file_id,
                          ".  Try \"show\" to get list of valid ids."))
 
     if file_id == "show":
@@ -112,15 +107,16 @@ def get_pretrained_network(file_id=None,
 
     url = switch_networks(file_id)
 
-    if target_file_name is None:        
+    if target_file_name is None:
         target_file_name = (
             f"{file_id}.pt" if file_id.endswith("_pytorch") else f"{file_id}.h5"
         )
 
-    if antstorch_cache_directory is None:
-        antstorch_cache_directory = os.path.join(os.path.expanduser("~"), ".antstorch/")
+    antstorch_cache_directory = get_antstorch_cache_directory()
 
-    os.makedirs(antstorch_cache_directory, exist_ok=True)
+    if not os.path.exists(antstorch_cache_directory):
+        os.makedirs(antstorch_cache_directory, exist_ok=True)
+
     target_file_name_path = os.path.join(antstorch_cache_directory, target_file_name)
 
     url = switch_networks(file_id)

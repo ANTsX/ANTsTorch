@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 
 def chexnet(image,
-            antstorch_cache_directory=None,
             verbose=False):
 
     """
@@ -29,14 +28,14 @@ def chexnet(image,
         'Hernia'
 
     Reproducing this work:   https://github.com/jrzech/reproduce-chexnet
-      fork:  https://github.com/ntustison/reproduce-chexnet    
+      fork:  https://github.com/ntustison/reproduce-chexnet
 
     NB:  There are slight differences due to the internal PyTorch transforms
     that are not reproduced here, i.e.,
 
     >>> image = Image.open(image_file)
     >>> image = image.convert('RGB')
-    >>> 
+    >>>
     >>> # use imagenet mean,std for normalization
     >>> mean = [0.485, 0.456, 0.406]
     >>> std = [0.229, 0.224, 0.225]
@@ -44,7 +43,7 @@ def chexnet(image,
     >>>                                       transforms.CenterCrop(224),
     >>>                                       transforms.ToTensor(),
     >>>                                       transforms.Normalize(mean, std)
-    >>>                                     ])    
+    >>>                                     ])
 
     Arguments
     ---------
@@ -84,7 +83,7 @@ def chexnet(image,
                           'Fibrosis',
                           'Pleural_Thickening',
                           'Hernia']
-  
+
     ################################
     #
     # Load model and weights
@@ -94,12 +93,11 @@ def chexnet(image,
     if verbose:
         print("Loading model and weights.")
 
-    weights_file_name = get_pretrained_network("chexnet_repro_pytorch",
-                                                antstorch_cache_directory=antstorch_cache_directory)
+    weights_file_name = get_pretrained_network("chexnet_repro_pytorch")
 
     model = models.densenet121(weights='DEFAULT')
-    model.classifier = torch.nn.Sequential(torch.nn.Linear(model.classifier.in_features, 
-                                                           len(disease_categories)), 
+    model.classifier = torch.nn.Sequential(torch.nn.Linear(model.classifier.in_features,
+                                                           len(disease_categories)),
                                            torch.nn.Sigmoid())
     model.eval()
     model.load_state_dict(torch.load(weights_file_name))
@@ -111,10 +109,10 @@ def chexnet(image,
     ################################
 
     if verbose:
-        print("Image preprocessing.")  
+        print("Image preprocessing.")
 
     image_size = (224, 224)
-    image = ants.resample_image(image, image_size, use_voxels=True, interp_type=0)  
+    image = ants.resample_image(image, image_size, use_voxels=True, interp_type=0)
     image_array = (image.numpy() - image.min()) / (image.max() - image.min())
 
     # use imagenet mean,std for normalization
