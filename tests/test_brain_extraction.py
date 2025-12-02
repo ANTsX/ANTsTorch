@@ -8,7 +8,7 @@ class Test_t1(unittest.TestCase):
     def tearDown(self):
         pass
     def test_example(self):
-        t1 = ants.image_read(antstorch.get_antsxnet_data('mprage_hippmapp3r'))
+        t1 = ants.image_read(antstorch.get_antstorch_data('mprage_hippmapp3r'))
         seg = antstorch.brain_extraction(t1, modality="t1")
 
 # class Test_t1threetissue(unittest.TestCase):
@@ -17,7 +17,7 @@ class Test_t1(unittest.TestCase):
 #     def tearDown(self):
 #         pass
 #     def test_example(self):
-#         t1 = ants.image_read(antstorch.get_antsxnet_data('mprage_hippmapp3r'))
+#         t1 = ants.image_read(antstorch.get_antstorch_data('mprage_hippmapp3r'))
 #         bext = antstorch.brain_extraction(t1, modality="t1threetissue")
 
 # class Test_t1hemi(unittest.TestCase):
@@ -26,7 +26,7 @@ class Test_t1(unittest.TestCase):
 #     def tearDown(self):
 #         pass
 #     def test_example(self):
-#         t1 = ants.image_read(antstorch.get_antsxnet_data('mprage_hippmapp3r'))
+#         t1 = ants.image_read(antstorch.get_antstorch_data('mprage_hippmapp3r'))
 #         bext = antstorch.brain_extraction(t1, modality="t1hemi")
 
 # class Test_t1lobes(unittest.TestCase):
@@ -35,7 +35,7 @@ class Test_t1(unittest.TestCase):
 #     def tearDown(self):
 #         pass
 #     def test_example(self):
-#         t1 = ants.image_read(antstorch.get_antsxnet_data('mprage_hippmapp3r'))
+#         t1 = ants.image_read(antstorch.get_antstorch_data('mprage_hippmapp3r'))
 #         bext = antstorch.brain_extraction(t1, modality="t1lobes")
 
 if __name__ == '__main__':
