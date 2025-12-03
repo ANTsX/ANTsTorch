@@ -1,10 +1,3 @@
-# normalizing_simr_flows_whitener.py
-# Full-featured trainer: dataset-owned normalization/jitter + alignment penalties,
-# early stopping, checkpointing/resume, scale regularizer, EMA tradeoff, and
-# robust inverse() handling. Exports dataset_normalizers used by the apply step.
-#
-# Drop-in replacement for antstorch.deep_simr.normalizing_simr_flows_whitener
-
 from __future__ import annotations
 
 import math, os, json
@@ -17,6 +10,9 @@ import torch.nn as nn
 import torch.optim as optim
 
 import normflows as nf
+
+from . import latent_alignment as la
+
 
 # Keep package-relative imports to match ANTsTorch layout
 from ..architectures.create_normalizing_flow_model import (
@@ -211,7 +207,7 @@ def _dump_dataset_normalizers_json(path: str, norm_list: List[Dict[str, Any]]):
 # Main trainer
 # -------------------------------
 
-def normalizing_simr_flows_whitener(
+def lamnr_flows_whitener(
     views: List[pd.DataFrame],
     *,
 
@@ -272,6 +268,12 @@ def normalizing_simr_flows_whitener(
     bt_lambda_diag: float = 1.0,
     bt_lambda_offdiag: float = 5e-3,
     bt_eps: float = 1e-6,
+    info_nce_T: float = 0.2,
+    vicreg_w_inv: float = 25.0,
+    vicreg_w_var: float = 25.0,
+    vicreg_w_cov: float = 1.0,
+    vicreg_gamma: float = 1.0,
+    hsic_sigma: float = 0.0,
     penalty_warmup_iters: int = 400,
 
     # Validation / early stopping
@@ -428,17 +430,35 @@ def normalizing_simr_flows_whitener(
         EMA smoothing factor for "ema" mode; a lighter EMA is also used inside
         "uncertainty" to reduce jitter.
 
-    penalty_type : {"barlow_twins_align","correlate","decorrelate"}, default "barlow_twins_align"
+    penalty_type : {"barlow_twins_align","correlate","decorrelate","pearson","barlow_twins_multi","vicreg","info_nce","hsic","none"}, default "barlow_twins_align"
         Alignment objective on whitened latents across views:
-          • "barlow_twins_align": push cross-view correlation toward identity (diag≈1, off-diag≈0).
-          • "correlate":         maximize correlation.
-          • "decorrelate":       minimize correlation (ablation).
+          • "barlow_twins_align":   Barlow Twins-style cross-correlation to identity (diag≈1, off-diag≈0).
+          • "correlate":            maximize correlation (scalarized Pearson) between views.
+          • "decorrelate":          minimize correlation (ablation).
+          • "pearson":              use latent_alignment.pearson_multi to maximize diagonal Pearson corr.
+          • "barlow_twins_multi":   use latent_alignment.barlow_twins_multi on whitened latents.
+          • "vicreg":               use latent_alignment.vicreg_multi (variance–invariance–covariance).
+          • "info_nce":             use latent_alignment.info_nce_multi (SimCLR-style NT-Xent).
+          • "hsic":                 use latent_alignment.hsic_multi (RBF HSIC; maximizes dependence).
+          • "none":                 disable alignment penalty entirely.
     bt_lambda_diag : float, default 1.0
         Diagonal weight for Barlow-Twins-style alignment.
     bt_lambda_offdiag : float, default 5e-3
         Off-diagonal weight.
     bt_eps : float, default 1e-6
         Numerical epsilon in correlation/whitening ops.
+    info_nce_T : float, default 0.2
+        Temperature for InfoNCE / NT-Xent when ``penalty_type="info_nce"``.
+    vicreg_w_inv : float, default 25.0
+        Invariance (MSE) weight for VICReg when ``penalty_type="vicreg"``.
+    vicreg_w_var : float, default 25.0
+        Variance-floor weight for VICReg when ``penalty_type="vicreg"``.
+    vicreg_w_cov : float, default 1.0
+        Covariance off-diagonal weight for VICReg when ``penalty_type="vicreg"``.
+    vicreg_gamma : float, default 1.0
+        Target standard deviation (gamma) for VICReg variance term.
+    hsic_sigma : float, default 0.0
+        RBF kernel bandwidth for HSIC when ``penalty_type="hsic"``; 0.0 = median heuristic per batch.
     penalty_warmup_iters : int, default 400
         Warmup period: linearly introduce the alignment term and cap λ_eff early.
 
@@ -632,18 +652,36 @@ def normalizing_simr_flows_whitener(
                 H.append(h)
 
             # --- Cross-view penalty ---
-            penalty_active = (len(models) >= 2)
+            penalty_active = (len(models) >= 2 and penalty_type != "none")
             pen = torch.tensor(0.0, device=H[0].device)
             if penalty_active:
                 if penalty_type == "barlow_twins_align":
                     for i in range(len(models)):
                         for j in range(i + 1, len(models)):
-                            pen = pen + _barlow_twins_align_square(H[i], H[j], bt_lambda_diag, bt_lambda_offdiag, bt_eps)
+                            pen = pen + _barlow_twins_align_square(
+                                H[i], H[j], bt_lambda_diag, bt_lambda_offdiag, bt_eps
+                            )
                 elif penalty_type in ("decorrelate", "correlate"):
                     want = "minimize" if penalty_type == "decorrelate" else "maximize"
                     for i in range(len(models)):
                         for j in range(i + 1, len(models)):
                             pen = pen + _corr_square(H[i], H[j], want=want)
+                elif penalty_type == "pearson":
+                    pen = pen + la.pearson_multi(H)
+                elif penalty_type == "barlow_twins_multi":
+                    pen = pen + la.barlow_twins_multi(H, lam=float(bt_lambda_offdiag))
+                elif penalty_type == "info_nce":
+                    pen = pen + la.info_nce_multi(H, T=float(info_nce_T))
+                elif penalty_type == "vicreg":
+                    pen = pen + la.vicreg_multi(
+                        H,
+                        w_inv=float(vicreg_w_inv),
+                        w_var=float(vicreg_w_var),
+                        w_cov=float(vicreg_w_cov),
+                        gamma=float(vicreg_gamma),
+                    )
+                elif penalty_type == "hsic":
+                    pen = pen + la.hsic_multi(H, sigma=float(hsic_sigma))
                 else:
                     raise ValueError(f"Unknown penalty_type: {penalty_type}")
 

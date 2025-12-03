@@ -14,8 +14,8 @@
 # from .tab_simr import corr2_coeff
 # from .tab_simr import preprocess_signal_for_ica
 
-from .normalizing_simr_flows_whitener import normalizing_simr_flows_whitener
-from .apply_normalizing_simr_flows_whitener import apply_normalizing_simr_flows_whitener
+from .lamnr_flows_whitener import lamnr_flows_whitener
+from .apply_lamnr_flows_whitener import apply_lamnr_flows_whitener
 
 from .latent_alignment import pearson_multi
 from .latent_alignment import info_nce_multi
