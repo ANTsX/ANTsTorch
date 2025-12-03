@@ -11,6 +11,11 @@ import torch.optim as optim
 
 import normflows as nf
 
+try:
+    from tqdm import tqdm
+except Exception:  # tqdm is optional
+    tqdm = None
+
 from . import latent_alignment as la
 
 
@@ -632,7 +637,18 @@ def lamnr_flows_whitener(
     # -------------------------------
     # Training loop
     # -------------------------------
-    for step in range(start_step, max_iter):
+    if verbose and tqdm is not None:
+        iter_range = tqdm(
+            range(start_step, max_iter),
+            initial=start_step,
+            total=max_iter,
+            desc="training",
+            dynamic_ncols=True,
+        )
+    else:
+        iter_range = range(start_step, max_iter)
+
+    for step in iter_range:
         for m in models: m.train()
 
         current_alpha = float(jitter_sched.value(step))
