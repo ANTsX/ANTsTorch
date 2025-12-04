@@ -745,7 +745,7 @@ def lamnr_flows_whitener(
                         lam_eff = lam_eff.clamp(max=0.1)
 
                 elif tradeoff_mode == "fixed":
-                    lam_eff = lambda_penalty
+                    lam_eff = torch.tensor(float(lambda_penalty), device=nll_sum.device)
                 else:
                     raise ValueError(f"Unknown tradeoff_mode: {tradeoff_mode}")
             else:
