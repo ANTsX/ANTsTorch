@@ -718,7 +718,6 @@ def lamnr_flows_whitener(
                     # final safety clamps (prevents collapse to zero or blowups)
                     lam_eff = torch.nan_to_num(lam_eff, nan=0.0, posinf=1e3, neginf=0.0).clamp(min=1e-3, max=1e3)
                 elif tradeoff_mode == "uncertainty":
-                    import math
                     eps = 1e-4
                     lam_min, lam_max = 1e-3, 1e3     # expose as CLI if you like
                     beta = 0.9                       # light smoothing to avoid jitter
