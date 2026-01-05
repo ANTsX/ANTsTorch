@@ -4,7 +4,15 @@ import torch.nn as nn
 import normflows as nf
 from normflows import distributions as nfd
 
-from typing import Optional, Sequence, Tuple, Literal
+from typing import Optional, Sequence, Tuple, Literal, Union
+
+def _get_val_at_level(val: Union[int, Sequence[int]], level: int, default_name: str) -> int:
+    """Helper to return a constant or level-specific integer value."""
+    if isinstance(val, int):
+        return val
+    if level < len(val):
+        return val[level]
+    raise ValueError(f"Level index {level} out of range for {default_name} sequence of length {len(val)}.")
 
 
 def create_real_nvp_normalizing_flow_model(
@@ -167,8 +175,8 @@ def create_glow_normalizing_flow_model_2d(
     input_shape: Tuple[int, int, int],  # (C, H, W)
     *,
     L: int,
-    K: int,
-    hidden_channels: int,
+    K: Union[int, Sequence[int]],
+    hidden_channels: Union[int, Sequence[int]],
     base: Literal["glow", "diag"] = "glow",
     glowbase_logscale_factor: float = 3.0,
     glowbase_min_log: float = -5.0,
@@ -201,10 +209,10 @@ def create_glow_normalizing_flow_model_2d(
         Input tensor shape as (C, H, W). H and W must be divisible by 2**L.
     L : int
         Number of multiscale levels. Each level performs K Glow blocks, then a squeeze and a split.
-    K : int
-        Number of Glow blocks (ActNorm + 1x1 invertible conv + affine coupling) per level.
-    hidden_channels : int
-        Width of the conditioner CNN inside each affine coupling at all levels.
+    K : int or Sequence[int]
+        Number of Glow blocks per level. If Sequence, must be of length L.
+    hidden_channels : int or Sequence[int]
+        Width of the conditioner CNN inside each affine coupling. If Sequence, must be of length L.
     base : {"glow", "diag"}, default="glow"
         Base distribution for each latent split. "glow" uses a GlowBase (bounded log-scale),
         "diag" uses a diagonal Gaussian.
@@ -259,19 +267,24 @@ def create_glow_normalizing_flow_model_2d(
         # In inverse, blocks run right after an unsqueeze → they see 4 * c_in channels
         block_channels = 4 * c_in
 
+        k_level = _get_val_at_level(K, i, "K")
+        hc_level = _get_val_at_level(hidden_channels, i, "hidden_channels")
+
+        # Build K Glow blocks for this level
         level_flows = [
-            nf.flows.GlowBlock2d(
-                block_channels,          # <-- build for what it *actually* sees
-                hidden_channels,
-                split_mode=split_mode,   # 'channel' is fine now
+            nf.flows.GlowBlock3d(
+                block_channels,             # <-- must match what it will *see* (not c_in)
+                hc_level,
+                split_mode=split_mode,      # 'channel' works with this ordering
                 scale=scale,
                 scale_map=scale_map,
                 leaky=leaky,
                 net_actnorm=net_actnorm,
                 s_cap=scale_cap,
             )
-            for _ in range(K)
+            for _ in range(k_level)
         ]
+
         level_flows.append(nf.flows.Squeeze2d())
         flows.append(level_flows)
 
@@ -340,10 +353,10 @@ def create_glow_normalizing_flow_model_3d(
         Input tensor shape as (C, D, H, W). D, H, and W must each be divisible by 2**L.
     L : int
         Number of multiscale levels. Each level performs K Glow blocks, then a squeeze and a split.
-    K : int
-        Number of Glow blocks (ActNorm + invertible 1×1 conv + affine coupling) per level.
-    hidden_channels : int
-        Width of the conditioner CNN inside each affine coupling at all levels.
+    K : int or Sequence[int]
+        Number of Glow blocks per level. If Sequence, must be of length L.
+    hidden_channels : int or Sequence[int]
+        Width of the conditioner CNN inside each affine coupling. If Sequence, must be of length L.
     base : {"glow", "diag"}, default="glow"
         Base distribution for each latent split. "glow" uses GlowBase (tanh-bounded log-scale);
         "diag" uses a diagonal Gaussian.
@@ -399,11 +412,14 @@ def create_glow_normalizing_flow_model_3d(
         if split_mode == "channel" and (block_channels % 2 != 0):
             raise ValueError(f"Channel split needs even channels at level {i}, got {block_channels}.")
 
+        k_level = _get_val_at_level(K, i, "K")
+        hc_level = _get_val_at_level(hidden_channels, i, "hidden_channels")
+
         # Build K Glow blocks for this level
         level_flows = [
             nf.flows.GlowBlock3d(
                 block_channels,             # <-- must match what it will *see* (not c_in)
-                hidden_channels,
+                hc_level,
                 split_mode=split_mode,      # 'channel' works with this ordering
                 scale=scale,
                 scale_map=scale_map,
@@ -411,7 +427,7 @@ def create_glow_normalizing_flow_model_3d(
                 net_actnorm=net_actnorm,
                 s_cap=scale_cap,
             )
-            for _ in range(K)
+            for _ in range(k_level)
         ]
         level_flows.append(nf.flows.Squeeze3d())
         flows.append(level_flows)
