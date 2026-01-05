@@ -1,4 +1,4 @@
-# apply_normalizing_simr_flows_whitener.py
+# apply_lamnr_flows_whitener.py
 # Apply trained normalizing-flow whitener models to new data.
 # Updated to support dataset-driven normalization (z-score or min–max), to
 # remove the hard dependency on legacy "standardizers", and to coerce any
@@ -175,7 +175,7 @@ def _z_from_whitened_full(model, eps_full: torch.Tensor) -> torch.Tensor:
 # Main apply function
 # -------------------------------
 
-def apply_normalizing_simr_flows_whitener(
+def apply_lamnr_flows_whitener(
     trainer_output: Dict[str, Any] | List[torch.nn.Module],
     data: pd.DataFrame | List[pd.DataFrame],
     direction: str = "forward",              # {"forward", "inverse"}

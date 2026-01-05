@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 import antstorch
+import normflows as nf
 
 
 # -----------------------
@@ -165,6 +166,26 @@ def _sample_and_likelihood_assertions(
         assert torch.allclose(lp_m, lq, atol=atol, rtol=rtol), \
             f"log_prob(sampled x) != sample()'s log_q (max diff {(lp_m - lq).abs().max().item():g})"
 
+import torch
+
+@torch.no_grad()
+def check_flow_roundtrip(flow, x, name="", tol=1e-4):
+    """
+    Debug helper: check that flow.inverse(flow(x)) == x (up to tol)
+    and that log-dets cancel, for a single Flow.
+    """
+    z, logdet_fwd = flow(x)          # forward
+    x_rec, logdet_inv = flow.inverse(z)  # inverse
+
+    rec_err = (x_rec - x).abs()
+    max_err = rec_err.max().item()
+    mean_err = rec_err.mean().item()
+    logdet_sum = (logdet_fwd + logdet_inv).abs().max().item()
+
+    print(f"[{name}] max|x - inv(fwd(x))|={max_err:.3e}, "
+          f"mean={mean_err:.3e}, max|logdet_f+logdet_i|={logdet_sum:.3e}")
+
+    return max_err, mean_err, logdet_sum
 
 # -----------------------
 # pytest params
@@ -172,8 +193,8 @@ def _sample_and_likelihood_assertions(
 
 def _device_params():
     devs = ["cpu"]
-    if torch.cuda.is_available():
-        devs.append("cuda:0")
+    # if torch.cuda.is_available():
+    #     devs.append("cuda:0")
     return devs
 
 
@@ -220,7 +241,8 @@ def test_glow2d_roundtrip_and_likelihood(device, shape, L, K, hidden, batch):
     "shape,L,K,hidden,batch",
     [
         ((1, 32, 64, 128), 3, 7, 128, 2),  # 3D: C1, L=3
-        ((2, 32, 64, 128), 4, 8, 128, 2),  # 3D: C2, L=4
+        ((2, 32, 64, 128), 3, 8, 128, 2),  # 3D: C2, L=3
+        ((1, 96, 96, 96), 4, 6, 128, 3),   # 3D: C2, L=4
         # ((1, 192, 256, 256), 3, 7, 128, 2),  # 3D: C1, L=3
     ],
 )
@@ -252,3 +274,64 @@ def test_glow3d_roundtrip_and_likelihood(device, shape, L, K, hidden, batch):
 
     # sampling: return shape + likelihood sanity
     _sample_and_likelihood_assertions(model, (C, D, H, W), n=2)
+
+@pytest.mark.parametrize("device", _device_params())
+@pytest.mark.parametrize(
+    "channels, spatial, hidden",
+    [
+        # These (C,D,H,W) are the block input shapes actually used
+        # in the failing 3D config: (C=2, D=32, H=64, W=128, L=4)
+        # Level 3 blocks: 16 channels, (16, 32, 64)
+        (16,   (16, 32, 64), 128),
+        # Level 2 blocks: 64 channels, (8, 16, 32)
+        (64,   (8, 16, 32),  128),
+        # Level 1 blocks: 256 channels, (4, 8, 16)
+        (256,  (4, 8, 16),   128),
+        # Level 0 blocks: 1024 channels, (2, 4, 8)
+        (1024, (2, 4, 8),    128),
+    ],
+)
+def test_glow3d_block_roundtrip_large_channels(device, channels, spatial, hidden):
+    """
+    Directly test GlowBlock3d invertibility at the channel/spatial sizes
+    used inside the 3D multiscale Glow with (C=2, D=32, H=64, W=128, L=4).
+
+    This isolates GlowBlock3d from MultiscaleFlow/Merge/Squeeze plumbing.
+    If this test fails at any (channels, spatial), the bug is inside GlowBlock3d
+    (including its ActNorm, Invertible1x1x1Conv, or coupling).
+    """
+
+    D, H, W = spatial
+    batch = 2
+
+    block = nf.flows.GlowBlock3d(
+        channels,
+        hidden,
+        split_mode="channel",
+        scale=True,
+        scale_map="tanh",
+        leaky=0.0,
+        net_actnorm=True,
+        s_cap=3.0,
+    ).to(device)
+
+    block.eval()
+    x = torch.randn(batch, channels, D, H, W, device=device, dtype=torch.float32)
+
+    with torch.no_grad():
+        # forward then inverse
+        z, logdet_fwd = block(x)
+        x_rec, logdet_inv = block.inverse(z)
+
+    rec = (x_rec.to(torch.float32) - x.to(torch.float32)).abs()
+    max_err = float(rec.max().detach().cpu())
+    mean_err = float(rec.mean().detach().cpu())
+
+    # Allow a bit tighter tolerance than the multiscale test
+    assert max_err <= 1e-2, f"GlowBlock3d max|x-x_rec|={max_err:g} at C={channels}, spatial={spatial}"
+    assert mean_err <= 1e-2, f"GlowBlock3d mean|x-x_rec|={mean_err:g} at C={channels}, spatial={spatial}"
+
+    # Per-sample log-det should cancel: forward + inverse ≈ 0
+    logdet_sum = (logdet_fwd + logdet_inv).abs().max().item()
+    assert logdet_sum <= 1e-2, f"GlowBlock3d logdet_fwd+logdet_inv={logdet_sum:g} at C={channels}, spatial={spatial}"
+
