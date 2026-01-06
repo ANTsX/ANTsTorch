@@ -21,6 +21,7 @@ def create_real_nvp_normalizing_flow_model(
     q0=None,
     leaky_relu_negative_slope: float = 0.0,
     *,
+    mlp_width: int | None = None,
     scale_cap: float = 3.0,
     spectral_norm_scales: bool = False,
     mask_mode: str = "alternating",          # "alternating" (default) or "rolling"
@@ -40,6 +41,8 @@ def create_real_nvp_normalizing_flow_model(
         Base distribution (e.g., nf.distributions.DiagGaussian(latent_size) or GaussianPCA).
     leaky_relu_negative_slope : float, default=0.0
         Negative slope for LeakyReLU activations in the coupling MLPs.
+    mlp_width : int or None, default=None
+        Hidden width for the RealNVP coupling MLPs (shift/scale heads). If None, defaults to 2 * latent_size.
     scale_cap : float, default=3.0
         Bound on the log-scale output ŝ = scale_cap * tanh(raw).
     spectral_norm_scales : bool, default=False
@@ -100,7 +103,8 @@ def create_real_nvp_normalizing_flow_model(
             b, b_alt = (b0, b1) if (i % 2 == 0) else (b1, b0)
 
         # Shift head (t): zero-initialized last layer → identity at start
-        t = nf.nets.MLP([latent_size, 2 * latent_size, latent_size],
+        hidden_w = (mlp_width if (mlp_width is not None) else 2 * latent_size)
+        t = nf.nets.MLP([latent_size, hidden_w, latent_size],
                         leaky=leaky_relu_negative_slope,
                         init_zeros=True)
 
@@ -108,7 +112,7 @@ def create_real_nvp_normalizing_flow_model(
         if i < additive_first_n:
             s = None  # MaskedAffineFlow interprets None as "no scale"
         else:
-            s = _BoundedMLP([latent_size, 2 * latent_size, latent_size],
+            s = _BoundedMLP([latent_size, hidden_w, latent_size],
                             leaky=leaky_relu_negative_slope,
                             scale_cap=scale_cap,
                             init_zeros=True,

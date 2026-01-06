@@ -234,6 +234,8 @@ def lamnr_flows_whitener(
     # Flow config
     K: int = 64,
     leaky_relu_negative_slope: float = 0.0,
+    hidden_channels: int | None = None,
+    hidden: int | None = None,
 
     # Base distribution
     base_distribution: str = "GaussianPCA",
@@ -373,6 +375,10 @@ def lamnr_flows_whitener(
         Number of coupling layers per view.
     leaky_relu_negative_slope : float, default 0.0
         Negative slope for internal activations (if used).
+    hidden_channels : int or None, default None
+        Hidden width for RealNVP coupling MLPs. If None, defaults to 2 * D.
+    hidden : int or None, default None
+        Alias for hidden_channels for backward compatibility.
 
     # Base distribution
     base_distribution : {"GaussianPCA","DiagGaussian"}, default "GaussianPCA"
@@ -586,6 +592,7 @@ def lamnr_flows_whitener(
         model = create_rnvp(
             latent_size=D, K=K, q0=q0,
             leaky_relu_negative_slope=leaky_relu_negative_slope,
+            mlp_width=(hidden_channels if hidden_channels is not None else hidden),
             scale_cap=scale_cap, spectral_norm_scales=spectral_norm_scales,
             additive_first_n=additive_first_n, actnorm_every=actnorm_every, mask_mode=mask_mode,
         ).to(device)
