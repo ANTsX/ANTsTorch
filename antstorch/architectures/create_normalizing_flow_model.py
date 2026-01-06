@@ -272,7 +272,7 @@ def create_glow_normalizing_flow_model_2d(
 
         # Build K Glow blocks for this level
         level_flows = [
-            nf.flows.GlowBlock3d(
+            nf.flows.GlowBlock2d(
                 block_channels,             # <-- must match what it will *see* (not c_in)
                 hc_level,
                 split_mode=split_mode,      # 'channel' works with this ordering
