@@ -629,10 +629,12 @@ def lamnr_flows_whitener(
     ema_pen = None
 
     best_metric = float('inf')
+    best_val_bpd = float('inf')
     best_state = None
     best_step = -1
     patience_counter = 0
     smooth_total = None
+    val_history = []
 
     smooth_u_n = None   # EMA of |nll|  (for 'uncertainty' mode)
     smooth_u_p = None   # EMA of |pen|  (for 'uncertainty' mode)
@@ -792,7 +794,7 @@ def lamnr_flows_whitener(
                         xb = batch['views'][vn].to(device)
                         z, log_det = _inverse_with_guard(models[i], xb)
                         nll_val_sum += (-(models[i].q0.log_prob(z) + log_det)).sum()
-                    count += xb.shape[0]
+                    count += batch['views'][view_names[0]].shape[0]
                 nll_val = nll_val_sum / max(1, count)
                 D_total = sum(Ds)
                 val_bpd = _bits_per_dim(nll_val, D_total)
@@ -802,15 +804,38 @@ def lamnr_flows_whitener(
                                (early_stop_beta * float(smooth_total) + (1 - early_stop_beta) * float(total.detach().cpu()))
                 metric = val_bpd if best_selection_metric == "val_bpd" else smooth_total
 
-                # early-stop style best tracking
-                improved = (metric + early_stop_min_delta < best_metric) and (step + 1) >= early_stop_min_iters
-                if improved:
+                val_history.append({
+                    "step": int(step + 1),
+                    "val_bpd": float(val_bpd),
+                    "metric": float(metric),
+                    "metric_name": str(best_selection_metric),
+                    "smooth_total": None if smooth_total is None else float(smooth_total),
+                    "train_total": float(total.detach().cpu()),
+                    "alpha": float(current_alpha),
+                    "lam_eff": float(lam_eff.detach().cpu()) if penalty_active else 0.0,
+                    "penalty": float(pen.detach().cpu()) if penalty_active else 0.0,
+                })
+
+                # --- early-stop style best tracking (decoupled) ---
+
+                # Decide improvement relative to the best-so-far BEFORE any update.
+                prev_best_metric = best_metric
+                is_improved = (metric + early_stop_min_delta) < prev_best_metric
+
+                # Track best from the beginning (no gating).
+                if is_improved:
                     best_metric = metric
                     best_state = [m.state_dict() for m in models]
                     best_step = step + 1
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
+                    best_val_bpd = float(val_bpd)
+
+                # Only start counting patience after min iters (i.e., when stopping is allowed).
+                can_stop = early_stop_enabled and ((step + 1) >= early_stop_min_iters)
+                if can_stop:
+                    if is_improved:
+                        patience_counter = 0
+                    else:
+                        patience_counter += val_interval
 
                 if verbose:
                     lam_eff_value = float(lam_eff.detach().cpu()) if penalty_active else 0.0
@@ -819,10 +844,11 @@ def lamnr_flows_whitener(
                           f"train_total={float(total):.4f}, smooth_total={float(smooth_total):.4f}, "
                           f"val_bpd={val_bpd:.4f}, lam_eff={lam_eff_value:.2e}, penalty={(pen_val if penalty_active else 0.0):.4f}")
 
-                if early_stop_enabled and (step + 1) >= early_stop_min_iters and patience_counter >= early_stop_patience:
+                if can_stop and (patience_counter >= early_stop_patience):
                     if verbose:
                         print(f"[early stop] step {step+1} best {best_selection_metric}={best_metric:.4f} @ step {best_step}")
                     break
+
 
         # ---------------------------
         # Checkpointing
@@ -848,6 +874,10 @@ def lamnr_flows_whitener(
             print(f"[warn] failed to dump dataset_normalizers to '{dataset_normalizers_dump_path}': {e}")
 
     metrics = {"best_step": best_step if best_state is not None else max_iter,
-               "best_metric": best_metric, "best_metric_name": best_selection_metric}
+               "best_metric": best_metric, "best_metric_name": best_selection_metric,
+               "best_val_bpd": best_val_bpd}
 
-    return {"models": models, "metrics": metrics, "dataset_normalizers": dataset_normalizers}
+    return {"models": models, 
+            "metrics": metrics, 
+            "val_history": val_history,
+            "dataset_normalizers": dataset_normalizers}
