@@ -80,7 +80,7 @@ jobs:
         uses: actions/cache/save@v5
         with:
           key: ${{ steps.compute-key.outputs.cache-key }}
-          path: ${{ env.ANTSTORCH_CACHE_DIR }}
+          path: ~/.antstorch
 
 
   #################################################
