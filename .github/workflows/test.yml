@@ -3,7 +3,7 @@ name: ANTsTorch Unit Tests
 on:
   pull_request:
     types: [opened, synchronize]
-    branches: [master]
+    branches: [main]
   workflow_call:
   workflow_dispatch:
 
@@ -31,7 +31,6 @@ jobs:
       - name: Set cache location and compute key
         id: compute-key
         run: |
-          echo "ANTSTORCH_CACHE_DIR=${{ runner.temp }}/.antstorch" >> "$GITHUB_ENV"
           KEY="antstorch-${{ hashFiles(
             'antstorch/utilities/get_antstorch_data.py',
             'antstorch/utilities/get_pretrained_network.py'
@@ -43,13 +42,13 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           key: ${{ steps.compute-key.outputs.cache-key }}
-          path: ${{ env.ANTSTORCH_CACHE_DIR }}
+          path: ~/.antstorch
+          lookup-only: true
 
       - name: Cache hit — skip download
         if: steps.restore-cache.outputs.cache-hit == 'true'
         run: |
           echo "Cache HIT — will use cached ANTsTorch data."
-          rm -rf ${{ env.ANTSTORCH_CACHE_DIR }}
 
       - name: Set up Python 3.11
         if: steps.restore-cache.outputs.cache-hit != 'true'
@@ -74,14 +73,14 @@ jobs:
         if: steps.restore-cache.outputs.cache-hit != 'true'
         run: |
           pip install -e .
-          python tools/download_antstorch_data.py --strict --cache-dir ${{ env.ANTSTORCH_CACHE_DIR }}
+          python tools/download_antstorch_data.py --strict
 
       - name: Save newly downloaded ANTsTorch data to cache
         if: steps.restore-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
         with:
           key: ${{ steps.compute-key.outputs.cache-key }}
-          path: ${{ env.ANTSTORCH_CACHE_DIR }}
+          path: ~/.antstorch
 
 
   #################################################
@@ -101,11 +100,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download ANTsTorch data and models artifact
-        uses: actions/download-artifact@v7
+      - name: Restore ANTsTorch data cache
+        id: restore-cache
+        uses: actions/cache/restore@v5
         with:
-         name: ANTsTorch-data-${{ needs.prepare-data.outputs.cache-key }}
-         path: ~/.antstorch
+          key: ${{ needs.prepare-data.outputs.cache-key }}
+          path: ~/.antstorch
+          fail-on-cache-miss: true
 
       - name: Set up Python
         uses: actions/setup-python@v6
