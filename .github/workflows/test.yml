@@ -3,7 +3,7 @@ name: ANTsTorch Unit Tests
 on:
   pull_request:
     types: [opened, synchronize]
-    branches: [master]
+    branches: [main]
   workflow_call:
   workflow_dispatch:
 
