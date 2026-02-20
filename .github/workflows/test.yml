@@ -101,11 +101,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download ANTsTorch data and models artifact
-        uses: actions/download-artifact@v7
+      - name: Try restoring ANTsTorch data cache
+        id: restore-cache
+        uses: actions/cache/restore@v5
         with:
-         name: ANTsTorch-data-${{ needs.prepare-data.outputs.cache-key }}
-         path: ~/.antstorch
+          key: ${{ steps.compute-key.outputs.cache-key }}
+          path: ~/.antstorch
 
       - name: Set up Python
         uses: actions/setup-python@v6
