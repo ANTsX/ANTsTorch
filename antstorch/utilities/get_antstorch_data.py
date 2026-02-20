@@ -2,7 +2,7 @@
 import os
 from urllib.parse import urlparse
 from typing import Optional
-from torchvision.datasets.utils import download_url
+from torch.hub import download_url_to_file
 
 _antstorch_cache_directory = os.path.join(os.path.expanduser('~'), '.antstorch')
 
@@ -41,7 +41,8 @@ def set_antstorch_cache_directory(antstorch_cache_dir: str):
 def get_antstorch_data(
     file_id: Optional[str] = None,
     target_file_name: Optional[str] = None,
-):
+    show_progress: bool = True
+) -> str:
     """
     Download ANTsTorch data (templates, priors, etc.) from the Figshare repo, or from the local cache.
 
@@ -52,6 +53,8 @@ def get_antstorch_data(
         Note that most require internet access to download.
     target_file_name : str, optional
         Optional target filename. If omitted, a sensible default is inferred from `file_id`.
+    show_progress : bool, optional
+        Whether to print download progress. Default is True.
 
     Returns
     -------
@@ -153,7 +156,6 @@ def get_antstorch_data(
 
     # Download only if needed
     if not os.path.exists(target_file_name_path):
-        # torchvision's download_url will skip if the file already exists in the directory
-        download_url(url, antstorch_cache_directory, target_file_name, md5=None)
+        download_url_to_file(url, target_file_name_path, hash_prefix=None, progress=show_progress)
 
     return target_file_name_path

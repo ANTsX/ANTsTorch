@@ -1,10 +1,13 @@
-import torchvision
 import os
+
+from torch.hub import download_url_to_file
+from typing import Optional,Tuple
 
 from .get_antstorch_data import get_antstorch_cache_directory
 
-def get_pretrained_network(file_id=None,
-                           target_file_name=None):
+def get_pretrained_network(file_id: Optional[str] = None,
+                           target_file_name: Optional[str] = None,
+                           show_progress: bool=True) -> str|Tuple:
 
     """
     Download (or resolve cached) pretrained network/weights.
@@ -19,6 +22,9 @@ def get_pretrained_network(file_id=None,
     target_file_name : str, optional
     Target filename. If omitted, defaults to `<file_id>.pt` for ids ending
     in `_pytorch`, otherwise `<file_id>.h5`.
+
+    show_progress : bool, optional
+    Whether to show download progress. Default is True.
 
     Returns
     -------
@@ -122,19 +128,20 @@ def get_pretrained_network(file_id=None,
     url = switch_networks(file_id)
 
     if url is not None:
-        # We know where to download from
+        # Download only if needed
         if not os.path.exists(target_file_name_path):
-            torchvision.datasets.utils.download_url(url, antstorch_cache_directory, target_file_name)
+            download_url_to_file(url, target_file_name_path, hash_prefix=None, progress=show_progress)
         return target_file_name_path
-
-    # No URL mapping: allow cache‑only ids, but be explicit.
-    if os.path.exists(target_file_name_path):
-        return target_file_name_path
-
-    raise ValueError(
-        (f"No URL mapping for file_id='{file_id}', and not found in cache: \n"
-        f" {target_file_name_path}\n"
-        "Add a mapping in get_pretrained_network(), or place the file in the cache."
+    else:
+        # No URL mapping: allow cache‑only ids, but be explicit.
+        if os.path.exists(target_file_name_path):
+            return target_file_name_path
+        # Only get here if no URL mapping and not found in cache
+        raise ValueError(
+            (
+                f"No URL mapping for file_id='{file_id}', and not found in cache: \n"
+                f" {target_file_name_path}\n"
+                "Add a mapping in get_pretrained_network(), or place the file in the cache."
+            )
         )
-    )
 
