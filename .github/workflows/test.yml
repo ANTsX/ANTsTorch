@@ -44,12 +44,12 @@ jobs:
         with:
           key: ${{ steps.compute-key.outputs.cache-key }}
           path: ${{ env.ANTSTORCH_CACHE_DIR }}
+          lookup-only: true
 
       - name: Cache hit — skip download
         if: steps.restore-cache.outputs.cache-hit == 'true'
         run: |
           echo "Cache HIT — will use cached ANTsTorch data."
-          rm -rf ${{ env.ANTSTORCH_CACHE_DIR }}
 
       - name: Set up Python 3.11
         if: steps.restore-cache.outputs.cache-hit != 'true'
@@ -101,12 +101,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Try restoring ANTsTorch data cache
+      - name: Restore ANTsTorch data cache
         id: restore-cache
         uses: actions/cache/restore@v5
         with:
           key: ${{ needs.prepare-data.outputs.cache-key }}
           path: ~/.antstorch
+          fail-on-cache-miss: true
 
       - name: Set up Python
         uses: actions/setup-python@v6
