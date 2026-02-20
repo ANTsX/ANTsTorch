@@ -9,8 +9,7 @@ on:
 
 env:
   USE_ANTSPY_SOURCE_BUILD: false
-  # Use the default cache location
-  ANTSTORCH_CACHE_DIR: ${{ runner.home }}/.antstorch
+
 jobs:
 
   #################################################
@@ -29,9 +28,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Compute cache key
+      - name: Set cache location and compute key
         id: compute-key
         run: |
+          echo "ANTSTORCH_CACHE_DIR=${{ runner.temp }}/.antstorch" >> "$GITHUB_ENV"
           KEY="antstorch-${{ hashFiles(
             'antstorch/utilities/get_antstorch_data.py',
             'antstorch/utilities/get_pretrained_network.py'
@@ -105,7 +105,7 @@ jobs:
         uses: actions/download-artifact@v7
         with:
          name: ANTsTorch-data-${{ needs.prepare-data.outputs.cache-key }}
-         path: ~/.keras/ANTsTorch
+         path: ~/.antstorch
 
       - name: Set up Python
         uses: actions/setup-python@v6
