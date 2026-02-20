@@ -105,7 +105,7 @@ jobs:
         id: restore-cache
         uses: actions/cache/restore@v5
         with:
-          key: ${{ steps.compute-key.outputs.cache-key }}
+          key: ${{ needs.prepare-data.outputs.cache-key }}
           path: ~/.antstorch
 
       - name: Set up Python
