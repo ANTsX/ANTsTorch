@@ -33,6 +33,9 @@ jobs:
           python -m pip install --upgrade pip build
           python -m build --sdist --outdir dist
 
+      - name: Twine check (metadata / long description)
+        run: python -m twine check --strict dist/*
+
       - name: Upload sdist artifact
         uses: actions/upload-artifact@v6
         with:

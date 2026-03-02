@@ -3,8 +3,8 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ANTsTorch"
-version = "0.0.0"
+name = "antstorch"
+version = "0.0.1"
 description = "PyTorch-based ANTsX Utilities"
 readme = "README.md"
 authors = [{name = "Nick Tustison", email = "ntustison@gmail.com"},
@@ -30,6 +30,9 @@ dependencies = [
     "normflows @ git+https://github.com/ntustison/normalizing-flows.git@master"
     ]
 
+[tool.setuptools.packages.find]
+include = ["antstorch*"]
+
 [project.urls]
-"Homepage" = "https://github.com/ntustison/ANTsTorch"
+"Homepage" = "https://github.com/ANTsX/ANTsTorch"
 
