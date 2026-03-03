@@ -42,11 +42,11 @@ RUN apt-get update && \
 # This is to prevent users spinning up multiple instances of the
 # container and downloading the data to a non-persistent location
 #
-RUN useradd --create-home antspyuser && \
-    mkdir /home/antspyuser/.antspy /home/antspyuser/.antstorch
+RUN useradd --create-home antstorchuser && \
+    mkdir /home/antstorchuser/.antspy /home/antstorchuser/.antstorch
 
-COPY --from=builder --chown=antspyuser \
-     /opt/antspydata/* /home/antspyuser/.antspy/
+COPY --from=builder --chown=antstorchuser \
+     /opt/antspydata/* /home/antstorchuser/.antspy/
 
 COPY tools/download_antstorch_data.py /opt/bin/
 
