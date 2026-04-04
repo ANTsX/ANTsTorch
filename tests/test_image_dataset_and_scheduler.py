@@ -79,7 +79,7 @@ def _resample_to_size(im01: np.ndarray, tile_size: int) -> np.ndarray:
 
 def _save_mosaic_png(images01, rows: int, cols: int, tile_size: int, out_path: str):
     """Tile per-image [0,1] arrays into rows×cols, save PNG (uint8)."""
-    tiles = [(_resample_to_size(im, tile_size) if im.shape != (tile_size, tile_size) else im)
+    tiles = [(_resample_to_size(np.rot90(im), tile_size) if im.shape != (tile_size, tile_size) else np.rot90(im))
              for im in images01]
 
     mosaic = np.zeros((rows * tile_size, cols * tile_size), dtype=np.float32)
