@@ -322,8 +322,8 @@ def create_glow_normalizing_flow_model_3d(
     input_shape: Tuple[int, int, int, int],  # (C, D, H, W)
     *,
     L: int,
-    K: int,
-    hidden_channels: int,
+    K: Union[int, Sequence[int]],
+    hidden_channels: Union[int, Sequence[int]],
     base: Literal["glow", "diag"] = "glow",
     glowbase_logscale_factor: float = 3.0,
     glowbase_min_log: float = -5.0,
