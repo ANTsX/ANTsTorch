@@ -30,7 +30,7 @@ class create_resnet_model_2d(nn.Module):
     input_channel_size : integer
         Used for specifying the input tensor shape.
 
-    number_of_classification_labels : integer
+    number_of_outputs : integer
         Number of classification labels.
 
     layers : tuple
@@ -64,7 +64,7 @@ class create_resnet_model_2d(nn.Module):
     """
 
     def __init__(self, input_channel_size,
-                       number_of_classification_labels=1000,
+                       number_of_outputs=1000,
                        layers=(1, 2, 3, 4),
                        residual_block_schedule=(3, 4, 6, 3),
                        lowest_resolution=64,
@@ -263,11 +263,11 @@ class create_resnet_model_2d(nn.Module):
         if mode == 'classification':
             self.dense = nn.Sequential(
                 nn.Linear(in_features=n_filters_out,
-                          out_features=number_of_classification_labels),
+                          out_features=number_of_outputs),
                 nn.Softmax(dim=1))
         elif mode == 'regression':
             self.dense = nn.Linear(in_features=n_filters_out,
-                          out_features=number_of_classification_labels)
+                          out_features=number_of_outputs)
         else:
             raise ValueError('mode must be either `classification` or `regression`.')
 
@@ -307,7 +307,7 @@ class create_resnet_model_3d(nn.Module):
     input_channel_size : integer
         Used for specifying the input tensor shape.
 
-    number_of_classification_labels : integer
+    number_of_outputs : integer
         Number of classification labels.
 
     layers : tuple
@@ -341,7 +341,7 @@ class create_resnet_model_3d(nn.Module):
     """
 
     def __init__(self, input_channel_size,
-                       number_of_classification_labels=1000,
+                       number_of_outputs=1000,
                        layers=(1, 2, 3, 4),
                        residual_block_schedule=(3, 4, 6, 3),
                        lowest_resolution=64,
@@ -542,11 +542,11 @@ class create_resnet_model_3d(nn.Module):
         if mode == 'classification':
             self.dense = nn.Sequential(
                 nn.Linear(in_features=n_filters_out,
-                          out_features=number_of_classification_labels),
+                          out_features=number_of_outputs),
                 nn.Softmax(dim=1))
         elif mode == 'regression':
             self.dense = nn.Linear(in_features=n_filters_out,
-                          out_features=number_of_classification_labels)
+                          out_features=number_of_outputs)
         else:
             raise ValueError('mode must be either `classification` or `regression`.')
 
