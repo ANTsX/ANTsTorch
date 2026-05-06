@@ -1,8 +1,8 @@
 
 import torch
 import torch.nn as nn
-import normflows as nf
-from normflows import distributions as nfd
+import antsnormflows as nf
+from antsnormflows import distributions as nfd
 
 from typing import Optional, Sequence, Tuple, Literal, Union
 
@@ -37,7 +37,7 @@ def create_real_nvp_normalizing_flow_model(
         Input dimensionality for this view.
     K : int, default=64
         Number of coupling layers (each layer = MaskedAffineFlow; ActNorm inserted per 'actnorm_every').
-    q0 : normflows distribution or None
+    q0 : antsnormflows distribution or None
         Base distribution (e.g., nf.distributions.DiagGaussian(latent_size) or GaussianPCA).
     leaky_relu_negative_slope : float, default=0.0
         Negative slope for LeakyReLU activations in the coupling MLPs.
@@ -56,7 +56,7 @@ def create_real_nvp_normalizing_flow_model(
 
     Returns
     -------
-    normflows.NormalizingFlow
+    antsnormflows.NormalizingFlow
     """
 
     class _BoundedMLP(nn.Module):
@@ -243,7 +243,7 @@ def create_glow_normalizing_flow_model_2d(
     Returns
     -------
     nf.MultiscaleFlow
-        A normflows MultiscaleFlow where `forward_and_log_det(z_list)` reconstructs x from
+        A antsnormflows MultiscaleFlow where `forward_and_log_det(z_list)` reconstructs x from
         multiscale latents, and `inverse_and_log_det(x)` returns a list of latents (one per level).
 
     Notes
@@ -387,7 +387,7 @@ def create_glow_normalizing_flow_model_3d(
     Returns
     -------
     nf.MultiscaleFlow
-        A normflows MultiscaleFlow. `inverse_and_log_det(x)` returns a list of latents (one per level)
+        A antsnormflows MultiscaleFlow. `inverse_and_log_det(x)` returns a list of latents (one per level)
         and log-det; `forward_and_log_det(z_list)` reconstructs x and returns the forward log-det.
 
     Notes

@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 
 import antstorch
-import normflows as nf
+import antsnormflows as nf
 
 
 # -----------------------
