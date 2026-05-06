@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-import normflows as nf
+import antsnormflows as nf
 
 try:
     from tqdm import tqdm

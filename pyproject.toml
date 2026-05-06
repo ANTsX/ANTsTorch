@@ -27,7 +27,7 @@ dependencies = [
     "jax",
     "optax",
     "jaxopt",
-    "antsnormflows @ git+https://github.com/ANTsX/ANTsNormalizingFlows.git@master"
+    "antsnormflows @ git+https://github.com/ANTsx/ANTsNormalizingFlows.git@master"
     ]
 
 [tool.setuptools.packages.find]
