@@ -81,11 +81,11 @@ def mri_modality_classification(image,
 
     modality_types = ["T1", "T2", "FLAIR", "T2Star", "Mean DWI", "Mean Bold", "ASL Perfusion"]
 
-    number_of_classification_labels = len(modality_types)
+    number_of_outputs = len(modality_types)
     channel_size = 1
 
     model = create_resnet_model_3d(input_channel_size=channel_size,
-                                   number_of_classification_labels=number_of_classification_labels,
+                                   number_of_outputs=number_of_outputs,
                                    mode="classification",
                                    layers=(1, 2, 3, 4),
                                    residual_block_schedule=(3, 4, 6, 3),
