@@ -10,6 +10,8 @@ from .deep_flash import deep_flash
 from .harvard_oxford_atlas_labeling import harvard_oxford_atlas_labeling
 from .desikan_killiany_tourville_labeling import desikan_killiany_tourville_labeling
 from .cerebellum_morphology import cerebellum_morphology
+from .nbm_labeling import nbm_labeling
+from .cit168_labeling import cit168_labeling
 
 from .mri_modality_classification import mri_modality_classification
 
@@ -25,3 +27,7 @@ from .mutual_information import mutual_information_kde
 from .correlation import absolute_pearson_correlation
 
 from .schedulers import ParamSchedule, MultiParamScheduler, parse_schedules
+
+from .device_manager import set_default_device, get_default_device
+
+

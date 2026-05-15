@@ -126,6 +126,9 @@ def get_antstorch_data(
         "DevCCF_P56_MRI-T2_50um_BrainParcellationTctMask": "https://ndownloader.figshare.com/files/47214532",
         "DevCCF_P04_STPT_50um": "https://ndownloader.figshare.com/files/46711546",
         "DevCCF_P04_STPT_50um_BrainParcellationJayMask": "https://ndownloader.figshare.com/files/46712656",
+        "CIT168_T1w_700um_pad_adni": "https://ndownloader.figshare.com/files/64536261",
+        "CIT168_basal_forebrain_adni": "https://ndownloader.figshare.com/files/64536324",
+        "det_atlas_25_pad_LR_adni": "https://ndownloader.figshare.com/files/64536333",
     }
 
     valid_list = tuple(sorted(list(_switcher.keys()) + ["show"]))

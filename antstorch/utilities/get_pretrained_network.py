@@ -65,7 +65,10 @@ def get_pretrained_network(file_id: Optional[str] = None,
             "DesikanKillianyTourvilleOuter_pytorch": "https://ndownloader.figshare.com/files/58494949",
             "cerebellumWhole_pytorch": "https://ndownloader.figshare.com/files/58495219",
             "cerebellumTissue_pytorch": "https://ndownloader.figshare.com/files/58495210",
-            "cerebellumLabels_pytorch": "https://ndownloader.figshare.com/files/58495102"
+            "cerebellumLabels_pytorch": "https://ndownloader.figshare.com/files/58495102",
+            "deep_nbm_rank_pytorch": "https://ndownloader.figshare.com/files/64536405",
+            "deepCIT168_pytorch": "https://ndownloader.figshare.com/files/64536618",
+            "deepCIT168_sn_pytorch": "https://ndownloader.figshare.com/files/64537371"
         }
         return(switcher.get(argument, "Invalid argument."))
 
@@ -102,6 +105,9 @@ def get_pretrained_network(file_id: Optional[str] = None,
                   "cerebellumWhole_pytorch",
                   "cerebellumTissue_pytorch",
                   "cerebellumLabels_pytorch",
+                  "deep_nbm_rank_pytorch",
+                  "deepCIT168_pytorch",
+                  "deepCIT168_sn_pytorch",
                   "show")
 
     if not file_id in valid_list:

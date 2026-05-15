@@ -8,6 +8,7 @@ import ants
 
 def harvard_oxford_atlas_labeling(t1,
                                   do_preprocessing=True,
+                                  device=None,
                                   verbose=False):
 
 
@@ -89,6 +90,12 @@ def harvard_oxford_atlas_labeling(t1,
     from ..utilities import preprocess_brain_image
     from ..architectures import create_unet_model_3d
     from ..architectures import create_multihead_unet_model_3d
+    from ..utilities.device_manager import get_default_device
+
+    if device is None:
+        device = get_default_device()
+    elif isinstance(device, str):
+        device = torch.device(device)
 
     if t1.dimension != 3:
         raise ValueError( "Image dimension must be 3." )
@@ -119,6 +126,7 @@ def harvard_oxford_atlas_labeling(t1,
             template_transform_type=template_transform_type,
             do_bias_correction=True,
             do_denoising=False,
+            device=device,
             verbose=verbose)
         t1_preprocessed = t1_preprocessing["preprocessed_image"] * t1_preprocessing['brain_mask']
         t1_preprocessed = reshape_image(t1_preprocessed, crop_size=cropped_template_size)
@@ -159,6 +167,8 @@ def harvard_oxford_atlas_labeling(t1,
     weights_path = get_pretrained_network("HarvardOxfordAtlasSubcortical_pytorch")
     state = torch.load(weights_path, map_location="cpu")
     unet_model.load_state_dict(state, strict=False)
+    unet_model.eval()
+    unet_model = unet_model.to(device)
 
     if verbose:
         print("Model prediction using both the original and contralaterally flipped version.")
@@ -168,7 +178,7 @@ def harvard_oxford_atlas_labeling(t1,
     batchX[1,:,:,:,0] = np.flip(batchX[0,:,:,:,0], axis=0)
 
     with torch.no_grad():
-        x = torch.from_numpy(np.transpose(batchX, (0, 4, 1, 2, 3)))  # NHWDC -> NCDHW
+        x = torch.from_numpy(np.transpose(batchX, (0, 4, 1, 2, 3))).float().to(device)  # NHWDC -> NCDHW
         out = unet_model(x)
         if isinstance(out, (list, tuple)):
             main_np = out[0].detach().cpu().numpy()  # [N,C,D,H,W]
@@ -234,7 +244,7 @@ def harvard_oxford_atlas_labeling(t1,
 
     labels = sorted((*hoa_lateral_labels, *hoa_lateral_left_labels))
 
-    bext = brain_extraction(t1, modality="t1hemi", verbose=verbose)
+    bext = brain_extraction(t1, modality="t1hemi", device=device, verbose=verbose)
 
     probability_all_images = list()
     for i in range(len(labels)):

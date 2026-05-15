@@ -6,10 +6,6 @@ import torch
 import torch.nn.functional as F
 import ants
 
-from ..architectures.create_unet_model import create_unet_model_3d
-from ..utilities.get_pretrained_network import get_pretrained_network
-from ..utilities.get_antstorch_data import get_antstorch_data
-
 
 # -----------------------------
 # Helper: ensure float image
@@ -64,7 +60,10 @@ def _infer_unet3d_from_state_dict(state_dict):
 # -----------------------------
 # Public API
 # -----------------------------
-def brain_extraction(image, modality, verbose: bool = False):
+def brain_extraction(image, 
+                     modality, 
+                     device = None, 
+                     verbose: bool = False):
     """
     Mirror antspynet brain_extraction() behavior with Torch backbone:
       - same modality routing and templates
@@ -72,6 +71,17 @@ def brain_extraction(image, modality, verbose: bool = False):
       - same intensity normalization policy
       - identical post-processing & inverse mapping
     """
+
+    from ..architectures.create_unet_model import create_unet_model_3d
+    from ..utilities.get_pretrained_network import get_pretrained_network
+    from ..utilities.get_antstorch_data import get_antstorch_data
+    from ..utilities.device_manager import get_default_device
+
+    if device is None:
+        device = get_default_device()
+    elif isinstance(device, str):
+        device = torch.device(device)
+
     # ---------------------
     # Channel handling
     # ---------------------
@@ -197,8 +207,6 @@ def brain_extraction(image, modality, verbose: bool = False):
         print("  e.g. missing[:8]   =", missing[:8])
         print("  e.g. unexpected[:8]=", unexpected[:8])
 
-    model.eval()
-
     if verbose:
         print("Brain extraction:  normalizing image to the template.")
 
@@ -231,10 +239,13 @@ def brain_extraction(image, modality, verbose: bool = False):
                 batchX[0, :, :, :, i] = (warped_array - mu) / sigma
 
     if verbose:
-        print("Brain extraction:  prediction and decoding.")
+            print("Brain extraction:  prediction and decoding.")
+
+    model.eval()
+    model = model.to(device)
 
     with torch.no_grad():
-        x = torch.from_numpy(batchX).permute(0, 4, 1, 2, 3)  # [1,C,D,H,W]
+        x = torch.from_numpy(batchX).permute(0, 4, 1, 2, 3).float().to(device)  # [1,C,D,H,W]
         y = model(x).squeeze(0).cpu().numpy()  # [C_out,D,H,W]
 
     # Convert to probability images in template space

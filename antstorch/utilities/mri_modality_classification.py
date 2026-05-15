@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 
 def mri_modality_classification(image,
+                                device=None,
                                 verbose=False):
 
     """
@@ -41,6 +42,12 @@ def mri_modality_classification(image,
     from ..utilities import get_pretrained_network
     from ..utilities import get_antstorch_data
     from ..architectures import create_resnet_model_3d
+    from ..utilities.device_manager import get_default_device
+
+    if device is None:
+        device = get_default_device()
+    elif isinstance(device, str):
+        device = torch.device(device)
 
     if image.dimension != 3:
         raise ValueError( "Image dimension must be 3." )
@@ -95,19 +102,15 @@ def mri_modality_classification(image,
     model.load_state_dict(torch.load(weights_file_name))
     # Set the model to evaluation mode - important for batch normalization and dropout layers.
     model.eval()
+    model = model.to(device)
 
     image_array = np.expand_dims(image.numpy(), axis=-1)
 
-    # swap color axis because
-    # numpy image: H x W x D x C
-    # torch image: C x H x W x D
+    with torch.no_grad():
+        x = torch.from_numpy(np.expand_dims(image_array.transpose((3, 0, 1, 2)), 0)).float().to(device)
+        y = model(x).cpu().numpy()  # [C_out,D,H,W]
 
-    batchX = image_array.transpose((3, 0, 1, 2))
-    batchX = np.expand_dims(batchX, 0)
-
-    batchY = model(torch.from_numpy(batchX))
-
-    modality_df = pd.DataFrame(batchY.detach().numpy(), columns = modality_types)
+    modality_df = pd.DataFrame(y, columns = modality_types)
 
     return modality_df
 

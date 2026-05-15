@@ -5,6 +5,7 @@ import torch
 def deep_atropos(
     t1,
     do_preprocessing=True,
+    device=None,
     verbose=False
 ):
     """
@@ -57,6 +58,12 @@ def deep_atropos(
     from ..utilities import get_antstorch_data as _get_antstorch_data
     from ..utilities import get_pretrained_network as _get_pretrained_network
     from ..utilities import brain_extraction as _brain_extraction
+    from ..utilities.device_manager import get_default_device
+
+    if device is None:
+        device = get_default_device()   
+    elif isinstance(device, str):
+        device = torch.device(device)   
 
     if not isinstance(t1, list):
         raise ValueError("This antstorch implementation only handles the list-input branch ([T1, T2, FA]).")
@@ -173,14 +180,12 @@ def deep_atropos(
     }[which_network]
     weights_path = _get_pretrained_network(weights_key + "_pytorch")
 
-    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    device = "cpu"
-    model = model.to(device)
     state = torch.load(weights_path, map_location=device)
     if isinstance(state, dict) and "state_dict" in state:
         state = state["state_dict"]
     model.load_state_dict(state, strict=True)
     model.eval()
+    model = model.to(device)
 
     # ----------------------------
     # Prediction (8 octant patches)
@@ -214,12 +219,11 @@ def deep_atropos(
                 batchX[idx, :, :, :] = patches[h, :, :, :]
                 idx += 1
 
-            xt = torch.from_numpy(batchX[None, ...])  # (1, C, D, H, W)
-            xt = xt.to(device=device, dtype=torch.float32)
+                with torch.no_grad():
+                    xt = torch.from_numpy(batchX[None, ...]).to(device)  # [1,C,D,H,W]
+                    yt = model(xt).squeeze(0).permute(1, 2, 3, 0).cpu().numpy()  # [C_out,D,H,W]
 
-            yt = model(xt)  # (1, C_out, D, H, W), logits or probs depending on head
-            y_np = yt.squeeze(0).permute(1, 2, 3, 0).cpu().numpy()  # (D,H,W,C_out)
-            predicted_data[h, ...] = y_np
+            predicted_data[h, ...] = yt
 
     # ----------------------------
     # Reconstruct prob maps and warp back if needed

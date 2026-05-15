@@ -6,6 +6,7 @@ def deep_flash(t1,
                t2=None,
                do_preprocessing=True,
                use_rank_intensity=True,
+               device=None,
                verbose=False
                ):
 
@@ -113,6 +114,12 @@ def deep_flash(t1,
     from ..utilities import get_pretrained_network
     from ..architectures import create_unet_model_3d
     from ..architectures import create_multihead_unet_model_3d
+    from ..utilities.device_manager import get_default_device
+
+    if device is None:
+        device = get_default_device()   
+    elif isinstance(device, str):
+        device = torch.device(device)   
 
     def _batch_from_crops(
         t1_cropped, priors_list, image_size, use_contralaterality,
@@ -144,7 +151,7 @@ def deep_flash(t1,
 
         return batchX
 
-    def _predict_torch(model, batchX: np.ndarray, device: str = "cpu"):
+    def _predict_torch(model, batchX: np.ndarray, device):
         # NHWDC -> NCDHW
         x = torch.from_numpy(np.transpose(batchX, (0, 4, 1, 2, 3))).to(device)
         out = model(x)
@@ -381,7 +388,7 @@ def deep_flash(t1,
         t2_cropped_flipped=t2_cropped_flipped,
     )
 
-    pred = _predict_torch(unet_model, batchX, device="cpu")  # (main, aux1, aux2, aux3)
+    pred = _predict_torch(unet_model, batchX, device=device)  # (main, aux1, aux2, aux3)
 
     # Convert predictions to images and decrop/transform back
     # Main head (8 channels)
@@ -495,7 +502,7 @@ def deep_flash(t1,
         t2_cropped_flipped=t2_cropped_flipped,
     )
 
-    pred = _predict_torch(unet_model, batchX, device="cpu")  # (main, aux1, aux2, aux3)
+    pred = _predict_torch(unet_model, batchX, device=device)  # (main, aux1, aux2, aux3)
 
     # Main head (8 channels)
     main_probs = pred[0]  # [N,C,D,H,W]

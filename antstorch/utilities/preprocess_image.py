@@ -16,6 +16,7 @@ def preprocess_brain_image(
     intensity_matching_type: Optional[str] = None,
     reference_image: Optional["ants.ANTsImage"] = None,
     intensity_normalization_type: Optional[str] = None,
+    device=None,
     verbose: bool = True,
 ) -> Dict[str, Any]:
     """
@@ -104,7 +105,7 @@ def preprocess_brain_image(
         if verbose:
             print("Preprocessing:  brain extraction.")
 
-        bext = brain_extraction(preprocessed_image, modality=brain_extraction_modality, verbose=verbose)
+        bext = brain_extraction(preprocessed_image, modality=brain_extraction_modality, device=device, verbose=verbose)
         if brain_extraction_modality == "t1threetissue":
             mask = ants.threshold_image(bext['segmentation_image'], 1, 1, 1, 0)
         else:
@@ -129,7 +130,7 @@ def preprocess_brain_image(
             transforms = dict(fwdtransforms=registration['fwdtransforms'],
                               invtransforms=registration['invtransforms'])
         else:
-            template_bext = brain_extraction(template_image, modality=brain_extraction_modality, verbose=verbose)
+            template_bext = brain_extraction(template_image, modality=brain_extraction_modality, device=device, verbose=verbose)
             if brain_extraction_modality == "t1threetissue":
                 template_mask = ants.threshold_image(template_bext['segmentation_image'], 1, 1, 1, 0)
             else:
