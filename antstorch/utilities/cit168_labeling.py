@@ -7,9 +7,78 @@ import torch.nn as nn
 
 def cit168_labeling(t1, device=None,verbose=False):
     """
+    
     Perform CIT168 segmentation in T1 images using Pauli atlas (CIT168) 
     labels described in https://pubmed.ncbi.nlm.nih.gov/29664465/
+
+                group_labels = [0,7,8,9,23,24,25,33,34]
+
+                            group_labels = [0,1,2,5,6,17,18,21,22]
+
+    The labeling is as follows:
+
+    Label 1:   BN_STR_Pu_Left
+    Labeļ 2:   BN_STR_Ca_Left
+    Label 3:   BN_STR_NAC_Left.  (not modeled)
+    Label 4:   EXA_Left          (not modeled)
+    Label 5:   BN_GP_GPe_Left
+    Label 6:   BN_GP_GPi_Left 
+    Label 7:   MTg_SN_SNc_Left
+    Label 8:   MTg_RN_Left
+    Label 9:   MTg_SN_SNc_Left
+    Label 10:  MTg_VTR_PBP_Left  (not modeled)
+    Label 11:  MTg_VTR_VTA_Left  (not modeled)
+    Label 12:  BN_GP_VeP_Left    (not modeled)
+    Label 13:  THM_ETH_HN_Left   (not modeled)
+    Label 14:  Die_HTH_Left      (not modeled)
+    Label 15:  Die_HTH_MN_Left   (not modeled) 
+    Label 16:  Die_STH_Left      (not modeled)
+    Label 17:  BN_STR_Pu_Right
+    Label 18:  BN_STR_Ca_Right
+    Label 19:  BN_STR_NAC_Right  (not modeled)
+    Label 20:  EXA_Right         (not modeled)
+    Label 21:  BN_GP_GPe_Right
+    Label 22:  BN_GP_GPi_Right
+    Label 23:  MTg_SN_SNc_Right
+    Label 24:  MTg_RN_Right
+    Label 25:  MTg_SN_SNr_Right
+    Label 26:  MTg_VTR_PBP_Right (not modeled)
+    Label 27:  MTg_VTR_VTA_Right (not modeled)
+    Label 28:  BN_GP_VeP_Right   (not modeled)
+    Label 29:  THM_ETH_HN_Right  (not modeled)
+    Label 30:  Die_HTH_Right     (not modeled)
+    Label 31:  Die_HTH_MN_Right  (not modeled)
+    Label 32:  Die_STH_Right     (not modeled)
+    Label 33:  ReferenceRegion_Left
+    Label 34:  ReferenceRegion_Right
+
+    Preprocessing consists of:
+       * n4 bias correction and
+       * brain extraction
+    
+    Arguments
+    ---------
+    t1 : ANTsImage
+        input image
+
+    verbose : boolean
+        Print progress to the screen.
+
+    Returns
+    -------
+    ANTs segmentation label and probability images.
+
+    Example
+    -------
+    >>> seg = cit168_labeling(t1)
     """
+
+    from ..utilities import get_pretrained_network
+    from ..utilities import preprocess_brain_image
+    from ..utilities import get_antstorch_data
+    from ..architectures import create_unet_model_3d
+    from ..utilities.device_manager import get_default_device
+
     from ..utilities import get_pretrained_network
     from ..utilities import preprocess_brain_image
     from ..utilities import get_antstorch_data
@@ -97,6 +166,7 @@ def cit168_labeling(t1, device=None,verbose=False):
         number_of_outputs = len(group_labels)
         number_of_channels = len(group_labels)
 
+        # ---> AJOUT DES OPTIONS D'ARCHITECTURE KERAS EXACTE <---
         unet0 = create_unet_model_3d(input_channel_size=number_of_channels,
                                      number_of_outputs=1, 
                                      number_of_filters=(32, 64, 128, 256), 
@@ -104,7 +174,8 @@ def cit168_labeling(t1, device=None,verbose=False):
                                      deconvolution_kernel_size=(2, 2, 2),
                                      pool_size=(2, 2, 2), strides=(2, 2, 2), 
                                      dropout_rate=0.0,
-                                     mode="sigmoid")
+                                     mode="sigmoid",
+                                     additional_options=["nnUnetActivationStyle", "kerasDeconvolutionStyle"])
         
         unet1 = create_unet_model_3d(input_channel_size=2,
                                      number_of_outputs=number_of_outputs,
@@ -113,13 +184,15 @@ def cit168_labeling(t1, device=None,verbose=False):
                                      deconvolution_kernel_size=(2, 2, 2),
                                      pool_size=(2, 2, 2), strides=(2, 2, 2),
                                      dropout_rate=0.0,
-                                     mode="classification")
+                                     mode="classification",
+                                     additional_options=["nnUnetActivationStyle", "kerasDeconvolutionStyle"])
 
         unet_model = CIT168Net(unet0, unet1).to(device)
-        state = torch.load(cit168_weights, map_location="cpu")
-        unet_model.load_state_dict(state, strict=False)
+        state = torch.load(cit168_weights, map_location=device)
+        
+        # ---> FORCER LA VÉRIFICATION STRICTE DES POIDS <---
+        unet_model.load_state_dict(state, strict=True)
         unet_model.eval()
-        unet_model = unet_model.to(device)
 
         ################################
         # Do prediction and normalize
@@ -138,7 +211,8 @@ def cit168_labeling(t1, device=None,verbose=False):
             print("    CIT168: Model prediction.")
        
         with torch.no_grad():
-            x = torch.from_numpy(batchX).permute(0, 4, 1, 2, 3).float().to(device)  # [1,C,D,H,W]
+            # ---> RETRAIT DU .permute QUI DÉTRUISAIT LES DIMENSIONS <---
+            x = torch.from_numpy(batchX).float().to(device)  # [1,C,D,H,W]
             out1, out0 = unet_model(x)
             pred1 = out1.cpu().numpy()
             pred0 = out0.cpu().numpy()

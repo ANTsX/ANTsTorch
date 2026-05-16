@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import numpy as np
 import ants
 import torch
@@ -7,9 +8,25 @@ import torch.nn as nn
 
 def nbm_labeling(t1, device=None, verbose=False):
     """
-    Perform CH13 and Nucleus basalis of Meynert (NBM) segmentation in 
+    Perform CH13 and Nucleaus basalis of Meynert (NBM) segmentation in 
     T1 images using Avants labels.
+
+    The labeling is as follows:
+
+    Label 1: CH13_left
+    Label 2: CH13_right
+    Label 3: NBM_left_ant
+    Label 4: NBM_left_mid
+    Label 5: NBM_left_pos
+    Label 6: NBM_right_ant
+    Label 7: NBM_right_mid
+    Label 8: NBM_right_pos
+    
+    Preprocessing consists of:
+       * n4 bias correction and
+       * brain extraction
     """
+
     from ..utilities import get_pretrained_network
     from ..utilities import preprocess_brain_image
     from ..utilities import get_antstorch_data
@@ -46,6 +63,7 @@ def nbm_labeling(t1, device=None, verbose=False):
         template_transform_type=template_transform_type,
         do_bias_correction=True,
         do_denoising=False,
+        device=device,
         verbose=verbose)
         
     t1_preprocessed = t1_preprocessing["preprocessed_image"] * t1_preprocessing['brain_mask']
@@ -69,7 +87,6 @@ def nbm_labeling(t1, device=None, verbose=False):
         def forward(self, x):
             out0 = self.unet0(x)
             if isinstance(out0, (list, tuple)): out0 = out0[0]
-            # Concaténer le tenseur initial avec la sortie de U-Net 0
             next_in = torch.cat([x, out0], dim=1)
             out1 = self.unet1(next_in)
             if isinstance(out1, (list, tuple)): out1 = out1[0]
@@ -93,7 +110,8 @@ def nbm_labeling(t1, device=None, verbose=False):
                                  deconvolution_kernel_size=(2, 2, 2),
                                  pool_size=(2, 2, 2), strides=(2, 2, 2), 
                                  dropout_rate=0.0,
-                                 mode="sigmoid")
+                                 mode="sigmoid",
+                                 additional_options=["nnUnetActivationStyle", "kerasDeconvolutionStyle"])
     
     unet1 = create_unet_model_3d(input_channel_size=2,
                                  number_of_outputs=number_of_outputs,
@@ -102,33 +120,41 @@ def nbm_labeling(t1, device=None, verbose=False):
                                  deconvolution_kernel_size=(2, 2, 2),
                                  pool_size=(2, 2, 2), strides=(2, 2, 2),
                                  dropout_rate=0.0, 
-                                 mode="classification")
+                                 mode="classification",
+                                 additional_options=["nnUnetActivationStyle", "kerasDeconvolutionStyle"])
 
     unet_model = NBMNet(unet0, unet1).to(device)
 
-    nbm_weights = get_pretrained_network("deep_nbm_rank_pytorch")
-    state = torch.load(nbm_weights, map_location="cpu")
-    unet_model.load_state_dict(state, strict=False)
+    nbm_weights = os.path.expanduser("~/.antstorch/deep_nbm_rank_pytorch.pt")
+    if not os.path.exists(nbm_weights):
+        nbm_weights = get_pretrained_network("deep_nbm_rank_pytorch")
+        
+    state = torch.load(nbm_weights, map_location=device)
+    unet_model.load_state_dict(state, strict=True)
     unet_model.eval()
-    unet_model = unet_model.to(device)
 
     ################################
     # Do prediction and normalize
     ################################
 
     if verbose:
-        print("Model prediction using both the original and contralaterally flipped version.")
+        print("    NBM: Model prediction using isolated and contiguous memory batches.")
 
-    # PyTorch Batch: [Batch, Channels, X, Y, Z]
-    batchX = np.zeros((2, channel_size, *cropped_template_size), dtype=np.float32)
-    batchX[0, 0, ...] = t1_cropped.numpy()
-    batchX[1, 0, ...] = np.flip(batchX[0, 0, ...], axis=0)
+    t1_arr = t1_cropped.numpy()
+    t1_arr_flipped = np.flip(t1_arr, axis=0).copy()
+
+    batchX_1 = np.expand_dims(np.expand_dims(t1_arr, axis=0), axis=0).astype(np.float32)
+    batchX_2 = np.expand_dims(np.expand_dims(t1_arr_flipped, axis=0), axis=0).astype(np.float32)
 
     with torch.no_grad():
-        x = torch.from_numpy(batchX).permute(0, 4, 1, 2, 3).float().to(device)  # [1,C,D,H,W]
-        out1, out0 = unet_model(x)
-        pred1 = out1.cpu().numpy()
-        pred0 = out0.cpu().numpy()
+        x1 = torch.from_numpy(batchX_1).to(device)
+        out1_1, out0_1 = unet_model(x1)
+        
+        x2 = torch.from_numpy(batchX_2).to(device)
+        out1_2, out0_2 = unet_model(x2)
+
+        pred1 = np.concatenate([out1_1.cpu().numpy(), out1_2.cpu().numpy()], axis=0)
+        pred0 = np.concatenate([out0_1.cpu().numpy(), out0_2.cpu().numpy()], axis=0)
 
     nbm_labels = sorted((*nbm_lateral_labels, *nbm_lateral_left_labels, *nbm_lateral_right_labels))
     probability_images = [None] * len(labels)
