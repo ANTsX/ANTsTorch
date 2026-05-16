@@ -66,9 +66,9 @@ def get_pretrained_network(file_id: Optional[str] = None,
             "cerebellumWhole_pytorch": "https://ndownloader.figshare.com/files/58495219",
             "cerebellumTissue_pytorch": "https://ndownloader.figshare.com/files/58495210",
             "cerebellumLabels_pytorch": "https://ndownloader.figshare.com/files/58495102",
-            "deep_nbm_rank_pytorch": "https://ndownloader.figshare.com/files/64536405",
-            "deepCIT168_pytorch": "https://ndownloader.figshare.com/files/64536618",
-            "deepCIT168_sn_pytorch": "https://ndownloader.figshare.com/files/64537371"
+            "deep_nbm_rank_pytorch": "https://ndownloader.figshare.com/files/64608699",
+            "deepCIT168_pytorch": "https://ndownloader.figshare.com/files/64608723",
+            "deepCIT168_sn_pytorch": "https://ndownloader.figshare.com/files/64608726"
         }
         return(switcher.get(argument, "Invalid argument."))
 

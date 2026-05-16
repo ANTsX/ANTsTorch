@@ -23,7 +23,7 @@ def cortical_thickness(t1, device=None, verbose: bool = False):
     from ..utilities.device_manager import get_default_device
 
     # Run Deep Atropos (torch)
-    atropos = deep_atropos([t1, None, None], do_preprocessing=True, device=device, verbose=verbose)
+    atropos = deep_atropos(t1, do_preprocessing=True, device=device, verbose=verbose)
             
     # Kelly-Kapowski cortical thickness (unchanged; uses ANTs ops)
     kk_segmentation = ants.image_clone(atropos['segmentation_image'])

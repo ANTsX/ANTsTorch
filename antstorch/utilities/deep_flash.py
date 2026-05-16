@@ -86,15 +86,6 @@ def deep_flash(t1,
     #
     ################################
 
-    # use_hierarchical_parcellation : boolean
-    #     If True, the u-net model exposes additional outputs of the medial temporal lobe
-    #     region, hippocampal, and entorhinal/perirhinal/parahippocampal regions.  Otherwise
-    #     the only additional output is the medial temporal lobe.
-    #
-    # use_contralaterality : boolean
-    #     Use both hemispherical models to also predict the corresponding contralateral
-    #     segmentation and use both sets of priors to produce the results.
-    #
     use_hierarchical_parcellation = True
     use_contralaterality = True
 
@@ -327,6 +318,9 @@ def deep_flash(t1,
         dummy = torch.zeros(1, channel_size, *image_size)
         _ = unet_model(dummy)
 
+    # ---> CORRECTION: Allocation explicite du modèle sur le matériel cible <---
+    unet_model = unet_model.to(device)
+
     ################################
     #
     # LEFT hemisphere
@@ -347,7 +341,10 @@ def deep_flash(t1,
     if verbose:
         print("DeepFlash: retrieving model weights (left).")
     weights_file_name = get_pretrained_network(network_name + "_pytorch")
-    state = torch.load(weights_file_name, map_location="cpu")
+    
+    # ---> CORRECTION: Chargement direct dans la mémoire du matériel cible <---
+    state = torch.load(weights_file_name, map_location=device)
+    
     missing, unexpected = unet_model.load_state_dict(state, strict=False)
     if verbose:
         print(f"[antstorch] load_state_dict: missing={len(missing)} unexpected={len(unexpected)}")
@@ -463,7 +460,10 @@ def deep_flash(t1,
     if verbose:
         print("DeepFlash: retrieving model weights (right).")
     weights_file_name = get_pretrained_network(network_name + "_pytorch")
-    state = torch.load(weights_file_name, map_location="cpu")
+    
+    # ---> CORRECTION: Chargement direct dans la mémoire du matériel cible <---
+    state = torch.load(weights_file_name, map_location=device)
+    
     missing, unexpected = unet_model.load_state_dict(state, strict=False)
     if verbose:
         print(f"[antstorch] load_state_dict: missing={len(missing)} unexpected={len(unexpected)}")
