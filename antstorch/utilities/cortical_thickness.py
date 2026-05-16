@@ -1,6 +1,6 @@
 import ants
 
-def cortical_thickness(t1, verbose: bool = False):
+def cortical_thickness(t1, device=None, verbose: bool = False):
     """
     Perform KellyKapowski cortical thickness using antstorch.deep_atropos for
     segmentation.
@@ -19,13 +19,11 @@ def cortical_thickness(t1, verbose: bool = False):
         Dictionary containing the cortical thickness image and segmentation/probability images.
     """
 
-    from antstorch.utilities import deep_atropos  
+    from ..utilities.deep_atropos import deep_atropos  
+    from ..utilities.device_manager import get_default_device
 
     # Run Deep Atropos (torch)
-    if isinstance(t1, list):
-        atropos = deep_atropos(t1, do_preprocessing=True, verbose=verbose)
-    else:
-        atropos = deep_atropos([t1, None, None], do_preprocessing=True, verbose=verbose)
+    atropos = deep_atropos(t1, do_preprocessing=True, device=device, verbose=verbose)
             
     # Kelly-Kapowski cortical thickness (unchanged; uses ANTs ops)
     kk_segmentation = ants.image_clone(atropos['segmentation_image'])
@@ -62,6 +60,7 @@ def longitudinal_cortical_thickness(
     initial_template: "str|ants.ANTsImage" = "oasis",
     number_of_iterations: int = 1,
     refinement_transform: str = "antsRegistrationSyNQuick[a]",
+    device=None,
     verbose: bool = False
 ):
     """
@@ -118,6 +117,7 @@ def longitudinal_cortical_thickness(
                 do_bias_correction=False,
                 do_denoising=False,
                 intensity_normalization_type="01",
+                device=device,
                 verbose=verbose
             )
             sst_tmp += t1_pre['preprocessed_image']
@@ -139,6 +139,7 @@ def longitudinal_cortical_thickness(
             do_bias_correction=True,
             do_denoising=True,
             intensity_normalization_type="01",
+            device=device,
             verbose=verbose
         )
         t1s_preprocessed.append(t1_pre)

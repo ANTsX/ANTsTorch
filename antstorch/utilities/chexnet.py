@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 def chexnet(image,
+            device=None,
             verbose=False):
 
     """
@@ -65,6 +66,13 @@ def chexnet(image,
     """
 
     from ..utilities import get_pretrained_network
+    from ..utilities.device_manager import get_default_device
+
+
+    if device is None:
+        device = get_default_device()
+    elif isinstance(device, str):
+        device = torch.device(device) 
 
     if image.dimension != 2:
         raise ValueError( "Image dimension must be 2." )
@@ -101,6 +109,7 @@ def chexnet(image,
                                            torch.nn.Sigmoid())
     model.eval()
     model.load_state_dict(torch.load(weights_file_name))
+    model = model.to(device)
 
     ################################
     #
@@ -133,9 +142,12 @@ def chexnet(image,
 
     if verbose:
         print("Prediction.")
-    batchY = model((torch.from_numpy(batchX)).float())
 
-    disease_df = pd.DataFrame(batchY.detach().numpy(), columns = disease_categories)
+    with torch.no_grad():
+        x = torch.from_numpy(batchX).float().to(device)
+        y = model(x).squeeze(0).cpu().numpy()
+
+    disease_df = pd.DataFrame([y], columns = disease_categories)
 
     return disease_df
 

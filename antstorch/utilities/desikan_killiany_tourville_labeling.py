@@ -5,21 +5,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import ants
 
-# We assume these utilities exist in your ANTsTorch package layout.
-# If paths differ in your repo, adjust the relative imports accordingly.
-from ..architectures import create_unet_model_3d
-from ..architectures import create_multihead_unet_model_3d
-from ..utilities import get_pretrained_network
-from ..utilities import get_antstorch_data
-from ..utilities import preprocess_brain_image
-from ..utilities import brain_extraction
-from ..utilities import deep_atropos
-
-
 def desikan_killiany_tourville_labeling(t1,
                                         do_preprocessing=True,
                                         return_probability_images=False,
                                         do_lobar_parcellation=False,
+                                        device=None,
                                         verbose=False):
     """
     Desikan-Killiany-Tourville labeling.  https://pubmed.ncbi.nlm.nih.gov/23227001/
@@ -216,6 +206,23 @@ def desikan_killiany_tourville_labeling(t1,
     if t1.dimension != 3:
         raise ValueError("Image dimension must be 3.")
 
+    # We assume these utilities exist in your ANTsTorch package layout.
+    # If paths differ in your repo, adjust the relative imports accordingly.
+    from ..architectures import create_unet_model_3d
+    from ..architectures import create_multihead_unet_model_3d
+    from ..utilities import get_pretrained_network
+    from ..utilities import get_antstorch_data
+    from ..utilities import preprocess_brain_image
+    from ..utilities import brain_extraction
+    from ..utilities import deep_atropos
+
+    from ..utilities.device_manager import get_default_device
+
+    if device is None:
+        device = get_default_device()
+    elif isinstance(device, str):
+        device = torch.device(device)
+
     def reshape_image(image, crop_size, interp_type="linear"):
         image_resampled = None
         if interp_type == "linear":
@@ -246,6 +253,7 @@ def desikan_killiany_tourville_labeling(t1,
             template_transform_type=template_transform_type,
             do_bias_correction=True,
             do_denoising=False,
+            device=device,
             verbose=verbose)
         t1_preprocessed = t1_preprocessing["preprocessed_image"] * t1_preprocessing['brain_mask']
         t1_preprocessed = reshape_image(t1_preprocessed, crop_size=cropped_template_size)
@@ -294,9 +302,7 @@ def desikan_killiany_tourville_labeling(t1,
         print(f"[ANTsTorch] load_state_dict: missing={len(missing)} unexpected={len(unexpected)}")
 
     unet_model.eval()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     unet_model.to(device)
-
     ################################
     #
     # Do prediction and normalize to native space
@@ -374,7 +380,7 @@ def desikan_killiany_tourville_labeling(t1,
 
     labels_sorted = sorted((*dkt_lateral_labels, *dkt_left_labels))
 
-    bext = brain_extraction(t1, modality="t1hemi", verbose=verbose)
+    bext = brain_extraction(t1, modality="t1hemi", device=device, verbose=verbose)
 
     probability_all_images = list()
     probability_all_images.append(probability_images[0])
@@ -439,7 +445,7 @@ def desikan_killiany_tourville_labeling(t1,
 
         dkt_lobes[dkt_lobes > len(lobar_labels)] = 0
 
-        six_tissue = deep_atropos([t1, None, None], do_preprocessing=True, verbose=verbose)
+        six_tissue = deep_atropos([t1, None, None], do_preprocessing=True, device=device, verbose=verbose)
         atropos_seg = six_tissue['segmentation_image']
         atropos_seg[atropos_seg == 1] = 0
         atropos_seg[atropos_seg == 5] = 0

@@ -6,6 +6,7 @@ def deep_flash(t1,
                t2=None,
                do_preprocessing=True,
                use_rank_intensity=True,
+               device=None,
                verbose=False
                ):
 
@@ -85,15 +86,6 @@ def deep_flash(t1,
     #
     ################################
 
-    # use_hierarchical_parcellation : boolean
-    #     If True, the u-net model exposes additional outputs of the medial temporal lobe
-    #     region, hippocampal, and entorhinal/perirhinal/parahippocampal regions.  Otherwise
-    #     the only additional output is the medial temporal lobe.
-    #
-    # use_contralaterality : boolean
-    #     Use both hemispherical models to also predict the corresponding contralateral
-    #     segmentation and use both sets of priors to produce the results.
-    #
     use_hierarchical_parcellation = True
     use_contralaterality = True
 
@@ -113,6 +105,12 @@ def deep_flash(t1,
     from ..utilities import get_pretrained_network
     from ..architectures import create_unet_model_3d
     from ..architectures import create_multihead_unet_model_3d
+    from ..utilities.device_manager import get_default_device
+
+    if device is None:
+        device = get_default_device()   
+    elif isinstance(device, str):
+        device = torch.device(device)   
 
     def _batch_from_crops(
         t1_cropped, priors_list, image_size, use_contralaterality,
@@ -144,7 +142,7 @@ def deep_flash(t1,
 
         return batchX
 
-    def _predict_torch(model, batchX: np.ndarray, device: str = "cpu"):
+    def _predict_torch(model, batchX: np.ndarray, device):
         # NHWDC -> NCDHW
         x = torch.from_numpy(np.transpose(batchX, (0, 4, 1, 2, 3))).to(device)
         out = model(x)
@@ -320,6 +318,9 @@ def deep_flash(t1,
         dummy = torch.zeros(1, channel_size, *image_size)
         _ = unet_model(dummy)
 
+    # ---> CORRECTION: Allocation explicite du modèle sur le matériel cible <---
+    unet_model = unet_model.to(device)
+
     ################################
     #
     # LEFT hemisphere
@@ -340,7 +341,10 @@ def deep_flash(t1,
     if verbose:
         print("DeepFlash: retrieving model weights (left).")
     weights_file_name = get_pretrained_network(network_name + "_pytorch")
-    state = torch.load(weights_file_name, map_location="cpu")
+    
+    # ---> CORRECTION: Chargement direct dans la mémoire du matériel cible <---
+    state = torch.load(weights_file_name, map_location=device)
+    
     missing, unexpected = unet_model.load_state_dict(state, strict=False)
     if verbose:
         print(f"[antstorch] load_state_dict: missing={len(missing)} unexpected={len(unexpected)}")
@@ -381,7 +385,7 @@ def deep_flash(t1,
         t2_cropped_flipped=t2_cropped_flipped,
     )
 
-    pred = _predict_torch(unet_model, batchX, device="cpu")  # (main, aux1, aux2, aux3)
+    pred = _predict_torch(unet_model, batchX, device=device)  # (main, aux1, aux2, aux3)
 
     # Convert predictions to images and decrop/transform back
     # Main head (8 channels)
@@ -456,7 +460,10 @@ def deep_flash(t1,
     if verbose:
         print("DeepFlash: retrieving model weights (right).")
     weights_file_name = get_pretrained_network(network_name + "_pytorch")
-    state = torch.load(weights_file_name, map_location="cpu")
+    
+    # ---> CORRECTION: Chargement direct dans la mémoire du matériel cible <---
+    state = torch.load(weights_file_name, map_location=device)
+    
     missing, unexpected = unet_model.load_state_dict(state, strict=False)
     if verbose:
         print(f"[antstorch] load_state_dict: missing={len(missing)} unexpected={len(unexpected)}")
@@ -495,7 +502,7 @@ def deep_flash(t1,
         t2_cropped_flipped=t2_cropped_flipped,
     )
 
-    pred = _predict_torch(unet_model, batchX, device="cpu")  # (main, aux1, aux2, aux3)
+    pred = _predict_torch(unet_model, batchX, device=device)  # (main, aux1, aux2, aux3)
 
     # Main head (8 channels)
     main_probs = pred[0]  # [N,C,D,H,W]

@@ -7,6 +7,7 @@ def cerebellum_morphology(t1,
                           cerebellum_mask=None,
                           compute_thickness_image=False,
                           do_preprocessing=True,
+                          device=None,
                           verbose=False):
     """
     Cerebellum tissue segmentation, Schmahmann parcellation, and thickness.
@@ -83,6 +84,12 @@ def cerebellum_morphology(t1,
     from ..utilities.get_pretrained_network import get_pretrained_network
     from ..utilities.get_antstorch_data import get_antstorch_data
     from ..utilities.brain_extraction import brain_extraction
+    from ..utilities.device_manager import get_default_device
+
+    if device is None:
+        device = get_default_device()
+    elif isinstance(device, str):
+        device = torch.device(device)
 
     if t1.dimension != 3:
         raise ValueError("Image dimension must be 3.")
@@ -197,8 +204,6 @@ def cerebellum_morphology(t1,
     region_probability_images = []
     which_priors = None
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     start_m = 0
     if cerebellum_mask is not None:
         start_m = 1
@@ -283,7 +288,7 @@ def cerebellum_morphology(t1,
                     batchX[j, i + 1, :, :, :] = prior_np
 
         with torch.no_grad():
-            x = torch.from_numpy(batchX).to(device)         # (N,C,D,H,W)
+            x = torch.from_numpy(batchX).float().to(device)         # (N,C,D,H,W)
             y = unet_model(x)                                # logits (N,C_out,D,H,W)
             prob = y.detach().cpu().numpy()                  # (N,C_out,D,H,W)
             predicted_data = np.moveaxis(prob, 1, -1)        # (N,D,H,W,C_out) for parity
