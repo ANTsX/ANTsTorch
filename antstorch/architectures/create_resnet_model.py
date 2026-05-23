@@ -127,7 +127,7 @@ class create_resnet_model_2d(nn.Module):
 
 
         def add_common_layers(number_of_features):
-            x = nn.Sequential(nn.BatchNorm2d(number_of_features), nn.LeakyReLU(0.3))
+            x = nn.Sequential(nn.BatchNorm2d(number_of_features), nn.ReLU())
             return x
 
         def grouped_convolution_layer_2d(in_channels,
@@ -207,7 +207,7 @@ class create_resnet_model_2d(nn.Module):
                 if squeeze_and_excite_local:
                     self.squeeze_and_excite_layer = squeeze_and_excite_block_2d(in_channels=number_of_filters_out,
                                                                                 out_channels=number_of_filters_out)
-                self.leaky_relu = nn.LeakyReLU(0.3)
+                self.relu = nn.ReLU()
 
             def forward(self, x):
                 shortcut = x
@@ -219,7 +219,7 @@ class create_resnet_model_2d(nn.Module):
                 if self.squeeze_and_excite_layer is not None:
                     x = self.squeeze_and_excite_layer(x)
                 x = torch.add(shortcut, x)
-                x = self.leaky_relu(x)
+                x = self.relu(x)
                 return x
 
         n_filters = lowest_resolution
@@ -366,8 +366,13 @@ class create_resnet_model_3d(nn.Module):
 
                 if pad_h > 0 or pad_w > 0 or pad_d > 0:
                     x = F.pad(
-                        x, [pad_w // 2, pad_w - pad_w // 2, pad_h // 2, pad_h - pad_h // 2, pad_d // 2, pad_d - pad_d // 2]
+                        x, [pad_d // 2, pad_d - pad_d // 2,  # Largeur (Width)
+                            pad_w // 2, pad_w - pad_w // 2,  # Hauteur (Height)
+                            pad_h // 2, pad_h - pad_h // 2]  # Profondeur (Depth)
                     )
+                    # x = F.pad(
+                    #     x, [pad_w // 2, pad_w - pad_w // 2, pad_h // 2, pad_h - pad_h // 2, pad_d // 2, pad_d - pad_d // 2]
+                    # )
                 return F.conv3d(
                     x,
                     self.weight,
@@ -392,7 +397,9 @@ class create_resnet_model_3d(nn.Module):
 
                 if pad_h > 0 or pad_w > 0 or pad_d > 0:
                     x = F.pad(
-                        x, [pad_w // 2, pad_w - pad_w // 2, pad_h // 2, pad_h - pad_h // 2, pad_d // 2, pad_d - pad_d // 2]
+                        x, [pad_d // 2, pad_d - pad_d // 2,  # Largeur (Width)
+                            pad_w // 2, pad_w - pad_w // 2,  # Hauteur (Height)
+                            pad_h // 2, pad_h - pad_h // 2]  # Profondeur (Depth)
                     )
                 return F.max_pool3d(
                     x,
@@ -406,7 +413,7 @@ class create_resnet_model_3d(nn.Module):
 
 
         def add_common_layers(number_of_features):
-            x = nn.Sequential(nn.BatchNorm3d(number_of_features), nn.LeakyReLU(0.3))
+            x = nn.Sequential(nn.BatchNorm3d(number_of_features), nn.ReLU())
             return x
 
         def grouped_convolution_layer_3d(in_channels,
@@ -486,7 +493,7 @@ class create_resnet_model_3d(nn.Module):
                 if squeeze_and_excite_local:
                     self.squeeze_and_excite_layer = squeeze_and_excite_block_3d(in_channels=number_of_filters_out,
                                                                                 out_channels=number_of_filters_out)
-                self.leaky_relu = nn.LeakyReLU(0.3)
+                self.relu = nn.ReLU()
 
             def forward(self, x):
                 shortcut = x
@@ -498,7 +505,7 @@ class create_resnet_model_3d(nn.Module):
                 if self.squeeze_and_excite_layer is not None:
                     x = self.squeeze_and_excite_layer(x)
                 x = torch.add(shortcut, x)
-                x = self.leaky_relu(x)
+                x = self.relu(x)
                 return x
 
         n_filters = lowest_resolution

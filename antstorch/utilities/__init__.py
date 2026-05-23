@@ -14,6 +14,7 @@ from .nbm_labeling import nbm_labeling
 from .cit168_labeling import cit168_labeling
 
 from .mri_modality_classification import mri_modality_classification
+from .t1_grader import t1_grader
 
 from .chexnet import chexnet
 
