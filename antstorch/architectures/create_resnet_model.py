@@ -127,7 +127,8 @@ class create_resnet_model_2d(nn.Module):
 
 
         def add_common_layers(number_of_features):
-            x = nn.Sequential(nn.BatchNorm2d(number_of_features), nn.ReLU())
+            x = nn.Sequential(nn.BatchNorm2d(number_of_features, eps=1e-3), 
+                              nn.LeakyReLU(negative_slope=0.3))
             return x
 
         def grouped_convolution_layer_2d(in_channels,
@@ -192,7 +193,7 @@ class create_resnet_model_2d(nn.Module):
                                            out_channels=number_of_filters_out,
                                            kernel_size=(1, 1),
                                            stride=(1, 1)),
-                                nn.BatchNorm2d(number_of_filters_out))
+                                nn.BatchNorm2d(number_of_filters_out, eps=1e-3))
 
                 self.shortcut = None
                 if project_shortcut or strides != (1, 1):
@@ -201,13 +202,13 @@ class create_resnet_model_2d(nn.Module):
                                                   out_channels=number_of_filters_out,
                                                   kernel_size=(1, 1),
                                                   stride=strides),
-                                       nn.BatchNorm2d(number_of_filters_out))
+                                       nn.BatchNorm2d(number_of_filters_out, eps=1e-3))
 
                 self.squeeze_and_excite_layer = None
                 if squeeze_and_excite_local:
                     self.squeeze_and_excite_layer = squeeze_and_excite_block_2d(in_channels=number_of_filters_out,
                                                                                 out_channels=number_of_filters_out)
-                self.relu = nn.ReLU()
+                self.relu = nn.LeakyReLU(negative_slope=0.3)
 
             def forward(self, x):
                 shortcut = x
@@ -411,9 +412,9 @@ class create_resnet_model_3d(nn.Module):
                     self.return_indices
                 )
 
-
         def add_common_layers(number_of_features):
-            x = nn.Sequential(nn.BatchNorm3d(number_of_features), nn.ReLU())
+            x = nn.Sequential(nn.BatchNorm3d(number_of_features, eps=1e-3),
+                              nn.LeakyReLU(negative_slope=0.3))
             return x
 
         def grouped_convolution_layer_3d(in_channels,
@@ -478,7 +479,7 @@ class create_resnet_model_3d(nn.Module):
                                            out_channels=number_of_filters_out,
                                            kernel_size=(1, 1, 1),
                                            stride=(1, 1, 1)),
-                                nn.BatchNorm3d(number_of_filters_out))
+                                nn.BatchNorm3d(number_of_filters_out, eps=1e-3))
 
                 self.shortcut = None
                 if project_shortcut or strides != (1, 1, 1):
@@ -487,13 +488,13 @@ class create_resnet_model_3d(nn.Module):
                                                   out_channels=number_of_filters_out,
                                                   kernel_size=(1, 1, 1),
                                                   stride=strides),
-                                       nn.BatchNorm3d(number_of_filters_out))
+                                       nn.BatchNorm3d(number_of_filters_out, eps=1e-3))
 
                 self.squeeze_and_excite_layer = None
                 if squeeze_and_excite_local:
                     self.squeeze_and_excite_layer = squeeze_and_excite_block_3d(in_channels=number_of_filters_out,
                                                                                 out_channels=number_of_filters_out)
-                self.relu = nn.ReLU()
+                self.relu = nn.LeakyReLU(negative_slope=0.3)
 
             def forward(self, x):
                 shortcut = x
