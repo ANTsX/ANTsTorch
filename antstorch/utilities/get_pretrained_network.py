@@ -68,7 +68,8 @@ def get_pretrained_network(file_id: Optional[str] = None,
             "cerebellumLabels_pytorch": "https://ndownloader.figshare.com/files/58495102",
             "deep_nbm_rank_pytorch": "https://ndownloader.figshare.com/files/64608699",
             "deepCIT168_pytorch": "https://ndownloader.figshare.com/files/64608723",
-            "deepCIT168_sn_pytorch": "https://ndownloader.figshare.com/files/64608726"
+            "deepCIT168_sn_pytorch": "https://ndownloader.figshare.com/files/64608726",
+            "resnet_grader_pytorch": "https://figshare.com/ndownloader/files/64896243",
         }
         return(switcher.get(argument, "Invalid argument."))
 
@@ -108,6 +109,7 @@ def get_pretrained_network(file_id: Optional[str] = None,
                   "deep_nbm_rank_pytorch",
                   "deepCIT168_pytorch",
                   "deepCIT168_sn_pytorch",
+                  "resnet_grader_pytorch",
                   "show")
 
     if not file_id in valid_list:
