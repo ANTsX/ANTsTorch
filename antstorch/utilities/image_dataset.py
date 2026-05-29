@@ -253,10 +253,17 @@ class ImageDataset(Dataset):
         else:
             raise ValueError("Unrecognized dimension.")    
 
+        for img in image:
+            del img
+        del image
+
         if output_tensor is not None:
-            return image_tensor, output_tensor
+            del output
+            return image_tensor.clone(), output_tensor.clone()
         elif self.outputs is None:
-            return image_tensor
+            if output is not None:
+                del output
+            return image_tensor.clone()
         else:
-            return image_tensor, output
+            return image_tensor.clone(), output
 
