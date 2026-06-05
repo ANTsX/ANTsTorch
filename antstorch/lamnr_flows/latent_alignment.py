@@ -557,3 +557,37 @@ def hsic_multi(views_feats: List[torch.Tensor], sigma: float = 0.0) -> torch.Ten
         loss = loss / float(n_pairs)
     return loss
 
+
+def mse_multi(views_feats: List[torch.Tensor]) -> torch.Tensor:
+    """
+    Mean Squared Error (MSE) alignment over multiple views.
+
+    For each unordered pair of views (i < j), this computes the 
+    standard MSE loss between their projected latents. Minimizing 
+    this loss forces exact point-to-point matching across modalities,
+    avoiding the small-batch statistical instability of contrastive methods.
+
+    Parameters
+    ----------
+    views_feats : list[torch.Tensor]
+        List of feature tensors, one per view, each of shape ``[B, D]``.
+
+    Returns
+    -------
+    torch.Tensor
+        A scalar tensor containing the averaged MSE loss.
+    """
+    V = len(views_feats)
+    if V < 2:
+        return torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
+
+    loss = torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
+    count = 0
+    
+    # Calcule la MSE pour chaque paire de vues (ex: Xénon / Proton)
+    for i in range(V):
+        for j in range(i + 1, V):
+            loss += F.mse_loss(views_feats[i], views_feats[j])
+            count += 1
+            
+    return loss / max(count, 1)
