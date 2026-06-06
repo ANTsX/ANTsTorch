@@ -557,3 +557,27 @@ def hsic_multi(views_feats: List[torch.Tensor], sigma: float = 0.0) -> torch.Ten
         loss = loss / float(n_pairs)
     return loss
 
+def mse_multi(views_feats: List[torch.Tensor]) -> torch.Tensor:
+    """
+    Normalized Mean Squared Error (MSE) alignment over multiple views.
+    Applies L2 normalization across the feature dimension prior to MSE
+    to prevent gradient explosion on large uninitialized latents,
+    maintaining stability for extremely small batch sizes.
+    """
+    V = len(views_feats)
+    if V < 2:
+        return torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
+
+    loss = torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
+    count = 0
+    
+    for i in range(V):
+        for j in range(i + 1, V):
+            # Normalisation L2 indépendante du batch
+            z_i = F.normalize(views_feats[i], p=2, dim=1)
+            z_j = F.normalize(views_feats[j], p=2, dim=1)
+            
+            loss += F.mse_loss(z_i, z_j)
+            count += 1
+            
+    return loss / max(count, 1)
