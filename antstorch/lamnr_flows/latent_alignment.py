@@ -557,27 +557,36 @@ def hsic_multi(views_feats: List[torch.Tensor], sigma: float = 0.0) -> torch.Ten
         loss = loss / float(n_pairs)
     return loss
 
-def mse_multi(views_feats: List[torch.Tensor]) -> torch.Tensor:
+def lpnorm_multi(views_feats: List[torch.Tensor], p: float = 2.0) -> torch.Tensor:
     """
-    Normalized Mean Squared Error (MSE) alignment over multiple views.
-    Applies L2 normalization across the feature dimension prior to MSE
-    to prevent gradient explosion on large uninitialized latents,
-    maintaining stability for extremely small batch sizes.
+    Lp-norm alignment over multiple views, fortified against
+    low-precision (bf16/fp16) division-by-zero errors at initialization.
     """
     V = len(views_feats)
     if V < 2:
         return torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
 
-    loss = torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
+    # Force le calcul de l'alignement en float32 pour éviter les underflows
+    loss = torch.tensor(0.0, device=views_feats[0].device, dtype=torch.float32)
     count = 0
     
     for i in range(V):
         for j in range(i + 1, V):
-            # Normalisation L2 indépendante du batch
-            z_i = F.normalize(views_feats[i], p=2, dim=1)
-            z_j = F.normalize(views_feats[j], p=2, dim=1)
+            # Conversion temporaire en float32
+            v_i = views_feats[i].to(torch.float32)
+            v_j = views_feats[j].to(torch.float32)
             
-            loss += F.mse_loss(z_i, z_j)
+            # Normalisation Lp avec un epsilon explicite et robuste
+            z_i = F.normalize(v_i, p=p, dim=1, eps=1e-4)
+            z_j = F.normalize(v_j, p=p, dim=1, eps=1e-4)
+            
+            # Calcul de la distance Lp réelle moyenne sur le lot (batch)
+            pair_loss = torch.norm(z_i - z_j, p=p, dim=1).mean()
+            
+            loss += pair_loss
             count += 1
             
-    return loss / max(count, 1)
+    final_loss = loss / max(count, 1)
+    
+    # Reconvertit dans le type original (ex: bf16) pour le reste du réseau
+    return final_loss.to(views_feats[0].dtype)
