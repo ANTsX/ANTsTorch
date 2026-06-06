@@ -24,4 +24,7 @@ from .latent_alignment import vicreg_multi
 from .latent_alignment import hsic_biased
 from .latent_alignment import hsic_multi
 from .latent_alignment import mse_multi
+<<<<<<< HEAD
 
+=======
+>>>>>>> 0b6ebcdc6a2c4ff620fa03134feb2a0a6fa4927a
