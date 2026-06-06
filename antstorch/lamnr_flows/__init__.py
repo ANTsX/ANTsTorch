@@ -23,4 +23,4 @@ from .latent_alignment import barlow_twins_multi
 from .latent_alignment import vicreg_multi
 from .latent_alignment import hsic_biased
 from .latent_alignment import hsic_multi
-from .latent_alignment import mse_multi
+from .latent_alignment import lpnorm_multi
