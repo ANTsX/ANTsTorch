@@ -62,23 +62,30 @@ def pearson_multi(views_feats: List[torch.Tensor]) -> torch.Tensor:
     if V < 2:
         return torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
 
-    eps = 1e-6
-    total = torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
+    loss = torch.tensor(0.0, device=views_feats[0].device, dtype=torch.float32)
     n_pairs = 0
+
     for i in range(V):
         for j in range(i + 1, V):
-            x = views_feats[i]
-            y = views_feats[j]
-            B = x.size(0)
-            # standardize along batch
-            x = (x - x.mean(dim=0)) / (x.std(dim=0) + eps)
-            y = (y - y.mean(dim=0)) / (y.std(dim=0) + eps)
-            C = (x.t() @ y) / max(B - 1, 1)  # [D,D]
-            diag_mean = torch.diag(C).mean()
-            total = total - diag_mean  # negative to maximize correlation
-            n_pairs += 1
-    return total / float(n_pairs) if n_pairs > 0 else total
+            # Conversion temporaire en float32
+            v_i = views_feats[i].to(torch.float32)
+            v_j = views_feats[j].to(torch.float32)
 
+            # Standardisation avec un epsilon de sécurité (1e-6)
+            v_i = (v_i - v_i.mean(dim=0)) / (v_i.std(dim=0) + 1e-6)
+            v_j = (v_j - v_j.mean(dim=0)) / (v_j.std(dim=0) + 1e-6)
+
+            # Corrélation croisée
+            c_ij = torch.matmul(v_i.T, v_j) / (v_i.shape[0] - 1)
+            
+            # Extraction de la diagonale
+            hs = torch.mean(torch.diag(c_ij))
+            loss = loss - hs  # Négatif pour maximiser la dépendance
+            n_pairs += 1
+            
+    if n_pairs > 0:
+        loss = loss / float(n_pairs)
+    return loss
 
 
 
@@ -572,7 +579,7 @@ def lpnorm_multi(views_feats: List[torch.Tensor], p: float = 2.0) -> torch.Tenso
     
     for i in range(V):
         for j in range(i + 1, V):
-            # Conversion temporaire en float32
+            # Conversion temporaire en float32 pour la stabilité
             v_i = views_feats[i].to(torch.float32)
             v_j = views_feats[j].to(torch.float32)
             
@@ -580,13 +587,10 @@ def lpnorm_multi(views_feats: List[torch.Tensor], p: float = 2.0) -> torch.Tenso
             z_i = F.normalize(v_i, p=p, dim=1, eps=1e-4)
             z_j = F.normalize(v_j, p=p, dim=1, eps=1e-4)
             
-            # Calcul de la distance Lp réelle moyenne sur le lot (batch)
-            pair_loss = torch.norm(z_i - z_j, p=p, dim=1).mean()
-            
-            loss += pair_loss
+            # Calcul de la perte
+            loss += torch.mean(torch.norm(z_i - z_j, p=p, dim=1))
             count += 1
-            
-    final_loss = loss / max(count, 1)
-    
-    # Reconvertit dans le type original (ex: bf16) pour le reste du réseau
-    return final_loss.to(views_feats[0].dtype)
+
+    if count > 0:
+        loss = loss / count
+    return loss
