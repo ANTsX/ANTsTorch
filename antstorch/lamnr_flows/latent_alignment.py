@@ -87,9 +87,6 @@ def pearson_multi(views_feats: List[torch.Tensor]) -> torch.Tensor:
         loss = loss / float(n_pairs)
     return loss
 
-
-
-
 def info_nce_multi(views_feats: List[torch.Tensor], T: float) -> torch.Tensor:
     """
     Multi-view InfoNCE / NT-Xent loss with multi-positives (SimCLR-style).
