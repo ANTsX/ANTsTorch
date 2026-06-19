@@ -126,6 +126,10 @@ def create_real_nvp_normalizing_flow_model(
             flows.append(nf.flows.ActNorm(latent_size))
 
     model = nf.NormalizingFlow(q0=q0, flows=flows)
+
+    if hasattr(torch, 'compile'):
+        model = torch.compile(model, mode="reduce-overhead")
+        
     return model
 
 def _check_power_of_two_divisibility(spatial: Sequence[int], L: int, dims: int) -> None:
@@ -311,6 +315,9 @@ def create_glow_normalizing_flow_model_2d(
 
     model = nf.MultiscaleFlow(q0, flows, merges)
 
+    if hasattr(torch, 'compile'):
+        model = torch.compile(model, mode="reduce-overhead")
+
     if verbose:
         print("Created the following 2D GLOW model:")
         _print_model_summary(model, input_shape=input_shape)
@@ -453,6 +460,9 @@ def create_glow_normalizing_flow_model_3d(
             merges.append(nf.flows.Merge())
 
     model = nf.MultiscaleFlow(q0, flows, merges)
+
+    if hasattr(torch, 'compile'):
+        model = torch.compile(model, mode="reduce-overhead")
 
     if verbose:
         print("Created the following 3D GLOW model:")
