@@ -31,7 +31,7 @@ from tqdm.auto import tqdm
 
 import ants
 import antstorch
-import normflows as nf
+import antsnormflows as nf
 
 from antstorch.lamnr_flows.core.base_trainer import (
     BaseLAMNrTrainer,
