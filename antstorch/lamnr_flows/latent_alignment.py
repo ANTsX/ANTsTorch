@@ -1,593 +1,503 @@
+"""
+latent_alignment.py
+===================
+Factory class that owns **all** latent-space alignment logic for the LAMNr
+Glow trainers.  The training loop needs only to call:
+
+    loss_total, L_align, w_nll, w_align = manager.compute(
+        lat_flat, L_nll, it, s_nll, s_align
+    )
+
+and then ``loss_total.backward()``.
+
+No normalizing-flow mathematics live here — only the alignment objectives
+(VICReg, Barlow Twins, InfoNCE, HSIC, Pearson, MSE) and the optional
+shared-subspace screening (CCA / HSIC).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, List, Literal, Optional, Tuple
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from typing import List
-
-
-def pearson_multi(views_feats: List[torch.Tensor]) -> torch.Tensor:
-    """
-    Pearson alignment baseline over multiple views.
-
-    For each unordered pair of views (i < j), this computes the per-feature
-    Pearson cross-correlation between their projected latents and returns
-    the **negative** mean of the diagonal correlations, averaged across
-    all pairs. Minimizing this loss therefore maximizes per-dimension
-    correlation across views.
-
-    Parameters
-    ----------
-    views_feats : list[torch.Tensor]
-        List of feature tensors, one per view, each of shape ``[B, D]``.
-        All tensors must share the same batch size ``B`` and feature
-        dimension ``D``. Float32 is recommended; inputs may reside on CPU
-        or a CUDA device, but all tensors must be on the same device.
-
-    Returns
-    -------
-    torch.Tensor
-        A scalar (0-dim) tensor with the loss value:
-        ``loss = - mean_{i<j} mean(diag(C_ij))``, where
-        ``C_ij = X_i^T X_j / (B - 1)`` and each ``X`` is the standardized
-        (zero-mean, unit-variance) version of the corresponding view’s
-        features along the batch dimension. If fewer than two views are
-        provided, returns ``tensor(0.0)`` on the inputs’ device/dtype.
-
-    Notes
-    -----
-    * Each feature column is standardized over the batch with a small
-      numerical floor (``eps = 1e-6``) on the standard deviation to avoid
-      divide-by-zero.
-    * Only the **diagonal** of the cross-correlation matrix is used
-      (feature-aligned correlation). Redundancy between different feature
-      dimensions is **not** penalized here; prefer Barlow Twins or VICReg
-      if you want de-redundancy.
-    * Fully differentiable; gradients flow into the inputs.
-    * Computational cost is ``O(V^2 * B * D)`` for ``V`` views.
-
-    Shape
-    -----
-    - Input: ``views_feats[v]`` is ``[B, D]`` for each view ``v``.
-    - Output: scalar tensor ``[]``.
-
-    Examples
-    --------
-    >>> x = torch.randn(64, 128)
-    >>> y = x + 0.05 * torch.randn(64, 128)
-    >>> loss = pearson_multi([x, y])
-    >>> loss.shape
-    torch.Size([])
-    """
-    V = len(views_feats)
-    if V < 2:
-        return torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
-
-    loss = torch.tensor(0.0, device=views_feats[0].device, dtype=torch.float32)
-    n_pairs = 0
-
-    for i in range(V):
-        for j in range(i + 1, V):
-            # Conversion temporaire en float32
-            v_i = views_feats[i].to(torch.float32)
-            v_j = views_feats[j].to(torch.float32)
-
-            # Standardisation avec un epsilon de sécurité (1e-6)
-            v_i = (v_i - v_i.mean(dim=0)) / (v_i.std(dim=0) + 1e-6)
-            v_j = (v_j - v_j.mean(dim=0)) / (v_j.std(dim=0) + 1e-6)
-
-            # Corrélation croisée
-            c_ij = torch.matmul(v_i.T, v_j) / (v_i.shape[0] - 1)
-            
-            # Extraction de la diagonale
-            hs = torch.mean(torch.diag(c_ij))
-            loss = loss - hs  # Négatif pour maximiser la dépendance
-            n_pairs += 1
-            
-    if n_pairs > 0:
-        loss = loss / float(n_pairs)
-    return loss
-
-def info_nce_multi(views_feats: List[torch.Tensor], T: float) -> torch.Tensor:
-    """
-    Multi-view InfoNCE / NT-Xent loss with multi-positives (SimCLR-style).
-
-    For V aligned views of the same batch, this computes the NT-Xent
-    contrastive loss where, for each anchor row, **positives are the
-    same-sample rows from the other views**, and **all remaining rows in
-    the concatenated batch are negatives**. Features are L2-normalized
-    inside the function, cosine similarities are scaled by temperature
-    ``T``, and a numerically-stable ``logsumexp`` is used for both the
-    numerator (multi-positives) and denominator.
-
-    Formally, with normalized features and similarities
-    :math:`s_{ij} = \\langle x_i, x_j \\rangle / T`, the per-row loss is
-
-    .. math::
-
-        \\ell_i = -\\log
-        \\frac{\\sum\\limits_{p \\in \\mathcal{P}(i)} \\exp(s_{ip})}
-             {\\sum\\limits_{a \\neq i} \\exp(s_{ia})},
-
-    where :math:`\\mathcal{P}(i)` indexes the **same sample** in all
-    *other* views (multi-positive). The returned loss is the mean of
-    :math:`\\ell_i` over all rows across all views.
-
-    Parameters
-    ----------
-    views_feats : list[torch.Tensor]
-        List of V feature tensors, one per view, each of shape ``[B, D]``.
-        Rows must be **paired across views** (row k in every view refers
-        to the same sample). ``V`` must be >= 2.
-    T : float
-        Temperature (scales cosine similarities). Internally clamped to
-        ``max(T, 1e-8)`` for numerical stability.
-
-    Returns
-    -------
-    torch.Tensor
-        A scalar (0-dim) tensor with the InfoNCE/NT-Xent loss value,
-        averaged over all rows in all views.
-
-    Notes
-    -----
-    * Inputs are **L2-normalized** along ``dim=1`` inside the function, so
-      you do not need to pre-normalize.
-    * Self-similarities are removed from the denominator by masking.
-    * Uses ``torch.logsumexp`` for stability with multiple positives.
-    * Complexity is ``O((V·B)^2)`` due to the full similarity matrix.
-    * Mixed precision is supported; loss math runs in fp32 once inputs are
-      cast to float (recommend fp32 for alignment losses).
-
-    Shape
-    -----
-    - Input: each ``views_feats[v]`` is ``[B, D]``.
-    - Output: scalar tensor ``[]``.
-
-    Examples
-    --------
-    >>> x = torch.randn(64, 128)                 # view 1
-    >>> y = x + 0.05 * torch.randn(64, 128)      # view 2 (positives align by row)
-    >>> loss = info_nce_multi([x, y], T=0.2)
-    >>> loss.shape
-    torch.Size([])
-
-    References
-    ----------
-    .. [1] van den Oord, A., Li, Y., & Vinyals, O. (2018).
-           *Representation Learning with Contrastive Predictive Coding*.
-           arXiv:1807.03748.
-    .. [2] Chen, T., Kornblith, S., Norouzi, M., & Hinton, G. (2020).
-           *A Simple Framework for Contrastive Learning of Visual Representations*
-           (SimCLR). ICML 2020.
-    """
-    ...
-    feats = [nn.functional.normalize(f, dim=1) for f in views_feats]
-    B = feats[0].size(0)
-    V = len(feats)
-    X = torch.cat(feats, dim=0)               # [V*B, D]
-    sim = X @ X.t() / max(T, 1e-8)            # [VB, VB]
-    mask = torch.eye(V*B, device=X.device, dtype=torch.bool)
-    sim.masked_fill_(mask, -1e9)              # remove self
-
-    ids = torch.arange(B, device=X.device).repeat(V)  # [VB]
-    loss_rows = []
-    arange_vb = torch.arange(V*B, device=X.device)
-    for i in range(V*B):
-        pos = (ids == ids[i]) & (arange_vb != i)
-        denom = torch.logsumexp(sim[i], dim=0)
-        numer = torch.logsumexp(sim[i][pos], dim=0)
-        loss_rows.append(-(numer - denom))
-    return torch.stack(loss_rows, dim=0).mean()
-
-
-
-
-def barlow_twins_multi(views_feats: List[torch.Tensor], lam: float = 5e-3) -> torch.Tensor:
-    """
-    Multi-view Barlow Twins alignment loss.
-
-    For each unordered pair of views (i < j), this computes the
-    cross-correlation matrix between **standardized** features and
-    penalizes deviation from the identity matrix:
-
-    .. math::
-
-        \\mathcal{L}_{\\text{BT}}(i,j)
-        = \\sum_k (C_{kk} - 1)^2
-        \\, + \\, \\lambda \\sum_{k\\ne\\ell} C_{k\\ell}^2,
-
-    where :math:`C = X^\\top Y / (B-1)`, and :math:`X, Y \\in \\mathbb{R}^{B\\times D}`
-    are the per-batch **zero-mean / unit-variance** versions of the two
-    views' features. The function returns the average of
-    :math:`\\mathcal{L}_{\\text{BT}}(i,j)` over all view pairs.
-
-    Intuition: the diagonal term encourages **featurewise agreement**
-    across views (corr ≈ 1), while the off-diagonal term discourages
-    **redundancy** (features become decorrelated / whitened).
-
-    Parameters
-    ----------
-    views_feats : list[torch.Tensor]
-        List of feature tensors, one per view, each of shape ``[B, D]``.
-        Rows must be aligned across views (row k corresponds to the same
-        sample). All tensors must share the same ``B`` and ``D`` and live
-        on the same device. Float32 is recommended for numerical stability.
-    lam : float, default=5e-3
-        Weight on the off-diagonal penalty. Larger values enforce stronger
-        de-redundancy; smaller values emphasize diagonal ≈ 1.
-
-    Returns
-    -------
-    torch.Tensor
-        A scalar (0-dim) tensor with the Barlow Twins loss value, averaged
-        over all unordered view pairs.
-
-    Notes
-    -----
-    * Each feature column is standardized over the batch with a small
-      variance floor (``eps``) internally to avoid divide-by-zero.
-    * No negatives are used; works well with moderate batch sizes.
-      (Empirically more stable with ``B ≥ 64`` for covariance estimates.)
-    * Fully differentiable; gradients flow into all inputs.
-    * Computational cost is ``O(V^2 · B · D)`` for ``V`` views.
-
-    Shape
-    -----
-    - Input: ``views_feats[v]`` is ``[B, D]`` for each view ``v``.
-    - Output: scalar tensor ``[]``.
-
-    Examples
-    --------
-    >>> x = torch.randn(64, 256)                 # view 1
-    >>> y = x + 0.05 * torch.randn(64, 256)      # view 2 (paired)
-    >>> loss = barlow_twins_multi([x, y], lam=5e-3)
-    >>> loss.shape
-    torch.Size([])
-
-    References
-    ----------
-    .. [1] Zbontar, J., Jing, L., Misra, I., LeCun, Y., & Deny, S. (2021).
-           *Barlow Twins: Self-Supervised Learning via Redundancy Reduction.*
-           ICML 2021.
-    """
-    B = views_feats[0].size(0)
-    losses = []
-    eye_cache = None
-    for i in range(len(views_feats)):
-        Zi = (views_feats[i] - views_feats[i].mean(0)) / (views_feats[i].std(0) + 1e-5)
-        Zi = torch.nan_to_num(Zi)
-        for j in range(i+1, len(views_feats)):
-            Zi = torch.nan_to_num(Zi)
-            Zj = (views_feats[j] - views_feats[j].mean(0)) / (views_feats[j].std(0) + 1e-5)
-            Zj = torch.nan_to_num(Zj)
-            C = (Zi.t() @ Zj) / max(B, 1)
-            C = torch.nan_to_num(C)
-            if eye_cache is None or eye_cache.size(0) != C.size(0):
-                eye_cache = torch.eye(C.size(0), device=C.device, dtype=C.dtype)
-            on = (C.diag() - 1).pow(2).sum()
-            off = (C - eye_cache).pow(2).sum() - (C.diag() - 1).pow(2).sum()
-            losses.append(on + lam * off)
-    return torch.stack(losses).mean() if losses else torch.tensor(0.0, device=views_feats[0].device)
-
-
-
-
-def vicreg_multi(views_feats: List[torch.Tensor],
-                 w_inv: float = 25.0,
-                 w_var: float = 25.0,
-                 w_cov: float = 1.0,
-                 gamma: float = 1.0) -> torch.Tensor:
-    """
-    Multi-view VICReg (Variance–Invariance–Covariance Regularization) loss.
-
-    Extends VICReg to V aligned views of the same batch. For each unordered
-    pair of views (i < j), the **invariance** term pulls paired samples
-    together via MSE in the projector space. For each individual view,
-    the **variance** term enforces a per-feature standard deviation floor
-    to prevent collapse, and the **covariance** term penalizes off-diagonal
-    entries of the (centered) feature covariance to reduce redundancy.
-
-    The returned loss is:
-    ``w_inv * mean_pair(MSE) + w_var * mean_view(VarFloor) + w_cov * mean_view(CovOffDiag)``.
-
-    Formally, let ``X ∈ R^{B×D}`` denote a view's features centered along the
-    batch, and ``std_j`` the per-feature standard deviation with a small
-    numerical floor (``eps``). Then
-
-    .. math::
-
-        \\mathcal{L}_{\\text{inv}} =
-        \\frac{1}{|\\mathcal{P}|} \\sum_{(i,j)\\in\\mathcal{P}}
-        \\frac{1}{B D} \\lVert X^{(i)} - X^{(j)} \\rVert_2^2,
-
-        \\quad
-        \\mathcal{L}_{\\text{var}} =
-        \\frac{1}{V D} \\sum_{v=1}^V \\sum_{j=1}^D
-        \\big[\\max(0, \\gamma - \\operatorname{std}_j(X^{(v)}))\\big]^2,
-
-        \\quad
-        \\mathcal{L}_{\\text{cov}} =
-        \\frac{1}{V} \\sum_{v=1}^V
-        \\frac{1}{D} \\sum_{k\\neq \\ell}
-        \\big( \\operatorname{Cov}(X^{(v)})_{k\\ell} \\big)^2,
-
-    where ``Cov(X) = X^T X / (B-1)`` after centering.
-
-    Parameters
-    ----------
-    views_feats : list[torch.Tensor]
-        List of V feature tensors, one per view, each of shape ``[B, D]``.
-        Rows must be paired across views (row k is the same sample). All
-        tensors must share the same ``B`` and ``D`` and live on the same device.
-        Float32 is recommended for numerical stability.
-    w_inv : float, default=25.0
-        Weight of the invariance (pairwise MSE) term.
-    w_var : float, default=25.0
-        Weight of the variance floor term.
-    w_cov : float, default=1.0
-        Weight of the covariance off-diagonal penalty.
-    gamma : float, default=1.0
-        Target minimum standard deviation per feature (variance floor).
-        Typical choice is ``1.0`` when projector outputs are roughly
-        standardized; tune if your projector uses different scaling.
-
-    Returns
-    -------
-    torch.Tensor
-        A scalar (0-dim) tensor with the VICReg loss value aggregated over
-        all unordered view pairs (for the invariance term) and over views
-        (for the variance & covariance terms).
-
-    Notes
-    -----
-    * No negatives are required; VICReg is robust with modest batch sizes.
-    * We recommend computing this loss in **fp32** (cast inside the function)
-      and adding a small ``eps`` (e.g., ``1e-4``) to standard deviations and
-      denominators to avoid divide-by-zero.
-    * The invariance part averages over all unordered view pairs; variance
-      and covariance parts average over views.
-    * Computational complexity is ``O(V^2 · B · D)`` for the pairwise MSE
-      plus ``O(V · B · D)`` for statistics.
-
-    Shape
-    -----
-    - Input: each ``views_feats[v]`` is ``[B, D]``.
-    - Output: scalar tensor ``[]``.
-
-    Examples
-    --------
-    >>> x = torch.randn(64, 256)                         # view 1
-    >>> y = x + 0.05 * torch.randn(64, 256)              # view 2 (paired)
-    >>> loss = vicreg_multi([x, y], w_inv=25, w_var=25, w_cov=1, gamma=1.0)
-    >>> loss.shape
-    torch.Size([])
-
-    References
-    ----------
-    .. [1] Bardes, A., Ponce, J., & LeCun, Y. (2021).
-           *VICReg: Variance-Invariance-Covariance Regularization for Self-Supervised Learning*.
-           arXiv:2105.04906.
-    """
-
-    def _offdiag(x: torch.Tensor) -> torch.Tensor:
-        # return the off-diagonal elements of a square matrix
-        n, m = x.shape
-        assert n == m
-        return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
-
-    V = len(views_feats)
-    B = views_feats[0].size(0)
-    eps = 1e-4
-
-    # Invariance (pairwise MSE)
-    inv = torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
-    n_pairs = 0
-    for i in range(V):
-        for j in range(i + 1, V):
-            inv = inv + F.mse_loss(views_feats[i], views_feats[j])
-            n_pairs += 1
-    if n_pairs > 0:
-        inv = inv / float(n_pairs)
-
-    # Variance & Covariance (per view)
-    var_acc = torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
-    cov_acc = torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
-    for v in range(V):
-        z = views_feats[v]
-        # variance
-        std = z.std(dim=0) + eps
-        var = torch.relu(gamma - std).pow(2).mean()
-        var_acc = var_acc + var
-        # covariance
-        zc = z - z.mean(dim=0, keepdim=True)
-        cov = (zc.t() @ zc) / max(B - 1, 1)
-        cov = _offdiag(cov).pow(2).sum() / cov.size(0)
-        cov_acc = cov_acc + cov
-
-    var_acc = var_acc / float(V)
-    cov_acc = cov_acc / float(V)
-
-    return w_inv * inv + w_var * var_acc + w_cov * cov_acc
-
-
-
-
-def hsic_biased(
-    x: torch.Tensor,
-    y: torch.Tensor,
-    sigma_x: float = 0.0,
-    sigma_y: float = 0.0,
+# ---------------------------------------------------------------------------
+# Re-export screening helpers so importers can stay in one place
+# ---------------------------------------------------------------------------
+
+Method = Literal["none", "cca", "hsic"]
+
+
+@dataclass
+class ScreenState:
+    method: Method = "none"
+    proj_dim: int = 0
+    keep_dim: int = 0
+    n_views: int = 0
+    device: Optional[torch.device] = None
+    dtype: Optional[torch.dtype] = None
+    projectors: Optional[List[torch.Tensor]] = None  # for CCA  (D, r)
+    masks: Optional[List[torch.Tensor]] = None        # for HSIC (D,)
+    meta: Optional[Dict] = None
+
+
+# ---------------------------------------------------------------------------
+# Screening internals
+# ---------------------------------------------------------------------------
+
+def _whiten(
+    F: torch.Tensor, ridge: float = 1e-3
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    mu = F.mean(dim=0, keepdim=True)
+    X = F - mu
+    cov = (X.T @ X) / max(1, X.shape[0] - 1)
+    cov = cov + ridge * torch.eye(cov.shape[0], device=F.device, dtype=F.dtype)
+    evals, evecs = torch.linalg.eigh(cov)
+    evals = torch.clamp(evals, min=1e-12)
+    inv_sqrt = evecs @ torch.diag(evals.rsqrt()) @ evecs.T
+    return X @ inv_sqrt, mu, inv_sqrt
+
+
+@torch.no_grad()
+def _cca_pair(
+    A: torch.Tensor, B: torch.Tensor, ridge: float = 1e-3
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    Xa, _, Wa = _whiten(A, ridge=ridge)
+    Xb, _, Wb = _whiten(B, ridge=ridge)
+    M = Xa.T @ Xb / max(1, A.shape[0] - 1)
+    U, S, Vh = torch.linalg.svd(M, full_matrices=False)
+    Ua = Wa @ U
+    Vb = Wb @ Vh.T
+    return Ua, S, Vb
+
+
+@torch.no_grad()
+def _screen_cca(
+    feats: List[torch.Tensor], keep_dim: int, ridge: float = 1e-3
+) -> Tuple[List[torch.Tensor], Dict]:
+    n = len(feats)
+    B, D = feats[0].shape
+    accum = [
+        torch.zeros(D, D, device=feats[0].device, dtype=feats[0].dtype)
+        for _ in range(n)
+    ]
+    spectra = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            Ui, S, Vj = _cca_pair(feats[i], feats[j], ridge=ridge)
+            ui = Ui[:, :keep_dim]
+            vj = Vj[:, :keep_dim]
+            accum[i] = accum[i] + ui @ ui.T
+            accum[j] = accum[j] + vj @ vj.T
+            spectra.append(S.detach().cpu())
+    projectors = []
+    for i in range(n):
+        A = accum[i] / max(1, n - 1) + 1e-6 * torch.eye(
+            accum[i].shape[0], device=accum[i].device, dtype=accum[i].dtype
+        )
+        ev, evc = torch.linalg.eigh(A)
+        idx = torch.argsort(ev, descending=True)[:keep_dim]
+        projectors.append(evc[:, idx])
+    info = {
+        "cca_keep_dim": int(keep_dim),
+        "mean_spectrum": (
+            torch.stack(spectra).mean(dim=0).tolist() if len(spectra) else None
+        ),
+    }
+    return projectors, info
+
+
+def _rbf_kernel(
+    x: torch.Tensor, gamma: Optional[float] = None
 ) -> torch.Tensor:
+    B = x.shape[0]
+    x_norm = (x * x).sum(1).view(-1, 1)
+    dist = x_norm + x_norm.T - 2.0 * (x @ x.T)
+    if gamma is None:
+        vals = dist.detach()
+        median = torch.median(
+            vals[~torch.eye(B, dtype=torch.bool, device=x.device)]
+        )
+        if median <= 0:
+            median = torch.tensor(1.0, device=x.device, dtype=x.dtype)
+        gamma = 1.0 / (2.0 * median)
+    K = torch.exp(-gamma * dist)
+    H = torch.eye(B, device=x.device, dtype=x.dtype) - (1.0 / B) * torch.ones(
+        B, B, device=x.device, dtype=x.dtype
+    )
+    return H @ K @ H
+
+
+@torch.no_grad()
+def _hsic_unbiased(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    B = x.shape[0]
+    K = _rbf_kernel(x)
+    L = _rbf_kernel(y)
+    mask = ~torch.eye(B, dtype=torch.bool, device=x.device)
+    K_off = K[mask].view(B, B - 1)
+    L_off = L[mask].view(B, B - 1)
+    term1 = (K_off * L_off).sum() / (B * (B - 3))
+    K1 = K.sum(dim=1) - torch.diagonal(K)
+    L1 = L.sum(dim=1) - torch.diagonal(L)
+    term2 = (K1 * L1).sum() / (B * (B - 3) * (B - 1))
+    return term1 - term2
+
+
+@torch.no_grad()
+def _screen_hsic(
+    feats: List[torch.Tensor],
+    keep_frac: float,
+    prefilter_frac: float = 0.5,
+) -> Tuple[List[torch.Tensor], Dict]:
+    n = len(feats)
+    B, D = feats[0].shape
+    r = max(1, int(round(D * keep_frac)))
+    k_pref = max(1, int(round(D * prefilter_frac)))
+    Z = [
+        (Fv - Fv.mean(dim=0, keepdim=True)) / (Fv.std(dim=0, keepdim=True) + 1e-6)
+        for Fv in feats
+    ]
+    pearson_scores = [
+        torch.zeros(D, device=feats[0].device, dtype=feats[0].dtype) for _ in range(n)
+    ]
+    for v in range(n):
+        others = [Z[u] for u in range(n) if u != v]
+        Zcat = torch.cat(others, dim=1) if others else None
+        if Zcat is None or Zcat.shape[1] == 0:
+            continue
+        zmean = Zcat.mean(dim=1, keepdim=True)
+        a = Z[v]
+        num = (a * zmean).sum(dim=0)
+        den = a.pow(2).sum(dim=0).sqrt() * (
+            zmean.pow(2).sum(dim=0).sqrt().squeeze(0) + 1e-8
+        )
+        pearson_scores[v] = (num / (den + 1e-8)).abs()
+
+    hsic_scores = [
+        torch.zeros(D, device=feats[0].device, dtype=feats[0].dtype) for _ in range(n)
+    ]
+    for v in range(n):
+        top_idx = torch.topk(pearson_scores[v], k=k_pref, largest=True).indices
+        others = [Z[u] for u in range(n) if u != v]
+        Zcat = torch.cat(others, dim=1) if others else None
+        if Zcat is None or Zcat.shape[1] == 0:
+            continue
+        y = Zcat.mean(dim=1, keepdim=True)
+        for d in top_idx.tolist():
+            x = Z[v][:, d : d + 1]
+            hsic_scores[v][d] = _hsic_unbiased(x, y)
+
+    masks, kept_counts = [], []
+    for v in range(n):
+        idx = torch.topk(hsic_scores[v], k=r, largest=True).indices
+        mask = torch.zeros(D, dtype=torch.bool, device=feats[0].device)
+        mask[idx] = True
+        masks.append(mask)
+        kept_counts.append(int(mask.sum().item()))
+    info = {"keep_dim": r, "prefilter_dim": k_pref, "kept_per_view": kept_counts}
+    return masks, info
+
+
+def _update_screen(
+    feats: List[torch.Tensor],
+    state: Optional[ScreenState],
+    method: Method = "none",
+    keep_frac: float = 0.5,
+    ridge: float = 1e-3,
+    refresh: bool = False,
+    prefilter_frac: float = 0.5,
+) -> ScreenState:
+    if method == "none":
+        return ScreenState(method="none")
+    assert 0.0 < keep_frac <= 1.0
+    B, D = feats[0].shape
+    device, dtype = feats[0].device, feats[0].dtype
+    n_views = len(feats)
+    r = max(1, int(round(D * keep_frac)))
+    if state is None or (
+        state.method != method
+        or state.proj_dim != D
+        or state.n_views != n_views
+        or state.keep_dim != r
+    ):
+        state = ScreenState(
+            method=method,
+            proj_dim=D,
+            keep_dim=r,
+            n_views=n_views,
+            device=device,
+            dtype=dtype,
+            projectors=None,
+            masks=None,
+            meta={},
+        )
+    if not refresh:
+        return state
+    if method == "cca":
+        projectors, info = _screen_cca(feats, keep_dim=r, ridge=ridge)
+        state.projectors = [P.to(device=device, dtype=dtype) for P in projectors]
+        state.masks = None
+        state.meta = {"cca_info": info, "keep_dim": r}
+    elif method == "hsic":
+        masks, info = _screen_hsic(feats, keep_frac=keep_frac, prefilter_frac=prefilter_frac)
+        state.masks = [m.to(device=device, dtype=dtype) for m in masks]
+        state.projectors = None
+        state.meta = {"hsic_info": info, "keep_dim": r}
+    return state
+
+
+@torch.no_grad()
+def _apply_screen(
+    feats: List[torch.Tensor], state: Optional[ScreenState]
+) -> List[torch.Tensor]:
+    """Apply learned screening transform, or identity if not yet computed."""
+    if state is None or state.method == "none":
+        return feats
+    if state.method == "cca":
+        if state.projectors is None:
+            return feats
+        return [f @ P for f, P in zip(feats, state.projectors)]
+    if state.method == "hsic":
+        if state.masks is None:
+            return feats
+        return [f[:, m] for f, m in zip(feats, state.masks)]
+    return feats
+
+
+# ---------------------------------------------------------------------------
+# Projector MLP
+# ---------------------------------------------------------------------------
+
+class Projector(nn.Module):
+    """Lightweight 2-layer MLP projection head."""
+
+    def __init__(self, in_dim: int, hidden: int, out_dim: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, out_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # [B, D]
+        return self.net(x)
+
+
+# ---------------------------------------------------------------------------
+# Latent flattening helper (shared 2D / 3D)
+# ---------------------------------------------------------------------------
+
+def flatten_latents(z, target_pool_size: int = 2) -> torch.Tensor:
     """
-    Biased HSIC between two views using RBF kernels.
+    LAMNr strategy: extract only the deepest latent level and adaptive-pool
+    it to a fixed size before feeding the Projector MLP.
 
-    Computes the (biased) Hilbert–Schmidt Independence Criterion (HSIC)
-    between two batches of features ``x`` and ``y``. RBF kernels are
-    formed on each view with bandwidths ``sigma_x`` and ``sigma_y``; the
-    centered Gram matrices are then combined as:
+    Supports 2D (N, C, H, W) and 3D (N, C, D, H, W) tensors.
+    """
+    zs = z if isinstance(z, (list, tuple)) else [z]
+    deepest_z = zs[-1]
 
-    .. math::
+    if deepest_z.ndim == 5:
+        z_pooled = F.adaptive_avg_pool3d(
+            deepest_z,
+            (target_pool_size, target_pool_size, target_pool_size),
+        )
+        return z_pooled.flatten(1)
+    elif deepest_z.ndim == 4:
+        z_pooled = F.adaptive_avg_pool2d(
+            deepest_z, (target_pool_size, target_pool_size)
+        )
+        return z_pooled.flatten(1)
+    else:
+        return deepest_z.flatten(1)
 
-        \\operatorname{HSIC}_b(x,y)
-        \\,=\\, \\frac{1}{(B-1)^2} \\, \\operatorname{tr}( K H L H ),
 
-    where :math:`K` and :math:`L` are the RBF Gram matrices for ``x`` and
-    ``y`` respectively, :math:`H = I - \\tfrac{1}{B}\\mathbf{1}\\mathbf{1}^\\top`
-    is the centering matrix, and ``B`` is the batch size.
+# ---------------------------------------------------------------------------
+# LatentAlignmentLossManager — the Factory
+# ---------------------------------------------------------------------------
 
-    Parameters
-    ----------
-    x : torch.Tensor
-        Tensor of shape ``[B, D_x]`` (batch of features for view X).
-    y : torch.Tensor
-        Tensor of shape ``[B, D_y]`` (batch of features for view Y).
-        ``x`` and ``y`` must have the same batch size ``B`` and reside on
-        the same device; float32 is recommended for numerical stability.
-    sigma_x : float, default=0.0
-        RBF bandwidth for ``x``. If ``0.0``, a **median heuristic** is
-        used (median pairwise distance on the batch, with small numerical
-        flooring if needed).
-    sigma_y : float, default=0.0
-        RBF bandwidth for ``y``. If ``0.0``, uses the median heuristic.
+class LatentAlignmentLossManager:
+    """
+    Owns **all** latent-alignment loss computation for the LAMNr Glow trainers.
 
-    Returns
-    -------
-    torch.Tensor
-        A non-negative scalar (0-dim) tensor with the biased HSIC value.
-        Larger values indicate stronger statistical dependence between
-        ``x`` and ``y`` over the batch.
+    The training loop only needs to call::
 
-    Notes
-    -----
-    * This is the **biased** estimator (uses all entries including the
-      diagonal after centering). It is simple, low-variance, and works
-      well in practice. If you require the **unbiased** U-statistic
-      version, implement the corresponding correction on the Gram
-      matrices before the trace.
-    * Bandwidth selection strongly affects the magnitude of HSIC; the
-      median heuristic (``sigma=0``) is a good default. You can also
-      pass explicit ``sigma_x/sigma_y`` if prior scale knowledge exists.
-    * Computational cost is ``O(B^2 · (D_x + D_y))`` to form the two Gram
-      matrices and center them.
+        loss_total, L_align, w_nll, w_align = manager.compute(
+            lat_flat   = [...],   # per-view flattened latents (no grad needed here)
+            L_nll      = ...,     # NLL loss tensor (with grad)
+            it         = it,      # current global iteration
+            s_nll      = ...,     # Kendall log-var parameter (or None)
+            s_align    = ...,     # Kendall log-var parameter (or None)
+        )
+        loss_total.backward()
 
-    Shape
-    -----
-    - Input: ``x: [B, D_x]``, ``y: [B, D_y]`` (same ``B``).
-    - Output: scalar tensor ``[]``.
+    Supported alignment losses
+    --------------------------
+    vicreg, barlow, infonce, hsic, pearson, mse, none
 
-    Examples
-    --------
-    >>> B, Dx, Dy = 128, 16, 16
-    >>> x = torch.randn(B, Dx)
-    >>> y_indep = torch.randn(B, Dy)
-    >>> y_dep = x + 0.2 * torch.randn(B, Dy)
-    >>> hs_ind = hsic_biased(x, y_indep, sigma_x=0.0, sigma_y=0.0)
-    >>> hs_dep = hsic_biased(x, y_dep,   sigma_x=0.0, sigma_y=0.0)
-    >>> (hs_dep > hs_ind).item()
-    True
-
-    References
-    ----------
-    .. [1] Gretton, A., Bousquet, O., Smola, A., & Schölkopf, B. (2005).
-           *Measuring Statistical Dependence with Hilbert-Schmidt Norms*.
-           ALT 2005.
-    .. [2] Gretton, A., Fukumizu, K., Teo, C. H., Song, L., Schölkopf, B., & Smola, A. (2008).
-           *A Kernel Statistical Test of Independence*. NIPS 2008.
+    Supported screening methods
+    ---------------------------
+    cca, hsic, none
     """
 
-    def _pairwise_sq_dists(x: torch.Tensor) -> torch.Tensor:
-        # x: [B,D]
-        x_norm = (x * x).sum(dim=1, keepdim=True)  # [B,1]
-        d2 = x_norm + x_norm.t() - 2.0 * (x @ x.t())
-        d2 = torch.clamp(d2, min=0.0)
-        return d2
+    def __init__(
+        self,
+        args,
+        projectors: Optional[nn.ModuleList],
+        device: torch.device,
+    ) -> None:
+        self.args = args
+        self.projectors = projectors
+        self.device = device
+        self._screen_state: Optional[ScreenState] = None
 
-    def _median_heuristic_sigma(x: torch.Tensor) -> float:
-        # median of upper-triangular pairwise distances (sqrt of squared distances)
-        with torch.no_grad():
-            d2 = _pairwise_sq_dists(x)
-            triu = d2.triu(diagonal=1)
-            vals = triu[triu > 0].flatten()
-            if vals.numel() == 0:
-                return 1.0
-            med = torch.median(torch.sqrt(vals)).item()
-            if med <= 0 or not (med == med):  # NaN check
-                return 1.0
-            return med
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
-    def _rbf_gram(x: torch.Tensor, sigma: float) -> torch.Tensor:
-        d2 = _pairwise_sq_dists(x)
-        if sigma <= 0:
-            sigma = _median_heuristic_sigma(x)
-        gamma = 1.0 / (2.0 * (sigma ** 2) + 1e-12)
-        K = torch.exp(-gamma * d2)
-        return K
+    def compute(
+        self,
+        lat_flat: List[torch.Tensor],
+        L_nll: torch.Tensor,
+        it: int,
+        s_nll: Optional[nn.Parameter],
+        s_align: Optional[nn.Parameter],
+    ) -> Tuple[torch.Tensor, torch.Tensor, float, float]:
+        """
+        Returns
+        -------
+        loss_total : torch.Tensor  — backpropagatable combined loss
+        L_align    : torch.Tensor  — alignment term only (for logging)
+        w_nll      : float         — effective NLL weight (for logging)
+        w_align    : float         — effective alignment weight (for logging)
+        """
+        args = self.args
+        L_align = torch.tensor(0.0, dtype=torch.float32, device=self.device)
 
-    assert x.size(0) == y.size(0), "Batch sizes must match for HSIC."
-    n = x.size(0)
-    if n < 2:
-        return torch.tensor(0.0, device=x.device, dtype=x.dtype)
+        if args.align != "none" and it >= args.align_warmup and self.projectors is not None:
+            # 1. Project latents
+            feats = [self.projectors[i](lat_flat[i]) for i in range(len(lat_flat))]
+            feats = [f.float() for f in feats]
 
-    K = _rbf_gram(x, sigma_x)
-    L = _rbf_gram(y, sigma_y)
+            # 2. Optional shared-subspace screening
+            feats_screened = self._maybe_screen(feats, it)
 
-    I = torch.eye(n, device=x.device, dtype=x.dtype)
-    H = I - (1.0 / n) * torch.ones_like(I)
-    KH = K @ H
-    HLH = H @ L @ H
-    hsic = torch.trace(KH @ HLH) / max((n - 1) ** 2, 1)
-    return hsic
+            # 3. Dispatch to alignment loss
+            L_align = self._compute_raw_align(feats_screened)
 
-def hsic_multi(views_feats: List[torch.Tensor], sigma: float = 0.0) -> torch.Tensor:
-    """
-    Average negative HSIC (so it's a loss) over all (i<j) view pairs.
-    If sigma==0, uses median heuristic per view for the RBF bandwidths.
-    """
-    V = len(views_feats)
-    if V < 2:
-        return torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
+        # 4. Combine with NLL
+        loss_total, w_nll, w_align = self._combine(L_nll, L_align, s_nll, s_align, it)
+        return loss_total, L_align, w_nll, w_align
 
-    loss = torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
-    n_pairs = 0
-    for i in range(V):
-        for j in range(i + 1, V):
-            # separate bandwidths for each view improve stability
-            sig_i = sigma if sigma > 0 else 0.0
-            sig_j = sigma if sigma > 0 else 0.0
-            hs = hsic_biased(views_feats[i], views_feats[j], sigma_x=sig_i, sigma_y=sig_j)
-            loss = loss - hs  # negative to maximize dependence
-            n_pairs += 1
-    if n_pairs > 0:
-        loss = loss / float(n_pairs)
-    return loss
+    @property
+    def screen_state(self) -> Optional[ScreenState]:
+        """Expose internal screening state (for checkpointing if needed)."""
+        return self._screen_state
 
-def lpnorm_multi(views_feats: List[torch.Tensor], p: float = 2.0) -> torch.Tensor:
-    """
-    Lp-norm alignment over multiple views, fortified against
-    low-precision (bf16/fp16) division-by-zero errors at initialization.
-    """
-    V = len(views_feats)
-    if V < 2:
-        return torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
 
-    # Force le calcul de l'alignement en float32 pour éviter les underflows
-    loss = torch.tensor(0.0, device=views_feats[0].device, dtype=torch.float32)
-    count = 0
-    
-    for i in range(V):
-        for j in range(i + 1, V):
-            # Conversion temporaire en float32 pour la stabilité
-            v_i = views_feats[i].to(torch.float32)
-            v_j = views_feats[j].to(torch.float32)
-            
-            # Normalisation Lp avec un epsilon explicite et robuste
-            z_i = F.normalize(v_i, p=p, dim=1, eps=1e-4)
-            z_j = F.normalize(v_j, p=p, dim=1, eps=1e-4)
-            
-            # Calcul de la perte
-            loss += torch.mean(torch.norm(z_i - z_j, p=p, dim=1))
-            count += 1
+    def _compute_raw_align(self, feats: List[torch.Tensor]) -> torch.Tensor:
+        """Dispatch to the correct alignment loss function."""
+        import antstorch
+        args = self.args
+        dev = self.device
 
-    if count > 0:
-        loss = loss / count
-    return loss
+        if args.align == "vicreg":
+            L_inv_cov = antstorch.vicreg_multi(
+                feats,
+                w_inv=float(args.vicreg_inv),
+                w_var=0.0,
+                w_cov=float(args.vicreg_cov),
+                gamma=1.0,
+            )
+            L_var = torch.tensor(0.0, device=dev)
+            for vi, feat in enumerate(feats):
+                w_var_v = (
+                    args.vicreg_var[vi]
+                    if vi < len(args.vicreg_var)
+                    else args.vicreg_var[0]
+                )
+                gamma_v = (
+                    args.vicreg_gamma[vi]
+                    if vi < len(args.vicreg_gamma)
+                    else args.vicreg_gamma[0]
+                )
+                std = torch.sqrt(feat.var(dim=0) + 1e-4)
+                L_var = L_var + w_var_v * torch.mean(F.relu(gamma_v - std))
+            return L_inv_cov + L_var
+
+        elif args.align == "barlow":
+            return antstorch.barlow_twins_multi(feats, lam=float(args.barlow_lambda))
+
+        elif args.align == "infonce":
+            return antstorch.info_nce_multi(feats, T=float(args.temperature))
+
+        elif args.align == "hsic":
+            return antstorch.hsic_multi(feats, sigma=float(args.hsic_sigma))
+
+        elif args.align == "pearson":
+            return antstorch.pearson_multi(feats)
+
+        elif args.align == "mse":
+            return antstorch.lpnorm_multi(feats, p=2.0)
+
+        return torch.tensor(0.0, device=self.device)
+
+    def _maybe_screen(
+        self, feats: List[torch.Tensor], it: int
+    ) -> List[torch.Tensor]:
+        """Run CCA/HSIC screening if configured, or return feats unchanged."""
+        args = self.args
+        if args.screen == "none" or it < args.screen_warmup:
+            return feats
+
+        do_refresh: bool
+        if self._screen_state is None:
+            do_refresh = True
+        else:
+            do_refresh = (
+                args.screen_refresh > 0
+                and (it - args.screen_warmup) % args.screen_refresh == 0
+            )
+
+        self._screen_state = _update_screen(
+            feats,
+            state=self._screen_state,
+            method=args.screen,
+            keep_frac=args.screen_frac,
+            ridge=args.cca_ridge,
+            prefilter_frac=args.prefilter_frac,
+            refresh=do_refresh,
+        )
+        return _apply_screen(feats, self._screen_state)
+
+    def _combine(
+        self,
+        L_nll: torch.Tensor,
+        L_align: torch.Tensor,
+        s_nll: Optional[nn.Parameter],
+        s_align: Optional[nn.Parameter],
+        it: int,
+    ) -> Tuple[torch.Tensor, float, float]:
+        """Combine NLL and alignment losses using fixed or Kendall weighting."""
+        args = self.args
+
+        if args.weighting == "fixed" or args.align == "none":
+            w_align = float(args.align_weight) if args.align != "none" else 0.0
+            loss_total = L_nll + (w_align * L_align if args.align != "none" else 0.0)
+            return loss_total, 1.0, w_align
+
+        # Kendall & Gal uncertainty weighting
+        s_nll_eff   = torch.clamp(s_nll,   -5.0, 5.0)
+        s_align_eff = torch.clamp(s_align, -5.0, 5.0)
+        loss_total  = torch.exp(-s_nll_eff)   * L_nll   + s_nll_eff
+        loss_total  = loss_total + torch.exp(-s_align_eff) * L_align + s_align_eff
+        w_nll   = float(torch.exp(-s_nll_eff).detach().cpu().item())
+        w_align = float(torch.exp(-s_align_eff).detach().cpu().item())
+        return loss_total, w_nll, w_align

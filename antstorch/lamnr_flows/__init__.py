@@ -1,26 +1,22 @@
-# from .tab_simr import tab_simr
-# from .tab_simr import whiten
-# from .tab_simr import simr_low_rank_frobenius_norm_loss
-# from .tab_simr import simr_canonical_correlation_loss
-# from .tab_simr import simr_low_rank_frobenius_norm_loss_pj
-# from .tab_simr import simr_canonical_correlation_loss_pj
-# from .tab_simr import simr_low_rank_frobenius_norm_loss_reg_sparse
-# from .tab_simr import simr_canonical_correlation_loss_reg_sparse
-# from .tab_simr import simr_absolute_canonical_covariance
-# from .tab_simr import orthogonalize_and_q_sparsify
-# from .tab_simr import basic_q_sparsify
-# from .tab_simr import correlation_regularization_matrices
-# from .tab_simr import correlation_regularization_matrices
-# from .tab_simr import corr2_coeff
-# from .tab_simr import preprocess_signal_for_ica
 
-from .lamnr_flows_whitener import lamnr_flows_whitener
-from .apply_lamnr_flows_whitener import apply_lamnr_flows_whitener
+# Par ceci :
+from .latent_alignment import (
+    LatentAlignmentLossManager,
+    Projector,
+    ScreenState,
+    flatten_latents,
+)
 
-from .latent_alignment import pearson_multi
-from .latent_alignment import info_nce_multi
-from .latent_alignment import barlow_twins_multi
-from .latent_alignment import vicreg_multi
-from .latent_alignment import hsic_biased
-from .latent_alignment import hsic_multi
-from .latent_alignment import lpnorm_multi
+# Et si vous voulez aussi exposer les pertes historiques d'ANTsTorch :
+from .alignment_losses import (
+    pearson_multi,
+    info_nce_multi,
+    barlow_twins_multi,
+    vicreg_multi,
+    hsic_biased,
+    hsic_multi, 
+    lpnorm_multi
+)
+
+
+from .scripts.train_lamnr_flows_tabular import TabularLAMNrTrainer
