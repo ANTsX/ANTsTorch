@@ -27,6 +27,7 @@ dependencies = [
     "jax",
     "optax",
     "jaxopt",
+    "tqdm",
     "antsnormflows @ git+https://github.com/ANTsx/ANTsNormalizingFlows.git@main"
     ]
 
