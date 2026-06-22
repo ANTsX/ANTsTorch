@@ -10,7 +10,7 @@ from sklearn.datasets import load_iris
 from torch.utils.data import DataLoader, TensorDataset
 
 # Importation de votre nouveau trainer (ajustez le chemin selon votre structure)
-from src.lamnrflows.training.train_lamnr_flows_tabular import TabularLAMNrTrainer
+from antstorch.lamnr_flows.scripts.train_lamnr_flows_tabular import TabularLAMNrTrainer
 
 # ---------------------------------------------------------
 # 1. Faux Modèle (Mock Model) pour contourner Glow/RealNVP
@@ -44,7 +44,7 @@ def dummy_args(tmp_path):
     
     args = Args()
     args.num_views = 2
-    args.view = ["clinique_t1", "clinique_t2"]
+    args.views = ["clinique_t1", "clinique_t2"]
     args.out_dir = str(tmp_path / "runs_test")
     
     # Arguments pour l'exportation que nous venons de créer
@@ -63,25 +63,32 @@ def dummy_args(tmp_path):
 @pytest.fixture
 def dummy_tabular_trainer(dummy_args):
     """Instancie le trainer en contournant le chargement réel des données."""
-    # Instanciation (on suppose que __init__ accepte args)
-    # Si votre __init__ charge les données immédiatement, nous allons
-    # mocker la méthode build_loaders ou injecter un faux dataloader.
-    trainer = TabularLAMNrTrainer(dummy_args)
+    trainer = TabularLAMNrTrainer()
+    trainer.args = dummy_args
+    trainer.num_views = 2
+    trainer.dev = "cpu"
     
-    # Injection de faux modèles
-    trainer.models = nn.ModuleList([DummyFlowModel(dim=10), DummyFlowModel(dim=10)])
-    trainer.dev = torch.device("cpu")
+    trainer.models = [DummyFlowModel(dim=2), DummyFlowModel(dim=2)]
     
-    # Injection d'un faux DataLoader (1 batch, 2 vues, taille du batch=5, features=10)
-    faux_batch = [torch.randn(5, 10), torch.randn(5, 10)]
-    trainer.train_loader = [faux_batch]  # Une liste agit comme un itérable d'1 itération
+    return trainer
+
+@pytest.fixture
+def dummy_tabular_trainer(dummy_args):
+    """Instancie le trainer avec les attributs minimaux nécessaires."""
+    trainer = TabularLAMNrTrainer()
+    trainer.args = dummy_args
+    trainer.num_views = len(dummy_args.views)
+    trainer.dev = "cpu"
     
-    # Faux normaliseurs pour tester la branche "whitened"
-    class DummyNormalizer:
-        def normalize(self, z):
-            return z - 0.1 # Fausse standardisation
-            
-    trainer.dataset_normalizers = [DummyNormalizer(), DummyNormalizer()]
+    # Injection des modèles (ce que vous avez déjà)
+    trainer.models = [DummyFlowModel(dim=2), DummyFlowModel(dim=2)]
+    
+    # AJOUTEZ CE BLOC : Injection du DataLoader factice pour l'export
+    # On crée un faux DataLoader qui contient les données que le trainer attend
+    t0 = torch.randn(10, 2) # Faux batch de 10 échantillons, 2 features
+    t1 = torch.randn(10, 2)
+    dataset = TensorDataset(t0, t1)
+    trainer.train_loader = DataLoader(dataset, batch_size=32)
     
     return trainer
 
@@ -90,7 +97,7 @@ def dummy_tabular_trainer(dummy_args):
 # ---------------------------------------------------------
 def test_tabular_trainer_inheritance(dummy_tabular_trainer):
     """Vérifie que le TabularTrainer hérite bien de la base unifiée."""
-    from lamnrflows.training.base_trainer import BaseLAMNrTrainer
+    from antstorch.lamnr_flows.core.base_trainer import BaseLAMNrTrainer
     assert isinstance(dummy_tabular_trainer, BaseLAMNrTrainer), "TabularLAMNrTrainer doit hériter de BaseLAMNrTrainer"
 
 def test_export_tabular_results(dummy_tabular_trainer, dummy_args):
@@ -101,22 +108,21 @@ def test_export_tabular_results(dummy_tabular_trainer, dummy_args):
     out_dir = Path(dummy_args.out_dir)
     
     # 2. Assertions : Vérifier que les fichiers existent sur le disque
-    for view_name in dummy_args.view:
-        path_z = out_dir / f"{view_name}_latent_z.csv"
-        path_w = out_dir / f"{view_name}_whitened_epsilon.csv"
-        path_r = out_dir / f"{view_name}_reconstructed_x.csv"
+    for vi in range(dummy_args.num_views):
+        path_z = out_dir / f"view_{vi}_latent_z.csv"
+        path_w = out_dir / f"view_{vi}_whitened_epsilon.csv"
+        path_r = out_dir / f"view_{vi}_reconstructed_x.csv"
         
         assert path_z.exists(), f"Le fichier Z {path_z} n'a pas été créé."
-        assert path_w.exists(), f"Le fichier Whitened {path_w} n'a pas été créé."
-        assert path_r.exists(), f"Le fichier Recon {path_r} n'a pas été créé."
-        
+        assert path_w.exists(), f"Le fichier W {path_w} n'a pas été créé."
+        assert path_r.exists(), f"Le fichier R {path_r} n'a pas été créé."
+
         # 3. Assertions : Vérifier le contenu (Optionnel mais recommandé)
         df_z = pd.read_csv(path_z)
-        assert df_z.shape == (5, 10), "La forme du DataFrame Z exporté est incorrecte."
+        assert df_z.shape == (10, 2), "La forme du DataFrame Z exporté est incorrecte."
 
 
-# Ajustez ce chemin d'import selon la structure exacte de votre dossier
-from train_lamnr_flows_tabular import TabularLAMNrTrainer
+from antstorch.lamnr_flows.scripts.train_lamnr_flows_tabular import TabularLAMNrTrainer
 
 # ---------------------------------------------------------
 # 1. Faux Modèle (Mock Model) pour exécution rapide
@@ -187,7 +193,7 @@ def test_tabular_trainer_export_iris(tmp_path, monkeypatch):
     # ÉTAPE 3 : Patch de la fonction de création du modèle
     # (Ajustez la chaîne si votre fonction se trouve ailleurs, ex: "antstorch.create_...")
     monkeypatch.setattr(
-        "train_lamnr_flows_tabular.create_real_nvp_normalizing_flow_model", 
+        "antstorch.architectures.create_real_nvp_normalizing_flow_model",
         lambda *a, **kw: DummyFlowModel(dim=2)
     )
 

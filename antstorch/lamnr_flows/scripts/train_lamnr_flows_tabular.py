@@ -100,6 +100,7 @@ class TabularNormalizer:
         if mode not in ("0mean", "01", "none"):
             raise ValueError(f"TabularNormalizer mode must be '0mean', '01', or 'none'; got '{mode}'")
         self.mode    = mode
+        self.models = None
         self._mean:  Optional[np.ndarray] = None
         self._std:   Optional[np.ndarray] = None
         self._vmin:  Optional[np.ndarray] = None
