@@ -194,20 +194,27 @@ def _copy_actnorm_state(src: nn.Module, dst: nn.Module) -> None:
                     except Exception:
                         setattr(md, fld, bool(getattr(ms, fld)))
 
-
 @torch.no_grad()
 def _prime_if_needed(model: nn.Module, x: torch.Tensor) -> None:
     x1 = x[:1]
+    
+    # --- CORRECTIF : Garantir 5 dimensions pour Glow 3D ---
+    # Si on est en 3D (D,H,W) -> (1, 1, D, H, W)
+    # Si on est en 4D (B, D, H, W) -> (B, 1, D, H, W)
     if x1.ndim == 3:
+        x1 = x1.unsqueeze(0).unsqueeze(1) 
+    elif x1.ndim == 4:
         x1 = x1.unsqueeze(1)
+    # ------------------------------------------------------
+        
     p = next(model.parameters(), None)
     dev = p.device if p is not None else x1.device
     x1 = x1.to(dev, dtype=torch.float32)
+    
     try:
         _ = model.inverse_and_log_det(x1)
     except Exception:
         _ = model.log_prob(x1)
-
 
 def log_prob_exact(model: nn.Module, x: torch.Tensor) -> torch.Tensor:
     z, logdet = model.inverse_and_log_det(x)
@@ -1313,6 +1320,9 @@ class BaseLAMNrTrainer(abc.ABC):
         try:
             xs = _extract_views_from_batch(batch, num_views=n_views)
             for vi in range(n_views):
+                x_tensor = xs[vi]
+                if x_tensor.ndim == 4:
+                    x_tensor = x_tensor.unsqueeze(1)
                 x_v = to01(xs[vi].to(dtype=torch.float32, device=dev))
                 x_v = x_v[:100]
                 imgs = _coerce_nchw_4d(x_v, target_hw=(args.H, args.W))

@@ -333,16 +333,22 @@ class LAMNrGlow3DTrainer(BaseLAMNrTrainer):
         self, batch: object, vi: int, dev: torch.device
     ) -> torch.Tensor:
         """
-        Extract view vi from a 3D batch.
-
-        The 3D ImageDataset stacks views along dim=1 as (B, n_views, H, W, D),
-        so we slice [:, vi:vi+1, ...] to get (B, 1, H, W, D).
+        Extract view vi from a 3D batch and guarantee strict 5D format (B, 1, H, W, D)
+        required by multi-scale Glow 3D coupling and squeeze operations.
         """
         if torch.is_tensor(batch):
             x_v = batch[:, vi : vi + 1, ...].to(dev)
         else:
             xs  = _extract_views_from_batch(batch, num_views=self.args.num_views)
             x_v = xs[vi].to(dev)
+            
+            # --- ALIGNEMENT DIMENSIONNEL GLOW 3D ---
+            # Si le déballage de la liste renvoie (B, H, W, D), 
+            # on injecte le canal C=1 à l'index 1 -> (B, 1, H, W, D)
+            if x_v.ndim == 4:
+                x_v = x_v.unsqueeze(1)
+            # ----------------------------------------
+            
         return to01(x_v.to(dtype=torch.float32))
 
     def cleanup_checkpoints(self, keep_every: int = 20_000) -> None:
