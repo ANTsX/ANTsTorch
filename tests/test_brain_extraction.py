@@ -1,12 +1,15 @@
 import unittest
 import ants
 import antstorch
+import torch
+import pytest
 
 class Test_t1(unittest.TestCase):
     def setUp(self):
         pass
     def tearDown(self):
         pass
+    @pytest.mark.skipif(torch.backends.mps.is_available(), reason="ConvTranspose3d instable sur MPS")
     def test_example(self):
         t1 = ants.image_read(antstorch.get_antstorch_data('mprage_hippmapp3r'))
         seg = antstorch.brain_extraction(t1, modality="t1")

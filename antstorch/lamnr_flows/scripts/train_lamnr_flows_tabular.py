@@ -57,7 +57,7 @@ from tqdm.auto import tqdm
 
 import antsnormflows as nf
 
-from antstorch.architectures.create_normalizing_flow_model import (
+from antstorch.lamnr_flows.architectures.create_normalizing_flow_model import (
     create_real_nvp_normalizing_flow_model as create_rnvp,
 )
 from antstorch.utilities.dataframe_dataset import MultiViewDataFrameDataset
@@ -70,7 +70,7 @@ from antstorch.lamnr_flows.core.base_trainer import (
     set_deterministic,
     _save_metric_plots,
 )
-from antstorch.lamnr_flows.latent_alignment import (
+from antstorch.lamnr_flows.misc.latent_alignment import (
     LatentAlignmentLossManager,
     Projector,
 )

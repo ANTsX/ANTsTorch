@@ -32,7 +32,7 @@ import torchvision as tv
 from PIL import Image
 
 try:
-    from antstorch import create_glow_normalizing_flow_model_2d
+    from antstorch.lamnr_flows.architectures import create_glow_normalizing_flow_model_2d
 except ImportError:
     print("[warn] 'antstorch' not found. Ensure it is installed for 2D Glow models.")
     create_glow_normalizing_flow_model_2d = None

@@ -29,7 +29,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 try:
-    from antstorch import create_glow_normalizing_flow_model_3d
+    from antstorch.lamnr_flows.architectures import create_glow_normalizing_flow_model_3d
 except ImportError:
     print("[warn] 'antstorch' not found. Ensure it is installed for 3D Glow models.")
     create_glow_normalizing_flow_model_3d = None

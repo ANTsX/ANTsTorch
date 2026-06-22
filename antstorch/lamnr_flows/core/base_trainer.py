@@ -42,7 +42,7 @@ from tqdm.auto import tqdm
 import ants
 import antstorch
 
-from antstorch.lamnr_flows.latent_alignment import (
+from antstorch.lamnr_flows.misc.latent_alignment import (
     LatentAlignmentLossManager,
     Projector,
     ScreenState,
