@@ -519,6 +519,7 @@ def main():
     args    = _build_args()
     trainer = LAMNrGlow2DTrainer()
     trainer.setup(args)
+    screen_dump_run_config(args, Path(args.out_dir))
     trainer.train()
 
 

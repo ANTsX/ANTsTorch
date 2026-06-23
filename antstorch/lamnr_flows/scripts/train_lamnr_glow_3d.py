@@ -40,6 +40,7 @@ from antstorch.lamnr_flows.core.base_trainer import (
     _check_hw_divisible,
     _extract_views_from_batch,
     set_deterministic,
+    screen_dump_run_config,
     to01,
 )
 
@@ -508,13 +509,12 @@ def _build_args() -> argparse.Namespace:
 
     return args
 
-
 def main():
     args    = _build_args()
     trainer = LAMNrGlow3DTrainer()
     trainer.setup(args)
+    screen_dump_run_config(args, Path(args.out_dir))
     trainer.train()
-
 
 if __name__ == "__main__":
     main()
