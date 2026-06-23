@@ -161,13 +161,26 @@ def build_loaders_from_globs(
         return per_subj
 
     def _read_slice(path: Path, idx: int, H: int, W: int):
+        import ants
+        import numpy as np
+        from PIL import Image
+
         if path.suffix.lower() == ".png":
-            return path
+            pil_img = Image.open(path).convert("RGB") # Force le mode monocanal (Grayscale)
+            
+            pil_img = pil_img.resize((W, H), resample=Image.Resampling.BILINEAR)
+
+            import torchvision.transforms.functional as TF
+            arr = TF.to_tensor(pil_img) 
+            return arr
+            
+        # Branche NIfTI standard (inchangée)
         im = ants.image_read(str(path))
         if im.dimension == 3:
             slc = ants.slice_image(im, axis=1, idx=idx, collapse_strategy=1)
         else:
             slc = im
+            
         resize_factor = min(float(H) / slc.shape[0], float(W) / slc.shape[1])
         spacing = (slc.spacing[0] / resize_factor, slc.spacing[1] / resize_factor)
         slc = ants.resample_image(slc, spacing, use_voxels=False, interp_type=0)
@@ -371,7 +384,8 @@ class LAMNrGlow2DTrainer(BaseLAMNrTrainer):
     ) -> torch.Tensor:
         """Extract view vi from a 2D batch and normalize to [0, 1]."""
         xs = _extract_views_from_batch(batch, num_views=self.args.num_views)
-        return to01(xs[vi].to(dtype=torch.float32, device=dev))
+        x_v = xs[vi].to(dev, dtype=torch.float32)
+        return x_v       
 
 
 # ---------------------------------------------------------------------------

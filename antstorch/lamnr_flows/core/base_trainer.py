@@ -198,18 +198,27 @@ def _copy_actnorm_state(src: nn.Module, dst: nn.Module) -> None:
 def _prime_if_needed(model: nn.Module, x: torch.Tensor) -> None:
     x1 = x[:1]
     
-    # --- CORRECTIF : Garantir 5 dimensions pour Glow 3D ---
-    # Si on est en 3D (D,H,W) -> (1, 1, D, H, W)
-    # Si on est en 4D (B, D, H, W) -> (B, 1, D, H, W)
+    # --- PLINDAGE ARCHITECTURAL COMPATIBLE 2D / 3D ---
+    # Si le tenseur est en 3D (sans batch/canal) -> (1, 1, D, H, W) ou (1, 1, H, W)
     if x1.ndim == 3:
-        x1 = x1.unsqueeze(0).unsqueeze(1) 
+        x1 = x1.unsqueeze(0).unsqueeze(1)
+        
+    # Si le tenseur a 4 dimensions, il faut distinguer la 2D de la 3D :
     elif x1.ndim == 4:
-        x1 = x1.unsqueeze(1)
-    # ------------------------------------------------------
+        # Cas A : C'est un lot 2D déjà formaté avec son canal unitaire (B, 1, H, W) ou (B, 3, H, W)
+        if x1.shape[1] == 1 or x1.shape[1] == 3:
+            pass
+        # Cas B : C'est un lot 3D brut qui n'a pas encore son canal (B, D, H, W) -> (B, 1, D, H, W)
+        else:
+            x1 = x1.unsqueeze(1)
+    # -------------------------------------------------
         
     p = next(model.parameters(), None)
     dev = p.device if p is not None else x1.device
+    
+    # --- CORRECTION DE LA FAUTE DE FRAPPE ---
     x1 = x1.to(dev, dtype=torch.float32)
+    # ----------------------------------------
     
     try:
         _ = model.inverse_and_log_det(x1)
@@ -1357,11 +1366,17 @@ class BaseLAMNrTrainer(abc.ABC):
         try:
             xs = _extract_views_from_batch(batch, num_views=n_views)
             for vi in range(n_views):
-                x_tensor = xs[vi]
+                x_tensor = xs[vi].to(device=dev, dtype=torch.float32)
+
                 if x_tensor.ndim == 4:
-                    x_tensor = x_tensor.unsqueeze(1)
-                x_v = to01(xs[vi].to(dtype=torch.float32, device=dev))
+                    mid_d = x_tensor.shape[1] // 2
+                    x_v = x_tensor[:, mid_d : mid_d + 1, :, :] # (B, 1, H, W)
+                else:
+                    x_v = x_tensor # (B, C, H, W)
+
+                x_v = to01(x_tensor.to(dtype=torch.float32, device=dev))
                 x_v = x_v[:100]
+                
                 imgs = _coerce_nchw_4d(x_v, target_hw=(args.H, args.W))
                 grid = tv.utils.make_grid(imgs, nrow=10, padding=2, normalize=False)
                 tv.utils.save_image(
