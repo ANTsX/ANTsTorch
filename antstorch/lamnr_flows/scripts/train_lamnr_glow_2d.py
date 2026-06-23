@@ -177,7 +177,7 @@ def build_loaders_from_globs(
         # Branche NIfTI standard (inchangée)
         im = ants.image_read(str(path))
         if im.dimension == 3:
-            slc = ants.slice_image(im, axis=1, idx=idx, collapse_strategy=1)
+            slc = ants.slice_image(im, axis=2, idx=idx, collapse_strategy=1)
         else:
             slc = im
             
@@ -265,10 +265,10 @@ def build_loaders_from_globs(
             number_of_samples=int(val_samples),
         )
     else:
-        train_ds = PNGMultiViewDataset(images_list=images_train, target_size=(H, W), do_aug=False)
+        train_ds = PNGMultiViewDataset(images_list=images_train, target_size=(H, W), do_aug=True)
         val_ds   = PNGMultiViewDataset(
             images_list=(images_val if images_val else images_train[:1]),
-            target_size=(H, W), do_aug=False,
+            target_size=(H, W), do_aug=True,
         )
 
     train_ds.global_step_ref = global_step

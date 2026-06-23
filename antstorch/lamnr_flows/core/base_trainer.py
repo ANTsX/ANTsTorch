@@ -1352,38 +1352,59 @@ class BaseLAMNrTrainer(abc.ABC):
     def _save_input_grids(
         self, eval_models: List[nn.Module], it: int
     ) -> Tuple[bool, Optional[str]]:
-        """Save one input-data grid per view (first call only)."""
-        args    = self.args
-        dev     = self.dev
+        args = self.args
+        dev = self.dev
         run_dir = self.run_dir
         n_views = len(eval_models)
-
+        
+        # 1. Collecte des batchs jusqu'à remplir 100 images
+        all_batches = []
+        total_count = 0
         try:
-            batch = next(iter(self.train_loader))
+            for batch in self.train_loader:
+                all_batches.append(batch)
+                # Calcule la taille du batch (générique)
+                b_size = batch[0].shape[0] if isinstance(batch, (list, tuple)) else batch.shape[0]
+                total_count += b_size
+                if total_count >= 100:
+                    break
         except StopIteration:
-            return False, "empty train loader"
+            return False, "loader exhausted"
 
         try:
-            xs = _extract_views_from_batch(batch, num_views=n_views)
             for vi in range(n_views):
-                x_tensor = xs[vi].to(device=dev, dtype=torch.float32)
-
-                if x_tensor.ndim == 4:
-                    mid_d = x_tensor.shape[1] // 2
-                    x_v = x_tensor[:, mid_d : mid_d + 1, :, :] # (B, 1, H, W)
-                else:
-                    x_v = x_tensor # (B, C, H, W)
-
-                x_v = to01(x_tensor.to(dtype=torch.float32, device=dev))
-                x_v = x_v[:100]
+                # 2. Concaténation des vues de tous les batchs récupérés
+                list_of_views = []
+                current_vi_count = 0
                 
+                for batch in all_batches:
+                    xs = _extract_views_from_batch(batch, num_views=n_views)
+                    x_tensor = xs[vi].to(device=dev, dtype=torch.float32)
+                    
+                    # Normalisation géométrique
+                    if x_tensor.ndim == 3:   # 2D (B, H, W) -> (B, 1, H, W)
+                        x_tensor = x_tensor.unsqueeze(1)
+                    elif x_tensor.ndim == 4: # 3D (B, D, H, W) -> (B, 1, H, W) par coupe
+                        x_tensor = x_tensor
+                    
+                    list_of_views.append(x_tensor)
+                    current_vi_count += x_tensor.shape[0]
+                    if current_vi_count >= 100:
+                        break
+                
+                # 3. Assemblage final et découpage à 100
+                x_all = torch.cat(list_of_views, dim=0)[:100]
+                
+                # 4. Normalisation et sauvegarde
+                x_v = to01(x_all)
                 imgs = _coerce_nchw_4d(x_v, target_hw=(args.H, args.W))
+                
                 grid = tv.utils.make_grid(imgs, nrow=10, padding=2, normalize=False)
-                tv.utils.save_image(
-                    grid, str(run_dir / f"input_data_view{vi}.png")
-                )
-                del x_v, imgs
-            del xs, batch
+                tv.utils.save_image(grid, str(run_dir / f"input_data_view{vi}.png"))
+                
+                del x_all, x_v, imgs
+            
+            del all_batches
             gc.collect()
             return True, None
         except Exception as e:
