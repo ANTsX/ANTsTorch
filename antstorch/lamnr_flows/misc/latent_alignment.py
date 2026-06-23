@@ -404,12 +404,12 @@ class LatentAlignmentLossManager:
 
     def _compute_raw_align(self, feats: List[torch.Tensor]) -> torch.Tensor:
         """Dispatch to the correct alignment loss function."""
-        import antstorch
+        import antstorch.lamnr_flows.misc.alignment_losses as al
         args = self.args
         dev = self.device
 
         if args.align == "vicreg":
-            L_inv_cov = antstorch.vicreg_multi(
+            L_inv_cov = al.vicreg_multi(
                 feats,
                 w_inv=float(args.vicreg_inv),
                 w_var=0.0,
@@ -433,19 +433,19 @@ class LatentAlignmentLossManager:
             return L_inv_cov + L_var
 
         elif args.align == "barlow":
-            return antstorch.barlow_twins_multi(feats, lam=float(args.barlow_lambda))
+            return al.barlow_twins_multi(feats, lam=float(args.barlow_lambda))
 
         elif args.align == "infonce":
-            return antstorch.info_nce_multi(feats, T=float(args.temperature))
+            return al.info_nce_multi(feats, T=float(args.temperature))
 
         elif args.align == "hsic":
-            return antstorch.hsic_multi(feats, sigma=float(args.hsic_sigma))
+            return al.hsic_multi(feats, sigma=float(args.hsic_sigma))
 
         elif args.align == "pearson":
-            return antstorch.pearson_multi(feats)
+            return al.pearson_multi(feats)
 
         elif args.align == "mse":
-            return antstorch.lpnorm_multi(feats, p=2.0)
+            return al.lpnorm_multi(feats, p=2.0)
 
         return torch.tensor(0.0, device=self.device)
 
