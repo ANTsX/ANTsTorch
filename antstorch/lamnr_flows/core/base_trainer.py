@@ -486,7 +486,9 @@ def screen_dump_run_config(
 
     out_dir.mkdir(parents=True, exist_ok=True)
     cfg = dict(vars(args))
-    cfg["grad_accum"]    = int(cfg.get("grad_accum", 1))
+    
+    # Calculs dérivés
+    cfg["grad_accum"]     = int(cfg.get("grad_accum", 1))
     cfg["effective_batch"] = int(cfg.get("batch", 0)) * cfg["grad_accum"]
 
     env = {
@@ -496,12 +498,16 @@ def screen_dump_run_config(
         "cuda_available":    torch.cuda.is_available(),
         "cuda_device_count": torch.cuda.device_count(),
     }
+    
+    # Fusion des infos dataset si fournies
     if dataset_info:
         cfg["dataset_info"] = dataset_info
 
+    # Sauvegarde JSON (machine-readable)
     with open(out_dir / "run_config.json", "w") as f:
         json.dump({"env": env, "config": cfg, "note": note}, f, indent=2)
 
+    # Construction de l'affichage humain (pretty TXT)
     rows = [
         f"[run] {env['timestamp']} | Py {env['python']} | torch {env['torch']} "
         f"| cuda={_fmt_bool(env['cuda_available'])} (n={env['cuda_device_count']})"
@@ -512,24 +518,55 @@ def screen_dump_run_config(
     def add(k, v):
         rows.append(f"{k:>24}: {'None' if v is None else v}")
 
+    # Core architecture
     add("out_dir", cfg.get("out_dir"))
-    add("views",   getattr(args, "num_views", None))
+    add("spatial_dims", cfg.get("spatial_dims"))
+    add("views", getattr(args, "num_views", None))
+    add("H×WxD", f"{cfg.get('H')}×{cfg.get('W')}×{cfg.get('D')}")
     add("L / K / hidden", f"{cfg.get('L')} / {cfg.get('K')} / {cfg.get('hidden')}")
     add("precision / amp_dtype", f"{cfg.get('precision')} / {cfg.get('amp_dtype')}")
-    add("batch / grad_accum / eff_batch",
-        f"{cfg.get('batch')} / {cfg.get('grad_accum')} / {cfg.get('effective_batch')}")
-    add("max_iter / extra",  f"{cfg.get('max_iter')} / {cfg.get('extra_iters')}")
-    add("lr / warmup",       f"{cfg.get('lr')} / {cfg.get('warmup_iters')}")
-    add("grad_clip",         cfg.get("grad_clip"))
-    add("ema / decay",       f"{_fmt_bool(cfg.get('ema'))} / {cfg.get('ema_decay')}")
-    add("align",             cfg.get("align"))
-    add("align_weight/warmup",
-        f"{cfg.get('align_weight')} / {cfg.get('align_warmup')}")
-    add("vicreg (i/v/c/g)",
-        f"{cfg.get('vicreg_inv')}/{cfg.get('vicreg_var')}/{cfg.get('vicreg_cov')}/{cfg.get('vicreg_gamma')}")
-    add("screen",  cfg.get("screen"))
     add("devices", cfg.get("devices"))
-    add("seed",    cfg.get("seed"))
+    add("num_workers", cfg.get("num_workers"))
+    add("seed", cfg.get("seed"))
+
+    # Training & Optimization
+    add("batch", cfg.get("batch"))
+    add("grad_accum", cfg.get("grad_accum"))
+    add("effective_batch", cfg.get("effective_batch"))
+    add("max_iter / extra", f"{cfg.get('max_iter')} / {cfg.get('extra_iters')}")
+    add("lr / warmup", f"{cfg.get('lr')} / {cfg.get('warmup_iters')}")
+    add("grad_clip", cfg.get("grad_clip"))
+    add("weight_decay", cfg.get("weight_decay"))
+    add("ema / decay", f"{_fmt_bool(cfg.get('ema'))} / {cfg.get('ema_decay')}")
+    
+    add("lr_decay_gamma/steps", f"{cfg.get('lr_decay_gamma')} / {cfg.get('lr_decay_steps')}")
+    add("plateau (fac/pat/thr)", f"{cfg.get('plateau_factor')} / {cfg.get('plateau_patience')} / {cfg.get('plateau_threshold')}")
+
+    # Data & Augmentation
+    add("slice_idx", cfg.get("slice_idx"))
+    add("val_frac", cfg.get("val_frac"))
+    add("train / val samples", f"{cfg.get('train_samples')} / {cfg.get('val_samples')}")
+    add("disable_aug_anneal", _fmt_bool(cfg.get("disable_aug_anneal")))
+    add("aug_schedules", cfg.get("aug_schedules"))
+
+    # Alignment & VICReg
+    add("align", cfg.get("align"))
+    add("weighting", cfg.get("weighting"))
+    add("align_weight/warmup", f"{cfg.get('align_weight')} / {cfg.get('align_warmup')}")
+    add("vicreg (i/v/c/g)", f"{cfg.get('vicreg_inv')}/{cfg.get('vicreg_var')}/{cfg.get('vicreg_cov')}/{cfg.get('vicreg_gamma')}")
+
+    # CCA Screening
+    add("screen", cfg.get("screen"))
+    add("screen_frac", cfg.get("screen_frac"))
+    add("screen_warmup / refresh", f"{cfg.get('screen_warmup')} / {cfg.get('screen_refresh')}")
+    add("cca_ridge", cfg.get("cca_ridge"))
+    add("prefilter_frac", cfg.get("prefilter_frac"))
+
+    # Glow Specifics
+    add("sample_mode / temp", f"{cfg.get('sample_mode')} / {cfg.get('sample_temp')}")
+    add("smooth_alpha", cfg.get("smooth_alpha"))
+    add("scale_map / scale_cap", f"{cfg.get('scale_map')} / {cfg.get('scale_cap')}")
+    add("glowbase (min/max log)", f"{cfg.get('glowbase_min_log')} / {cfg.get('glowbase_max_log')}")
 
     if dataset_info:
         rows.append("-" * 60)
