@@ -459,12 +459,13 @@ def _lowrank_from_Xc(
     rmax = min(D, max(1, N - 1))
     r = int(max(1, min(rank, rmax)))
     Xc_t = torch.tensor(Xc, dtype=torch.float32)
+    Xc_t = torch.nan_to_num(Xc_t, nan=0.0, posinf=0.0, neginf=0.0)
     _, S_t, V_t = torch.svd_lowrank(Xc_t, q=r)
     Svals = S_t.numpy()
     U_cov = V_t.numpy().copy()
     eig_r = (Svals ** 2) / max(1, (N - 1))
     if isinstance(sigma2, str) and sigma2.lower() == "auto":
-        total_var = np.sum(Xc ** 2) / max(1, (N - 1))
+        total_var = torch.sum(Xc_t ** 2).item() / max(1, (N - 1))
         explained  = np.sum(eig_r)
         residual   = max(0.0, total_var - explained)
         n_rem = min(N, D) - r
@@ -502,6 +503,30 @@ def _fit_gaussian_blocks(
         raise RuntimeError(f"Unknown --cov-estimator: {estimator}")
     stats = _np_stats(Sigma)
     return mu, Sigma, stats
+
+def _sanitize_latents_array(X, cap_quantile=99.9, hard_cap=None):
+    X = np.asarray(X, dtype=np.float64)
+    stats = {}
+    nf = ~np.isfinite(X)
+    nf_count = int(nf.sum())
+    if nf_count:
+        X[nf] = 0.0
+    stats["nonfinite"] = nf_count
+
+    if hard_cap is None:
+        q = np.percentile(np.abs(X), [50, 90, 99, cap_quantile])
+        cap = float(q[-1] + 1e-12)
+        stats["abs_quantiles"] = {"p50": float(q[0]), "p90": float(q[1]), "p99": float(q[2]), f"p{cap_quantile}": float(q[3])}
+    else:
+        cap = float(hard_cap)
+        stats["abs_quantiles"] = None
+
+    pre = X.copy()
+    np.clip(X, -cap, cap, out=X)
+    clipped = int(np.sum(pre != X))
+    stats["cap"] = cap
+    stats["clipped"] = clipped
+    return X, stats
 
 
 # ---------------------------------------------------------------------------
@@ -1096,6 +1121,10 @@ class GlowToolBase(ABC):
                         choices=[16, 32, 64])
         ap.add_argument("--ema",             action=argparse.BooleanOptionalAction,
                         default=True)
+        ap.add_argument("--no-scrub",        action="store_true", default=False,
+                        help="Désactive le rejet automatique des sujets aberrants.")
+        ap.add_argument("--scrub-threshold", type=float, default=None,
+                        help="Seuil de variance/déviation pour exclure un sujet.")
         self._add_size_arg(ap, required=True)
         args = ap.parse_args(argv)
 
@@ -1147,32 +1176,45 @@ class GlowToolBase(ABC):
             xbatch: List[torch.Tensor] = []
             path_batch: List[str] = []
 
+
             def _flush_batch(xlist, pbatch):
                 if not xlist:
                     return
                 try:
+                    # xlist contains tensors of shape (1, 48, 32, 48)
+                    # stack makes xb shape (Batch, 1, 48, 32, 48)
                     xb = torch.stack(xlist, dim=0).to(device)
+
                     z_list = _encode_latents(model, xb)
                     z_flat = _flatten_latents_by_level(z_list)
                     for l_idx in range(L):
                         latents_this_view[l_idx].append(
-                            z_flat[l_idx].to(fp_dtype).cpu()
+                            z_flat[l_idx].cpu().to(fp_dtype)
                         )
                     del xb, z_list, z_flat
+
                 except Exception as e:
-                    print(f"  [warn] batch encode failed: {e}")
+                    print(f"  [ERROR] Échec encodage pour le batch {pbatch}")
+                    print(f"  [ERROR] Message d'erreur : {e}")
+                    import traceback
+                    traceback.print_exc()
                     for p in pbatch:
                         bad_paths.append(str(p))
+
                 finally:
                     gc.collect()
-
+                    
             for i, img_path in enumerate(tqdm(per_view_paths[vi], desc=f"  {v_name}")):
                 try:
                     x = self.read_image(img_path, target_size)
                     xbatch.append(x)
                     path_batch.append(str(img_path))
                 except Exception as e:
-                    print(f"  [warn] could not read {img_path}: {e}")
+                    # Rendre l'erreur plus visible et afficher le traceback
+                    print(f"\n[CRITICAL ERROR] Failed to process {img_path}")
+                    print(f"Error details: {e}")
+                    import traceback
+                    traceback.print_exc()
                     bad_paths.append(str(img_path))
                     continue
 
@@ -1188,29 +1230,53 @@ class GlowToolBase(ABC):
 
             latents_per_view.append(latents_this_view)
 
-        # ── Outlier scrubbing ────────────────────────────────────────────
+        # Diagnostic de population
+        for vi_ in range(V):
+            for l_idx in range(L):
+                count = len(latents_per_view[vi_][l_idx])
+                print(f"[debug] View {vi_}, Level {l_idx} has {count} latents.")
+
         def _scrub_outliers(threshold=1e6):
-            """Remove subjects with extreme latent norms across all views."""
+            """Remplace les normes extrêmes par la valeur du seuil plutôt que d'exclure le sujet."""
             N_enc = min(len(latents_per_view[vi_][0]) for vi_ in range(V))
-            keep = list(range(N_enc))
             for vi_ in range(V):
                 for l_idx in range(L):
                     chunks = latents_per_view[vi_][l_idx]
                     if not chunks:
                         continue
                     z = torch.cat(chunks, dim=0)
-                    norms = z.float().norm(dim=1)
-                    bad = (norms > threshold).nonzero(as_tuple=False).squeeze(1).tolist()
-                    keep = [k for k in keep if k not in bad]
-            print(f"[gauss-fit] scrubbing: keeping {len(keep)}/{N_enc} subjects")
-            return keep
+                    norms = z.float().norm(dim=1, keepdim=True)
+                    
+                    # Détection des indices à problème
+                    mask = (norms > threshold)
+                    if mask.any():
+                        # Au lieu de supprimer le sujet, on re-normalise le vecteur
+                        # pour qu'il soit exactement égal au seuil
+                        scale = threshold / norms
+                        z = torch.where(mask.expand_as(z), z * scale.expand_as(z), z)
+                        
+                        # Mise à jour de la liste latents_per_view avec les vecteurs corrigés
+                        latents_per_view[vi_][l_idx] = list(z.split(1, dim=0))
+            
+            # On garde tout le monde puisque nous avons corrigé les valeurs
+            return list(range(N_enc))
 
-        keep_idx = _scrub_outliers()
-        N_kept = len(keep_idx)
+        if args.no_scrub:
+            N_enc = min(len(latents_per_view[vi_][0]) for vi_ in range(V))
+            keep_idx = list(range(N_enc))
+            print(f"[gauss-fit] no-scrub active: forcing all {len(keep_idx)} subjects.")
+        else:
+            keep_idx = _scrub_outliers(threshold=args.scrub_threshold)
+        N_kept = len(keep_idx)    
 
-        def _select(chunks, idx):
+        def _select(chunks, keep_idx):
+            if not chunks:
+                raise RuntimeError(
+                    f" Erreur Critique : Aucun vecteur latent n'a pu être accumulé pour cette vue/ce niveau. "
+                    f"Veuillez vérifier les messages '[warn] batch encode failed' ci-dessus pour identifier l'erreur d'encodage."
+                )
             z = torch.cat(chunks, dim=0)
-            return z[idx].float().numpy()
+            return z[keep_idx]
 
         # ── Compute dims_per_level_per_view and shapes_by_view ──────────
         dims_per_level_per_view = [
@@ -1238,15 +1304,16 @@ class GlowToolBase(ABC):
 
         if args.cov_mode == "perlevel":
             for l in range(L):
-                blocks = [
-                    _select(latents_per_view[vi_][l], keep_idx)
-                    for vi_ in range(V)
-                ]
+                blocks = [_select(latents_per_view[vi_][l], keep_idx) for vi_ in range(V)]
+                X = np.concatenate(blocks, axis=1) if len(blocks) > 1 else blocks[0]
+                
+                mu = X.mean(axis=0)
+                Xc = X - mu
+                # cap_quant=0.99 est une valeur classique pour éviter les outliers
+                Xc_clean, _ = _sanitize_latents_array(Xc, cap_quantile=0.99)
+
                 if args.cov_estimator == "lowrank":
-                    X = np.concatenate(blocks, axis=1) if len(blocks) > 1 else blocks[0]
-                    mu  = X.mean(axis=0)
-                    Xc  = X - mu
-                    Sig = _lowrank_from_Xc(Xc, rank=args.rank,
+                    Sig = _lowrank_from_Xc(Xc_clean, rank=args.rank,
                                            sigma2=args.sigma2, extra_ridge=shrinkage)
                     sts = _lowrank_stats(Sig)
                 else:

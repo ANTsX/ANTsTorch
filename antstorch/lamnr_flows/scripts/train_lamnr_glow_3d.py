@@ -236,7 +236,6 @@ class LAMNrGlow3DTrainer(BaseLAMNrTrainer):
     """
 
     def build_models(self, args) -> List[nn.Module]:
-        from antstorch import create_glow_normalizing_flow_model_2d
         try:
             from antstorch import create_glow_normalizing_flow_model_3d
         except Exception:
@@ -247,31 +246,20 @@ class LAMNrGlow3DTrainer(BaseLAMNrTrainer):
         models      = []
 
         for vi in range(args.num_views):
-            if args.spatial_dims == 2:
-                m = create_glow_normalizing_flow_model_2d(
-                    input_shape=input_shape, L=args.L, K=args.K,
-                    hidden_channels=args.hidden, base=args.base,
-                    glowbase_logscale_factor=args.glowbase_logscale_factor,
-                    glowbase_min_log=args.glowbase_min_log,
-                    glowbase_max_log=args.glowbase_max_log,
-                    split_mode="channel", scale=True, scale_map=args.scale_map,
-                    leaky=0.0, net_actnorm=bool(args.net_actnorm), scale_cap=args.scale_cap,
+            if create_glow_normalizing_flow_model_3d is None:
+                raise RuntimeError(
+                    "antstorch.create_glow_normalizing_flow_model_3d not available; "
+                    "update antstorch."
                 )
-            else:
-                if create_glow_normalizing_flow_model_3d is None:
-                    raise RuntimeError(
-                        "antstorch.create_glow_normalizing_flow_model_3d not available; "
-                        "update antstorch or use --spatial-dims=2."
-                    )
-                m = create_glow_normalizing_flow_model_3d(
-                    input_shape=input_shape, L=args.L, K=args.K,
-                    hidden_channels=args.hidden, base=args.base,
-                    glowbase_logscale_factor=args.glowbase_logscale_factor,
-                    glowbase_min_log=args.glowbase_min_log,
-                    glowbase_max_log=args.glowbase_max_log,
-                    split_mode="channel", scale=True, scale_map=args.scale_map,
-                    leaky=0.0, net_actnorm=bool(args.net_actnorm), scale_cap=args.scale_cap,
-                )
+            m = create_glow_normalizing_flow_model_3d(
+                input_shape=input_shape, L=args.L, K=args.K,
+                hidden_channels=args.hidden, base=args.base,
+                glowbase_logscale_factor=args.glowbase_logscale_factor,
+                glowbase_min_log=args.glowbase_min_log,
+                glowbase_max_log=args.glowbase_max_log,
+                split_mode="channel", scale=True, scale_map=args.scale_map,
+                leaky=0.0, net_actnorm=bool(args.net_actnorm), scale_cap=args.scale_cap,
+            )
 
             m = m.to(dev).float().train()
             # Cast any non-float32 parameters
