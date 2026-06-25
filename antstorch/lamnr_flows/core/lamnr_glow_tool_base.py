@@ -434,12 +434,18 @@ def _cov_diag(X: np.ndarray, ridge: float) -> np.ndarray:
 
 
 def _cov_oas(X: np.ndarray, extra_ridge: float) -> np.ndarray:
-    """Oracle Approximating Shrinkage toward scaled identity (Chen et al. 2010)."""
+    """
+    Oracle Approximating Shrinkage toward scaled identity: (1-a)S + a*(tr(S)/p)I
+    Uses Chen et al. 2010 closed form.
+    """
     N, p = X.shape
     S = (X.T @ X) / max(1, (N - 1))
     mu = np.trace(S) / p
+    # Frobenius norm of S
     trS2 = float(np.sum(S * S))
-    trS  = float(np.trace(S))
+    trS = float(np.trace(S))
+    # OAS shrinkage factor
+    # guard for tiny denominators
     denom = (N + 1 - 2.0 / p) * (trS2 - (trS * trS) / p)
     if denom <= 0:
         a = 1.0
@@ -452,29 +458,42 @@ def _cov_oas(X: np.ndarray, extra_ridge: float) -> np.ndarray:
     return S_shrunk
 
 
-def _lowrank_from_Xc(
-    Xc: np.ndarray, rank: int, sigma2, extra_ridge: float
-) -> dict:
+def _lowrank_from_Xc(Xc: np.ndarray, rank: int, sigma2: float | str, extra_ridge: float) -> dict:
     N, D = Xc.shape
     rmax = min(D, max(1, N - 1))
     r = int(max(1, min(rank, rmax)))
-    Xc_t = torch.tensor(Xc, dtype=torch.float32)
-    Xc_t = torch.nan_to_num(Xc_t, nan=0.0, posinf=0.0, neginf=0.0)
-    _, S_t, V_t = torch.svd_lowrank(Xc_t, q=r)
-    Svals = S_t.numpy()
-    U_cov = V_t.numpy().copy()
+    
+    # 1. SVD Randomisée via PyTorch (Extrêmement rapide)
+    # Convertir en tenseur PyTorch
+    Xc_tensor = torch.tensor(Xc, dtype=torch.float32)
+    
+    # q=r force l'algorithme à ne chercher que les 'r' premières composantes (ici 256)
+    _, S_tensor, V_tensor = torch.svd_lowrank(Xc_tensor, q=r)
+    
+    Svals = S_tensor.numpy()
+    # torch.svd_lowrank retourne V avec la dimension (D, r)
+    # Cela correspond directement à la forme transposée dont nous avons besoin pour U_cov
+    U_cov = V_tensor.numpy().copy() 
+    
+    # 2. Calcul des valeurs propres pour les composantes principales
     eig_r = (Svals ** 2) / max(1, (N - 1))
+    
+    # 3. Estimation du bruit résiduel (sigma2)
     if isinstance(sigma2, str) and sigma2.lower() == "auto":
-        total_var = torch.sum(Xc_t ** 2).item() / max(1, (N - 1))
-        explained  = np.sum(eig_r)
-        residual   = max(0.0, total_var - explained)
-        n_rem = min(N, D) - r
-        sigma2_val = float(residual / n_rem) if n_rem > 0 else 0.0
+        # Variance totale = somme des carrés des éléments de Xc divisée par (N-1)
+        total_variance = np.sum(Xc ** 2) / max(1, (N - 1))
+        explained_variance = np.sum(eig_r)
+        
+        # Le reste de la variance est attribué au bruit
+        residual_variance = max(0.0, total_variance - explained_variance)
+        num_remaining_eigs = min(N, D) - r
+        
+        sigma2_val = float(residual_variance / num_remaining_eigs) if num_remaining_eigs > 0 else 0.0
     else:
         sigma2_val = float(sigma2)
+        
     sigma2_val += extra_ridge
     return {"type": "lowrank", "U": U_cov, "eig": eig_r, "sigma2": sigma2_val}
-
 
 def _lowrank_stats(sig: dict) -> dict:
     eig    = np.asarray(sig.get("eig", []), dtype=float)
@@ -484,24 +503,25 @@ def _lowrank_stats(sig: dict) -> dict:
     cond    = float(lam_max / (lam_min + 1e-12)) if lam_max > 0 else float("inf")
     return {"lambda_min": lam_min, "lambda_max": lam_max, "cond": cond}
 
-
-def _fit_gaussian_blocks(
-    X_blocks: List[np.ndarray], estimator: str, shrinkage: float, cov_lam: float
-) -> Tuple[np.ndarray, Any, Dict]:
-    """Fit a Gaussian to concatenated blocks. Returns (mu, Sigma, stats)."""
+def _fit_gaussian_blocks(X_blocks: List[np.ndarray], estimator: str, shrinkage: float, cov_lam: float) -> Tuple[np.ndarray, np.ndarray, Dict]:
+    """
+    Fit Gaussian to concatenated blocks (per level). Returns (mu, Sigma, meta).
+    For 'diag', Sigma is 1D vector of variances.
+    """
     X = np.concatenate(X_blocks, axis=1) if len(X_blocks) > 1 else X_blocks[0]
-    mu  = X.mean(axis=0)
-    Xc  = X - mu
+    mu = X.mean(axis=0)
+    Xc = X - mu
     est = estimator.lower()
     if est == "full":
         Sigma = _cov_full(Xc, ridge=float(shrinkage) + float(cov_lam))
     elif est == "diag":
         Sigma = _cov_diag(Xc, ridge=float(shrinkage) + float(cov_lam))
     elif est in ("oas", "lw", "ledoitwolf"):
+        # Treat lw as oas for now; both shrink toward scaled identity; OAS has closed form
         Sigma = _cov_oas(Xc, extra_ridge=float(cov_lam))
     else:
         raise RuntimeError(f"Unknown --cov-estimator: {estimator}")
-    stats = _np_stats(Sigma)
+    stats = _np_stats(Sigma if Sigma.ndim == 2 else Sigma)
     return mu, Sigma, stats
 
 def _sanitize_latents_array(X, cap_quantile=99.9, hard_cap=None):
@@ -783,33 +803,40 @@ def _validate_gauss_blob(g: dict):
 # Lowrank conditional mean (push-through / Woodbury identity)
 # ---------------------------------------------------------------------------
 
-def _cond_mean_block_lowrank(
-    U: np.ndarray,
-    eig: np.ndarray,
-    sigma2: float,
-    idx_U: np.ndarray,   # observed indices into the joint latent vector
-    idx_T: np.ndarray,   # target indices
-    mu: np.ndarray,
-    ZO: np.ndarray,      # (1, D_O) observed latent (zero-mean)
-    base_ridge: float = 1e-6,
-) -> np.ndarray:
-    """
-    E[z_T | z_O] via push-through identity.
-    Inverts an (r×r) matrix instead of (D_O×D_O); O(r³) vs O(D_O³).
-    """
-    U_O = U[idx_U, :]    # (D_O, r)
-    U_T = U[idx_T, :]    # (D_T, r)
-    # Push-through: (U_O^T U_O / sigma2 + diag(1/eig))^-1
-    A = (U_O.T @ U_O) / (sigma2 + base_ridge) + np.diag(1.0 / (eig + 1e-12))
-    A = 0.5 * (A + A.T)
+def _cond_mean_block_lowrank(U: np.ndarray, eig: np.ndarray, sigma2: float,
+                             idx_U: list, idx_O: list,
+                             mu: np.ndarray, ZO: np.ndarray,
+                             base_ridge: float = 1e-4):
+    U = np.asarray(U, dtype=np.float64)
+    eig = np.asarray(eig, dtype=np.float64)
+    mu = np.asarray(mu, dtype=np.float64).ravel()
+    
+    if ZO.ndim == 1:
+        ZO = ZO[None, :]
+        
+    U_O = U[idx_O, :] 
+    U_U = U[idx_U, :] 
+    
+    s2 = max(float(sigma2) + float(base_ridge), 1e-6)
+        
+    dO = (ZO - mu[idx_O][None, :]).T 
+    
+    sqrt_eig = np.sqrt(np.clip(eig, 0.0, None))
+    A_T = U_O.T * sqrt_eig[:, None]  
+    
+    K = A_T @ A_T.T + s2 * np.eye(len(eig), dtype=np.float64) 
+    rhs = A_T @ dO 
+    
     try:
-        L_ch = np.linalg.cholesky(A + base_ridge * np.eye(A.shape[0]))
-        A_inv = np.linalg.inv(A + base_ridge * np.eye(A.shape[0]))
+        w = np.linalg.solve(K, rhs)
     except np.linalg.LinAlgError:
-        A_inv = np.linalg.pinv(A)
-    proj = (U_T @ A_inv @ U_O.T) / (sigma2 + base_ridge)
-    return proj @ ZO.T  # (D_T, 1)
-
+        w, _, _, _ = np.linalg.lstsq(K, rhs, rcond=None)
+        
+    v_target = sqrt_eig[:, None] * w 
+    projection = U_U @ v_target 
+    zU = mu[idx_U][:, None] + projection
+    
+    return zU.T 
 
 # ---------------------------------------------------------------------------
 # Sampling utility
@@ -1176,13 +1203,10 @@ class GlowToolBase(ABC):
             xbatch: List[torch.Tensor] = []
             path_batch: List[str] = []
 
-
             def _flush_batch(xlist, pbatch):
                 if not xlist:
                     return
                 try:
-                    # xlist contains tensors of shape (1, 48, 32, 48)
-                    # stack makes xb shape (Batch, 1, 48, 32, 48)
                     xb = torch.stack(xlist, dim=0).to(device)
 
                     z_list = _encode_latents(model, xb)
@@ -1310,7 +1334,7 @@ class GlowToolBase(ABC):
                 mu = X.mean(axis=0)
                 Xc = X - mu
                 # cap_quant=0.99 est une valeur classique pour éviter les outliers
-                Xc_clean, _ = _sanitize_latents_array(Xc, cap_quantile=0.99)
+                Xc_clean, _ = _sanitize_latents_array(Xc, cap_quantile=99)
 
                 if args.cov_estimator == "lowrank":
                     Sig = _lowrank_from_Xc(Xc_clean, rank=args.rank,
