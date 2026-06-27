@@ -55,6 +55,8 @@ matplotlib.use("Agg")
 
 _orig_double = torch.Tensor.double
 
+_orig_double = torch.Tensor.double
+
 def _mps_safe_double(self, *args, **kwargs):
     """Downgrade float64 → float32 on Apple Silicon (MPS does not support float64)."""
     if self.device.type == "mps":
@@ -1013,7 +1015,7 @@ class GlowToolBase(ABC):
         ...
 
     @abstractmethod
-    def read_image(self, path: Path, target_size, **kw) -> torch.Tensor:
+    def read_image(self, path: Path, target_size) -> torch.Tensor:
         """Read one image/volume from disk → float32 tensor in [0,1]."""
         ...
 
@@ -1188,6 +1190,7 @@ class GlowToolBase(ABC):
                 model, blob, vi, prefer_ema=args.ema,
                 view_name=v_name, cfg_views=cfg_views
             )
+
             if not ok:
                 raise RuntimeError(f"Could not load weights for view '{v_name}'")
             print(f"  [ckpt] loaded from {src}")
@@ -1261,29 +1264,33 @@ class GlowToolBase(ABC):
                 print(f"[debug] View {vi_}, Level {l_idx} has {count} latents.")
 
         def _scrub_outliers(threshold=1e6):
-            """Remplace les normes extrêmes par la valeur du seuil plutôt que d'exclure le sujet."""
+            """
+            Exclut les sujets dont la valeur absolue maximale dépasse le seuil,
+            reproduisant la logique de main_gauss_fit.
+            """
             N_enc = min(len(latents_per_view[vi_][0]) for vi_ in range(V))
+            bad_indices = set()
+            
             for vi_ in range(V):
                 for l_idx in range(L):
                     chunks = latents_per_view[vi_][l_idx]
                     if not chunks:
                         continue
-                    z = torch.cat(chunks, dim=0)
-                    norms = z.float().norm(dim=1, keepdim=True)
                     
-                    # Détection des indices à problème
-                    mask = (norms > threshold)
-                    if mask.any():
-                        # Au lieu de supprimer le sujet, on re-normalise le vecteur
-                        # pour qu'il soit exactement égal au seuil
-                        scale = threshold / norms
-                        z = torch.where(mask.expand_as(z), z * scale.expand_as(z), z)
-                        
-                        # Mise à jour de la liste latents_per_view avec les vecteurs corrigés
-                        latents_per_view[vi_][l_idx] = list(z.split(1, dim=0))
+                    # Les tenseurs sont déjà aplatis en (N, D_l)
+                    Z = torch.cat(chunks, dim=0)
+                    row_max = Z.abs().amax(dim=1)
+                    
+                    for i in range(N_enc):
+                        if row_max[i].item() > threshold:
+                            bad_indices.add(i)
             
-            # On garde tout le monde puisque nous avons corrigé les valeurs
-            return list(range(N_enc))
+            keep_idx = [i for i in range(N_enc) if i not in bad_indices]
+            
+            if bad_indices:
+                print(f"[scrub] dropped {len(bad_indices)} subjects > {threshold:g}; new N={len(keep_idx)}")
+                
+            return keep_idx
 
         if args.no_scrub:
             N_enc = min(len(latents_per_view[vi_][0]) for vi_ in range(V))

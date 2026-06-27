@@ -41,27 +41,6 @@ from antstorch.lamnr_flows.core.lamnr_glow_tool_base import GlowToolBase, _valid
 # 3D Helper Functions
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _read_image_3d(pth: Path, target_shape: Optional[Tuple[int, int, int]] = None) -> Tuple[torch.Tensor, tuple]:
-    img = ants.image_read(str(pth))
-    native_spacing = img.spacing
-
-    if target_shape is not None:
-        img = ants.resample_image(
-            img, 
-            resample_params=tuple(target_shape), 
-            use_voxels=True, 
-            interp_type=0
-        )
-
-    arr = img.numpy()
-    t = torch.from_numpy(arr).to(torch.float32)
-
-    # ─── FORCE EXACTLY 4D: (1, H, W, D) ───
-    t = t.squeeze() # Remove all arbitrary dimensions, making it (H, W, D)
-    t = t.unsqueeze(0) # Add single channel dimension -> (1, H, W, D)
-
-    return t, native_spacing
-
 def _save_nifti(tensor: torch.Tensor, out_path: Path, spacing: Optional[tuple] = None):
     """
     Save a (1, 1, H, W, D) or (B, C, H, W, D) tensor to NIfTI.
@@ -309,10 +288,36 @@ class GlowTool3D(GlowToolBase):
                 else:
                     model.log_prob(dummy_input)
 
-    def read_image(self, path: Path, target_size: Tuple[int, int, int], args: argparse.Namespace = None) -> torch.Tensor:
-        """Read a 3D image, returning the PyTorch tensor."""
-        t, _ = _read_image_3d(path, target_size)
-        return t
+    def read_image(self, path: "Path", target_size, **kw) -> torch.Tensor:
+        import ants
+        path = Path(path)
+        if not path.exists(): raise FileNotFoundError(f"{path}")
+        
+        img = ants.image_read(str(path))
+        H, W, D = target_size
+        
+        resize_factor = min(float(H)/float(img.shape[0]), 
+                            float(W)/float(img.shape[1]),
+                            float(D)/float(img.shape[2]))
+        
+        spacing = (img.spacing[0] / resize_factor, 
+                   img.spacing[1] / resize_factor,
+                   img.spacing[2] / resize_factor)   
+        
+        img = ants.resample_image(img, spacing, use_voxels=False, interp_type=0)
+        img = ants.pad_or_crop_image_to_size(img, (H, W, D))
+        
+        arr = img.numpy()
+        if arr.ndim == 3: 
+            arr = arr[np.newaxis, ...] # (1, H, W, D)
+            
+        t = torch.from_numpy(arr).float()
+        
+        x_min = t.amin(dim=(1, 2, 3), keepdim=True)
+        x_max = t.amax(dim=(1, 2, 3), keepdim=True)
+        t = (t - x_min) / (x_max - x_min + 1e-8)
+        
+        return t 
         
     def save_single(self, x_tensor: torch.Tensor, out_path: Path, **kwargs):
         """Save a single 3D volume to disk (NIfTI)."""
