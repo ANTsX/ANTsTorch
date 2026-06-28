@@ -193,6 +193,46 @@ def _edit_latents_to_mean_for_view_3d(
         z_out.append(z_l_edit)
     return z_out
 
+def _coerce_nchwd_5d(x, target_hwd=None):
+    """Coerce n'importe quel tenseur/liste en sortie vers (B, C, H, W, D) float32."""
+    if isinstance(x, (list, tuple)):
+        # Filtrer pour ne garder que les tenseurs 4D ou 5D
+        cands = [t for t in x if torch.is_tensor(t) and t.dim() in (4, 5)]
+        if not cands:
+            raise RuntimeError("La sortie n'est pas un tenseur 4D/5D.")
+        
+        # Sélectionner le candidat avec le plus grand volume spatial (H * W * D)
+        volumes = [int(t.shape[-1]) * int(t.shape[-2]) * int(t.shape[-3]) for t in cands]
+        x = cands[int(torch.tensor(volumes).argmax().item())]
+
+    if not torch.is_tensor(x):
+        raise RuntimeError(f"Type de sortie inattendu : {type(x)}")
+
+    # Si 4D (C, H, W, D), ajouter la dimension batch -> (1, C, H, W, D)
+    if x.dim() == 4:
+        x = x.unsqueeze(0)
+    
+    # Si la dimension canal est > 1, moyenner pour obtenir C=1
+    if x.size(1) > 1:
+        x = x.mean(dim=1, keepdim=True)
+    
+    x = x.float()
+    
+    # Normalisation automatique vers [0, 1] si nécessaire
+    try:
+        if x.amin() < 0.0 or x.amax() > 1.0:
+            x = to01(x, winsorize=True)
+    except Exception:
+        pass
+
+    # Interpolation vers la taille cible (H, W, D)
+    if target_hwd is not None:
+        target_shape = (int(target_hwd[0]), int(target_hwd[1]), int(target_hwd[2]))
+        if (x.shape[-3], x.shape[-2], x.shape[-1]) != target_shape:
+            x = F.interpolate(x, size=target_shape, mode="trilinear", align_corners=False)
+            
+    return x
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 3D Tool Class
 # ─────────────────────────────────────────────────────────────────────────────
@@ -350,11 +390,8 @@ class GlowTool3D(GlowToolBase):
         """Estimateur de covariance par défaut."""
         return "empirical"
 
-    def coerce_nd(self, tensor: torch.Tensor) -> torch.Tensor:
-        """Force le tenseur au format 5D (B, C, H, W, D) requis pour la 3D."""
-        while tensor.dim() < 5:
-            tensor = tensor.unsqueeze(0)
-        return tensor
+    def coerce_nd(self, x, target_size) -> torch.Tensor:
+        return _coerce_nchwd_5d(x, target_hwd=target_size)
 
     def parse_size(self, size_arg) -> tuple:
         """Convertit l'argument de taille en tuple de 3 entiers (H, W, D)."""
