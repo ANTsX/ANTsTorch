@@ -64,20 +64,42 @@ class AugSchedulerWrapper:
 # PNG dataset (2D only)
 # ---------------------------------------------------------------------------
 
+import torch
+import numpy as np
+from pathlib import Path
+from torchvision.io import image as io
+from torchvision.transforms import v2
+from torch.utils.data import Dataset
+
+# ---------------------------------------------------------------------------
+# PNG dataset (2D only) - Adapté pour l'entraînement sur Visages
+# ---------------------------------------------------------------------------
+
 class PNGMultiViewDataset(Dataset):
     """Multi-view dataset backed by PNG files."""
 
     def __init__(self, images_list, target_size=(128, 128), do_aug=False):
         self.images_list = images_list
         self.do_aug      = do_aug
+        
+        # Transformations de base (toujours appliquées)
         self.base_transform = v2.Compose([
             v2.Resize(target_size, antialias=True),
             v2.ToDtype(torch.float32, scale=True),
+            interpolation=InterpolationMode.BILINEAR,
         ])
+        
+        # Transformations spatiales (si augmentation activée)
         if self.do_aug:
             self.spatial_transforms = v2.Compose([
-                v2.RandomAffine(degrees=5, translate=(0.05, 0.05), scale=(0.95, 1.05)),
-                v2.ElasticTransform(alpha=50.0, sigma=5.0),
+                # LE PLUS IMPORTANT POUR LES VISAGES : Double la taille du dataset virtuellement
+                v2.RandomHorizontalFlip(p=0.5), 
+                
+                # Optionnel : de très légères rotations/translations si les visages ne sont pas parfaitement centrés
+                # v2.RandomAffine(degrees=3, translate=(0.02, 0.02), scale=(0.98, 1.02)), 
+                
+                # Désactivé : l'ElasticTransform détruit la structure photoréaliste des visages
+                # v2.ElasticTransform(alpha=50.0, sigma=5.0),
             ])
 
     def __len__(self):
@@ -96,12 +118,21 @@ class PNGMultiViewDataset(Dataset):
             img = self.base_transform(img)
             tensors.append(img)
 
+        # On empile pour obtenir la forme (Vues, Canaux, Hauteur, Largeur) -> (V, C, H, W)
         stacked = torch.stack(tensors)
+        
         if self.do_aug:
-            noise   = torch.randn_like(stacked) * 0.05
+            # 1. APPLICATION DES TRANSFORMATIONS SPATIALES (manquait dans le code d'origine)
+            # Note: torchvision v2 gère intelligemment la dimension 'V' supplémentaire
+            # S'il y a plusieurs vues (T1/T2 ou autre), elles subiront exactement le même retournement !
+            stacked = self.spatial_transforms(stacked)
+            
+            # 2. Ajout du bruit de déquantification (essentiel pour les Normalizing Flows)
+            noise   = torch.randn_like(stacked) * 0.05 # Pensez à baisser ce 0.05 si les visages sont trop flous
             stacked = torch.clamp(stacked + noise, 0.0, 1.0)
+            
         return stacked
-
+    
 
 # ---------------------------------------------------------------------------
 # 2D data loader
@@ -265,10 +296,17 @@ def build_loaders_from_globs(
             number_of_samples=int(val_samples),
         )
     else:
-        train_ds = PNGMultiViewDataset(images_list=images_train, target_size=(H, W), do_aug=True)
-        val_ds   = PNGMultiViewDataset(
+        train_ds = PNGMultiViewDataset(
+            images_list=images_train, 
+            target_size=(H, W), 
+            do_aug=do_aug  
+        )
+        
+        # La validation NE DOIT PAS être augmentée
+        val_ds = PNGMultiViewDataset(
             images_list=(images_val if images_val else images_train[:1]),
-            target_size=(H, W), do_aug=True,
+            target_size=(H, W), 
+            do_aug=False  # CRITIQUE : Toujours False pour l'évaluation !
         )
 
     train_ds.global_step_ref = global_step
