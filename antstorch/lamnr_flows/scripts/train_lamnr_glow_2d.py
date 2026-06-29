@@ -82,11 +82,12 @@ class PNGMultiViewDataset(Dataset):
         self.images_list = images_list
         self.do_aug      = do_aug
         
+        from torchvision.transforms import InterpolationMode
+        
         # Transformations de base (toujours appliquées)
         self.base_transform = v2.Compose([
-            v2.Resize(target_size, antialias=True),
-            v2.ToDtype(torch.float32, scale=True),
-            interpolation=InterpolationMode.BILINEAR,
+            v2.Resize(target_size, antialias=True, interpolation=InterpolationMode.BILINEAR),
+            v2.ToDtype(torch.float32, scale=True),            
         ])
         
         # Transformations spatiales (si augmentation activée)
