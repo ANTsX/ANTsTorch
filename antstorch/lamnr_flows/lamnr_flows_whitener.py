@@ -16,7 +16,7 @@ try:
 except Exception:  # tqdm is optional
     tqdm = None
 
-from . import latent_alignment as la
+from .misc import alignment_losses as la
 
 
 # Keep package-relative imports to match ANTsTorch layout

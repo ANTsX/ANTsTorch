@@ -27,6 +27,7 @@ dependencies = [
     "jax",
     "optax",
     "jaxopt",
+    "tqdm",
     "antsnormflows @ git+https://github.com/ANTsx/ANTsNormalizingFlows.git@main"
     ]
 
@@ -35,4 +36,3 @@ include = ["antstorch*"]
 
 [project.urls]
 "Homepage" = "https://github.com/ANTsX/ANTsTorch"
-

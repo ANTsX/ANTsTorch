@@ -1,4 +1,5 @@
 # tests/conftest.py
+
 def pytest_addoption(parser):
     parser.addoption(
         "--dump-aug-samples",
@@ -46,3 +47,15 @@ def pytest_addoption(parser):
         default=0,
         help="Which modality/channel index to render in the mosaic.",
     )
+
+# tests/conftest.py
+import os
+import pytest
+
+# Cette fixture s'exécutera avant chaque test
+@pytest.fixture(autouse=True)
+def force_cpu_env():
+    # Force PyTorch à ignorer les GPU si disponibles
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    # Autorise PyTorch à utiliser le CPU pour les opérations non supportées sur MPS
+    os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
