@@ -2168,6 +2168,7 @@ class GlowToolBase(ABC):
         ap.add_argument("--manifest",        type=str, default=None)
         ap.add_argument("--source-image",    type=str, default=None)
         ap.add_argument("--target-image",    type=str, default=None)
+        ap.add_argument("--pairwise",        action=argparse.BooleanOptionalAction, default=True)
         ap.add_argument("--ema",             action=argparse.BooleanOptionalAction, default=True)
         self._add_size_arg(ap, required=True)
         args = ap.parse_args(argv)
@@ -2266,27 +2267,54 @@ class GlowToolBase(ABC):
         rows = []
         v_idx_gauss = gauss_views.index(v_name) if v_name in gauss_views else vi
 
-        # Helper pour encoder à la volée sans fuite mémoire
-        def _get_encoded_flat(img_p):
+        # Helper pour encoder et convertir immédiatement en listes NumPy (optimisation RAM/VRAM)
+        def _get_encoded_flat_np(img_p):
             x_img = self.read_image(img_p, target_size).unsqueeze(0).to(device)
             with torch.no_grad():
                 z_l = _encode_latents(model, x_img)
             z_fl = _flatten_latents_by_level(z_l)
-            del x_img, z_l
-            return z_fl
+            
+            np_levels = []
+            for l in range(L):
+                np_levels.append(z_fl[l][0].cpu().float().numpy().ravel())
+            
+            del x_img, z_l, z_fl
+            return np_levels
 
-        # 3. Boucle principale de calcul
-        for idx, src_p in enumerate(tqdm(source_paths, desc="calc-distance")):
-            z_src_flat = _get_encoded_flat(src_p)
+        # Étape A : Pré-encodage unique de chaque image de la cohorte (Complexité O(N) au lieu de O(N²))
+        print("[calc-distance] Pre-encoding unique image representations...")
+        unique_paths = list(set(source_paths + (target_paths if target_paths else [])))
+        encodings = {}
+        for p in tqdm(unique_paths, desc="Encoding images"):
+            encodings[p] = _get_encoded_flat_np(p)
 
-            # Détermination du vecteur de référence (mu) pour cette itération
-            # Si target_paths est fourni, on prend le sujet correspondant (ou le premier si taille = 1)
-            z_tgt_flat = None
-            if target_paths:
+        # Étape B : Détermination des paires à calculer selon le flag --pairwise
+        pairs_to_compute = []
+        if args.pairwise and target_paths:
+            # VÉRITABLE TOUT-CONTRE-TOUT (All-pairs cross product Matrix)
+            for src_p in source_paths:
+                for tgt_p in target_paths:
+                    pairs_to_compute.append((src_p, tgt_p))
+        elif target_paths:
+            # Longitudinal ou appariement direct 1-to-1
+            for idx, src_p in enumerate(source_paths):
                 tgt_p = target_paths[idx if (len(target_paths) > 1 and idx < len(target_paths)) else 0]
-                z_tgt_flat = _get_encoded_flat(tgt_p)
+                pairs_to_compute.append((src_p, tgt_p))
+        else:
+            # Vers la moyenne Gaussienne globale
+            for src_p in source_paths:
+                pairs_to_compute.append((src_p, None))
+
+        # Étape C : Évaluation mathématique ultra-rapide des paires préparées
+        rows = []
+        for src_p, tgt_p in tqdm(pairs_to_compute, desc="calc-distance"):
+            z_src_flat = encodings[src_p]
+            
+            if tgt_p is not None:
+                z_tgt_flat = encodings[tgt_p]
                 row = {"source_path": str(src_p), "target_path": str(tgt_p)}
             else:
+                z_tgt_flat = None
                 row = {"path": str(src_p)}
 
             total = 0.0
@@ -2300,16 +2328,14 @@ class GlowToolBase(ABC):
                     view_key = list(level_slices.keys())[0]
                 a, b = level_slices[view_key]
 
-                # Si pas de cible, on compare à la moyenne de population mu du modèle Gaussien
                 if z_tgt_flat is None:
                     mu_l = np.asarray(mu_list[l], dtype=np.float64)
                     ref_vector = mu_l[a:b]
                 else:
-                    # Si cible, on extrait son vecteur latent à la tranche [a:b]
-                    ref_vector = z_tgt_flat[l][0].cpu().float().numpy().ravel()
+                    ref_vector = z_tgt_flat[l]
 
                 Sig_l  = Sigma_list[l] if isinstance(Sigma_list, (list, tuple)) else Sigma_list
-                z_np   = z_src_flat[l][0].cpu().float().numpy().ravel()
+                z_np   = z_src_flat[l]
                 
                 dist_l = _dist_at_level(z_np, ref_vector, Sig_l, l)
                 if args.save_levels:
@@ -2318,8 +2344,6 @@ class GlowToolBase(ABC):
 
             row["dist_total"] = total
             rows.append(row)
-            
-            del z_src_flat, z_tgt_flat
             gc.collect()
 
         with open(out_path, "w", newline="") as f:
@@ -2328,7 +2352,7 @@ class GlowToolBase(ABC):
                 w.writeheader()
                 w.writerows(rows)
 
-        print(f"[calc-distance] {len(rows)} subjects → {out_path}")
+        print(f"[calc-distance] {len(rows)} pairs processed → {out_path}")
 
     # ------------------------------------------------------------------ #
     # Internal helpers                                                     #
