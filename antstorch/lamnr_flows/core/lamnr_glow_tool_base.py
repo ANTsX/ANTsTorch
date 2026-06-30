@@ -1582,7 +1582,7 @@ class GlowToolBase(ABC):
             del model
             gc.collect()
 
-        print(f"[gauss-impute] done → {out_dir}")
+        print(f"[gauss-impute] done → {out_path}")
 
     # ------------------------------------------------------------------
     # recon
@@ -2260,15 +2260,21 @@ class GlowToolBase(ABC):
             total = 0.0
             for l in range(L):
                 mu_l = np.asarray(mu_list[l], dtype=np.float64)
-                # Extract the slice for this view from the joint mu
-                slices_l = gauss_blob.get("level_view_slices", None)
-                if slices_l is not None:
-                    a, b = slices_l[l][v_idx_gauss]
-                    mu_l_v = mu_l[a:b]
+                
+                level_slices = gauss_blob.get("level_view_slices", None)[l]
+                
+                if "0" in level_slices:
+                    view_key = "0"
+                elif str(v_idx_gauss) in level_slices:
+                    view_key = str(v_idx_gauss)
                 else:
-                    mu_l_v = mu_l  # assume single view
+                    view_key = list(level_slices.keys())[0]
+
+                a, b = level_slices[view_key]
+                mu_l_v = mu_l[a:b]
+                
                 Sig_l  = Sigma_list[l] if isinstance(Sigma_list, (list, tuple)) else Sigma_list
-                z_np   = z_flat_list[l][0].float().numpy().ravel()
+                z_np   = z_flat_list[l][0].cpu().float().numpy().ravel()
                 dist_l = _dist_at_level(z_np, mu_l_v, Sig_l, l)
                 if args.save_levels:
                     row[f"dist_level_{l}"] = dist_l
