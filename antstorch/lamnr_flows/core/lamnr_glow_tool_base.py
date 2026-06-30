@@ -2151,7 +2151,7 @@ class GlowToolBase(ABC):
     # ------------------------------------------------------------------
 
     def cmd_calc_distance(self, argv=None):
-        """Compute per-subject distances (Euclidean/Mahalanobis/geodesic) to Gaussian mean."""
+        """Compute per-subject distances (Euclidean/Mahalanobis/geodesic) to Gaussian mean or target images."""
         ap = argparse.ArgumentParser("calc-distance")
         ap.add_argument("--ckpt",            type=str, required=True)
         ap.add_argument("--gauss",           type=str, required=True)
@@ -2168,7 +2168,6 @@ class GlowToolBase(ABC):
         ap.add_argument("--manifest",        type=str, default=None)
         ap.add_argument("--source-image",    type=str, default=None)
         ap.add_argument("--target-image",    type=str, default=None)
-        ap.add_argument("--pairwise",        action=argparse.BooleanOptionalAction, default=False)
         ap.add_argument("--ema",             action=argparse.BooleanOptionalAction, default=True)
         self._add_size_arg(ap, required=True)
         args = ap.parse_args(argv)
@@ -2199,15 +2198,33 @@ class GlowToolBase(ABC):
         print(f"[calc-distance] loaded from {src}")
         self.prime_if_needed(model, target_size, device)
 
+        # 1. Résolution des sources (Image unique ou CSV)
         if args.manifest:
             manifest_path = Path(args.manifest)
             cols = _read_manifest_csv(manifest_path)
             _, per_view_paths = _resolve_views(cols, manifest_path.parent, args.views)
-            source_paths = per_view_paths[vi]
+            source_paths = [Path(p) for p in per_view_paths[vi]]
         elif args.source_image:
-            source_paths = [Path(args.source_image)]
+            if args.source_image.endswith(".csv"):
+                manifest_path = Path(args.source_image)
+                cols = _read_manifest_csv(manifest_path)
+                _, per_view_paths = _resolve_views(cols, manifest_path.parent, args.views)
+                source_paths = [Path(p) for p in per_view_paths[vi]]
+            else:
+                source_paths = [Path(args.source_image)]
         else:
             raise RuntimeError("--manifest or --source-image required.")
+
+        # 2. Résolution des cibles (Optionnel : Image unique ou CSV)
+        target_paths = None
+        if args.target_image:
+            if args.target_image.endswith(".csv"):
+                manifest_path = Path(args.target_image)
+                cols = _read_manifest_csv(manifest_path)
+                _, per_view_paths = _resolve_views(cols, manifest_path.parent, args.views)
+                target_paths = [Path(p) for p in per_view_paths[vi]]
+            else:
+                target_paths = [Path(args.target_image)]
 
         def _dist_at_level(z_flat: np.ndarray, mu_l: np.ndarray,
                            Sigma_l, l_idx: int) -> float:
@@ -2227,7 +2244,6 @@ class GlowToolBase(ABC):
                     U      = np.asarray(Sigma_l["U"], dtype=np.float64)
                     eig    = np.asarray(Sigma_l["eig"], dtype=np.float64)
                     sigma2 = float(Sigma_l.get("sigma2", args.variance_epsilon))
-                    # Mahalanobis via push-through
                     Ud = U.T @ d
                     mahal2 = float((Ud * Ud / (eig + sigma2)).sum()
                                    + np.dot(d, d) / sigma2
@@ -2250,39 +2266,60 @@ class GlowToolBase(ABC):
         rows = []
         v_idx_gauss = gauss_views.index(v_name) if v_name in gauss_views else vi
 
-        for img_path in tqdm(source_paths, desc="calc-distance"):
-            x = self.read_image(img_path, target_size).unsqueeze(0).to(device)
+        # Helper pour encoder à la volée sans fuite mémoire
+        def _get_encoded_flat(img_p):
+            x_img = self.read_image(img_p, target_size).unsqueeze(0).to(device)
             with torch.no_grad():
-                z_list = _encode_latents(model, x)
-            z_flat_list = _flatten_latents_by_level(z_list)
+                z_l = _encode_latents(model, x_img)
+            z_fl = _flatten_latents_by_level(z_l)
+            del x_img, z_l
+            return z_fl
 
-            row = {"path": str(img_path)}
+        # 3. Boucle principale de calcul
+        for idx, src_p in enumerate(tqdm(source_paths, desc="calc-distance")):
+            z_src_flat = _get_encoded_flat(src_p)
+
+            # Détermination du vecteur de référence (mu) pour cette itération
+            # Si target_paths est fourni, on prend le sujet correspondant (ou le premier si taille = 1)
+            z_tgt_flat = None
+            if target_paths:
+                tgt_p = target_paths[idx if (len(target_paths) > 1 and idx < len(target_paths)) else 0]
+                z_tgt_flat = _get_encoded_flat(tgt_p)
+                row = {"source_path": str(src_p), "target_path": str(tgt_p)}
+            else:
+                row = {"path": str(src_p)}
+
             total = 0.0
             for l in range(L):
-                mu_l = np.asarray(mu_list[l], dtype=np.float64)
-                
                 level_slices = gauss_blob.get("level_view_slices", None)[l]
-                
                 if "0" in level_slices:
                     view_key = "0"
                 elif str(v_idx_gauss) in level_slices:
                     view_key = str(v_idx_gauss)
                 else:
                     view_key = list(level_slices.keys())[0]
-
                 a, b = level_slices[view_key]
-                mu_l_v = mu_l[a:b]
-                
+
+                # Si pas de cible, on compare à la moyenne de population mu du modèle Gaussien
+                if z_tgt_flat is None:
+                    mu_l = np.asarray(mu_list[l], dtype=np.float64)
+                    ref_vector = mu_l[a:b]
+                else:
+                    # Si cible, on extrait son vecteur latent à la tranche [a:b]
+                    ref_vector = z_tgt_flat[l][0].cpu().float().numpy().ravel()
+
                 Sig_l  = Sigma_list[l] if isinstance(Sigma_list, (list, tuple)) else Sigma_list
-                z_np   = z_flat_list[l][0].cpu().float().numpy().ravel()
-                dist_l = _dist_at_level(z_np, mu_l_v, Sig_l, l)
+                z_np   = z_src_flat[l][0].cpu().float().numpy().ravel()
+                
+                dist_l = _dist_at_level(z_np, ref_vector, Sig_l, l)
                 if args.save_levels:
                     row[f"dist_level_{l}"] = dist_l
                 total += dist_l
 
             row["dist_total"] = total
             rows.append(row)
-            del x, z_list, z_flat_list
+            
+            del z_src_flat, z_tgt_flat
             gc.collect()
 
         with open(out_path, "w", newline="") as f:
