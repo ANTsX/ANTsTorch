@@ -310,8 +310,7 @@ def _extract_views_from_batch(batch, num_views: Optional[int] = None) -> List[to
 
 
 def _coerce_nchw_4d(
-    x, target_hw: Optional[Tuple[int, int]] = None
-) -> torch.Tensor:
+    x, target_hw: Optional[Tuple[int, int]] = None, axis=-1) -> torch.Tensor:
     """Coerce sample output to (N, C, H, W), handling 2D and 3D tensors."""
     if isinstance(x, (list, tuple)):
         cands = [t for t in x if torch.is_tensor(t) and t.dim() in (3, 4, 5)]
@@ -345,7 +344,9 @@ def _coerce_nchw_4d(
     if x.dim() == 4 and x.shape[-1] in (1, 3) and x.shape[1] not in (1, 3):
         x = x.permute(0, 3, 1, 2).contiguous()
     if x.dim() == 4 and x.size(1) not in (1, 3):
-        x = x.mean(dim=1, keepdim=True)
+        mid = x.shape[axis] // 2
+        x = torch.select(x, dim=axis, index=mid)
+        x = x.unsqueeze(1)
     x = torch.clamp(x, 0, 1).float()
     if target_hw is not None:
         Ht, Wt = int(target_hw[0]), int(target_hw[1])
@@ -1384,7 +1385,7 @@ class BaseLAMNrTrainer(abc.ABC):
                     # Normalisation géométrique
                     if x_tensor.ndim == 3:   # 2D (B, H, W) -> (B, 1, H, W)
                         x_tensor = x_tensor.unsqueeze(1)
-                    elif x_tensor.ndim == 4: # 3D (B, D, H, W) -> (B, 1, H, W) par coupe
+                    elif x_tensor.ndim == 4: # 3D (B, H, W, D) -> (B, 1, H, W) par coupe
                         x_tensor = x_tensor
                     
                     list_of_views.append(x_tensor)
@@ -1396,8 +1397,7 @@ class BaseLAMNrTrainer(abc.ABC):
                 x_all = torch.cat(list_of_views, dim=0)[:100]
                 
                 # 4. Normalisation et sauvegarde
-                x_v = to01(x_all)
-                imgs = _coerce_nchw_4d(x_v, target_hw=(args.H, args.W))
+                imgs = _coerce_nchw_4d(x_all, target_hw=(args.H, args.W), axis=-1)
                 
                 grid = tv.utils.make_grid(imgs, nrow=10, padding=2, normalize=False)
                 tv.utils.save_image(grid, str(run_dir / f"input_data_view{vi}.png"))
