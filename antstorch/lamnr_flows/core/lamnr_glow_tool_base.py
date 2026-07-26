@@ -55,8 +55,6 @@ matplotlib.use("Agg")
 
 _orig_double = torch.Tensor.double
 
-_orig_double = torch.Tensor.double
-
 def _mps_safe_double(self, *args, **kwargs):
     """Downgrade float64 → float32 on Apple Silicon (MPS does not support float64)."""
     if self.device.type == "mps":
@@ -79,6 +77,135 @@ def parse_mn(spec: str) -> Tuple[int, int]:
         raise argparse.ArgumentTypeError(
             f"Invalid --grid-size '{spec}'. Expected like '6x8' (rows×cols)."
         )
+
+
+# ---------------------------------------------------------------------------
+# Latent geometry
+# ---------------------------------------------------------------------------
+
+def _level_view_slice(gauss_blob: Dict[str, Any], level: int,
+                      view_idx: int) -> Tuple[int, int]:
+    """Return the slice occupied by one view in a concatenated level latent."""
+    raw_slices = gauss_blob.get("level_view_slices")
+    if raw_slices is not None:
+        row = raw_slices[level]
+        if isinstance(row, dict):
+            if view_idx in row:
+                return tuple(int(x) for x in row[view_idx])
+            if str(view_idx) in row:
+                return tuple(int(x) for x in row[str(view_idx)])
+            raise KeyError(
+                f"No latent slice for view {view_idx} at level {level}."
+            )
+        return tuple(int(x) for x in row[view_idx])
+
+    dims = gauss_blob["dims_per_level_per_view"]
+    start = sum(int(dims[v][level]) for v in range(view_idx))
+    return start, start + int(dims[view_idx][level])
+
+
+def _slice_covariance(Sigma_l, start: int, stop: int):
+    """Extract a view-specific covariance block without densifying low-rank fits."""
+    if Sigma_l is None:
+        return None
+    if isinstance(Sigma_l, dict) and Sigma_l.get("type") == "lowrank":
+        return {
+            "type": "lowrank",
+            "U": np.asarray(Sigma_l["U"], dtype=np.float64)[start:stop, :],
+            "eig": np.asarray(Sigma_l["eig"], dtype=np.float64),
+            "sigma2": float(Sigma_l.get("sigma2", 0.0)),
+        }
+    S = np.asarray(Sigma_l, dtype=np.float64)
+    return S[start:stop] if S.ndim == 1 else S[start:stop, start:stop]
+
+
+def _covariance_rms_radius(Sigma_view, dimension: int) -> float:
+    """
+    Return sqrt(trace(Sigma)), the RMS centred radius implied by a covariance.
+
+    This is a backward-compatible fallback for Gaussian files created before
+    gauss-fit began storing empirical median radii.
+    """
+    if Sigma_view is None:
+        return math.sqrt(float(dimension))
+    if isinstance(Sigma_view, dict) and Sigma_view.get("type") == "lowrank":
+        U = np.asarray(Sigma_view["U"], dtype=np.float64)
+        eig = np.asarray(Sigma_view["eig"], dtype=np.float64)
+        sigma2 = float(Sigma_view.get("sigma2", 0.0))
+        trace = float((U * U * eig[np.newaxis, :]).sum()
+                      + sigma2 * dimension)
+    else:
+        S = np.asarray(Sigma_view, dtype=np.float64)
+        trace = float(S.sum()) if S.ndim == 1 else float(np.trace(S))
+    return math.sqrt(max(trace, np.finfo(np.float64).eps))
+
+
+def _typical_radius(gauss_blob: Dict[str, Any], level: int,
+                    view_idx: int, Sigma_view, dimension: int) -> float:
+    """Use the empirical median radius saved by gauss-fit, with an RMS fallback."""
+    radii = gauss_blob.get("typical_radii_by_view")
+    if radii is not None:
+        try:
+            radius = float(radii[view_idx][level])
+            if np.isfinite(radius) and radius > 0.0:
+                return radius
+        except (IndexError, KeyError, TypeError, ValueError):
+            pass
+    return _covariance_rms_radius(Sigma_view, dimension)
+
+
+def _project_to_typical_sphere(z: np.ndarray, mu: np.ndarray, radius: float,
+                               eps: float = 1e-12) -> np.ndarray:
+    """Centre z on mu and project it to the specified typical-set radius."""
+    centred = np.asarray(z, dtype=np.float64) - np.asarray(mu, dtype=np.float64)
+    norm = float(np.linalg.norm(centred))
+    if not np.isfinite(norm) or norm <= eps:
+        raise ValueError(
+            "Cannot project a latent vector at (or numerically indistinguishable "
+            "from) the empirical mean onto a hypersphere."
+        )
+    return float(radius) * centred / norm
+
+
+def _slerp_on_typical_sphere(t: float, z0: np.ndarray, z1: np.ndarray,
+                             mu: np.ndarray, radius: float,
+                             dot_threshold: float = 0.9995) -> np.ndarray:
+    """SLERP after centring both endpoints and projecting to one common radius."""
+    u0 = _project_to_typical_sphere(z0, mu, 1.0)
+    u1 = _project_to_typical_sphere(z1, mu, 1.0)
+    dot = float(np.clip(np.dot(u0, u1), -1.0, 1.0))
+
+    if dot > dot_threshold:
+        direction = (1.0 - t) * u0 + t * u1
+        direction /= np.linalg.norm(direction) + 1e-12
+    elif dot < -dot_threshold:
+        # The shortest arc is not unique for antipodal points. Choose a stable,
+        # deterministic orthogonal direction.
+        axis = np.zeros_like(u0)
+        axis[int(np.argmin(np.abs(u0)))] = 1.0
+        orth = axis - np.dot(axis, u0) * u0
+        orth /= np.linalg.norm(orth) + 1e-12
+        direction = math.cos(math.pi * t) * u0 + math.sin(math.pi * t) * orth
+    else:
+        theta = math.acos(dot)
+        sin_theta = math.sin(theta)
+        direction = (
+            math.sin((1.0 - t) * theta) / sin_theta * u0
+            + math.sin(t * theta) / sin_theta * u1
+        )
+    return np.asarray(mu, dtype=np.float64) + float(radius) * direction
+
+
+def _nlerp_on_typical_sphere(t: float, z0: np.ndarray, z1: np.ndarray,
+                             mu: np.ndarray, radius: float) -> np.ndarray:
+    """Normalized linear interpolation on the same centred hypersphere."""
+    u0 = _project_to_typical_sphere(z0, mu, 1.0)
+    u1 = _project_to_typical_sphere(z1, mu, 1.0)
+    direction = (1.0 - t) * u0 + t * u1
+    norm = float(np.linalg.norm(direction))
+    if norm <= 1e-12:
+        raise ValueError("NLERP is undefined for antipodal endpoints at t=0.5.")
+    return np.asarray(mu, dtype=np.float64) + float(radius) * direction / norm
 
 
 # ---------------------------------------------------------------------------
@@ -569,6 +696,8 @@ def _save_gauss_npz(blob: Dict[str, Any], out_path: Path):
         "slices_json": json.dumps(blob["level_view_slices"]),
         "stats_json":  json.dumps(blob["stats"]),
     }
+    if blob.get("typical_radii_by_view") is not None:
+        pack["typical_radii_json"] = json.dumps(blob["typical_radii_by_view"])
     # Optionally persist D for 3D blobs
     if blob.get("D") is not None:
         pack["D"] = np.int64(blob["D"])
@@ -651,6 +780,10 @@ def _load_gaussian_model(gauss_path: Path) -> Dict[str, Any]:
         blob["shapes_by_view"]  = json.loads(str(np.array(npz["shapes_json"]).tolist()))
     if "slices_json" in keys:
         blob["level_view_slices"] = json.loads(str(np.array(npz["slices_json"]).tolist()))
+    if "typical_radii_json" in keys:
+        blob["typical_radii_by_view"] = json.loads(
+            str(np.array(npz["typical_radii_json"]).tolist())
+        )
 
     L = int(blob.get("L", 0) or 0)
     if any(f.startswith("mu_") for f in keys):
@@ -1268,6 +1401,8 @@ class GlowToolBase(ABC):
             Exclut les sujets dont la valeur absolue maximale dépasse le seuil,
             reproduisant la logique de main_gauss_fit.
             """
+            if threshold is None:
+                threshold = 1e6
             N_enc = min(len(latents_per_view[vi_][0]) for vi_ in range(V))
             bad_indices = set()
             
@@ -1382,6 +1517,25 @@ class GlowToolBase(ABC):
             del all_blocks
             gc.collect()
 
+        # Empirical typical-set radius for each view and level. The median is
+        # robust to residual radial outliers and is used consistently by
+        # calc-distance and recon-interpolate.
+        typical_radii_by_view = []
+        for vi_ in range(V):
+            view_radii = []
+            for l in range(L):
+                Z = _select(latents_per_view[vi_][l], keep_idx)
+                Z_np = Z.cpu().double().numpy()
+                centre = Z_np.mean(axis=0, keepdims=True)
+                radius = float(np.median(np.linalg.norm(Z_np - centre, axis=1)))
+                if not np.isfinite(radius) or radius <= 0.0:
+                    raise RuntimeError(
+                        f"Invalid typical-set radius for view {vi_}, level {l}: "
+                        f"{radius!r}"
+                    )
+                view_radii.append(radius)
+            typical_radii_by_view.append(view_radii)
+
         # ── Serialise ────────────────────────────────────────────────────
         out_blob: Dict[str, Any] = {
             "mode":       args.cov_mode,
@@ -1399,6 +1553,7 @@ class GlowToolBase(ABC):
             "dims_per_level_per_view": dims_per_level_per_view,
             "shapes_by_view":          shapes_by_view,
             "level_view_slices":       level_view_slices,
+            "typical_radii_by_view":   typical_radii_by_view,
             "stats":      stats_list,
             "ckpt_fingerprint": _ckpt_fingerprint(ckpt_path),
         }
@@ -1424,6 +1579,7 @@ class GlowToolBase(ABC):
                 "original_N": int(N_original),
                 "kept_N": int(N_kept),
             }
+            js["typical_radii_by_view"] = typical_radii_by_view
             js_path = Path(args.gauss_summary)
             js_path.parent.mkdir(parents=True, exist_ok=True)
             with open(js_path, "w") as f:
@@ -1990,10 +2146,10 @@ class GlowToolBase(ABC):
 
         Implementation:
           1. Encode source and target images to latents (z_src, z_tgt).
-          2. If target is the Gaussian mean (--gauss), z_tgt = µ.
-          3. Centre both around µ before interpolation to preserve the manifold.
-          4. SLERP between (z_src - µ) and (z_tgt - µ).
-          5. Decode µ + interpolated.
+          2. Centre both endpoints around the empirical level mean.
+          3. Project both endpoints to one empirical typical-set radius.
+          4. Interpolate on that common hypersphere.
+          5. Restore the mean and decode all levels jointly.
         """
         ap = argparse.ArgumentParser("recon-interpolate")
         ap.add_argument("--ckpt",          type=str, required=True)
@@ -2011,7 +2167,7 @@ class GlowToolBase(ABC):
         ap.add_argument("--interp-level",  action="append", default=None,
                         help="Per-level t override, format 'level,t'")
         ap.add_argument("--interp-type",   default="slerp",
-                        choices=["slerp", "nlerp"])
+                        choices=["slerp", "nlerp", "lerp"])
         ap.add_argument("--ema",           action=argparse.BooleanOptionalAction,
                         default=True)
         self._add_size_arg(ap, required=True)
@@ -2027,6 +2183,7 @@ class GlowToolBase(ABC):
         gauss_blob = _load_gaussian_model(Path(args.gauss))
         gauss_views, _, shapes_by_view, L = _validate_gauss_blob(gauss_blob)
         mu_list = gauss_blob["mu"]
+        Sigma_list = gauss_blob.get("Sigma", None)
 
         view_names = [v.strip() for v in args.views.split(",") if v.strip()]
         vi = int(args.view_index)
@@ -2052,27 +2209,6 @@ class GlowToolBase(ABC):
             except Exception:
                 print(f"[warn] ignoring invalid --interp-level spec: {spec!r}")
 
-        # SLERP kernel (with µ-centering)
-        def slerp_flat(t: float, v0: np.ndarray, v1: np.ndarray,
-                       DOT_THRESHOLD: float = 0.9995) -> np.ndarray:
-            """SLERP between v0 and v1 (mean-centred)."""
-            v0n = v0 / (np.linalg.norm(v0) + 1e-12)
-            v1n = v1 / (np.linalg.norm(v1) + 1e-12)
-            dot = float(np.clip((v0n * v1n).sum(), -1.0, 1.0))
-            if abs(dot) > DOT_THRESHOLD:
-                return v0 + t * (v1 - v0)  # near-parallel: lerp
-            theta_0 = math.acos(dot)
-            sin_0   = math.sin(theta_0)
-            return (math.sin((1.0 - t) * theta_0) / sin_0) * v0 + \
-                   (math.sin(t * theta_0) / sin_0) * v1
-
-        def nlerp_flat(t: float, v0: np.ndarray, v1: np.ndarray) -> np.ndarray:
-            lerp = v0 + t * (v1 - v0)
-            return lerp / (np.linalg.norm(lerp) + 1e-12) * \
-                   ((1.0 - t) * np.linalg.norm(v0) + t * np.linalg.norm(v1))
-
-        interp_fn = slerp_flat if args.interp_type == "slerp" else nlerp_flat
-
         # Resolve source images
         if args.manifest:
             manifest_path = Path(args.manifest)
@@ -2086,6 +2222,13 @@ class GlowToolBase(ABC):
 
         # Resolve target
         target_is_gauss = (args.target_image is None)
+        if target_is_gauss and args.interp_type != "lerp":
+            raise RuntimeError(
+                f"{args.interp_type.upper()} requires --target-image. The empirical "
+                "mean is the centre of the hypersphere and cannot be a spherical "
+                "interpolation endpoint. Use --interp-type lerp to interpolate "
+                "linearly toward the mean."
+            )
 
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2097,12 +2240,17 @@ class GlowToolBase(ABC):
 
             if target_is_gauss:
                 # Target = Gaussian mean per level
-                z_tgt_list = [
-                    torch.from_numpy(
-                        np.asarray(mu_list[l], dtype=np.float32)
-                    ).view(1, *shapes_by_view[v_idx_gauss][l]).to(device)
-                    for l in range(L)
-                ]
+                z_tgt_list = []
+                for l in range(L):
+                    a, b = _level_view_slice(gauss_blob, l, v_idx_gauss)
+                    mu_view = np.asarray(
+                        mu_list[l], dtype=np.float32
+                    ).ravel()[a:b]
+                    z_tgt_list.append(
+                        torch.from_numpy(mu_view)
+                        .view(1, *shapes_by_view[v_idx_gauss][l])
+                        .to(device)
+                    )
             else:
                 x_tgt = self.read_image(
                     Path(args.target_image), target_size
@@ -2116,22 +2264,35 @@ class GlowToolBase(ABC):
             for l in range(len(z_src_list)):
                 t_l = t_level.get(l, args.t)
 
-                # µ for this view at this level
-                mu_l_np = np.asarray(mu_list[l], dtype=np.float64)
+                # View-specific centre and typical-set radius for this level.
                 shp = shapes_by_view[v_idx_gauss][l]
-                mu_flat = mu_l_np.ravel()  # (D_l,)
+                a, b = _level_view_slice(gauss_blob, l, v_idx_gauss)
+                mu_flat = np.asarray(mu_list[l], dtype=np.float64).ravel()[a:b]
+                Sigma_l = (
+                    Sigma_list[l]
+                    if isinstance(Sigma_list, (list, tuple))
+                    else Sigma_list
+                )
+                Sigma_view = _slice_covariance(Sigma_l, a, b)
+                radius = _typical_radius(
+                    gauss_blob, l, v_idx_gauss, Sigma_view, b - a
+                )
 
                 z_s_flat = z_src_list[l].cpu().float().numpy().ravel()
                 z_t_flat = z_tgt_list[l].cpu().float().numpy().ravel()
 
-                # Centre around µ before rotation
-                z_s_c = z_s_flat - mu_flat
-                z_t_c = z_t_flat - mu_flat
-
-                z_interp_c = interp_fn(t_l, z_s_c, z_t_c)
-
-                # Restore µ offset
-                z_interp_flat = z_interp_c + mu_flat
+                if args.interp_type == "slerp":
+                    z_interp_flat = _slerp_on_typical_sphere(
+                        t_l, z_s_flat, z_t_flat, mu_flat, radius
+                    )
+                elif args.interp_type == "nlerp":
+                    z_interp_flat = _nlerp_on_typical_sphere(
+                        t_l, z_s_flat, z_t_flat, mu_flat, radius
+                    )
+                else:
+                    z_interp_flat = (
+                        (1.0 - t_l) * z_s_flat + t_l * z_t_flat
+                    )
                 z_interp_t = torch.from_numpy(
                     z_interp_flat.astype(np.float32)
                 ).view(1, *shp).to(device)
@@ -2151,7 +2312,7 @@ class GlowToolBase(ABC):
     # ------------------------------------------------------------------
 
     def cmd_calc_distance(self, argv=None):
-        """Compute per-subject distances (Euclidean/Mahalanobis/geodesic) to Gaussian mean or target images."""
+        """Compute per-subject distances to the Gaussian mean or target images."""
         ap = argparse.ArgumentParser("calc-distance")
         ap.add_argument("--ckpt",            type=str, required=True)
         ap.add_argument("--gauss",           type=str, required=True)
@@ -2164,6 +2325,11 @@ class GlowToolBase(ABC):
         ap.add_argument("--save-levels",     action=argparse.BooleanOptionalAction, default=True)
         ap.add_argument("--distance-metric", default="geodesic",
                         choices=["euclidean", "mahalanobis", "geodesic"])
+        ap.add_argument(
+            "--level-aggregation", default="l2", choices=["l2", "sum"],
+            help="Combine level distances by product-space L2 (default) or "
+                 "legacy arithmetic sum."
+        )
         ap.add_argument("--variance-epsilon",type=float, default=1e-6)
         ap.add_argument("--manifest",        type=str, default=None)
         ap.add_argument("--source-image",    type=str, default=None)
@@ -2227,31 +2393,39 @@ class GlowToolBase(ABC):
             else:
                 target_paths = [Path(args.target_image)]
 
-        def _dist_at_level(z_flat: np.ndarray, mu_l: np.ndarray,
-                           Sigma_l, l_idx: int) -> float:
-            d = z_flat - mu_l
+        def _dist_at_level(z_flat: np.ndarray, ref_flat: np.ndarray,
+                           centre: np.ndarray, Sigma_view,
+                           radius: float) -> float:
+            d = z_flat - ref_flat
             metric = args.distance_metric
             if metric == "euclidean":
                 return float(np.linalg.norm(d))
             elif metric == "geodesic":
-                z_n   = z_flat / (np.linalg.norm(z_flat) + 1e-12)
-                mu_n  = mu_l   / (np.linalg.norm(mu_l)   + 1e-12)
-                cos   = float(np.clip((z_n * mu_n).sum(), -1.0, 1.0))
-                return float(math.acos(cos))
+                z_proj = _project_to_typical_sphere(
+                    z_flat, centre, radius
+                )
+                ref_proj = _project_to_typical_sphere(
+                    ref_flat, centre, radius
+                )
+                cos = float(np.clip(
+                    np.dot(z_proj, ref_proj) / (radius * radius), -1.0, 1.0
+                ))
+                return float(radius * math.acos(cos))
             else:  # mahalanobis
-                if Sigma_l is None:
+                if Sigma_view is None:
                     return float(np.linalg.norm(d))
-                if isinstance(Sigma_l, dict) and Sigma_l.get("type") == "lowrank":
-                    U      = np.asarray(Sigma_l["U"], dtype=np.float64)
-                    eig    = np.asarray(Sigma_l["eig"], dtype=np.float64)
-                    sigma2 = float(Sigma_l.get("sigma2", args.variance_epsilon))
+                if isinstance(Sigma_view, dict) and Sigma_view.get("type") == "lowrank":
+                    U      = np.asarray(Sigma_view["U"], dtype=np.float64)
+                    eig    = np.asarray(Sigma_view["eig"], dtype=np.float64)
+                    sigma2 = float(Sigma_view.get("sigma2", args.variance_epsilon))
+                    sigma2 = max(sigma2, args.variance_epsilon)
                     Ud = U.T @ d
                     mahal2 = float((Ud * Ud / (eig + sigma2)).sum()
                                    + np.dot(d, d) / sigma2
                                    - float((Ud * Ud).sum()) / sigma2)
                     return float(abs(mahal2) ** 0.5)
-                S = np.asarray(Sigma_l, dtype=np.float64)
-                D = len(mu_l)
+                S = np.asarray(Sigma_view, dtype=np.float64)
+                D = len(ref_flat)
                 if S.ndim == 1:
                     var = S + args.variance_epsilon
                     return float(np.sqrt((d * d / var).sum()))
@@ -2266,6 +2440,13 @@ class GlowToolBase(ABC):
 
         rows = []
         v_idx_gauss = gauss_views.index(v_name) if v_name in gauss_views else vi
+
+        if args.distance_metric == "geodesic" and target_paths is None:
+            raise RuntimeError(
+                "Centred geodesic distance requires --target-image (an image or "
+                "CSV). Distance to the empirical mean is undefined because the "
+                "mean is the centre, not a point on the typical-set sphere."
+            )
 
         # Helper pour encoder et convertir immédiatement en listes NumPy (optimisation RAM/VRAM)
         def _get_encoded_flat_np(img_p):
@@ -2317,32 +2498,34 @@ class GlowToolBase(ABC):
                 z_tgt_flat = None
                 row = {"path": str(src_p)}
 
-            total = 0.0
+            level_distances = []
             for l in range(L):
-                level_slices = gauss_blob.get("level_view_slices", None)[l]
-                if "0" in level_slices:
-                    view_key = "0"
-                elif str(v_idx_gauss) in level_slices:
-                    view_key = str(v_idx_gauss)
-                else:
-                    view_key = list(level_slices.keys())[0]
-                a, b = level_slices[view_key]
+                a, b = _level_view_slice(gauss_blob, l, v_idx_gauss)
+                centre = np.asarray(mu_list[l], dtype=np.float64).ravel()[a:b]
 
                 if z_tgt_flat is None:
-                    mu_l = np.asarray(mu_list[l], dtype=np.float64)
-                    ref_vector = mu_l[a:b]
+                    ref_vector = centre
                 else:
                     ref_vector = z_tgt_flat[l]
 
                 Sig_l  = Sigma_list[l] if isinstance(Sigma_list, (list, tuple)) else Sigma_list
+                Sigma_view = _slice_covariance(Sig_l, a, b)
+                radius = _typical_radius(
+                    gauss_blob, l, v_idx_gauss, Sigma_view, b - a
+                )
                 z_np   = z_src_flat[l]
                 
-                dist_l = _dist_at_level(z_np, ref_vector, Sig_l, l)
+                dist_l = _dist_at_level(
+                    z_np, ref_vector, centre, Sigma_view, radius
+                )
                 if args.save_levels:
                     row[f"dist_level_{l}"] = dist_l
-                total += dist_l
+                level_distances.append(dist_l)
 
-            row["dist_total"] = total
+            if args.level_aggregation == "l2":
+                row["dist_total"] = float(np.linalg.norm(level_distances))
+            else:
+                row["dist_total"] = float(np.sum(level_distances))
             rows.append(row)
             gc.collect()
 
