@@ -10,7 +10,6 @@ calc-distance, sample …) lives in the base. This file implements only the
   - 4D (B, C, H, W) tensor coercion
   - build_model_from_config_2d
   - _prime_if_needed_2d
-  - edit_latents_to_mean (2D variant)
   - export-slices (2D-only subcommand)
 
 v0.3.9-refactored
@@ -21,7 +20,7 @@ import argparse
 import gc
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Optional, Tuple
 
 import ants
 import numpy as np
@@ -38,7 +37,7 @@ except ImportError:
     create_glow_normalizing_flow_model_2d = None
 
 # Import everything from the shared base
-from antstorch.lamnr_flows.core.lamnr_glow_tool_base import GlowToolBase
+from antstorch.lamnr_flows.core.lamnr_glow_tool_base import GlowToolBase, to01
 
 __version__ = "0.3.9"
 
@@ -273,140 +272,6 @@ def build_model_from_config_2d(cfg: dict, device: torch.device, target_hw=None):
     return m
 
 
-def _edit_latents_to_mean_for_view_2d(
-    z_list: List[torch.Tensor],
-    gauss_blob: Dict,
-    view_name: str,
-    levels_to_edit: List[int],
-    mode: str = "mean",
-    pc_index: int = 0,
-    pc_scale: float = 2.0,
-    pc_center: str = "sample",
-    pc_k: int = 64,
-    pc_beta: float = 0.0,
-) -> List[torch.Tensor]:
-    """
-    Edit latents for 2D model (4D tensors: B, C, H, W).
-    Mirror of the 3D version but asserts ndim == 4.
-    """
-    if not levels_to_edit:
-        return z_list
-
-    views, dims_tbl, shapes_by_view, L = _validate_gauss_blob(gauss_blob)
-    try:
-        v_idx = views.index(view_name)
-    except ValueError:
-        raise RuntimeError(f"[recon] View '{view_name}' not in Gaussian header {views}.")
-
-    mu_list    = gauss_blob["mu"]
-    Sigma_list = gauss_blob.get("Sigma", None)
-
-    raw_slices = gauss_blob.get("level_view_slices", None)
-    V = len(views)
-    level_view_slices = []
-    if raw_slices is not None:
-        for l in range(L):
-            row = raw_slices[l]
-            if isinstance(row, dict):
-                level_view_slices.append({int(k): tuple(v) for k, v in row.items()})
-            else:
-                level_view_slices.append({vi: tuple(row[vi]) for vi in range(V)})
-    else:
-        for l in range(L):
-            off, row_int = 0, {}
-            for vi in range(V):
-                d = int(np.asarray(dims_tbl[vi][l]).item()
-                        if hasattr(dims_tbl[vi][l], "item") else dims_tbl[vi][l])
-                row_int[vi] = (off, off + d)
-                off += d
-            level_view_slices.append(row_int)
-
-    levels_set = {int(l) for l in levels_to_edit}
-    z_out: List[torch.Tensor] = []
-
-    for l, z_l in enumerate(z_list):
-        if l not in levels_set:
-            z_out.append(z_l)
-            continue
-
-        if z_l.ndim != 4:
-            raise RuntimeError(f"[recon] Expected 4D latent at level {l}, got {z_l.shape}.")
-
-        B, C, H, W = z_l.shape
-        Cg, Hg, Wg = shapes_by_view[v_idx][l]
-        if (C, H, W) != (Cg, Hg, Wg):
-            raise RuntimeError(
-                f"[recon] Shape mismatch level {l}, view '{view_name}': "
-                f"model ({C},{H},{W}) vs Gauss ({Cg},{Hg},{Wg})."
-            )
-
-        a, b = level_view_slices[l][v_idx]
-        mu_level   = np.asarray(mu_list[l], dtype=np.float64).ravel()
-        mu_view_flat = mu_level[a:b]
-        mu_view = torch.as_tensor(
-            mu_view_flat, dtype=z_l.dtype, device=z_l.device
-        ).view(1, C, H, W)
-
-        if mode == "mean":
-            z_l_edit = mu_view.expand(B, C, H, W)
-
-        elif mode == "zero":
-            z_l_edit = torch.zeros_like(z_l)
-
-        elif mode in ("pc", "pc_denoise"):
-            Sigma_l = (Sigma_list[l] if isinstance(Sigma_list, (list, tuple))
-                       else Sigma_list)
-            Dv = C * H * W
-            if isinstance(Sigma_l, dict) and Sigma_l.get("type") == "lowrank":
-                U      = np.asarray(Sigma_l["U"], dtype=np.float64)
-                eig    = np.asarray(Sigma_l["eig"], dtype=np.float64)
-                sigma2 = float(Sigma_l.get("sigma2", 0.0))
-                U_v    = U[a:b, :]
-                Sv     = (U_v * eig[np.newaxis, :]) @ U_v.T
-                if sigma2 > 0.0:
-                    Sv += sigma2 * np.eye(Dv, dtype=np.float64)
-            else:
-                S = np.asarray(Sigma_l, dtype=np.float64)
-                Sv = np.diag(S[a:b]) if S.ndim == 1 else S[a:b, a:b]
-
-            Sv = 0.5 * (Sv + Sv.T)
-            w_eig, V_mat = np.linalg.eigh(Sv)
-
-            if mode == "pc":
-                k   = int(pc_index)
-                col = -1 - k
-                direction_np = V_mat[:, col]
-                lam  = float(max(w_eig[col], 0.0))
-                step = float(pc_scale) * (lam ** 0.5 if lam > 0.0 else 0.0)
-                direction_t = torch.from_numpy(
-                    direction_np.astype(np.float32)
-                ).view(1, C, H, W).to(z_l.device, z_l.dtype)
-                base = (mu_view.expand(B, C, H, W)
-                        if pc_center.lower() == "mean" else z_l)
-                z_l_edit = base + step * direction_t
-                print(f"[recon] level {l}, '{view_name}': PC{pc_index} "
-                      f"λ={lam:.3e}, step={step:.3e}, center={pc_center}")
-            else:  # pc_denoise
-                V_desc  = V_mat[:, ::-1]
-                k_keep  = min(max(int(pc_k), 0), V_desc.shape[1])
-                V_t     = torch.from_numpy(V_desc.astype(np.float32)).to(z_l.device, z_l.dtype)
-                z_flat  = z_l.view(B, -1)
-                mu_flat = mu_view.view(1, -1)
-                y = torch.matmul(z_flat - mu_flat, V_t)
-                if k_keep < V_t.shape[1]:
-                    tail = y[:, k_keep:]
-                    y[:, k_keep:] = 0.0 if float(pc_beta) == 0.0 else float(pc_beta) * tail
-                z_flat_edit = mu_flat + torch.matmul(y, V_t.T)
-                z_l_edit    = z_flat_edit.view(B, C, H, W)
-                print(f"[recon] level {l}, '{view_name}': "
-                      f"pc_denoise k_keep={k_keep}, β={pc_beta:.3f}")
-        else:
-            raise ValueError(f"[recon] Unknown edit mode '{mode}'.")
-
-        z_out.append(z_l_edit)
-    return z_out
-
-
 # ANTs-based 2D resampling helpers (preserved verbatim)
 
 @torch.no_grad()
@@ -536,18 +401,6 @@ class GlowTool2D(GlowToolBase):
     def prime_if_needed(self, model, size, device):
         H, W = int(size[0]), int(size[1])
         _prime_if_needed_2d(model, H, W, device)
-
-    def edit_latents_to_mean(
-        self,
-        z_list: List[torch.Tensor],
-        gauss_blob: dict,
-        view_name: str,
-        levels_to_edit: List[int],
-        **kw,
-    ) -> List[torch.Tensor]:
-        return _edit_latents_to_mean_for_view_2d(
-            z_list, gauss_blob, view_name, levels_to_edit, **kw
-        )
 
     # ── 2D-specific CLI hooks ────────────────────────────────────────────── #
 

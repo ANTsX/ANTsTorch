@@ -32,6 +32,7 @@ import warnings
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from statistics import NormalDist
 from typing import Any, Dict, List, Optional, Tuple
 
 import ants
@@ -79,6 +80,79 @@ def parse_mn(spec: str) -> Tuple[int, int]:
         )
 
 
+def _parse_edit_levels(specs, n_levels: int) -> List[int]:
+    """Parse space- or comma-separated latent level indices."""
+    if specs is None:
+        return []
+    if isinstance(specs, str):
+        specs = [specs]
+
+    tokens: List[str] = []
+    for spec in specs:
+        tokens.extend(part.strip() for part in str(spec).split(","))
+    tokens = [token for token in tokens if token]
+    if not tokens or tokens == ["none"]:
+        return []
+    if "none" in tokens:
+        raise ValueError("'none' cannot be combined with latent level indices.")
+    if "all" in tokens:
+        if len(tokens) != 1:
+            raise ValueError("'all' cannot be combined with latent level indices.")
+        return list(range(int(n_levels)))
+
+    levels: List[int] = []
+    for token in tokens:
+        try:
+            level = int(token)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid latent level {token!r}; expected integers, 'all', or 'none'."
+            ) from exc
+        if level < 0 or level >= int(n_levels):
+            raise ValueError(
+                f"Latent level {level} is out of range for a {n_levels}-level model."
+            )
+        if level in levels:
+            raise ValueError(f"Latent level {level} was specified more than once.")
+        levels.append(level)
+    return levels
+
+
+def _edit_levels_requested(specs) -> bool:
+    """Return whether an --edit-levels value requests any editing."""
+    if specs is None:
+        return False
+    if isinstance(specs, str):
+        specs = [specs]
+    tokens = [
+        part.strip().lower()
+        for spec in specs
+        for part in str(spec).split(",")
+        if part.strip()
+    ]
+    return bool(tokens) and tokens != ["none"]
+
+
+def _per_level_values(
+    levels: List[int],
+    common_value: float,
+    per_level_values: Optional[List[float]],
+    name: str,
+) -> Dict[int, float]:
+    """Map a common value or a positionally matched list onto selected levels."""
+    if per_level_values is None:
+        return {level: float(common_value) for level in levels}
+    if len(per_level_values) != len(levels):
+        raise ValueError(
+            f"--{name} requires one value per --edit-levels entry "
+            f"({len(levels)} expected, {len(per_level_values)} provided)."
+        )
+    return {
+        level: float(value)
+        for level, value in zip(levels, per_level_values)
+    }
+
+
 # ---------------------------------------------------------------------------
 # Latent geometry
 # ---------------------------------------------------------------------------
@@ -117,6 +191,26 @@ def _slice_covariance(Sigma_l, start: int, stop: int):
         }
     S = np.asarray(Sigma_l, dtype=np.float64)
     return S[start:stop] if S.ndim == 1 else S[start:stop, start:stop]
+
+
+def _marginal_variance(Sigma_l, start: int, stop: int) -> np.ndarray:
+    """Return marginal variances for a view without densifying low-rank fits."""
+    dimension = int(stop - start)
+    if Sigma_l is None:
+        raise ValueError("This latent edit requires covariance estimates from gauss-fit.")
+    if isinstance(Sigma_l, dict) and Sigma_l.get("type") == "lowrank":
+        U = np.asarray(Sigma_l["U"], dtype=np.float64)[start:stop, :]
+        eig = np.asarray(Sigma_l["eig"], dtype=np.float64)
+        sigma2 = float(Sigma_l.get("sigma2", 0.0))
+        variance = (U * U * eig[np.newaxis, :]).sum(axis=1) + sigma2
+    else:
+        S = np.asarray(Sigma_l, dtype=np.float64)
+        variance = S[start:stop] if S.ndim == 1 else np.diag(S[start:stop, start:stop])
+    if variance.size != dimension:
+        raise ValueError(
+            f"Covariance provides {variance.size} marginal variances; expected {dimension}."
+        )
+    return np.maximum(variance, 0.0)
 
 
 def _covariance_rms_radius(Sigma_view, dimension: int) -> float:
@@ -1172,7 +1266,7 @@ class GlowToolBase(ABC):
         """Run a dummy forward pass to initialise ActNorm statistics."""
         ...
 
-    @abstractmethod
+    @torch.no_grad()
     def edit_latents_to_mean(
         self,
         z_list: List[torch.Tensor],
@@ -1181,8 +1275,264 @@ class GlowToolBase(ABC):
         levels_to_edit: List[int],
         **kw,
     ) -> List[torch.Tensor]:
-        """Edit latents at specified levels (mean, zero, pc, pc_denoise)."""
-        ...
+        """
+        Edit selected latent levels using one dimension-agnostic implementation.
+
+        The legacy method name is retained for API compatibility. Supported
+        modes are mean, zero, pc, pc_denoise, winsorize, shrink, and sample.
+        """
+        if not levels_to_edit:
+            return z_list
+
+        mode = str(kw.get("mode", "mean")).lower()
+        pc_index = int(kw.get("pc_index", 0))
+        pc_scale = float(kw.get("pc_scale", 2.0))
+        pc_center = str(kw.get("pc_center", "sample"))
+        pc_k = int(kw.get("pc_k", 64))
+        pc_beta = float(kw.get("pc_beta", 0.0))
+        quantiles = kw.get("quantiles", {})
+        shrink_strength = float(kw.get("shrink_strength", 0.5))
+        sample_temperature = float(kw.get("sample_temperature", 1.0))
+        sample_seed = int(kw.get("sample_seed", 12345))
+
+        if str(gauss_blob.get("mode", "perlevel")).lower() != "perlevel":
+            raise ValueError(
+                "Level-specific latent editing requires a Gaussian model fitted "
+                "with --cov-mode perlevel."
+            )
+        views, _, shapes_by_view, n_levels = _validate_gauss_blob(gauss_blob)
+        try:
+            view_idx = views.index(view_name)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"[recon] View '{view_name}' not in Gaussian header {views}."
+            ) from exc
+
+        levels = [int(level) for level in levels_to_edit]
+        if len(set(levels)) != len(levels):
+            raise ValueError("Latent levels must not contain duplicates.")
+        invalid = [level for level in levels if level < 0 or level >= n_levels]
+        if invalid:
+            raise ValueError(
+                f"Latent levels {invalid} are out of range for a {n_levels}-level model."
+            )
+        if len(z_list) != n_levels:
+            raise RuntimeError(
+                f"[recon] Model returned {len(z_list)} levels; Gaussian model has "
+                f"{n_levels}."
+            )
+        if mode == "shrink" and not 0.0 <= shrink_strength <= 1.0:
+            raise ValueError("--edit-strength must be between 0 and 1.")
+        if mode == "sample" and sample_temperature < 0.0:
+            raise ValueError("--edit-temperature must be non-negative.")
+
+        mu_list = gauss_blob["mu"]
+        Sigma_list = gauss_blob.get("Sigma", None)
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(sample_seed)
+
+        def _randn(*shape):
+            return torch.randn(
+                *shape, dtype=torch.float32, generator=generator
+            ).to(device=z_list[0].device, dtype=z_list[0].dtype)
+
+        levels_set = set(levels)
+        z_out: List[torch.Tensor] = []
+
+        for level, z_level in enumerate(z_list):
+            if level not in levels_set:
+                z_out.append(z_level)
+                continue
+
+            expected_shape = tuple(int(x) for x in shapes_by_view[view_idx][level])
+            actual_shape = tuple(int(x) for x in z_level.shape[1:])
+            if actual_shape != expected_shape:
+                raise RuntimeError(
+                    f"[recon] Shape mismatch level {level}, view '{view_name}': "
+                    f"model {actual_shape} vs Gauss {expected_shape}."
+                )
+
+            batch = int(z_level.shape[0])
+            start, stop = _level_view_slice(gauss_blob, level, view_idx)
+            dimension = int(stop - start)
+            mu_flat_np = np.asarray(
+                mu_list[level], dtype=np.float64
+            ).ravel()[start:stop]
+            if mu_flat_np.size != dimension:
+                raise RuntimeError(
+                    f"[recon] Mean slice at level {level} has {mu_flat_np.size} "
+                    f"values; expected {dimension}."
+                )
+            mu_flat = torch.as_tensor(
+                mu_flat_np, dtype=z_level.dtype, device=z_level.device
+            ).view(1, -1)
+            mu_level = mu_flat.view(1, *actual_shape)
+            Sigma_level = (
+                Sigma_list[level]
+                if isinstance(Sigma_list, (list, tuple))
+                else Sigma_list
+            )
+
+            if mode == "mean":
+                z_edited = mu_level.expand_as(z_level)
+
+            elif mode == "zero":
+                z_edited = torch.zeros_like(z_level)
+
+            elif mode == "shrink":
+                z_edited = mu_level + shrink_strength * (z_level - mu_level)
+                print(
+                    f"[recon] level {level}, '{view_name}': "
+                    f"shrink α={shrink_strength:.3f}"
+                )
+
+            elif mode == "winsorize":
+                quantile = float(quantiles.get(level, 0.99))
+                if not 0.5 < quantile < 1.0:
+                    raise ValueError(
+                        "Winsorization quantiles must be strictly between 0.5 and 1."
+                    )
+                variance = _marginal_variance(Sigma_level, start, stop)
+                sigma = torch.as_tensor(
+                    np.sqrt(variance), dtype=z_level.dtype, device=z_level.device
+                ).view(1, -1)
+                cutoff = NormalDist().inv_cdf(quantile)
+                z_flat = z_level.reshape(batch, -1)
+                lower = mu_flat - cutoff * sigma
+                upper = mu_flat + cutoff * sigma
+                z_edited = torch.maximum(
+                    torch.minimum(z_flat, upper), lower
+                ).view_as(z_level)
+                print(
+                    f"[recon] level {level}, '{view_name}': winsorize "
+                    f"q={quantile:.6g} ({1.0 - quantile:.6g}–{quantile:.6g})"
+                )
+
+            elif mode == "sample":
+                if Sigma_level is None:
+                    raise ValueError(
+                        "The sample edit requires covariance estimates from gauss-fit."
+                    )
+                if (
+                    isinstance(Sigma_level, dict)
+                    and Sigma_level.get("type") == "lowrank"
+                ):
+                    U = torch.as_tensor(
+                        np.asarray(Sigma_level["U"], dtype=np.float64)[start:stop, :],
+                        dtype=z_level.dtype,
+                        device=z_level.device,
+                    )
+                    eig = torch.as_tensor(
+                        np.maximum(
+                            np.asarray(Sigma_level["eig"], dtype=np.float64), 0.0
+                        ),
+                        dtype=z_level.dtype,
+                        device=z_level.device,
+                    )
+                    sigma2 = max(float(Sigma_level.get("sigma2", 0.0)), 0.0)
+                    eps_rank = _randn(batch, eig.numel())
+                    centred = (eps_rank * eig.sqrt()) @ U.T
+                    if sigma2 > 0.0:
+                        centred = centred + math.sqrt(sigma2) * _randn(
+                            batch, dimension
+                        )
+                else:
+                    covariance = np.asarray(Sigma_level, dtype=np.float64)
+                    if covariance.ndim == 1:
+                        variance = np.maximum(covariance[start:stop], 0.0)
+                        scale = torch.as_tensor(
+                            np.sqrt(variance), dtype=z_level.dtype,
+                            device=z_level.device,
+                        ).view(1, -1)
+                        centred = scale * _randn(batch, dimension)
+                    else:
+                        covariance = covariance[start:stop, start:stop]
+                        covariance = 0.5 * (covariance + covariance.T)
+                        eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+                        factor = torch.as_tensor(
+                            eigenvectors
+                            * np.sqrt(np.maximum(eigenvalues, 0.0))[np.newaxis, :],
+                            dtype=z_level.dtype,
+                            device=z_level.device,
+                        )
+                        centred = _randn(batch, dimension) @ factor.T
+                z_edited = (
+                    mu_flat + sample_temperature * centred
+                ).view_as(z_level)
+                print(
+                    f"[recon] level {level}, '{view_name}': sample "
+                    f"T={sample_temperature:.3f}, seed={sample_seed}"
+                )
+
+            elif mode in ("pc", "pc_denoise"):
+                Sigma_view = _slice_covariance(Sigma_level, start, stop)
+                if Sigma_view is None:
+                    raise ValueError(
+                        f"The {mode} edit requires covariance estimates from gauss-fit."
+                    )
+                if (
+                    isinstance(Sigma_view, dict)
+                    and Sigma_view.get("type") == "lowrank"
+                ):
+                    U = np.asarray(Sigma_view["U"], dtype=np.float64)
+                    eig = np.asarray(Sigma_view["eig"], dtype=np.float64)
+                    sigma2 = float(Sigma_view.get("sigma2", 0.0))
+                    covariance = (U * eig[np.newaxis, :]) @ U.T
+                    if sigma2 > 0.0:
+                        covariance += sigma2 * np.eye(dimension, dtype=np.float64)
+                else:
+                    covariance = np.asarray(Sigma_view, dtype=np.float64)
+                    if covariance.ndim == 1:
+                        covariance = np.diag(covariance)
+
+                covariance = 0.5 * (covariance + covariance.T)
+                eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+
+                if mode == "pc":
+                    if pc_index < 0 or pc_index >= dimension:
+                        raise ValueError(
+                            f"--edit-pc-index must be in [0, {dimension - 1}]."
+                        )
+                    column = -1 - pc_index
+                    eigenvalue = float(max(eigenvalues[column], 0.0))
+                    step = pc_scale * math.sqrt(eigenvalue)
+                    direction = torch.as_tensor(
+                        eigenvectors[:, column],
+                        dtype=z_level.dtype,
+                        device=z_level.device,
+                    ).view(1, -1)
+                    base = (
+                        mu_flat.expand(batch, -1)
+                        if pc_center.lower() == "mean"
+                        else z_level.reshape(batch, -1)
+                    )
+                    z_edited = (base + step * direction).view_as(z_level)
+                    print(
+                        f"[recon] level {level}, '{view_name}': PC{pc_index} "
+                        f"λ={eigenvalue:.3e}, step={step:.3e}, center={pc_center}"
+                    )
+                else:
+                    eigenvectors_desc = eigenvectors[:, ::-1].copy()
+                    k_keep = min(max(pc_k, 0), dimension)
+                    V = torch.as_tensor(
+                        eigenvectors_desc,
+                        dtype=z_level.dtype,
+                        device=z_level.device,
+                    )
+                    z_flat = z_level.reshape(batch, -1)
+                    scores = (z_flat - mu_flat) @ V
+                    if k_keep < dimension:
+                        scores[:, k_keep:] *= pc_beta
+                    z_edited = (mu_flat + scores @ V.T).view_as(z_level)
+                    print(
+                        f"[recon] level {level}, '{view_name}': "
+                        f"pc_denoise k_keep={k_keep}, β={pc_beta:.3f}"
+                    )
+            else:
+                raise ValueError(f"[recon] Unknown edit mode '{mode}'.")
+
+            z_out.append(z_edited)
+        return z_out
 
     # ------------------------------------------------------------------ #
     # Optional hooks (subclasses may override)                             #
@@ -1755,9 +2105,36 @@ class GlowToolBase(ABC):
         ap.add_argument("--devices",   type=str, default="cuda:0")
         ap.add_argument("--out",       type=str, required=True)
         ap.add_argument("--gauss",     type=str, default=None)
-        ap.add_argument("--edit-levels",  type=str, default="none")
+        ap.add_argument(
+            "--edit-levels", nargs="+", default=["none"],
+            help="Latent levels to edit: space/comma-separated indices, 'all', or 'none'.",
+        )
         ap.add_argument("--edit-what",    default="mean",
-                        choices=["mean", "zero", "pc", "pc_denoise"])
+                        choices=[
+                            "mean", "zero", "pc", "pc_denoise",
+                            "winsorize", "shrink", "sample",
+                        ])
+        quantile_group = ap.add_mutually_exclusive_group()
+        quantile_group.add_argument(
+            "--edit-quantile", type=float, default=None,
+            help="Common upper Gaussian quantile for winsorize (default 0.99).",
+        )
+        quantile_group.add_argument(
+            "--edit-quantiles", type=float, nargs="+", default=None,
+            help="One upper Gaussian quantile per selected latent level.",
+        )
+        ap.add_argument(
+            "--edit-strength", type=float, default=0.5,
+            help="Shrink factor α in μ + α(z-μ), constrained to [0,1].",
+        )
+        ap.add_argument(
+            "--edit-temperature", type=float, default=1.0,
+            help="Temperature for Gaussian replacement samples (default 1.0).",
+        )
+        ap.add_argument(
+            "--edit-seed", type=int, default=12345,
+            help="Base random seed for reproducible Gaussian replacement samples.",
+        )
         ap.add_argument("--edit-pc-index",  type=int,   default=0)
         ap.add_argument("--edit-pc-scale",  type=float, default=2.0)
         ap.add_argument("--edit-pc-center", default="sample",
@@ -1794,12 +2171,22 @@ class GlowToolBase(ABC):
 
         gauss_blob = None
         levels_to_edit: List[int] = []
-        if args.gauss and args.edit_levels != "none":
+        quantiles_by_level: Dict[int, float] = {}
+        if args.gauss:
             gauss_blob = _load_gaussian_model(Path(args.gauss))
-            levels_to_edit = [int(l) for l in args.edit_levels.split(",") if l.strip().isdigit()]
+            _, _, _, n_levels = _validate_gauss_blob(gauss_blob)
+            levels_to_edit = _parse_edit_levels(args.edit_levels, n_levels)
+            quantiles_by_level = _per_level_values(
+                levels_to_edit,
+                0.99 if args.edit_quantile is None else args.edit_quantile,
+                args.edit_quantiles,
+                "edit-quantiles",
+            )
+        elif _edit_levels_requested(args.edit_levels):
+            raise ValueError("--gauss is required when --edit-levels selects levels.")
 
         panels = []
-        for img_path in tqdm(per_view_paths[vi], desc="recon"):
+        for image_index, img_path in enumerate(tqdm(per_view_paths[vi], desc="recon")):
             x = self.read_image(img_path, target_size).unsqueeze(0).to(device)
             with torch.no_grad():
                 z_list = _encode_latents(model, x)
@@ -1813,6 +2200,10 @@ class GlowToolBase(ABC):
                         pc_center=args.edit_pc_center,
                         pc_k=args.edit_pc_k,
                         pc_beta=args.edit_pc_beta,
+                        quantiles=quantiles_by_level,
+                        shrink_strength=args.edit_strength,
+                        sample_temperature=args.edit_temperature,
+                        sample_seed=args.edit_seed + image_index,
                     )
                     x_hat_e = self.decode_latents(model, z_edited, target_size)
                     diff = (x - x_hat_e).abs()
