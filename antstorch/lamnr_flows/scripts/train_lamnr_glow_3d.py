@@ -10,7 +10,7 @@ This script retains only 3D-specific concerns:
   - LAMNrGlow3DTrainer.extract_view()  → 3D volume view extraction + to01
 
 All shared logic (training loop, gradient accumulation, alignment losses,
-memory management, checkpoint save/load) lives in base_trainer.py.
+memory management, checkpoint save/load) lives in train_lamnr_glow_base.py.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ import ants
 import antstorch
 import antsnormflows as nf
 
-from antstorch.lamnr_flows.core.base_trainer import (
+from antstorch.lamnr_flows.core.train_lamnr_glow_base import (
     BaseLAMNrTrainer,
     GlowDataParallel,
     GlowStepWrapper,

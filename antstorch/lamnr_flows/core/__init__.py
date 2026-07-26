@@ -1,4 +1,4 @@
-from .base_trainer import BaseLAMNrTrainer, _extract_views_from_batch
+from .train_lamnr_glow_base import BaseLAMNrTrainer, _extract_views_from_batch
 from .lamnr_glow_tool_base import GlowToolBase
 
 __all__ = [

@@ -1,5 +1,5 @@
 """
-base_trainer.py
+base_glow_trainer.py
 ===============
 Abstract base class for the LAMNr Glow 2D and 3D trainers.
 
