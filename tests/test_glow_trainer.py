@@ -52,7 +52,7 @@ def test_glow_trainer_3d(dummy_args):
     batch = [torch.randn(1, 1, 32, 32, 32), torch.randn(1, 1, 32, 32, 32)]
     
     # Test d'extraction de vue
-    from antstorch.lamnr_flows.core.base_trainer import _extract_views_from_batch
+    from antstorch.lamnr_flows.core.train_lamnr_glow_base import _extract_views_from_batch
     views = _extract_views_from_batch(batch, num_views=2)
 
     assert len(views) == 2

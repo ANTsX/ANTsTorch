@@ -1,4 +1,5 @@
 # tests/test_glow_architectures.py
+import copy
 import os
 from math import prod
 from typing import Tuple
@@ -44,6 +45,64 @@ def _roundtrip_assertions(
     s = (fwd_logdet + inv_logdet).detach().cpu().to(torch.float32)
     max_abs = float(s.abs().max())
     assert max_abs <= logdet_tol, f"max|fwd+inv logdet|={max_abs:g} > {logdet_tol:g}"
+
+
+@torch.no_grad()
+def _roundtrip_assertions_double(
+    model,
+    x: torch.Tensor,
+    max_err_tol: float = 1e-6,
+    mean_err_tol: float = 1e-6,
+    logdet_tol: float = 1e-6,
+):
+    """
+    Authoritative invertibility check, run in float64 on a deep-copied model.
+
+    float32 roundtrip error through a deep/large multiscale Glow flow can be
+    large (per-layer affine coupling scales up to exp(scale_cap) compound
+    over many layers) purely from floating-point roundoff, with no actual
+    logic bug. That makes a float32-only max-error assertion a poor way to
+    validate correctness for deep/large configurations: any tolerance is
+    either too tight (flaky across random seeds/environments) or too loose
+    (would silently hide a real invertibility bug).
+
+    Running the identical roundtrip in float64 removes the precision
+    confound: if the float64 error is tiny, the flow is genuinely invertible
+    and any float32 discrepancy is expected roundoff. If the float64 error is
+    still large, the mismatch is a real bug in the flow logic (e.g. in the
+    Merge/Squeeze/multiscale composition), not a precision artifact.
+
+    A deep copy is used (rather than casting `model` in place) so the
+    original float32 model returned to the caller is left untouched for any
+    subsequent float32-only assertions (log_prob, sampling, etc.).
+    """
+    model_d = copy.deepcopy(model).double().eval()
+    x_d = x.double()
+
+    z, inv_logdet = model_d.inverse_and_log_det(x_d)
+    x_rec, fwd_logdet = model_d.forward_and_log_det(z)
+
+    rec = (x_rec - x_d).abs()
+    max_err = float(rec.max().detach().cpu())
+    mean_err = float(rec.mean().detach().cpu())
+    assert max_err <= max_err_tol, (
+        f"[float64] max|x-x_rec|={max_err:g} > {max_err_tol:g} -- this is NOT "
+        "explained by float32 roundoff (this check runs in double precision); "
+        "investigate the flow/merge/squeeze logic for a real invertibility bug."
+    )
+    assert mean_err <= mean_err_tol, (
+        f"[float64] mean|x-x_rec|={mean_err:g} > {mean_err_tol:g} -- this is NOT "
+        "explained by float32 roundoff (this check runs in double precision); "
+        "investigate the flow/merge/squeeze logic for a real invertibility bug."
+    )
+
+    s = (fwd_logdet + inv_logdet).detach().cpu()
+    max_abs = float(s.abs().max())
+    assert max_abs <= logdet_tol, (
+        f"[float64] max|fwd+inv logdet|={max_abs:g} > {logdet_tol:g} -- this is "
+        "NOT explained by float32 roundoff; investigate the flow/merge/squeeze "
+        "logdet bookkeeping."
+    )
 
 
 def _bases_of(model):
@@ -271,16 +330,17 @@ def test_glow3d_roundtrip_and_likelihood(device, shape, L, K, hidden, batch):
     torch.manual_seed(0)
     x = torch.randn(batch, C, D, H, W, device=device, dtype=torch.float32)
 
-    # Roundtrip & logdet consistency. A single tolerance is used regardless of
-    # CI vs local: float32 roundoff through a deep (L*K coupling layers) 3D
-    # Glow flow depends on network depth/width/volume size, not on the
-    # environment running it, so CI must not be stricter than local (it
-    # previously was: 0.25 vs 0.30), which made this borderline-precision
-    # check flaky in CI -- it failed intermittently (0.2596 > 0.25) purely
-    # because of an unseeded random draw of x on the deepest/largest
-    # parametrization (L=4, K=6, 96^3). The RNG is now seeded above so
-    # failures here are reproducible instead of depending on that draw.
-    _roundtrip_assertions(model, x, max_err_tol=3e-1, mean_err_tol=3e-1, logdet_tol=3e-1)
+    # Two-tier roundtrip check for this deep/large 3D config (L=4, K=6, up to
+    # 96^3): a float32 pass with a deliberately generous, fixed tolerance
+    # (catches gross breakage: NaNs, shape mismatches, wrong-direction calls)
+    # plus an authoritative float64 pass with a tight tolerance that isolates
+    # real invertibility bugs from expected float32 roundoff. Repeatedly
+    # tuning the float32 tolerance up (0.25 -> 0.30 -> ...) after every CI
+    # failure was treating the symptom without knowing whether the underlying
+    # flow was actually invertible; the float64 check below answers that
+    # question directly instead of guessing another float32 number.
+    _roundtrip_assertions(model, x, max_err_tol=6e-1, mean_err_tol=6e-1, logdet_tol=6e-1)
+    _roundtrip_assertions_double(model, x)
 
     # exact likelihood via inverse should match model.log_prob
     lp_exact = _log_prob_exact(model, x)
