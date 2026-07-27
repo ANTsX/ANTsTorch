@@ -97,7 +97,7 @@ def dummy_tabular_trainer(dummy_args):
 # ---------------------------------------------------------
 def test_tabular_trainer_inheritance(dummy_tabular_trainer):
     """Vérifie que le TabularTrainer hérite bien de la base unifiée."""
-    from antstorch.lamnr_flows.core.base_trainer import BaseLAMNrTrainer
+    from antstorch.lamnr_flows.core.train_lamnr_glow_base import BaseLAMNrTrainer
     assert isinstance(dummy_tabular_trainer, BaseLAMNrTrainer), "TabularLAMNrTrainer doit hériter de BaseLAMNrTrainer"
 
 def test_export_tabular_results(dummy_tabular_trainer, dummy_args):
