@@ -372,7 +372,8 @@ def vicreg_multi(views_feats: List[torch.Tensor],
     def _offdiag(x: torch.Tensor) -> torch.Tensor:
         # return the off-diagonal elements of a square matrix
         n, m = x.shape
-        assert n == m
+        if n != m:
+            raise ValueError(f"_offdiag expects a square matrix, got shape ({n}, {m}).")
         return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
 
     V = len(views_feats)
@@ -523,7 +524,8 @@ def hsic_biased(
         K = torch.exp(-gamma * d2)
         return K
 
-    assert x.size(0) == y.size(0), "Batch sizes must match for HSIC."
+    if x.size(0) != y.size(0):
+        raise ValueError("Batch sizes must match for HSIC.")
     n = x.size(0)
     if n < 2:
         return torch.tensor(0.0, device=x.device, dtype=x.dtype)

@@ -62,7 +62,7 @@ from antstorch.lamnr_flows.architectures.create_normalizing_flow_model import (
 )
 from antstorch.utilities.dataframe_dataset import MultiViewDataFrameDataset
 
-from antstorch.lamnr_flows.core.base_trainer import (
+from antstorch.lamnr_flows.core.train_lamnr_glow_base import (
     BaseLAMNrTrainer,
     bits_per_dim,
     make_warmup,

@@ -213,7 +213,8 @@ def _update_screen(
 ) -> ScreenState:
     if method == "none":
         return ScreenState(method="none")
-    assert 0.0 < keep_frac <= 1.0
+    if not (0.0 < keep_frac <= 1.0):
+        raise ValueError(f"keep_frac must be in (0.0, 1.0], got {keep_frac}.")
     B, D = feats[0].shape
     device, dtype = feats[0].device, feats[0].dtype
     n_views = len(feats)
