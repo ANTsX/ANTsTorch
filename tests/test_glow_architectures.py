@@ -332,9 +332,9 @@ def test_glow2d_roundtrip_and_likelihood(device, shape, L, K, hidden, batch):
     ],
 )
 def test_glow3d_roundtrip_and_likelihood(device, shape, L, K, hidden, batch, float64_tol, float64_logdet_tol):
-    C, D, H, W = shape
+    C, H, W, D = shape
     model = antstorch.create_glow_normalizing_flow_model_3d(
-        input_shape=(C, D, H, W),
+        input_shape=(C, H, W, D),
         L=L, K=K, hidden_channels=hidden,
         base="glow",
         split_mode="channel",
@@ -347,7 +347,7 @@ def test_glow3d_roundtrip_and_likelihood(device, shape, L, K, hidden, batch, flo
     ).to(device=device)
 
     torch.manual_seed(0)
-    x = torch.randn(batch, C, D, H, W, device=device, dtype=torch.float32)
+    x = torch.randn(batch, C, H, W, D, device=device, dtype=torch.float32)
 
     # Two-tier roundtrip check for this deep/large 3D config (L=4, K=6, up to
     # 96^3): a float32 pass with a deliberately generous, fixed tolerance
@@ -370,7 +370,7 @@ def test_glow3d_roundtrip_and_likelihood(device, shape, L, K, hidden, batch, flo
         "model.log_prob != exact(log p) (3D)"
 
     # sampling: return shape + likelihood sanity
-    _sample_and_likelihood_assertions(model, (C, D, H, W), n=2)
+    _sample_and_likelihood_assertions(model, (C, H, W, D), n=2)
 
 
 def test_glow3d_multiscale_composition_small_double():
@@ -396,9 +396,9 @@ def test_glow3d_multiscale_composition_small_double():
         96^3 case) compounded across levels, rather than a logic bug.
     """
     torch.manual_seed(0)
-    C, D, H, W = 2, 8, 8, 8
+    C, H, W, D = 2, 8, 8, 8
     model = antstorch.create_glow_normalizing_flow_model_3d(
-        input_shape=(C, D, H, W),
+        input_shape=(C, H, W, D),
         L=2, K=2, hidden_channels=16,
         base="glow",
         split_mode="channel",
@@ -409,7 +409,7 @@ def test_glow3d_multiscale_composition_small_double():
         scale_cap=3.0,
         verbose=False,
     )
-    x = torch.randn(2, C, D, H, W, dtype=torch.float32)
+    x = torch.randn(2, C, H, W, D, dtype=torch.float32)
     _roundtrip_assertions_double(model, x)
 
 
@@ -458,8 +458,8 @@ def test_invertible1x1x1conv_conditioning_scales_with_channels(num_channels):
 @pytest.mark.parametrize(
     "channels, spatial, hidden",
     [
-        # These (C,D,H,W) are the block input shapes actually used
-        # in the failing 3D config: (C=2, D=32, H=64, W=128, L=4)
+        # These (C,H,W,D) are the block input shapes actually used
+        # in the failing 3D config: (C=2, H=32, W=64, D=128, L=4)
         # Level 3 blocks: 16 channels, (16, 32, 64)
         (16,   (16, 32, 64), 128),
         # Level 2 blocks: 64 channels, (8, 16, 32)
@@ -473,14 +473,14 @@ def test_invertible1x1x1conv_conditioning_scales_with_channels(num_channels):
 def test_glow3d_block_roundtrip_large_channels(device, channels, spatial, hidden):
     """
     Directly test GlowBlock3d invertibility at the channel/spatial sizes
-    used inside the 3D multiscale Glow with (C=2, D=32, H=64, W=128, L=4).
+    used inside the 3D multiscale Glow with (C=2, H=32, W=64, D=128, L=4).
 
     This isolates GlowBlock3d from MultiscaleFlow/Merge/Squeeze plumbing.
     If this test fails at any (channels, spatial), the bug is inside GlowBlock3d
     (including its ActNorm, Invertible1x1x1Conv, or coupling).
     """
 
-    D, H, W = spatial
+    H, W, D = spatial
     batch = 2
 
     block = nf.flows.GlowBlock3d(
@@ -496,7 +496,7 @@ def test_glow3d_block_roundtrip_large_channels(device, channels, spatial, hidden
 
     block.eval()
     torch.manual_seed(0)
-    x = torch.randn(batch, channels, D, H, W, device=device, dtype=torch.float32)
+    x = torch.randn(batch, channels, H, W, D, device=device, dtype=torch.float32)
 
     with torch.no_grad():
         # forward then inverse

@@ -44,13 +44,31 @@ from antstorch.lamnr_flows.core.lamnr_glow_tool_base import GlowToolBase
 def _save_nifti(tensor: torch.Tensor, out_path: Path, spacing: Optional[tuple] = None):
     """
     Save a (1, 1, H, W, D) or (B, C, H, W, D) tensor to NIfTI.
+
+    B == 1 -> plain 3D NIfTI (H, W, D).
+    B  > 1 -> 4D NIfTI (H, W, D, B) -- e.g. `recon`'s multi-subject panel
+    (original / reconstruction / diff stacked along the batch dim). ANTs has
+    no 5D image type (`fromNumpyF5` does not exist), so a (B, C, H, W, D)
+    array with B > 1 must be reduced to 4D, not just have leading
+    size-1 dims squeezed away.
     """
     arr = tensor.detach().cpu().numpy()
-    
-    # Squeeze out Batch and Channel dimensions if they are 1
+
+    # Squeeze out a size-1 Channel dimension first (arr is (B, C, H, W, D)
+    # from _coerce_nchwd_5d, which always forces C == 1).
+    if arr.ndim == 5 and arr.shape[1] == 1:
+        arr = arr[:, 0]  # -> (B, H, W, D)
+
+    # Squeeze out a size-1 leading dim (covers plain 3D/4D inputs too).
     while arr.ndim > 3 and arr.shape[0] == 1:
         arr = arr[0]
-        
+
+    if arr.ndim == 4:
+        # Remaining leading axis (size > 1) is a genuine batch of volumes
+        # (e.g. panels from `recon`) -- move it last so ANTs sees a normal
+        # 4D (H, W, D, N) image instead of failing on a 5D array.
+        arr = np.moveaxis(arr, 0, -1)
+
     img = ants.from_numpy(arr)
     if spacing is not None:
         try:
@@ -87,7 +105,14 @@ def _coerce_nchwd_5d(x, target_hwd=None):
     
     # Normalisation automatique vers [0, 1] si nécessaire
     try:
-        if x.amin() < 0.0 or x.amax() > 1.0:
+        # NOTE: if x contains NaN, `x.amin() < 0.0` and `x.amax() > 1.0` are
+        # BOTH silently False (any comparison against NaN is False), so a
+        # fully-NaN tensor used to skip to01() entirely -- no normalization,
+        # no warning, just raw NaN passed downstream. Check finiteness
+        # explicitly so a NaN/Inf decode routes through to01() (which now
+        # warns loudly) instead of slipping past this guard unnoticed.
+        needs_norm = (not torch.isfinite(x).all()) or bool(x.amin() < 0.0) or bool(x.amax() > 1.0)
+        if needs_norm:
             x = to01(x, winsorize=True)
     except Exception:
         pass
@@ -147,7 +172,46 @@ class GlowTool3D(GlowToolBase):
         
         if isinstance(K, int): K = [K] * L
         if isinstance(hidden, int): hidden = [hidden] * L
-        
+
+        # Diagnostic: surface which architecture hyperparameters came from
+        # the checkpoint's own saved config vs. fell back to this tool's
+        # (possibly different from the training script's) defaults. A
+        # silent fallback here means the built model can numerically
+        # diverge from what was actually trained, even though weight
+        # loading itself succeeds cleanly.
+        _resolved = {
+            "base":                     ("base", "glow"),
+            "glowbase_logscale_factor": ("glowbase_logscale_factor", 3.0),
+            "glowbase_min_log":         ("glowbase_min_log", -1.0),
+            "glowbase_max_log":         ("glowbase_max_log", 1.0),
+            "scale_map":                ("scale_map", "tanh"),
+            "net_actnorm":              ("net_actnorm", False),
+            "scale_cap":                ("scale_cap", 1.5),
+        }
+        for label, (key, default) in _resolved.items():
+            present = key in cfg
+            print(f"  [build_model] {label}={cfg.get(key, default)!r} "
+                  f"({'from checkpoint config' if present else f'FALLBACK DEFAULT, key {key!r} missing from cfg'})")
+
+        # Backward compatibility: checkpoints trained before antsnormflows
+        # commit 2249ecd ("BUG: Minor numerical fixes") were trained with
+        # Invertible1x1x1Conv silently ignoring `scale_cap` and always using
+        # its own hardcoded default (2.5), regardless of what the config
+        # says. Loading those weights under the now-correct (config-driven)
+        # behavior reinterprets the trained log_S parameters under a
+        # different clamp than they were fit under, which can catastrophically
+        # break decode (confirmed empirically: 45/45 subjects non-finite with
+        # the fix vs. 2/45 -- the expected outlier rate -- with the legacy
+        # cap). Checkpoints trained AFTER the fix record
+        # "s_cap_wired_to_conv": True in their config; its absence means the
+        # checkpoint predates the fix and needs the legacy cap preserved.
+        s_cap_wired = bool(cfg.get("s_cap_wired_to_conv", False))
+        legacy_conv_cap = None if s_cap_wired else 2.5
+        print(f"  [build_model] s_cap_wired_to_conv={s_cap_wired!r} "
+              f"({'from checkpoint config' if 's_cap_wired_to_conv' in cfg else 'missing from cfg -- assuming a pre-fix checkpoint'}) "
+              f"-> legacy_conv_cap={legacy_conv_cap!r} "
+              f"({'invertible conv uses scale_cap normally' if legacy_conv_cap is None else 'invertible conv pinned to the pre-fix hardcoded cap'})")
+
         model = create_glow_normalizing_flow_model_3d(
             input_shape=(C, H, W, D),
             L=L,
@@ -157,39 +221,35 @@ class GlowTool3D(GlowToolBase):
             glowbase_logscale_factor=cfg.get("glowbase_logscale_factor", 3.0),
             glowbase_min_log=cfg.get("glowbase_min_log", -1.0),
             glowbase_max_log=cfg.get("glowbase_max_log", 1.0),
-            split_mode="channel", 
-            scale=True, 
+            split_mode="channel",
+            scale=True,
             scale_map=cfg.get("scale_map", "tanh"),
-            leaky=0.0, 
-            net_actnorm=bool(cfg.get("net_actnorm", False)), 
-            scale_cap=cfg.get("scale_cap", 1.5)
+            leaky=0.0,
+            net_actnorm=bool(cfg.get("net_actnorm", False)),
+            scale_cap=cfg.get("scale_cap", 1.5),
+            legacy_conv_cap=legacy_conv_cap,
         )
-        
+
         return model.to(device)
-        
+
     def prime_if_needed(self, model, target_size, device):
-        """Prime the multiscale 3D Glow model using a multi-view dummy list."""
-        # 1. Récupération dynamique du nombre de vues depuis l'arborescence des arguments
+        """Prime the multiscale 3D Glow model using a data-shaped dummy input."""
         num_views = getattr(model, "views", 1)
-        
-        # 2. Construction d'une liste de tenseurs 5D (un par vue)
-        # Chaque tenseur respecte la forme (B=1, C=1, H, W, D)
+
         dummy_input = [
             torch.zeros([1, 1] + list(target_size), device=device)
             for _ in range(num_views)
         ]
-        
-        # 3. Si le modèle n'a qu'une seule vue, on extrait le tenseur unique 
-        # pour éviter de passer une liste inutile
         if num_views == 1:
             dummy_input = dummy_input[0]
 
-        # 4. Priming sécurisé de l'ActNorm sans calcul de gradient
         with torch.no_grad():
             try:
-                model.forward_and_log_det(dummy_input)
+                if isinstance(dummy_input, list):
+                    _ = [model.inverse_and_log_det(d) for d in dummy_input]
+                else:
+                    model.inverse_and_log_det(dummy_input)   # ✅ corrigé : même direction que _encode_latents
             except Exception:
-                # Fallback de secours sur le calcul de log-probabilité si forward échoue
                 if isinstance(dummy_input, list):
                     _ = [model.log_prob(d) for d in dummy_input]
                 else:

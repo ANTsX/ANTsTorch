@@ -212,6 +212,7 @@ def create_glow_normalizing_flow_model_2d(
     leaky: float = 0.0,
     net_actnorm: bool = True,
     scale_cap: float = 2.0,
+    legacy_conv_cap: Optional[float] = None,
     verbose: bool = False,
 ) -> nf.MultiscaleFlow:
     """
@@ -260,6 +261,11 @@ def create_glow_normalizing_flow_model_2d(
         Use ActNorm inside the conditioner CNNs.
     scale_cap : float, default=3.0
         Magnitude cap for the coupling scale head (used with `scale_map="tanh"`).
+    legacy_conv_cap : float, optional
+        Backward-compatibility override for Invertible1x1Conv's own log-scale
+        clamp, for checkpoints trained before `scale_cap` was correctly wired
+        into the invertible conv. See `create_glow_normalizing_flow_model_3d`
+        for the full explanation. Leave as None for new checkpoints/training.
 
     Returns
     -------
@@ -306,6 +312,7 @@ def create_glow_normalizing_flow_model_2d(
                 leaky=leaky,
                 net_actnorm=net_actnorm,
                 s_cap=scale_cap,
+                conv_s_cap=legacy_conv_cap,
             )
             for _ in range(k_level)
         ]
@@ -342,7 +349,7 @@ def create_glow_normalizing_flow_model_2d(
 
 
 def create_glow_normalizing_flow_model_3d(
-    input_shape: Tuple[int, int, int, int],  # (C, D, H, W)
+    input_shape: Tuple[int, int, int, int],  # (C, H, W, D)
     *,
     L: int,
     K: Union[int, Sequence[int]],
@@ -357,6 +364,7 @@ def create_glow_normalizing_flow_model_3d(
     leaky: float = 0.0,
     net_actnorm: bool = True,
     scale_cap: float = 2.0,
+    legacy_conv_cap: Optional[float] = None,
     verbose: bool = False,
 ) -> nf.MultiscaleFlow:
     """
@@ -372,12 +380,12 @@ def create_glow_normalizing_flow_model_3d(
         • channels entering level i (forward):         c_in(i) = C * 4**(L-1-i)
         • channels seen by blocks (inverse, post-unsqueeze):  8 * c_in(i)
         • latent peeled at level i (after squeeze & split):   4 * c_in(i)
-        • latent spatial size:                         (D/2**(i+1), H/2**(i+1), W/2**(i+1))
+        • latent spatial size:                         (H/2**(i+1), W/2**(i+1), D/2**(i+1))
 
     Parameters
     ----------
     input_shape : (int, int, int, int)
-        Input tensor shape as (C, D, H, W). D, H, and W must each be divisible by 2**L.
+        Input tensor shape as (C, H, W, D). H, W, and D must each be divisible by 2**L.
     L : int
         Number of multiscale levels. Each level performs K Glow blocks, then a squeeze and a split.
     K : int or Sequence[int]
@@ -406,6 +414,18 @@ def create_glow_normalizing_flow_model_3d(
         Use ActNorm inside the conditioner CNNs.
     scale_cap : float, default=3.0
         Magnitude cap applied to the coupling scale head (used with `scale_map="tanh"`).
+    legacy_conv_cap : float, optional
+        Backward-compatibility override for Invertible1x1x1Conv's own log-scale
+        clamp. Checkpoints trained before antsnormflows correctly wired
+        `scale_cap` into the invertible conv (it used to silently ignore the
+        caller's cap and always clamp at its own hardcoded default, 2.5) have
+        weights calibrated against that old hardcoded cap, not against
+        `scale_cap`. For such checkpoints, pass `legacy_conv_cap=2.5` here so
+        the conv keeps using the cap it was actually trained under, while
+        `scale_cap` continues to apply normally to the affine coupling and to
+        any newly-trained model. Leave as None for checkpoints trained after
+        the fix (or for new training runs) -- then the conv uses `scale_cap`
+        like everything else, as intended.
 
     Returns
     -------
@@ -418,11 +438,11 @@ def create_glow_normalizing_flow_model_3d(
     • Per-level forward order is `[GlowBlock3d] × K → Squeeze3d → Split`. Inverse therefore begins with
       Unsqueeze3d at each level, then runs the K blocks. Each block is constructed with the number of
       channels it actually receives in inverse, i.e., `8 * c_in(i)`.
-    • Ensure D, H, W are multiples of `2**L`.
+    • Ensure H, W, D are multiples of `2**L`.
     """
 
-    C, D, H, W = input_shape
-    _check_power_of_two_divisibility((D, H, W), L=L, dims=3)
+    C, H, W, D = input_shape
+    _check_power_of_two_divisibility((H, W, D), L=L, dims=3)
 
     if split_mode not in ("channel", "checkerboard"):
         raise ValueError(f"Unknown split_mode={split_mode!r}")
@@ -453,6 +473,7 @@ def create_glow_normalizing_flow_model_3d(
                 leaky=leaky,
                 net_actnorm=net_actnorm,
                 s_cap=scale_cap,
+                conv_s_cap=legacy_conv_cap,
             )
             for _ in range(k_level)
         ]
@@ -460,7 +481,7 @@ def create_glow_normalizing_flow_model_3d(
         flows.append(level_flows)
 
         lat_ch = (8 * c_in) if i == 0 else (4 * c_in)
-        lat_shape = (lat_ch, D // (2 ** (L - i)), H // (2 ** (L - i)), W // (2 ** (L - i)))
+        lat_shape = (lat_ch, H // (2 ** (L - i)), W // (2 ** (L - i)), D // (2 ** (L - i)))
 
         q0.append(
             nfd.GlowBase(

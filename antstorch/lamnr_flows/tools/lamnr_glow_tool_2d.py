@@ -250,6 +250,12 @@ def build_model_from_config_2d(cfg: dict, device: torch.device, target_hw=None):
     parsed_hidden = ([int(v) for v in raw_hidden]
                      if isinstance(raw_hidden, (list, tuple)) else int(raw_hidden))
 
+    # Backward compatibility: see the matching comment in
+    # lamnr_glow_tool_3d.py's build_model(). Checkpoints trained before
+    # antsnormflows commit 2249ecd need the invertible conv pinned to its
+    # old hardcoded cap (2.5) rather than the configured scale_cap.
+    legacy_conv_cap = None if bool(cfg.get("s_cap_wired_to_conv", False)) else 2.5
+
     m = create_glow_normalizing_flow_model_2d(
         input_shape=input_shape,
         L=int(cfg.get("L", 4)),
@@ -265,6 +271,7 @@ def build_model_from_config_2d(cfg: dict, device: torch.device, target_hw=None):
         leaky=0.0,
         net_actnorm=bool(cfg.get("net_actnorm", False)),
         scale_cap=float(cfg.get("scale_cap", 2.0)),
+        legacy_conv_cap=legacy_conv_cap,
     ).to(device).float().eval()
 
     if not hasattr(m, "input_shape"):

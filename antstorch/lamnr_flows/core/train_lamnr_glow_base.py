@@ -798,14 +798,22 @@ class BaseLAMNrTrainer(abc.ABC):
     @staticmethod
     def _strip_dp_prefix(state_dict: dict) -> dict:
         """
-        Remove DataParallel / GlowStepWrapper prefixes ('module.' and 'model.')
-        from all keys **before writing to disk**.
+        Remove DataParallel / GlowStepWrapper / torch.compile wrapper prefixes
+        ('module.', 'model.', '_orig_mod.') from all keys **before writing to
+        disk**.
 
         Guarantees that saved checkpoints are always compatible with inference
-        scripts that load a bare Glow model — even if training used DataParallel.
+        scripts that load a bare Glow model — even if training used
+        DataParallel and/or ANTSNF_TORCH_COMPILE=1 (torch.compile wraps the
+        module and prefixes every state_dict key with '_orig_mod.'; without
+        stripping it here, a checkpoint saved from a compiled model has 100%
+        of its keys mismatched against a bare model at inference time, which
+        `load_state_dict` fails on and then silently masks via its
+        strict=False fallback -- leaving the whole model at its random
+        from-scratch initialization).
         """
         return {
-            k.replace("module.", "").replace("model.", ""): v
+            k.replace("module.", "").replace("model.", "").replace("_orig_mod.", ""): v
             for k, v in state_dict.items()
         }
 
@@ -825,7 +833,15 @@ class BaseLAMNrTrainer(abc.ABC):
                 "s_nll":   float(self.s_nll.detach().cpu())   if self.s_nll   else None,
                 "s_align": float(self.s_align.detach().cpu()) if self.s_align else None,
             },
-            "config":  vars(self.args),
+            # "s_cap_wired_to_conv": True marks checkpoints trained with the
+            # antsnormflows fix (commit 2249ecd) that correctly wires the
+            # configured scale_cap into Invertible1x1(x1)Conv, instead of the
+            # conv silently using its own hardcoded default (2.5). Inference
+            # code (lamnr_glow_tool_{2,3}d.py's build_model) checks this flag
+            # to decide whether to pin the conv to the legacy cap for
+            # backward compatibility. Do not remove this key without also
+            # checking those call sites.
+            "config":  {**vars(self.args), "s_cap_wired_to_conv": True},
             "scaler":  (
                 self.scaler.state_dict()
                 if self.scaler is not None and self.scaler.is_enabled()

@@ -326,6 +326,24 @@ def to01(x: torch.Tensor, eps: float = 1e-8, winsorize: bool = True) -> torch.Te
     Works for (N,C,H,W) and (N,C,H,W,D) tensors.
     If winsorize=True, clips 1%/99% quantiles to preserve contrast.
     """
+    total = x.numel()
+    nonfinite = int((~torch.isfinite(x)).sum()) if total else 0
+    if total and nonfinite / total > 0.5:
+        # torch.nan_to_num below silently turns NaN/Inf into 0.0/1.0/0.0. If
+        # that's the *majority* of the tensor, the decode that produced `x`
+        # effectively failed (e.g. a numerically unstable flow layer blew up
+        # to inf/nan), and what nan_to_num + min-max normalization produces
+        # next is a degenerate near-constant image (min==max -> ~0
+        # everywhere) that LOOKS like a successful, if blank, result instead
+        # of the loud failure it actually is. Surface this instead of hiding it.
+        print(
+            f"[to01] WARNING: {nonfinite}/{total} ({100.0 * nonfinite / total:.1f}%) "
+            "values are non-finite before normalization. The output is likely "
+            "a degenerate blank/constant image, not a real reconstruction -- "
+            "investigate the decode path (e.g. numerical conditioning of "
+            "Invertible1x1x1Conv at large channel counts, or an out-of-range "
+            "latent being decoded) rather than trusting this result."
+        )
     x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=0.0)
     if x.ndim < 4:
         return x
@@ -363,10 +381,31 @@ def resolve_ckpt_path(p: Path) -> Path:
 
 
 def _strip_dp_prefix(sd: dict) -> dict:
-    """Remove DataParallel 'module.' prefix from state_dict keys."""
-    if any(k.startswith("module.") for k in sd):
-        return {k[len("module."):] if k.startswith("module.") else k: v
-                for k, v in sd.items()}
+    """
+    Remove wrapper prefixes from state_dict keys so a checkpoint saved from a
+    wrapped model (DataParallel's ``module.`` and/or ``torch.compile``'s
+    ``_orig_mod.``) loads cleanly into a plain, unwrapped model.
+
+    Without this, ``load_state_dict(strict=True)`` fails with every single
+    key mismatched (since *all* keys carry the extra prefix), silently falls
+    back to ``strict=False`` elsewhere in this module, and the model ends up
+    almost entirely at its random from-scratch initialization -- which reads
+    as "no crash" but produces garbage/NaN as soon as a few dozen untrained
+    flow layers are composed.
+
+    Handles both prefixes, in either nesting order (e.g. a DataParallel model
+    that was then torch.compile'd, or vice versa), by stripping repeatedly
+    until no more known prefixes match.
+    """
+    prefixes = ("module.", "_orig_mod.")
+    changed = True
+    while changed:
+        changed = False
+        for prefix in prefixes:
+            if any(k.startswith(prefix) for k in sd):
+                sd = {k[len(prefix):] if k.startswith(prefix) else k: v
+                      for k, v in sd.items()}
+                changed = True
     return sd
 
 
@@ -396,7 +435,29 @@ def load_weights_into_model(
             return True, None
         except Exception as e:
             try:
-                model.load_state_dict(sd, strict=False)
+                # NOTE: load_state_dict(strict=False) does NOT raise on
+                # missing/unexpected keys -- it returns an IncompatibleKeys
+                # namedtuple instead. Any such mismatch means part of the
+                # model (e.g. an ActNorm buffer, an Invertible1x1x1Conv, or
+                # an entire conditioner-net layer) is silently left at its
+                # random from-scratch initialization instead of the trained
+                # checkpoint value, which is a classic source of
+                # "no crash, but garbage/NaN output" bugs. Surface this
+                # loudly instead of swallowing it.
+                res = model.load_state_dict(sd, strict=False)
+                missing = list(getattr(res, "missing_keys", []) or [])
+                unexpected = list(getattr(res, "unexpected_keys", []) or [])
+                if missing or unexpected:
+                    print(
+                        f"[load_weights_into_model] WARNING: non-strict load "
+                        f"({e}); missing_keys={missing[:20]}"
+                        f"{' ...' if len(missing) > 20 else ''}, "
+                        f"unexpected_keys={unexpected[:20]}"
+                        f"{' ...' if len(unexpected) > 20 else ''}. "
+                        f"These parameters/buffers are NOT from the checkpoint "
+                        f"and may be randomly initialized -- treat results with "
+                        f"suspicion until this mismatch is resolved."
+                    )
                 return True, f"non-strict: {e}"
             except Exception as e2:
                 return False, f"failed: {e2}"
@@ -749,6 +810,13 @@ def _fit_gaussian_blocks(X_blocks: List[np.ndarray], estimator: str, shrinkage: 
 
 def _sanitize_latents_array(X, cap_quantile=99.9, hard_cap=None):
     X = np.asarray(X, dtype=np.float64)
+    if X.shape[0] == 0:
+        raise RuntimeError(
+            "_sanitize_latents_array: received 0 rows (no subjects survived "
+            "upstream scrubbing/selection) -- np.percentile cannot compute "
+            "quantiles on an empty array. Fix the caller's subject-selection "
+            "logic rather than relying on this to no-op."
+        )
     stats = {}
     nf = ~np.isfinite(X)
     nf_count = int(nf.sum())
@@ -792,13 +860,23 @@ def _save_gauss_npz(blob: Dict[str, Any], out_path: Path):
     }
     if blob.get("typical_radii_by_view") is not None:
         pack["typical_radii_json"] = json.dumps(blob["typical_radii_by_view"])
+    if blob.get("nearest_real_image_paths"):
+        pack["nearest_real_image_paths_json"] = json.dumps(blob["nearest_real_image_paths"])
+    if blob.get("nearest_real_candidates_image_paths"):
+        pack["nearest_real_candidates_image_paths_json"] = json.dumps(
+            blob["nearest_real_candidates_image_paths"]
+        )
     # Optionally persist D for 3D blobs
     if blob.get("D") is not None:
         pack["D"] = np.int64(blob["D"])
 
+    mu_nearest_real = blob.get("mu_nearest_real")
+
     if blob["mode"] == "perlevel":
         for i, mu in enumerate(blob["mu"]):
             pack[f"mu_{i}"] = np.asarray(mu)
+            if mu_nearest_real is not None and i < len(mu_nearest_real):
+                pack[f"nearest_real_{i}"] = np.asarray(mu_nearest_real[i])
             S = blob["Sigma"][i]
             if isinstance(S, dict) and S.get("type") == "lowrank":
                 pack[f"Sigma_{i}_type"]   = "lowrank"
@@ -809,6 +887,8 @@ def _save_gauss_npz(blob: Dict[str, Any], out_path: Path):
                 pack[f"Sigma_{i}"] = np.asarray(S)
     else:
         pack["mu"] = np.asarray(blob["mu"])
+        if mu_nearest_real is not None and np.asarray(mu_nearest_real).size:
+            pack["nearest_real"] = np.asarray(mu_nearest_real)
         S = blob["Sigma"]
         if isinstance(S, dict) and S.get("type") == "lowrank":
             pack["Sigma_type"]   = "lowrank"
@@ -878,12 +958,22 @@ def _load_gaussian_model(gauss_path: Path) -> Dict[str, Any]:
         blob["typical_radii_by_view"] = json.loads(
             str(np.array(npz["typical_radii_json"]).tolist())
         )
+    if "nearest_real_image_paths_json" in keys:
+        blob["nearest_real_image_paths"] = json.loads(
+            str(np.array(npz["nearest_real_image_paths_json"]).tolist())
+        )
+    if "nearest_real_candidates_image_paths_json" in keys:
+        blob["nearest_real_candidates_image_paths"] = json.loads(
+            str(np.array(npz["nearest_real_candidates_image_paths_json"]).tolist())
+        )
 
     L = int(blob.get("L", 0) or 0)
     if any(f.startswith("mu_") for f in keys):
-        mu_list, Sig_list = [], []
+        mu_list, Sig_list, nearest_real_list = [], [], []
         for i in range(L):
             mu_list.append(np.array(npz[f"mu_{i}"]))
+            if f"nearest_real_{i}" in keys:
+                nearest_real_list.append(np.array(npz[f"nearest_real_{i}"]))
             if (f"Sigma_{i}_type" in keys
                     and str(np.array(npz[f"Sigma_{i}_type"]).tolist()) == "lowrank"):
                 Sig_list.append({
@@ -897,10 +987,14 @@ def _load_gaussian_model(gauss_path: Path) -> Dict[str, Any]:
         blob["mu"]    = mu_list
         blob["Sigma"] = Sig_list
         blob["mode"]  = "perlevel"
+        if len(nearest_real_list) == L:
+            blob["mu_nearest_real"] = nearest_real_list
         return blob
 
     if "mu" in keys:
         blob["mu"] = np.array(npz["mu"])
+        if "nearest_real" in keys:
+            blob["mu_nearest_real"] = np.array(npz["nearest_real"])
         if "Sigma_type" in keys and str(np.array(npz["Sigma_type"]).tolist()) == "lowrank":
             blob["Sigma"] = {
                 "type":   "lowrank",
@@ -1636,7 +1730,22 @@ class GlowToolBase(ABC):
         ap.add_argument("--no-scrub",        action="store_true", default=False,
                         help="Désactive le rejet automatique des sujets aberrants.")
         ap.add_argument("--scrub-threshold", type=float, default=None,
-                        help="Seuil de variance/déviation pour exclure un sujet.")
+                        help="Seuil ABSOLU de |valeur| pour exclure un sujet (mode 'absolute'/'both').")
+        ap.add_argument("--scrub-mode", default="absolute",
+                        choices=["absolute", "relative", "both"],
+                        help="'absolute' (défaut, comportement historique): compare "
+                             "--scrub-threshold à la valeur absolue brute, identique pour "
+                             "tous les niveaux -- casse si des niveaux ont des échelles "
+                             "naturelles très différentes (ex: modèles multiscale Glow où "
+                             "le niveau le plus profond/large peut légitimement atteindre "
+                             "des magnitudes bien supérieures aux autres niveaux). "
+                             "'relative': rejette un sujet à un niveau donné seulement si "
+                             "sa valeur dépasse --scrub-relative-factor fois la médiane de "
+                             "CE niveau (adapté à l'échelle propre de chaque niveau). "
+                             "'both': un sujet est rejeté si l'un OU l'autre critère déclenche.")
+        ap.add_argument("--scrub-relative-factor", type=float, default=20.0,
+                        help="Utilisé en mode 'relative'/'both': un sujet est rejeté à un "
+                             "niveau si max|z| > ce facteur * médiane(max|z|) de ce niveau.")
         self._add_size_arg(ap, required=True)
         args = ap.parse_args(argv)
 
@@ -1674,10 +1783,18 @@ class GlowToolBase(ABC):
                 view_name=v_name, cfg_views=cfg_views
             )
 
+            for name, p in model.named_parameters():
+                if torch.isnan(p).any():
+                    print(f"[NaN dans les poids] {name}")
+
             if not ok:
                 raise RuntimeError(f"Could not load weights for view '{v_name}'")
             print(f"  [ckpt] loaded from {src}")
             self.prime_if_needed(model, target_size, device)
+
+            for name, p in model.named_parameters():
+                if torch.isnan(p).any():
+                    print(f"[NaN après prime_if_needed] {name}")
 
             # Probe latent shapes with a dummy forward
             z_shapes = self._probe_latent_shapes(model, target_size, device)
@@ -1696,6 +1813,9 @@ class GlowToolBase(ABC):
                     xb = torch.stack(xlist, dim=0).to(device)
 
                     z_list = _encode_latents(model, xb)
+                    for i, z in enumerate(z_list):
+                        print(f"level {i}: nan={torch.isnan(z).any().item()}, "
+                              f"min={z.min().item():.4g}, max={z.max().item():.4g}")
                     z_flat = _flatten_latents_by_level(z_list)
                     for l_idx in range(L):
                         latents_this_view[l_idx].append(
@@ -1746,44 +1866,142 @@ class GlowToolBase(ABC):
                 count = len(latents_per_view[vi_][l_idx])
                 print(f"[debug] View {vi_}, Level {l_idx} has {count} latents.")
 
-        def _scrub_outliers(threshold=1e6):
+        for vi_ in range(V):
+            for l_idx in range(L):
+                Z = torch.cat(latents_per_view[vi_][l_idx], dim=0)
+                nan_rows = torch.isnan(Z).any(dim=1).nonzero().flatten().tolist()
+                inf_rows = torch.isinf(Z).any(dim=1).nonzero().flatten().tolist()
+                if nan_rows or inf_rows:
+                    print(f"View {vi_}, level {l_idx}: NaN={nan_rows}, Inf={inf_rows}")
+
+        def _scrub_outliers(threshold=1e6, mode="absolute", relative_factor=20.0):
             """
-            Exclut les sujets dont la valeur absolue maximale dépasse le seuil,
-            reproduisant la logique de main_gauss_fit.
+            Exclut les sujets dont les latents contiennent des valeurs non
+            finies (NaN/Inf), et/ou dont la valeur absolue maximale est
+            aberrante selon `mode`:
+
+              - "absolute": row_max > threshold (comportement historique).
+                Compare la même valeur absolue à TOUS les niveaux -- ne
+                convient pas si un niveau a une échelle naturelle très
+                différente des autres (ex: le niveau le plus large d'un flow
+                multiscale Glow peut légitimement être plusieurs ordres de
+                grandeur au-dessus des autres niveaux).
+              - "relative": row_max > relative_factor * median(row_max) pour
+                CE niveau précis -- s'adapte à l'échelle propre de chaque
+                niveau, donc ne rejette que les sujets réellement atypiques
+                par rapport aux autres sujets au même niveau.
+              - "both": un sujet est rejeté si l'un OU l'autre critère
+                déclenche.
             """
             if threshold is None:
                 threshold = 1e6
             N_enc = min(len(latents_per_view[vi_][0]) for vi_ in range(V))
             bad_indices = set()
-            
+            per_level_info = []
+
             for vi_ in range(V):
                 for l_idx in range(L):
                     chunks = latents_per_view[vi_][l_idx]
                     if not chunks:
                         continue
-                    
+
                     # Les tenseurs sont déjà aplatis en (N, D_l)
                     Z = torch.cat(chunks, dim=0)
+
+                    # Détection explicite des non-finis (NaN/Inf) : une comparaison
+                    # standard (row_max > threshold) est toujours False pour NaN,
+                    # ce qui les laisserait passer silencieusement.
+                    finite_mask = torch.isfinite(Z).all(dim=1)
+
+                    # Pour la comparaison au seuil, on ignore les non-finis
+                    # (déjà capturés ci-dessus) afin d'éviter tout avertissement
+                    # ou comportement indéfini sur amax() avec des NaN.
                     row_max = Z.abs().amax(dim=1)
-                    
+
+                    finite_row_max = row_max[finite_mask]
+                    level_median = (
+                        float(finite_row_max.median().item())
+                        if finite_row_max.numel() > 0 else float("nan")
+                    )
+                    rel_cutoff = relative_factor * level_median
+                    per_level_info.append(
+                        f"view={vi_} level={l_idx}: median(max|z|)={level_median:.4g}, "
+                        f"relative cutoff={rel_cutoff:.4g}"
+                    )
+
                     for i in range(N_enc):
-                        if row_max[i].item() > threshold:
+                        is_non_finite = not finite_mask[i].item()
+                        val = row_max[i].item() if finite_mask[i].item() else None
+
+                        trips_absolute = (val is not None) and (val > threshold)
+                        trips_relative = (val is not None) and (val > rel_cutoff)
+
+                        if mode == "absolute":
+                            trips = trips_absolute
+                        elif mode == "relative":
+                            trips = trips_relative
+                        else:  # "both"
+                            trips = trips_absolute or trips_relative
+
+                        if is_non_finite or trips:
                             bad_indices.add(i)
-            
+
             keep_idx = [i for i in range(N_enc) if i not in bad_indices]
-            
+
             if bad_indices:
-                print(f"[scrub] dropped {len(bad_indices)} subjects > {threshold:g}; new N={len(keep_idx)}")
-                
+                print(f"[scrub] mode={mode} threshold={threshold:g} "
+                      f"relative_factor={relative_factor:g}")
+                for line in per_level_info:
+                    print(f"  [scrub] {line}")
+                print(f"[scrub] dropped {len(bad_indices)} subjects "
+                      f"(non-finite or exceeding {mode} cutoff); new N={len(keep_idx)}")
+
             return keep_idx
+
 
         if args.no_scrub:
             N_enc = min(len(latents_per_view[vi_][0]) for vi_ in range(V))
             keep_idx = list(range(N_enc))
             print(f"[gauss-fit] no-scrub active: forcing all {len(keep_idx)} subjects.")
         else:
-            keep_idx = _scrub_outliers(threshold=args.scrub_threshold)
-        N_kept = len(keep_idx)    
+            keep_idx = _scrub_outliers(
+                threshold=args.scrub_threshold,
+                mode=args.scrub_mode,
+                relative_factor=args.scrub_relative_factor,
+            )
+        N_kept = len(keep_idx)
+
+        if N_kept == 0:
+            # Fail loudly and specifically here instead of letting an empty
+            # array silently propagate into np.percentile() several steps
+            # downstream (_sanitize_latents_array), where it crashes with an
+            # opaque "IndexError: index -1 is out of bounds for axis 0 with
+            # size 0" that gives no hint about *why* every subject vanished.
+            per_level_maxabs = []
+            for l_idx in range(L):
+                for vi_ in range(V):
+                    chunks = latents_per_view[vi_][l_idx]
+                    if not chunks:
+                        continue
+                    Z = torch.cat(chunks, dim=0)
+                    finite = torch.isfinite(Z)
+                    row_max = torch.where(finite, Z.abs(), torch.zeros_like(Z)).amax()
+                    n_nonfinite = int((~finite).any(dim=1).sum())
+                    per_level_maxabs.append(
+                        f"view={vi_} level={l_idx}: max|z|={row_max.item():.4g}, "
+                        f"non-finite subjects={n_nonfinite}"
+                    )
+            raise RuntimeError(
+                "[gauss-fit] Tous les sujets ont été rejetés par le scrubbing "
+                f"(seuil={args.scrub_threshold!r}); N=0, impossible d'ajuster le "
+                "modèle Gaussien. Détail par niveau/vue (avant scrubbing):\n  "
+                + "\n  ".join(per_level_maxabs)
+                + "\nAugmentez --scrub-threshold si ces magnitudes sont "
+                "attendues pour ce checkpoint, ou investiguez le niveau "
+                "incriminé (souvent le niveau au plus grand nombre de canaux, "
+                "sujet au mauvais conditionnement numérique connu de "
+                "Invertible1x1x1Conv à grand nombre de canaux)."
+            )
 
         def _select(chunks, keep_idx):
             if not chunks:
@@ -1817,12 +2035,35 @@ class GlowToolBase(ABC):
 
         # ── Fit Gaussian ─────────────────────────────────────────────────
         mu_list, Sigma_list, stats_list = [], [], []
+        # Also keep the *actual* subject latent closest to µ, at EVERY level,
+        # from ONE single consistent real subject (nearest-real fallback).
+        # µ is a raw arithmetic mean; at a level whose flow is numerically
+        # fragile in the decode direction (e.g. an ill-conditioned
+        # Invertible1x1x1Conv with huge channel count), µ can land off the
+        # narrow "valid encode" manifold real latents sit on and be
+        # undecodable (produces NaN/Inf), even though every real subject's
+        # own latent decodes fine. recon-template uses this to automatically
+        # substitute a guaranteed-decodable real exemplar for whichever
+        # level(s) actually fail, instead of only the mean.
+        #
+        # IMPORTANT: the substitute must come from the SAME subject at every
+        # level it's used for. Picking each level's own nearest neighbour
+        # independently can stitch together values from different subjects
+        # that were never produced by encoding a single real image, which is
+        # itself off-manifold and can still fail to decode (confirmed: it
+        # did, even after substituting every level -- see the "still
+        # non-finite after substituting nearest-real at all levels" case).
+        mu_nearest_real_list = []
+        nearest_real_image_paths: Dict[str, str] = {}
+        nearest_real_candidates_image_paths: List[Dict[str, str]] = []
+        X_per_level: List[np.ndarray] = []
 
         if args.cov_mode == "perlevel":
             for l in range(L):
                 blocks = [_select(latents_per_view[vi_][l], keep_idx) for vi_ in range(V)]
                 X = np.concatenate(blocks, axis=1) if len(blocks) > 1 else blocks[0]
-                
+                X_per_level.append(X)
+
                 mu = X.mean(axis=0)
                 Xc = X - mu
                 # cap_quant=0.99 est une valeur classique pour éviter les outliers
@@ -1839,11 +2080,44 @@ class GlowToolBase(ABC):
                 mu_list.append(mu)
                 Sigma_list.append(Sig)
                 stats_list.append(sts)
+
                 print(f"  level {l}: cond={sts['cond']:.2e}, "
                       f"λ_min={sts['lambda_min']:.2e}, λ_max={sts['lambda_max']:.2e}")
                 # Clean up
                 del blocks
                 gc.collect()
+
+            # Rank ALL kept subjects by distance to µ at level 0 -- the level
+            # empirically most likely to be numerically fragile in decode.
+            # We store the FULL ranking (not just the single nearest subject)
+            # because proximity to µ is no guarantee that a given subject's
+            # own latent actually decodes cleanly (near-singular conditioning
+            # can blow up for specific subjects regardless of how close they
+            # are to the population mean). recon-template walks this ranking
+            # nearest-first and verifies each candidate's own encode->decode
+            # roundtrip is finite before trusting it as the fallback.
+            dist_to_mu = np.linalg.norm(X_per_level[0] - mu_list[0], axis=1)
+            rank_order = np.argsort(dist_to_mu)  # kept-list indices, nearest first
+            nearest_idx = int(rank_order[0])
+            orig_subject_idx = keep_idx[nearest_idx]
+            nearest_real_image_paths = {
+                v_name: str(per_view_paths[vi_][orig_subject_idx])
+                for vi_, v_name in enumerate(view_names)
+            }
+            nearest_real_candidates_image_paths = [
+                {
+                    v_name: str(per_view_paths[vi_][keep_idx[int(ridx)]])
+                    for vi_, v_name in enumerate(view_names)
+                }
+                for ridx in rank_order
+            ]
+            print(f"  [gauss-fit] nearest-real fallback subject index (kept-list) = {nearest_idx} "
+                  f"(original manifest row {orig_subject_idx}): {nearest_real_image_paths}")
+            print(f"  [gauss-fit] stored {len(nearest_real_candidates_image_paths)} candidate "
+                  "subjects ranked by distance to µ (level 0) for recon-template's "
+                  "verified-decodable fallback search.")
+            for l in range(L):
+                mu_nearest_real_list.append(np.asarray(X_per_level[l][nearest_idx]))
         else:
             # merged mode
             all_blocks = []
@@ -1854,6 +2128,9 @@ class GlowToolBase(ABC):
                 X = np.concatenate(all_blocks, axis=1)
                 mu  = X.mean(axis=0)
                 Xc  = X - mu
+                mu_nearest_real_list = np.asarray(
+                    X[int(np.argmin(np.linalg.norm(X - mu, axis=1)))]
+                )
                 Sig = _lowrank_from_Xc(Xc, rank=args.rank,
                                        sigma2=args.sigma2, extra_ridge=shrinkage)
                 sts = _lowrank_stats(Sig)
@@ -1899,6 +2176,7 @@ class GlowToolBase(ABC):
             "W":          int(target_size[1]),
             "L":          L,
             "mu":         mu_list,
+            "mu_nearest_real": mu_nearest_real_list,
             "Sigma":      Sigma_list,
             "dims_per_level_per_view": dims_per_level_per_view,
             "shapes_by_view":          shapes_by_view,
@@ -1906,6 +2184,8 @@ class GlowToolBase(ABC):
             "typical_radii_by_view":   typical_radii_by_view,
             "stats":      stats_list,
             "ckpt_fingerprint": _ckpt_fingerprint(ckpt_path),
+            "nearest_real_image_paths": nearest_real_image_paths,
+            "nearest_real_candidates_image_paths": nearest_real_candidates_image_paths,
         }
         if len(target_size) == 3:
             out_blob["D"] = int(target_size[2])
@@ -2186,11 +2466,20 @@ class GlowToolBase(ABC):
             raise ValueError("--gauss is required when --edit-levels selects levels.")
 
         panels = []
+        n_nonfinite_subjects = 0
         for image_index, img_path in enumerate(tqdm(per_view_paths[vi], desc="recon")):
             x = self.read_image(img_path, target_size).unsqueeze(0).to(device)
             with torch.no_grad():
                 z_list = _encode_latents(model, x)
                 x_hat  = self.decode_latents(model, z_list, target_size)
+                if not torch.isfinite(x_hat).all():
+                    n_nonfinite_subjects += 1
+                    print(f"[recon] WARNING: subject {image_index} ({img_path}) "
+                          "decoded to a non-finite x_hat (own encode->decode "
+                          "roundtrip, no editing/µ involved). This subject's "
+                          "tile in the panel is corrupted even though the "
+                          "aggregate to01() warning threshold (>50% non-finite "
+                          "across the WHOLE multi-subject panel) may not fire.")
                 if gauss_blob and levels_to_edit:
                     z_edited = self.edit_latents_to_mean(
                         z_list, gauss_blob, v_name, levels_to_edit,
@@ -2226,6 +2515,17 @@ class GlowToolBase(ABC):
                     )
             del x, z_list, x_hat
             gc.collect()
+
+        n_total_subjects = len(per_view_paths[vi])
+        if n_nonfinite_subjects > 0:
+            print(f"[recon] SUMMARY: {n_nonfinite_subjects}/{n_total_subjects} "
+                  "subjects decoded to a non-finite x_hat on their own honest "
+                  "encode->decode roundtrip. A single normalization step "
+                  "(to01) over the whole concatenated panel can hide this "
+                  "visually -- it only warns above 50% non-finite globally.")
+        else:
+            print(f"[recon] SUMMARY: all {n_total_subjects} subjects decoded "
+                  "to finite x_hat.")
 
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2286,19 +2586,131 @@ class GlowToolBase(ABC):
         self.prime_if_needed(model, target_size, device)
 
         mu_list = gauss_blob["mu"]
+        mu_nearest_real = gauss_blob.get("mu_nearest_real")
+        nearest_real_image_paths = gauss_blob.get("nearest_real_image_paths") or {}
+        nearest_real_candidates = gauss_blob.get("nearest_real_candidates_image_paths") or []
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         if mc_n == 0:
-            # Decode µ directly
-            z_mu = [
-                torch.from_numpy(
-                    np.asarray(mu_list[l], dtype=np.float32)
+            def _to_z_tensor(value, l):
+                # `value` is either a native torch tensor straight out of
+                # _encode_latents (already the right dtype/shape, possibly
+                # with or without the batch dim), or a flat numpy vector
+                # that needs reshaping back to (C, H, W, D) and a batch dim.
+                if torch.is_tensor(value):
+                    v = value
+                    if v.dim() == len(shapes_by_view[v_idx_gauss][l]):
+                        v = v.unsqueeze(0)
+                    return v.to(device=device, dtype=torch.float32)
+                return torch.from_numpy(
+                    np.asarray(value, dtype=np.float32)
                 ).view(1, *shapes_by_view[v_idx_gauss][l]).to(device)
-                for l in range(L)
-            ]
+
+            def _build_z(source_per_level):
+                return [_to_z_tensor(source_per_level[l], l) for l in range(L)]
+
+            # Start from the per-level source list = pure µ everywhere.
+            sources = list(mu_list)
             with torch.no_grad():
-                x_mu = self.decode_latents(model, z_mu, target_size)
+                x_mu = self.decode_latents(model, _build_z(sources), target_size)
+
+            substituted_levels = []
+            if not torch.isfinite(x_mu).all():
+                # µ itself is not decodable. Substituting µ with a single
+                # hard-coded "nearest real subject" (whether from a fresh
+                # re-encode or from the stored mu_nearest_real vectors) is
+                # NOT sufficient on its own: proximity to µ says nothing
+                # about whether that particular subject's own latent decodes
+                # cleanly -- near-singular level-0 conditioning can blow up
+                # for specific subjects regardless of how close they sit to
+                # the population mean. Confirmed directly: even a freshly
+                # re-encoded nearest-real subject substituted at every level
+                # still came back 100% non-finite.
+                #
+                # So instead of trusting one candidate, walk the full
+                # nearest-to-farthest ranking and, for each candidate,
+                # re-encode its real image fresh and verify its OWN
+                # encode->decode roundtrip is finite before trusting it --
+                # exactly what `recon` does per-subject, just checked
+                # explicitly here instead of silently averaged away in a
+                # multi-subject panel.
+                verified_real_z_list = None
+                verified_x_hat = None
+                verified_img_path = None
+                candidates = nearest_real_candidates or (
+                    [nearest_real_image_paths] if nearest_real_image_paths else []
+                )
+                for rank, cand_paths in enumerate(candidates):
+                    img_path = cand_paths.get(v_name)
+                    if not img_path:
+                        continue
+                    try:
+                        x_real = self.read_image(Path(img_path), target_size).unsqueeze(0).to(device)
+                        with torch.no_grad():
+                            z_cand = _encode_latents(model, x_real)
+                            x_hat_cand = self.decode_latents(model, z_cand, target_size)
+                    except Exception as e:
+                        print(f"[recon-template] candidate rank={rank} '{img_path}' "
+                              f"could not be read/encoded/decoded ({e}); skipping.")
+                        continue
+                    if torch.isfinite(x_hat_cand).all():
+                        verified_real_z_list = z_cand
+                        verified_x_hat = x_hat_cand
+                        verified_img_path = img_path
+                        print(f"[recon-template] candidate rank={rank} '{img_path}' "
+                              "verified: own encode->decode roundtrip is finite. "
+                              "Using it as the fallback.")
+                        break
+                    else:
+                        print(f"[recon-template] candidate rank={rank} '{img_path}' "
+                              "rejected: its own encode->decode roundtrip is non-finite "
+                              "(not just µ-substitution -- this subject itself doesn't "
+                              "decode cleanly). Trying the next-nearest candidate.")
+
+                if verified_real_z_list is None:
+                    fallback_per_level = mu_nearest_real
+                    if fallback_per_level is None:
+                        print(
+                            "[recon-template] WARNING: decoding µ produced non-finite "
+                            "values, no candidate real subject verified as decodable, "
+                            "and this Gaussian file has no 'mu_nearest_real' fallback "
+                            "either. Falling back to nan_to_num-only via to01() below "
+                            "-- treat the output as unreliable."
+                        )
+                    else:
+                        for l in range(L):
+                            if torch.isfinite(x_mu).all():
+                                break
+                            sources[l] = fallback_per_level[l]
+                            substituted_levels.append(l)
+                            with torch.no_grad():
+                                x_mu = self.decode_latents(model, _build_z(sources), target_size)
+                        if not torch.isfinite(x_mu).all():
+                            print(
+                                "[recon-template] WARNING: no candidate subject (out of "
+                                f"{len(candidates)} tried) decodes cleanly on its own, and "
+                                "the stored mu_nearest_real fallback also failed. This "
+                                "points to a deeper numerical-conditioning problem "
+                                "(e.g. Invertible1x1x1Conv at large channel counts) "
+                                "rather than a bad choice of fallback subject -- "
+                                "investigate before trusting this output."
+                            )
+                else:
+                    # We have a verified-decodable real subject. Rather than
+                    # re-mixing it with µ level-by-level (which offers no
+                    # benefit once we already know µ fails and this
+                    # subject's own full latent is finite), use its own
+                    # reconstruction directly as the template.
+                    x_mu = verified_x_hat
+                    substituted_levels = list(range(L))
+                    print(
+                        f"[recon-template] µ was not decodable as-is; the template is "
+                        f"the verified-decodable nearest real subject's own "
+                        f"reconstruction ('{verified_img_path}'), not a true "
+                        "population mean."
+                    )
+
             x_mu = to01(x_mu, winsorize=True)
             if args.sharpen_image:
                 try:

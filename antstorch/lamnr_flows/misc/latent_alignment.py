@@ -297,7 +297,7 @@ def flatten_latents(z, target_pool_size: int = 2) -> torch.Tensor:
     LAMNr strategy: extract only the deepest latent level and adaptive-pool
     it to a fixed size before feeding the Projector MLP.
 
-    Supports 2D (N, C, H, W) and 3D (N, C, D, H, W) tensors.
+    Supports 2D (N, C, H, W) and 3D (N, C, H, W, D) tensors.
     """
     zs = z if isinstance(z, (list, tuple)) else [z]
     deepest_z = zs[-1]
