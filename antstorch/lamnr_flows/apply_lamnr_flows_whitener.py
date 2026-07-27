@@ -265,7 +265,11 @@ def apply_lamnr_flows_whitener(
                     stop = min(start + batch_size, X_proc.shape[0])
                     xb = torch.from_numpy(X_proc[start:stop]).to(device_t).double()
 
-                    z = model.forward(xb)
+                    # antsnormflows semantics: forward(z) maps latent->data
+                    # and inverse(x) maps data->latent. xb here is real
+                    # (normalized) data, so the data->latent direction is
+                    # model.inverse(xb), not model.forward(xb).
+                    z = model.inverse(xb)
                     if isinstance(z, (tuple, list)):
                         z = z[0]
 
@@ -323,7 +327,10 @@ def apply_lamnr_flows_whitener(
                     else:
                         raise ValueError("input_space must be one of {'z','whitened','whitened_full'}.")
 
-                    xrec = model.inverse(z)
+                    # antsnormflows semantics: z here is a latent-space value,
+                    # so the latent->data direction is model.forward(z), not
+                    # model.inverse(z) (which maps data->latent).
+                    xrec = model.forward(z)
                     if isinstance(xrec, (tuple, list)):
                         xrec = xrec[0]
                     Z_out.append(xrec.detach().cpu().numpy())

@@ -1,4 +1,5 @@
 
+import os
 import torch
 import torch.nn as nn
 import antsnormflows as nf
@@ -13,6 +14,23 @@ def _get_val_at_level(val: Union[int, Sequence[int]], level: int, default_name: 
     if level < len(val):
         return val[level]
     raise ValueError(f"Level index {level} out of range for {default_name} sequence of length {len(val)}.")
+
+
+def _maybe_compile(model):
+    """
+    Optionally wrap `model` with torch.compile.
+
+    Off by default: torch.compile only traces Module.forward(), but these
+    normalizing-flow models are actually driven through other methods
+    (forward_kld, log_prob, inverse_and_log_det, forward_and_log_det, sample,
+    ...), so compiling forward() alone provides no real speedup while adding
+    OptimizedModule-wrapping fragility (extra hasattr/try-except fallbacks
+    are needed elsewhere in this codebase to work around it). Opt in with
+    ANTSNF_TORCH_COMPILE=1 (mirrors antsnormflows/utils/splines.py).
+    """
+    if os.environ.get("ANTSNF_TORCH_COMPILE") == "1" and hasattr(torch, "compile"):
+        model = torch.compile(model, mode="reduce-overhead")
+    return model
 
 
 def create_real_nvp_normalizing_flow_model(
@@ -127,9 +145,8 @@ def create_real_nvp_normalizing_flow_model(
 
     model = nf.NormalizingFlow(q0=q0, flows=flows)
 
-    if hasattr(torch, 'compile'):
-        model = torch.compile(model, mode="reduce-overhead")
-        
+    model = _maybe_compile(model)
+
     return model
 
 def _check_power_of_two_divisibility(spatial: Sequence[int], L: int, dims: int) -> None:
@@ -315,8 +332,7 @@ def create_glow_normalizing_flow_model_2d(
 
     model = nf.MultiscaleFlow(q0, flows, merges)
 
-    if hasattr(torch, 'compile'):
-        model = torch.compile(model, mode="reduce-overhead")
+    model = _maybe_compile(model)
 
     if verbose:
         print("Created the following 2D GLOW model:")
@@ -461,8 +477,7 @@ def create_glow_normalizing_flow_model_3d(
 
     model = nf.MultiscaleFlow(q0, flows, merges)
 
-    if hasattr(torch, 'compile'):
-        model = torch.compile(model, mode="reduce-overhead")
+    model = _maybe_compile(model)
 
     if verbose:
         print("Created the following 3D GLOW model:")

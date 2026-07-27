@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import math, os, json
+import copy, math, os, json, warnings
 from typing import List, Dict, Any, Optional, Tuple, Union
 
 import numpy as np
@@ -64,14 +64,39 @@ def _bits_per_dim(nll: torch.Tensor, D_total: int) -> float:
 
 def _inverse_with_guard(model, xb):
     """
-    Handle inverse() across wrappers:
-      - returns Tensor -> (z, zeros)
-      - returns (z, log_det) -> as-is
-      - returns (z, log_det, *rest) -> take first two
-      - if model has .flow/.flows with .inverse, try those as fallback
+    Compute (z, log_det) for the data->latent direction across wrappers.
+
+    Preference order:
+      1. model.inverse_and_log_det(xb) / model.flow.inverse_and_log_det(xb) /
+         model.flows.inverse_and_log_det(xb) -> (z, log_det). This is the only
+         API that returns the log-determinant of the Jacobian, which is
+         required for a correct change-of-variables log-likelihood
+         (nll = -(q0.log_prob(z) + log_det)). Always try this first.
+      2. model.inverse(xb) / model.flow.inverse(xb) / model.flows.inverse(xb)
+         as a last-resort fallback for models that do not expose
+         inverse_and_log_det. antsnormflows' plain inverse() returns only z
+         (no tuple), so log_det defaults to zeros here -- this silently
+         drops the Jacobian correction and biases any NLL/bits-per-dim
+         computed from it. A warning is raised so this fallback is never
+         silent.
+
+    Each candidate is tried in a broad try/except so that attribute lookups
+    and wrapper quirks (e.g. torch.compile's OptimizedModule) don't abort the
+    whole call; if every candidate fails, the last exception is re-raised
+    wrapped in a RuntimeError. Note this can also mask a genuine error raised
+    from within a working inverse method if an earlier candidate exists but
+    fails for an unrelated reason -- callers debugging unexpected NaNs/shape
+    errors here should temporarily narrow the except clause below.
     """
     last = None
-    for attr_chain in (("inverse",), ("flow","inverse"), ("flows","inverse")):
+    for attr_chain in (
+        ("inverse_and_log_det",),
+        ("flow", "inverse_and_log_det"),
+        ("flows", "inverse_and_log_det"),
+        ("inverse",),
+        ("flow", "inverse"),
+        ("flows", "inverse"),
+    ):
         try:
             tgt = model
             for attr in attr_chain:
@@ -86,6 +111,13 @@ def _inverse_with_guard(model, xb):
             else:
                 z = out
                 log_det = torch.zeros(z.size(0), device=z.device, dtype=z.dtype)
+                if attr_chain[-1] != "inverse_and_log_det":
+                    warnings.warn(
+                        f"_inverse_with_guard: {'.'.join(attr_chain)} on "
+                        f"{type(model)} returned only z (no log_det); falling "
+                        "back to log_det=0. NLL/bits-per-dim computed from "
+                        "this will omit the Jacobian log-determinant term."
+                    )
             return z, log_det
         except Exception as e:
             last = e
@@ -549,6 +581,9 @@ def lamnr_flows_whitener(
     if base_lower in ("gaussianpca", "pca") and pca_latent_dimension is None:
         raise ValueError("pca_latent_dimension must be provided when base_distribution='GaussianPCA'.")
 
+    if not views:
+        raise ValueError("lamnr_flows_whitener: 'views' must be a non-empty list of DataFrames.")
+
     # Align rows, split
     view_names = [f"v{i}" for i in range(len(views))]
     view_map = {vn: df for vn, df in zip(view_names, views)}
@@ -778,6 +813,11 @@ def lamnr_flows_whitener(
                 if grad_clip and grad_clip > 0:
                     nn.utils.clip_grad_norm_(opt.param_groups[0]["params"], grad_clip)
                 opt.step()
+            elif verbose:
+                print(
+                    f"[warn] step {step + 1}: non-finite total loss "
+                    f"({float(total):.4g}); skipping backward/optimizer step."
+                )
 
         # ---------------------------
         # Validation
@@ -825,7 +865,11 @@ def lamnr_flows_whitener(
                 # Track best from the beginning (no gating).
                 if is_improved:
                     best_metric = metric
-                    best_state = [m.state_dict() for m in models]
+                    # deepcopy is required: state_dict() tensors are .detach()'d
+                    # views that share storage with the live parameters, so a
+                    # bare snapshot would be silently mutated by subsequent
+                    # optimizer steps, making restore_best_for_final_eval a no-op.
+                    best_state = [copy.deepcopy(m.state_dict()) for m in models]
                     best_step = step + 1
                     best_val_bpd = float(val_bpd)
 
