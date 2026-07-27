@@ -213,6 +213,7 @@ def create_glow_normalizing_flow_model_2d(
     net_actnorm: bool = True,
     scale_cap: float = 2.0,
     legacy_conv_cap: Optional[float] = None,
+    actnorm_scale_cap: Optional[float] = None,
     verbose: bool = False,
 ) -> nf.MultiscaleFlow:
     """
@@ -313,6 +314,7 @@ def create_glow_normalizing_flow_model_2d(
                 net_actnorm=net_actnorm,
                 s_cap=scale_cap,
                 conv_s_cap=legacy_conv_cap,
+                actnorm_s_cap=actnorm_scale_cap,
             )
             for _ in range(k_level)
         ]
@@ -365,6 +367,7 @@ def create_glow_normalizing_flow_model_3d(
     net_actnorm: bool = True,
     scale_cap: float = 2.0,
     legacy_conv_cap: Optional[float] = None,
+    actnorm_scale_cap: Optional[float] = None,
     verbose: bool = False,
 ) -> nf.MultiscaleFlow:
     """
@@ -474,6 +477,7 @@ def create_glow_normalizing_flow_model_3d(
                 net_actnorm=net_actnorm,
                 s_cap=scale_cap,
                 conv_s_cap=legacy_conv_cap,
+                actnorm_s_cap=actnorm_scale_cap,
             )
             for _ in range(k_level)
         ]

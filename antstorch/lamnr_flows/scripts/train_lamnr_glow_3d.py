@@ -259,6 +259,7 @@ class LAMNrGlow3DTrainer(BaseLAMNrTrainer):
                 glowbase_max_log=args.glowbase_max_log,
                 split_mode="channel", scale=True, scale_map=args.scale_map,
                 leaky=0.0, net_actnorm=bool(args.net_actnorm), scale_cap=args.scale_cap,
+                actnorm_scale_cap=args.actnorm_scale_cap,
             )
 
             m = m.to(dev).float().train()
@@ -383,6 +384,13 @@ def _build_args() -> argparse.Namespace:
     ap.add_argument("--scale-map", default="tanh",
         choices=["tanh", "exp", "sigmoid", "sigmoid_inv"])
     ap.add_argument("--scale-cap",   type=float, default=2.0)
+    ap.add_argument("--actnorm-scale-cap", type=float, default=None,
+        help="Log-scale clamp for the per-block ActNorm layers. Defaults to "
+             "--scale-cap. With deep multiscale flows (L*K blocks, one ActNorm "
+             "each), even --scale-cap can be too large: a per-layer cap c with "
+             "N sequential ActNorm layers permits a worst-case exp(c*N) blowup "
+             "in the generative direction (sample()). Lower this independently "
+             "of --scale-cap if sampling still produces non-finite output.")
     ap.add_argument("--net-actnorm", action="store_true")
 
     # Training loop

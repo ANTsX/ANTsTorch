@@ -199,16 +199,16 @@ def _prime_if_needed(model: nn.Module, x: torch.Tensor) -> None:
     x1 = x[:1]
     
     # --- PLINDAGE ARCHITECTURAL COMPATIBLE 2D / 3D ---
-    # Si le tenseur est en 3D (sans batch/canal) -> (1, 1, D, H, W) ou (1, 1, H, W)
+    # Si le tenseur est en 3D (sans batch/canal) -> (1, 1, H, W, D) ou (1, 1, H, W)
     if x1.ndim == 3:
         x1 = x1.unsqueeze(0).unsqueeze(1)
-        
+
     # Si le tenseur a 4 dimensions, il faut distinguer la 2D de la 3D :
     elif x1.ndim == 4:
         # Cas A : C'est un lot 2D déjà formaté avec son canal unitaire (B, 1, H, W) ou (B, 3, H, W)
         if x1.shape[1] == 1 or x1.shape[1] == 3:
             pass
-        # Cas B : C'est un lot 3D brut qui n'a pas encore son canal (B, D, H, W) -> (B, 1, D, H, W)
+        # Cas B : C'est un lot 3D brut qui n'a pas encore son canal (B, H, W, D) -> (B, 1, H, W, D)
         else:
             x1 = x1.unsqueeze(1)
     # -------------------------------------------------
@@ -417,8 +417,27 @@ def _save_samples_grid(
     try:
         x = s[0] if isinstance(s, (list, tuple)) else s
         x = _coerce_nchw_4d(x, target_hw=target_hw)
-        _std = x.std().item() if torch.isfinite(x).all() else 0.0
-        assert torch.isfinite(x).all(), "non-finite in sample grid"
+
+        # Instead of discarding the whole grid on non-finite values, sanitize
+        # them in place (NaN -> 0, +/-Inf -> the finite min/max observed in
+        # this batch) so a sample grid still gets saved every plot interval.
+        # This is purely for the diagnostic PNG; it has no effect on the
+        # training loss/gradients.
+        sanitize_note = None
+        nonfinite_mask = ~torch.isfinite(x)
+        n_nonfinite = int(nonfinite_mask.sum().item())
+        if n_nonfinite > 0:
+            finite_vals = x[~nonfinite_mask]
+            if finite_vals.numel() > 0:
+                fmin = float(finite_vals.min())
+                fmax = float(finite_vals.max())
+            else:
+                fmin, fmax = 0.0, 1.0
+            x = torch.nan_to_num(x, nan=0.0, posinf=fmax, neginf=fmin)
+            pct = 100.0 * n_nonfinite / x.numel()
+            sanitize_note = f"sanitized {n_nonfinite} non-finite voxel(s) ({pct:.3f}%)"
+
+        _std = x.std().item()
 
         valid = {"to01", "clamp", "both"}
         if which_type not in valid:
@@ -439,7 +458,7 @@ def _save_samples_grid(
 
         _save(x_to01,  "_to01.png")
         _save(x_clamp, "_clamp.png")
-        return True, None
+        return True, sanitize_note
     except Exception as e:
         return False, str(e)
 
@@ -995,6 +1014,10 @@ class BaseLAMNrTrainer(abc.ABC):
             for vi, m in enumerate(self.models):
                 xb = xs[vi][:1]
                 if xb.ndim == 3:
+                    # (B, H, W) -> (B, 1, H, W)
+                    xb = xb.unsqueeze(1)
+                elif xb.ndim == 4 and xb.shape[1] not in (1, 3):
+                    # Raw 3-D volume batch without a channel dim: (B, H, W, D) -> (B, 1, H, W, D)
                     xb = xb.unsqueeze(1)
                 xb = xb.to(dtype=torch.float32, device=self.dev)
                 p = next(m.parameters(), None)
@@ -1362,6 +1385,8 @@ class BaseLAMNrTrainer(abc.ABC):
                             torch.cuda.set_rng_state_all(cuda_states)
                     if not ok:
                         tqdm.write(f"[warn] model sampling failed view {vi} @ {it}: {err}")
+                    elif err:
+                        tqdm.write(f"[info] model sample grid view {vi} @ {it}: {err}")
                     any_ok = any_ok or ok
                 if any_ok:
                     tqdm.write(f"[samples] saved model sample grids @ iter {it}")
