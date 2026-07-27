@@ -1401,8 +1401,8 @@ class BaseLAMNrTrainer(abc.ABC):
                 
                 grid = tv.utils.make_grid(imgs, nrow=10, padding=2, normalize=False)
                 tv.utils.save_image(grid, str(run_dir / f"input_data_view{vi}.png"))
-                
-                del x_all, x_v, imgs
+
+                del x_all, list_of_views, imgs
             
             del all_batches
             gc.collect()
