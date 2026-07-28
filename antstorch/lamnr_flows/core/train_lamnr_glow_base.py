@@ -369,16 +369,19 @@ def _make_grid_canvas(x: torch.Tensor, nrow: int = 10) -> torch.Tensor:
 
 
 @torch.no_grad()
-def _save_samples_grid(
+def _sample_chunk(
     model: nn.Module,
     n: int,
     temp: float,
-    out_prefix,
-    nrow: int = 10,
-    target_hw=None,
     warm_x=None,
-    which_type: str = "to01",
-) -> Tuple[bool, Optional[str]]:
+) -> Tuple[Optional[torch.Tensor], Optional[str]]:
+    """
+    Draw a single chunk of ``n`` samples from ``model``, with the same
+    GPU/CPU fallback chain used previously in ``_save_samples_grid``.
+
+    Returns (x, None) on success — where x is the raw sample tensor, still
+    on its original device — or (None, error_message) on failure.
+    """
     temp_tensor = torch.tensor(temp, dtype=torch.float32)
     device_original = next(model.parameters()).device
     try:
@@ -396,7 +399,7 @@ def _save_samples_grid(
                 except TypeError:
                     s = model.sample(n)
             except Exception as e2:
-                return False, str(e2)
+                return None, str(e2)
         else:
             try:
                 model.to("cpu")
@@ -412,10 +415,55 @@ def _save_samples_grid(
                 model.to(device_original)
             except Exception as e_cpu:
                 model.to(device_original)
-                return False, f"Primary failed: {e}. CPU fallback failed: {e_cpu}"
+                return None, f"Primary failed: {e}. CPU fallback failed: {e_cpu}"
+
+    x = s[0] if isinstance(s, (list, tuple)) else s
+    return x, None
+
+
+@torch.no_grad()
+def _save_samples_grid(
+    model: nn.Module,
+    n: int,
+    temp: float,
+    out_prefix,
+    nrow: int = 10,
+    target_hw=None,
+    warm_x=None,
+    which_type: str = "to01",
+    chunk_size: int = 20,
+) -> Tuple[bool, Optional[str]]:
+    """
+    Generates ``n`` samples from ``model`` in chunks of at most
+    ``chunk_size``.
+
+    Rationale: model.sample() is called directly on the underlying module
+    (see GlowStepWrapper.sample / GlowDataParallel.sample), which bypasses
+    DataParallel's multi-GPU scatter entirely — the whole generative pass
+    runs on a single GPU. Drawing all ``n`` samples (previously 100) in one
+    shot creates a large single-device memory spike every --eval-interval
+    iterations; on deep 3D flows (L*K coupling steps) at full resolution
+    this was tipping GPU0 into OOM a few hundred iterations later. Chunking
+    + moving each chunk to CPU immediately + clearing the CUDA cache between
+    chunks bounds that peak.
+    """
+    chunks: List[torch.Tensor] = []
+    remaining = int(n)
+    csize = max(1, int(chunk_size))
+    while remaining > 0:
+        k = min(csize, remaining)
+        x_chunk, err = _sample_chunk(model, k, temp, warm_x=warm_x)
+        if x_chunk is None:
+            return False, err
+        chunks.append(x_chunk.detach().to("cpu"))
+        del x_chunk
+        remaining -= k
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     try:
-        x = s[0] if isinstance(s, (list, tuple)) else s
+        x = torch.cat(chunks, dim=0)
+        del chunks
         x = _coerce_nchw_4d(x, target_hw=target_hw)
 
         # Instead of discarding the whole grid on non-finite values, sanitize
@@ -553,6 +601,8 @@ def screen_dump_run_config(
     add("views", getattr(args, "num_views", None))
     add("H×WxD", f"{cfg.get('H')}×{cfg.get('W')}×{cfg.get('D')}")
     add("L / K / hidden", f"{cfg.get('L')} / {cfg.get('K')} / {cfg.get('hidden')}")
+    add("base", cfg.get("base"))
+    add("net_actnorm", _fmt_bool(cfg.get("net_actnorm")))
     add("precision / amp_dtype", f"{cfg.get('precision')} / {cfg.get('amp_dtype')}")
     add("devices", cfg.get("devices"))
     add("num_workers", cfg.get("num_workers"))
@@ -563,17 +613,28 @@ def screen_dump_run_config(
     add("grad_accum", cfg.get("grad_accum"))
     add("effective_batch", cfg.get("effective_batch"))
     add("max_iter / extra", f"{cfg.get('max_iter')} / {cfg.get('extra_iters')}")
+    add("eval / plot interval", f"{cfg.get('eval_interval')} / {cfg.get('plot_interval')}")
     add("lr / warmup", f"{cfg.get('lr')} / {cfg.get('warmup_iters')}")
     add("grad_clip", cfg.get("grad_clip"))
     add("weight_decay", cfg.get("weight_decay"))
     add("ema / decay", f"{_fmt_bool(cfg.get('ema'))} / {cfg.get('ema_decay')}")
-    
+
     add("lr_decay_gamma/steps", f"{cfg.get('lr_decay_gamma')} / {cfg.get('lr_decay_steps')}")
-    add("plateau (fac/pat/thr)", f"{cfg.get('plateau_factor')} / {cfg.get('plateau_patience')} / {cfg.get('plateau_threshold')}")
+    add(
+        "plateau (fac/pat/thr/cd)",
+        f"{cfg.get('plateau_factor')} / {cfg.get('plateau_patience')} / "
+        f"{cfg.get('plateau_threshold')} / {cfg.get('plateau_cooldown')}",
+    )
+    add("min_lr", cfg.get("min_lr"))
+
+    # Checkpointing / resume
+    add("resume", cfg.get("resume") or None)
+    add("auto_resume / use_ckpt_config", f"{_fmt_bool(cfg.get('auto_resume'))} / {_fmt_bool(cfg.get('use_ckpt_config'))}")
 
     # Data & Augmentation
     add("slice_idx", cfg.get("slice_idx"))
     add("val_frac", cfg.get("val_frac"))
+    add("subject_limit", cfg.get("subject_limit") or None)
     add("train / val samples", f"{cfg.get('train_samples')} / {cfg.get('val_samples')}")
     add("disable_aug_anneal", _fmt_bool(cfg.get("disable_aug_anneal")))
     add("aug_schedules", cfg.get("aug_schedules"))
@@ -582,7 +643,12 @@ def screen_dump_run_config(
     add("align", cfg.get("align"))
     add("weighting", cfg.get("weighting"))
     add("align_weight/warmup", f"{cfg.get('align_weight')} / {cfg.get('align_warmup')}")
+    add("proj_dim / proj_hidden", f"{cfg.get('proj_dim')} / {cfg.get('proj_hidden')}")
     add("vicreg (i/v/c/g)", f"{cfg.get('vicreg_inv')}/{cfg.get('vicreg_var')}/{cfg.get('vicreg_cov')}/{cfg.get('vicreg_gamma')}")
+    add("temperature (infonce)", cfg.get("temperature"))
+    add("barlow_lambda", cfg.get("barlow_lambda"))
+    add("hsic_sigma", cfg.get("hsic_sigma"))
+    add("init_logvar (nll/align)", f"{cfg.get('init_logvar_nll')} / {cfg.get('init_logvar_align')}")
 
     # CCA Screening
     add("screen", cfg.get("screen"))
@@ -593,9 +659,15 @@ def screen_dump_run_config(
 
     # Glow Specifics
     add("sample_mode / temp", f"{cfg.get('sample_mode')} / {cfg.get('sample_temp')}")
+    add("sample_chunk_size", cfg.get("sample_chunk_size"))
     add("smooth_alpha", cfg.get("smooth_alpha"))
     add("scale_map / scale_cap", f"{cfg.get('scale_map')} / {cfg.get('scale_cap')}")
-    add("glowbase (min/max log)", f"{cfg.get('glowbase_min_log')} / {cfg.get('glowbase_max_log')}")
+    add("actnorm_scale_cap", cfg.get("actnorm_scale_cap"))
+    add(
+        "glowbase (min/max log, logscale_factor)",
+        f"{cfg.get('glowbase_min_log')} / {cfg.get('glowbase_max_log')} / "
+        f"{cfg.get('glowbase_logscale_factor')}",
+    )
 
     if dataset_info:
         rows.append("-" * 60)
@@ -1378,6 +1450,7 @@ class BaseLAMNrTrainer(abc.ABC):
                             target_hw=(args.H, args.W),
                             warm_x=tmpl[vi],
                             which_type=getattr(args, "sample_grid_norm", "to01"),
+                            chunk_size=int(getattr(args, "sample_chunk_size", 20)),
                         )
                     finally:
                         torch.random.set_rng_state(cpu_state)

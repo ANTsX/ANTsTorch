@@ -536,6 +536,10 @@ def _build_args() -> argparse.Namespace:
     ap.add_argument("--sample-mode", default="model", choices=["model","data","off"])
     ap.add_argument("--sample-temp", type=float, default=1.0)
     ap.add_argument("--sample-grid-norm", default="to01", choices=["to01","clamp","both"])
+    ap.add_argument("--sample-chunk-size", type=int, default=20,
+        help="Max number of images generated per model.sample() call during "
+             "preview grids. model.sample() runs on a single GPU (it bypasses "
+             "DataParallel), so lower this if preview generation triggers OOM.")
 
     # Screening
     ap.add_argument("--screen",        default="none", choices=["none","cca","hsic"])
