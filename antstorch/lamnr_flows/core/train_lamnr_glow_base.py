@@ -1269,9 +1269,31 @@ class BaseLAMNrTrainer(abc.ABC):
             if self.scaler.is_enabled():
                 self.scaler.unscale_(self.opt)
             all_params = [p for g in self.opt.param_groups for p in g["params"]]
-            torch.nn.utils.clip_grad_norm_(
+            total_norm = torch.nn.utils.clip_grad_norm_(
                 all_params, max_norm=float(getattr(args, "grad_clip", 2.0))
             )
+
+            # Explicit finite-gradient guard.
+            #
+            # The forward-pass anomaly checks above only inspect the loss
+            # value, not the gradients produced by backward(). GradScaler
+            # normally provides this protection (it skips optimizer.step()
+            # on non-finite grads) -- but self.scaler is only enabled for
+            # fp16 (see setup()); for bf16 (our default under
+            # --precision mixed) or fp32 it stays disabled, since bf16
+            # doesn't need loss-scaling. That leaves no safety net here: a
+            # single NaN/Inf gradient would otherwise permanently poison
+            # Adamax's moving averages (exp_avg/exp_inf) for the affected
+            # parameters, producing NaN logp on every subsequent iteration
+            # with no recovery (observed in practice around iter ~2335).
+            if not torch.isfinite(total_norm):
+                tqdm.write(
+                    f"[anomaly] skipping optimizer step at iter {it} "
+                    f"(non-finite grad norm={float(total_norm):.2f})"
+                )
+                self.opt.zero_grad(set_to_none=True)
+                continue
+
             if self.scaler.is_enabled():
                 self.scaler.step(self.opt)
                 self.scaler.update()
