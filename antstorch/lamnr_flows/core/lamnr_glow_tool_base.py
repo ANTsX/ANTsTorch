@@ -2530,7 +2530,18 @@ class GlowToolBase(ABC):
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         all_panels = torch.cat(panels, dim=0)
-        n_cols = 5 if (gauss_blob and levels_to_edit) else 3
+        # Matches the panel stack built above: [x, x_hat, x_hat_e, diff] (4
+        # volumes/subject) when editing latents, [x, x_hat, diff] (3) when
+        # not. This must equal save_volume's `nrow` exactly -- previously
+        # this was 5 (off by one), which silently mismatched the true
+        # 4-volume group size. save_volume falls back to ungrouped, generic
+        # "vol" naming whenever n_total % nrow != 0, so every group boundary
+        # was wrong: filenames like "..._item004_vol.nii.gz" no longer lined
+        # up with a consistent (subject, role) pair, and could even land on
+        # the same raw volume (e.g. subject 1's unedited `x`) across
+        # different --edit-levels runs -- which is exactly why those runs
+        # could look identical despite editing different latent levels.
+        n_cols = 4 if (gauss_blob and levels_to_edit) else 3
         self.save_volume(all_panels, out_path, nrow=n_cols)
         print(f"[recon] saved → {out_path}")
 
