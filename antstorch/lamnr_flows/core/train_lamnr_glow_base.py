@@ -707,6 +707,7 @@ def screen_dump_run_config(
     # Glow Specifics
     add("sample_mode / temp", f"{cfg.get('sample_mode')} / {cfg.get('sample_temp')}")
     add("sample_chunk_size", cfg.get("sample_chunk_size"))
+    add("grad_checkpoint", cfg.get("grad_checkpoint"))
     add("smooth_alpha", cfg.get("smooth_alpha"))
     add("scale_map / scale_cap", f"{cfg.get('scale_map')} / {cfg.get('scale_cap')}")
     add("actnorm_scale_cap", cfg.get("actnorm_scale_cap"))
@@ -1067,7 +1068,8 @@ class BaseLAMNrTrainer(abc.ABC):
     @staticmethod
     def _ema_source(m: nn.Module) -> nn.Module:
         """
-        Unwrap DataParallel/DDP before deep-copying for an EMA model.
+        Unwrap DataParallel/DDP/GlowStepWrapper before deep-copying for an
+        EMA model.
 
         Deep-copying a DDP-wrapped module directly is risky -- DDP holds
         process-group/reducer state that isn't generally deepcopy-safe --
@@ -1075,8 +1077,19 @@ class BaseLAMNrTrainer(abc.ABC):
         eval/sampling (no backward), so they never need DataParallel's
         thread-scatter or DDP's gradient-sync machinery, just a plain
         forward pass on a single device.
+
+        We unwrap two levels for a wrapped model -- m.module (the
+        GlowStepWrapper) then .model (the bare MultiscaleFlow) -- not just
+        one. GlowStepWrapper exists solely to give DataParallel/DDP a
+        forward() with the (log_prob, z_flat) tuple signature needed for
+        scatter/gather; it contributes no parameters of its own. Stopping
+        at GlowStepWrapper left EMA state_dicts keyed with a "model."
+        prefix that clean_sd (fully stripped by _strip_dp_prefix) doesn't
+        have, breaking resume. MultiscaleFlow has its own native
+        log_prob()/sample(), so unwrapping all the way down is safe for
+        every EMA use site.
         """
-        return m.module if isinstance(m, (GlowDataParallel, GlowDDP)) else m
+        return m.module.model if isinstance(m, (GlowDataParallel, GlowDDP)) else m
 
     def _load_model_state(self, m: nn.Module, sd: dict) -> None:
         """Load state dict into m, stripping DataParallel/DDP prefixes from sd."""

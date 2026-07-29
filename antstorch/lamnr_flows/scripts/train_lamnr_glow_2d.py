@@ -386,6 +386,7 @@ class LAMNrGlow2DTrainer(BaseLAMNrTrainer):
                 leaky=0.0,
                 net_actnorm=bool(args.net_actnorm),
                 scale_cap=args.scale_cap,
+                grad_checkpoint={"auto": None, "on": True, "off": False}[args.grad_checkpoint],
             )
             m = m.to(dtype=torch.float32, device=dev).float().train()
 
@@ -585,6 +586,12 @@ def _build_args() -> argparse.Namespace:
         help="Enable torch.autograd.set_detect_anomaly(True) to pinpoint the "
              "exact forward op responsible for a NaN/Inf gradient (much "
              "slower — use for a short diagnostic run only, not full training).")
+    ap.add_argument("--grad-checkpoint", default="auto", choices=["auto", "on", "off"],
+        help="Control torch.utils.checkpoint on each level's flow sequence "
+             "(trades compute for activation memory). 'auto' (default) "
+             "checkpoints only levels with more than 10 flow steps. "
+             "'on'/'off' force it regardless of depth, e.g. to A/B-test "
+             "throughput vs. peak VRAM.")
 
     # Screening
     ap.add_argument("--screen",        default="none", choices=["none","cca","hsic"])

@@ -214,6 +214,7 @@ def create_glow_normalizing_flow_model_2d(
     scale_cap: float = 2.0,
     legacy_conv_cap: Optional[float] = None,
     actnorm_scale_cap: Optional[float] = None,
+    grad_checkpoint: Optional[bool] = None,
     verbose: bool = False,
 ) -> nf.MultiscaleFlow:
     """
@@ -339,7 +340,7 @@ def create_glow_normalizing_flow_model_2d(
         if i > 0:
             merges.append(nf.flows.Merge())
 
-    model = nf.MultiscaleFlow(q0, flows, merges)
+    model = nf.MultiscaleFlow(q0, flows, merges, grad_checkpoint=grad_checkpoint)
 
     model = _maybe_compile(model)
 
@@ -368,6 +369,7 @@ def create_glow_normalizing_flow_model_3d(
     scale_cap: float = 2.0,
     legacy_conv_cap: Optional[float] = None,
     actnorm_scale_cap: Optional[float] = None,
+    grad_checkpoint: Optional[bool] = None,
     verbose: bool = False,
 ) -> nf.MultiscaleFlow:
     """
@@ -429,6 +431,14 @@ def create_glow_normalizing_flow_model_3d(
         any newly-trained model. Leave as None for checkpoints trained after
         the fix (or for new training runs) -- then the conv uses `scale_cap`
         like everything else, as intended.
+    grad_checkpoint : bool, optional
+        Override for MultiscaleFlow's gradient-checkpointing heuristic
+        (torch.utils.checkpoint on each level's flow sequence during
+        training, trading compute for activation memory). None (default)
+        keeps the automatic per-level heuristic (checkpoint only if that
+        level has more than 10 flow steps). Pass True/False to force it on
+        or off regardless of depth -- useful for A/B-testing throughput vs.
+        peak memory.
 
     Returns
     -------
@@ -500,7 +510,7 @@ def create_glow_normalizing_flow_model_3d(
         if i > 0:
             merges.append(nf.flows.Merge())
 
-    model = nf.MultiscaleFlow(q0, flows, merges)
+    model = nf.MultiscaleFlow(q0, flows, merges, grad_checkpoint=grad_checkpoint)
 
     model = _maybe_compile(model)
 
