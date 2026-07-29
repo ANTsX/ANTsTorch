@@ -33,9 +33,12 @@ import ants
 import antstorch
 import antsnormflows as nf
 
+from torch.utils.data.distributed import DistributedSampler
+
 from antstorch.lamnr_flows.core.train_lamnr_glow_base import (
     BaseLAMNrTrainer,
     GlowDataParallel,
+    GlowDDP,
     GlowStepWrapper,
     _check_hw_divisible,
     _extract_views_from_batch,
@@ -59,6 +62,9 @@ def build_loaders_from_globs_3d(
     aug_schedules=None,
     disable_aug_anneal: bool = False,
     seed: int = 0,
+    is_ddp: bool = False,
+    rank: int = 0,
+    world_size: int = 1,
 ):
     """Load 3D ANTs volumes for multi-view training."""
 
@@ -132,14 +138,16 @@ def build_loaders_from_globs_3d(
         ]
 
     if num_workers > 0:
-        print(f"[info] Loading {len(subjects)} subjects using {num_workers} threads…")
+        if rank == 0:
+            print(f"[info] Loading {len(subjects)} subjects using {num_workers} threads…")
         with ThreadPoolExecutor(max_workers=num_workers) as ex:
             images_by_subject = list(
-                tqdm(ex.map(_load_subject, subjects), total=len(subjects), desc="Loading 3D")
+                tqdm(ex.map(_load_subject, subjects), total=len(subjects),
+                     desc="Loading 3D", disable=(rank != 0))
             )
     else:
         images_by_subject = [
-            _load_subject(s) for s in tqdm(subjects, desc="Loading 3D")
+            _load_subject(s) for s in tqdm(subjects, desc="Loading 3D", disable=(rank != 0))
         ]
 
     if not images_by_subject:
@@ -207,8 +215,26 @@ def build_loaders_from_globs_3d(
         dev_type = "cpu"
     use_pin_memory = (dev_type == "cuda")
 
+    # Under DDP, each rank must see a disjoint shard of the (virtual,
+    # number_of_samples-long) training indices, or every rank redundantly
+    # trains on identical data each step -- DistributedSampler handles the
+    # sharding; shuffle=True is passed to the sampler instead of the
+    # DataLoader (the two are mutually exclusive). train_ds itself still
+    # holds the full image pool on every rank (ImageDataset draws random
+    # augmented samples from that pool per index), so this only shards
+    # *which indices* each rank iterates, not the underlying data held in
+    # memory. The val_loader is left unsharded/unchanged: only rank 0 runs
+    # _run_eval (see train()), so other ranks simply never touch it.
+    train_sampler = (
+        DistributedSampler(
+            train_ds, num_replicas=world_size, rank=rank, shuffle=True, seed=seed,
+        )
+        if is_ddp else None
+    )
     train_loader = DataLoader(
-        train_ds, batch_size=batch, shuffle=True,
+        train_ds, batch_size=batch,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         num_workers=num_workers, pin_memory=use_pin_memory,
     )
     val_loader = DataLoader(
@@ -268,11 +294,16 @@ class LAMNrGlow3DTrainer(BaseLAMNrTrainer):
                     print(f"[warn] casting param {name} {p.dtype} → float32")
                     p.data = p.data.float()
 
-            # Force ActNorm init on device
+            # Force ActNorm init on device. Under DDP every rank runs this
+            # with the same seed on the same dummy shape, so each rank's
+            # ActNorm buffers start identical before wrapping -- and DDP's
+            # constructor broadcasts rank 0's params to all ranks anyway,
+            # so this is belt-and-suspenders, not a correctness requirement.
             with torch.no_grad():
                 dummy_shape = (1, *input_shape)
                 dummy       = torch.randn(dummy_shape, device=dev, dtype=torch.float32)
-                print(f"[init] Initializing ActNorm for view {vi} on {dev}…")
+                if self.rank == 0:
+                    print(f"[init] Initializing ActNorm for view {vi} on {dev}…")
                 try:
                     _ = m.log_prob(dummy)
                 except Exception as e:
@@ -283,7 +314,18 @@ class LAMNrGlow3DTrainer(BaseLAMNrTrainer):
             if not hasattr(m, "input_shape"):
                 m.input_shape = input_shape
 
-            if torch.cuda.device_count() > 1 and len(args.devices.split(",")) > 1:
+            if self.is_ddp:
+                if self.rank == 0:
+                    print(f"[info] Wrapping view {vi} in DistributedDataParallel "
+                          f"(world_size={self.world_size}, device={dev})")
+                models.append(
+                    GlowDDP(
+                        GlowStepWrapper(m),
+                        device_ids=[self.local_rank],
+                        output_device=self.local_rank,
+                    )
+                )
+            elif torch.cuda.device_count() > 1 and len(args.devices.split(",")) > 1:
                 print(f"[info] Wrapping view {vi} in DataParallel on {args.devices}")
                 device_ids = [int(d.split(":")[-1]) for d in args.devices.split(",")]
                 models.append(GlowDataParallel(GlowStepWrapper(m), device_ids=device_ids))
@@ -306,6 +348,9 @@ class LAMNrGlow3DTrainer(BaseLAMNrTrainer):
             aug_schedules=(args.aug_schedules if not args.disable_aug_anneal else None),
             disable_aug_anneal=args.disable_aug_anneal,
             seed=args.seed,
+            is_ddp=self.is_ddp,
+            rank=self.rank,
+            world_size=self.world_size,
         )
         # 3D volumes: shape is always (C=1, H, W, D)
         C = 1
@@ -409,7 +454,12 @@ def _build_args() -> argparse.Namespace:
     ap.add_argument("--num-workers",    type=int,   default=4)
 
     # Hardware & precision
-    ap.add_argument("--devices",   type=str, default="cuda:0")
+    ap.add_argument("--devices",   type=str, default="cuda:0",
+        help="Device(s) for single-process runs: 'cpu', 'cuda:0', or "
+             "'cuda:0,cuda:1' for legacy nn.DataParallel. Ignored when "
+             "launched under torchrun (RANK/LOCAL_RANK/WORLD_SIZE env vars "
+             "present) -- DDP binds each process to its LOCAL_RANK GPU "
+             "instead; see torchrun --nproc_per_node.")
     ap.add_argument("--precision", default="mixed", choices=["double","float","mixed"])
     ap.add_argument("--amp-dtype", default="bf16", choices=["bf16","fp16"])
     ap.add_argument("--seed",      type=int, default=0)
@@ -480,6 +530,12 @@ def _build_args() -> argparse.Namespace:
         help="Max number of volumes generated per model.sample() call during "
              "preview grids. model.sample() runs on a single GPU (it bypasses "
              "DataParallel), so lower this if preview generation triggers OOM.")
+
+    # Debugging
+    ap.add_argument("--detect-anomaly", action="store_true",
+        help="Enable torch.autograd.set_detect_anomaly(True) to pinpoint the "
+             "exact forward op responsible for a NaN/Inf gradient (much "
+             "slower — use for a short diagnostic run only, not full training).")
 
     # Screening
     ap.add_argument("--screen",         default="none", choices=["none","cca","hsic"])

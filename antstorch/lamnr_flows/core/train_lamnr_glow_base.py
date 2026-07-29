@@ -22,6 +22,7 @@ import copy
 import csv
 import gc
 import json
+import os
 import platform
 from contextlib import nullcontext
 from datetime import datetime
@@ -36,7 +37,10 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
 import torchvision as tv
+from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data.distributed import DistributedSampler
 from tqdm.auto import tqdm
 
 import ants
@@ -93,7 +97,50 @@ class GlowStepWrapper(nn.Module):
 
 
 class GlowDataParallel(nn.DataParallel):
-    """nn.DataParallel with explicit redirections for Glow-specific methods."""
+    """nn.DataParallel with explicit redirections for Glow-specific methods.
+
+    Kept around for single-process multi-GPU debugging (e.g. --devices
+    cuda:0,cuda:1 without torchrun) -- but nn.DataParallel scatters the
+    forward pass across GPUs using a Python ThreadPoolExecutor
+    (parallel_apply), and PyTorch's autograd engine backward pass runs
+    per-thread. In practice this made torch.autograd.set_detect_anomaly's
+    reported crash site non-deterministic across runs when a NaN gradient
+    appeared, and single-GPU (no DataParallel at all) reliably avoided the
+    issue -- consistent with a threading-related race in DataParallel's
+    backward, a known class of issue with this (largely superseded) API.
+    GlowDDP below is the safe multi-GPU path.
+    """
+
+    def log_prob(self, x):
+        return self.module.log_prob(x)
+
+    def inverse_and_log_det(self, x):
+        return self.module.inverse_and_log_det(x)
+
+    def sample(self, *args, **kwargs):
+        return self.module.sample(*args, **kwargs)
+
+
+class GlowDDP(DistributedDataParallel):
+    """
+    DistributedDataParallel with explicit redirections for Glow-specific
+    methods, mirroring GlowDataParallel.
+
+    Unlike nn.DataParallel (one process, multiple threads, one thread per
+    GPU), DDP runs one process per GPU: no shared Python-level threading
+    during forward/backward, gradient synchronization happens via NCCL
+    all-reduce after backward() completes locally on each process. This is
+    both the standard recommended multi-GPU approach in PyTorch and, in our
+    case, resolved a NaN-gradient issue that only reproduced under
+    DataParallel's multi-threaded backward.
+
+    IMPORTANT: log_prob()/inverse_and_log_det()/sample() below call
+    self.module directly, bypassing DDP's forward() -- which means they do
+    NOT trigger gradient synchronization. This is intentional and correct
+    for eval/sampling (no backward involved there), but must never be used
+    for the training forward pass -- that always goes through __call__
+    (DDP's own forward), same as the base nn.Module convention.
+    """
 
     def log_prob(self, x):
         return self.module.log_prob(x)
@@ -723,14 +770,55 @@ class BaseLAMNrTrainer(abc.ABC):
         self.args = args
         set_deterministic(args.seed)
 
-        # Device
-        if args.devices.lower() == "cpu":
-            dev = torch.device("cpu")
-        elif args.devices == "mps" and torch.backends.mps.is_available():
-            dev = torch.device("mps")
+        # Optional: torch.autograd.set_detect_anomaly(True) makes backward()
+        # raise immediately at the *forward* op that produced a NaN/Inf
+        # gradient, with a full stack trace, instead of just silently
+        # yielding a non-finite grad norm downstream (which our grad-finite
+        # guard in train() now catches, but only tells you *that* it
+        # happened, not *where*). Off by default: it's substantially
+        # slower, so only enable for a short diagnostic run.
+        if bool(getattr(args, "detect_anomaly", False)):
+            torch.autograd.set_detect_anomaly(True)
+            tqdm.write("[debug] torch.autograd.set_detect_anomaly(True) enabled — expect a large slowdown")
+
+        # Distributed (DDP) process group + device.
+        #
+        # Launched via `torchrun --nproc_per_node=N ...`: torchrun sets
+        # RANK/LOCAL_RANK/WORLD_SIZE env vars and spawns one process per
+        # GPU. We detect that here and init the NCCL process group; this
+        # replaces nn.DataParallel (one process, N threads) with N
+        # independent processes synchronizing gradients via all-reduce --
+        # no cross-GPU Python threading, which is what made DataParallel's
+        # backward non-deterministic under a NaN gradient (see GlowDDP
+        # docstring). Falls back to the previous single-process behavior
+        # (including optional DataParallel via --devices cuda:0,cuda:1)
+        # when not launched under torchrun, so single-GPU debugging and
+        # --detect-anomaly runs still work unchanged.
+        self.is_ddp = "WORLD_SIZE" in os.environ and int(os.environ["WORLD_SIZE"]) > 1
+        if self.is_ddp:
+            self.rank       = int(os.environ["RANK"])
+            self.local_rank = int(os.environ["LOCAL_RANK"])
+            self.world_size = int(os.environ["WORLD_SIZE"])
+            if not dist.is_initialized():
+                dist.init_process_group(backend="nccl")
+            torch.cuda.set_device(self.local_rank)
+            dev = torch.device(f"cuda:{self.local_rank}")
+            tqdm.write(
+                f"[ddp] rank {self.rank}/{self.world_size} bound to "
+                f"{dev} (local_rank={self.local_rank})"
+            )
         else:
-            dev = torch.device(args.devices.split(",")[0])
+            self.rank       = 0
+            self.local_rank = 0
+            self.world_size = 1
+            if args.devices.lower() == "cpu":
+                dev = torch.device("cpu")
+            elif args.devices == "mps" and torch.backends.mps.is_available():
+                dev = torch.device("mps")
+            else:
+                dev = torch.device(args.devices.split(",")[0])
         self.dev = dev
+        self.is_main_process = (self.rank == 0)
 
         # AMP
         if args.precision == "double":
@@ -856,31 +944,33 @@ class BaseLAMNrTrainer(abc.ABC):
         # Prime latent-shape caches
         self._prime_all_latent_shapes()
 
-        # CSV header
-        if not self.csv_path.exists():
-            with open(self.csv_path, "w") as f:
-                f.write("iter,loss,sum_bpd,lr\n")
-        else:
-            try:
-                df = pd.read_csv(self.csv_path)
-                df = df[df["iter"] < self.start_iter]
-                df.to_csv(self.csv_path, index=False)
-            except Exception as e:
-                print(f"[warn] Could not clean CSV: {e}")
+        # CSV header + run-config dump: rank-0-only file writes.
+        if self.rank == 0:
+            if not self.csv_path.exists():
+                with open(self.csv_path, "w") as f:
+                    f.write("iter,loss,sum_bpd,lr\n")
+            else:
+                try:
+                    df = pd.read_csv(self.csv_path)
+                    df = df[df["iter"] < self.start_iter]
+                    df.to_csv(self.csv_path, index=False)
+                except Exception as e:
+                    print(f"[warn] Could not clean CSV: {e}")
 
-        # Run-config dump
-        try:
-            dataset_info = {
-                "train_len": len(getattr(self.train_loader.dataset, "images", [])),
-                "val_len":   len(getattr(self.val_loader.dataset,   "images", [])),
-                "batch_size": args.batch,
-                "grad_accum": int(getattr(args, "grad_accum", 1)),
-                "effective_batch": int(args.batch) * int(getattr(args, "grad_accum", 1)),
-            }
-        except Exception:
-            dataset_info = {"note": "dataset stats unavailable"}
-        screen_dump_run_config(args, self.run_dir, note="post-dataset build",
-                               dataset_info=dataset_info)
+            try:
+                dataset_info = {
+                    "train_len": len(getattr(self.train_loader.dataset, "images", [])),
+                    "val_len":   len(getattr(self.val_loader.dataset,   "images", [])),
+                    "batch_size": args.batch,
+                    "grad_accum": int(getattr(args, "grad_accum", 1)),
+                    "effective_batch": int(args.batch) * int(getattr(args, "grad_accum", 1)),
+                }
+            except Exception:
+                dataset_info = {"note": "dataset stats unavailable"}
+            screen_dump_run_config(args, self.run_dir, note="post-dataset build",
+                                   dataset_info=dataset_info)
+        if self.is_ddp:
+            dist.barrier()
 
     # ------------------------------------------------------------------
     # Checkpoint save / load
@@ -974,10 +1064,24 @@ class BaseLAMNrTrainer(abc.ABC):
             except (ValueError, IndexError):
                 continue
 
+    @staticmethod
+    def _ema_source(m: nn.Module) -> nn.Module:
+        """
+        Unwrap DataParallel/DDP before deep-copying for an EMA model.
+
+        Deep-copying a DDP-wrapped module directly is risky -- DDP holds
+        process-group/reducer state that isn't generally deepcopy-safe --
+        and pointless even when it works: EMA models are only ever used for
+        eval/sampling (no backward), so they never need DataParallel's
+        thread-scatter or DDP's gradient-sync machinery, just a plain
+        forward pass on a single device.
+        """
+        return m.module if isinstance(m, (GlowDataParallel, GlowDDP)) else m
+
     def _load_model_state(self, m: nn.Module, sd: dict) -> None:
-        """Load state dict into m, stripping DataParallel prefixes from sd."""
+        """Load state dict into m, stripping DataParallel/DDP prefixes from sd."""
         clean_sd = self._strip_dp_prefix(sd)
-        if isinstance(m, GlowDataParallel):
+        if isinstance(m, (GlowDataParallel, GlowDDP)):
             m.module.model.load_state_dict(clean_sd)
         else:
             m.load_state_dict(clean_sd)
@@ -1059,7 +1163,7 @@ class BaseLAMNrTrainer(abc.ABC):
         # EMA weights
         if args.ema and blob.get("ema") is not None:
             self.ema_models = [
-                copy.deepcopy(m).eval().to(dtype=torch.float32, device=self.dev)
+                copy.deepcopy(self._ema_source(m)).eval().to(dtype=torch.float32, device=self.dev)
                 for m in self.models
             ]
             for em in self.ema_models:
@@ -1123,6 +1227,37 @@ class BaseLAMNrTrainer(abc.ABC):
                             print(f"[prime] ema view{vi} failed: {ex}")
 
     # ------------------------------------------------------------------
+    # DDP: cross-rank agreement on "skip this step" decisions
+    # ------------------------------------------------------------------
+
+    def _sync_skip_flag(self, is_bad: bool) -> bool:
+        """
+        Under DDP, each rank sees a different micro-batch (DistributedSampler
+        shards the data), so a NaN/anomaly decision computed from local data
+        -- bad_batch, non-finite L_nll/loss_total -- can differ across ranks.
+        If rank 0 decides to `continue` (skip backward()) while rank 1
+        proceeds to call it, backward()'s NCCL all-reduce is a collective op:
+        rank 1 blocks forever waiting for a contribution rank 0 never sends.
+        That's a silent hang, not a crash -- much worse than the bug it would
+        be masking.
+
+        This all-reduces a boolean "I want to skip" flag with MAX, so if
+        *any* rank wants to skip, *all* ranks skip together -- every rank
+        takes the same branch every iteration, guaranteeing backward() is
+        either called by everyone or no one.
+
+        (The post-backward non-finite-grad-norm check further down doesn't
+        need this: DDP's backward() has already all-reduced gradients across
+        ranks by the time we compute the norm, so that value is already
+        identical on every rank -- no separate sync required there.)
+        """
+        if not self.is_ddp:
+            return is_bad
+        flag = torch.tensor(1.0 if is_bad else 0.0, device=self.dev)
+        dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+        return bool(flag.item() > 0.0)
+
+    # ------------------------------------------------------------------
     # Training loop
     # ------------------------------------------------------------------
 
@@ -1138,19 +1273,28 @@ class BaseLAMNrTrainer(abc.ABC):
         ema_sum_bpd_disp  = None
         ema_bpd_views_disp = [None] * n_views
 
+        # DistributedSampler needs set_epoch() before each new epoch's
+        # iterator is created, or every rank re-draws the *same* shuffled
+        # shard every epoch (the sampler's shuffle is seeded by the epoch
+        # number). getattr(...) is a no-op for the non-DDP / non-sampler
+        # case (plain shuffle=True DataLoader has no .sampler.set_epoch).
+        train_epoch = 0
+        if hasattr(self.train_loader, "sampler") and hasattr(self.train_loader.sampler, "set_epoch"):
+            self.train_loader.sampler.set_epoch(train_epoch)
         train_iter      = iter(self.train_loader)
         input_data_saved = False
 
-        tqdm.write(
-            f"[info] training {n_views} view(s); "
-            f"params/view: {[n_params(m) for m in models]}"
-        )
-        pbar = tqdm(
-            total=args.max_iter,
-            initial=self.start_iter - 1,
-            dynamic_ncols=True,
-            desc="train",
-        )
+        if self.rank == 0:
+            tqdm.write(
+                f"[info] training {n_views} view(s); "
+                f"params/view: {[n_params(m) for m in models]}"
+            )
+            pbar = tqdm(
+                total=args.max_iter,
+                initial=self.start_iter - 1,
+                dynamic_ncols=True,
+                desc="train",
+            )
 
         for it in range(self.start_iter, args.max_iter + 1):
             grad_accum = max(1, int(getattr(args, "grad_accum", 1)))
@@ -1172,6 +1316,9 @@ class BaseLAMNrTrainer(abc.ABC):
                 try:
                     x = next(train_iter)
                 except StopIteration:
+                    train_epoch += 1
+                    if hasattr(self.train_loader, "sampler") and hasattr(self.train_loader.sampler, "set_epoch"):
+                        self.train_loader.sampler.set_epoch(train_epoch)
                     train_iter = iter(self.train_loader)
                     x = next(train_iter)
                     # Epoch boundary: flush GPU caches
@@ -1200,8 +1347,15 @@ class BaseLAMNrTrainer(abc.ABC):
                     for vi, m in enumerate(models):
                         x_v = self.extract_view(x, vi, dev)
 
-                        # Forward pass
-                        if isinstance(m, GlowDataParallel):
+                        # Forward pass. Must go through __call__ (m(...))
+                        # for both GlowDataParallel and GlowDDP -- calling
+                        # .log_prob()/.inverse_and_log_det() directly (the
+                        # else branch) bypasses DDP's forward(), which is
+                        # what registers the autograd hooks DDP needs to
+                        # all-reduce gradients in backward(). Skipping that
+                        # wouldn't just be a perf issue, it would silently
+                        # stop gradient synchronization across ranks.
+                        if isinstance(m, (GlowDataParallel, GlowDDP)):
                             logp_v, zflat = m(x_v.float())
                         else:
                             logp_v = m.log_prob(x_v.float())
@@ -1227,10 +1381,13 @@ class BaseLAMNrTrainer(abc.ABC):
                         # Note: z_v and bpd_v are referenced by the computation graph;
                         # del here only drops Python refs — backward() is still intact.
 
-                if bad_batch or not torch.isfinite(L_nll) or abs(L_nll.item()) > 1e7:
+                local_bad = bad_batch or not torch.isfinite(L_nll) or abs(L_nll.item()) > 1e7
+                if self._sync_skip_flag(local_bad):
                     tqdm.write(
                         f"[anomaly] skipping iter {it} "
-                        f"(bad_batch={bad_batch}, L_nll={L_nll.item():.2f})"
+                        f"(bad_batch={bad_batch}, L_nll={L_nll.item():.2f}"
+                        + (", flagged by another rank" if (self.is_ddp and not local_bad) else "")
+                        + ")"
                     )
                     bad_update = True
                     # Cleanup this micro-batch before breaking
@@ -1247,8 +1404,12 @@ class BaseLAMNrTrainer(abc.ABC):
                     s_align=self.s_align,
                 )
 
-                if not torch.isfinite(loss_total):
-                    tqdm.write(f"[nan] loss_total non-finite at iter {it}; skipping")
+                local_bad = not torch.isfinite(loss_total)
+                if self._sync_skip_flag(local_bad):
+                    tqdm.write(
+                        f"[nan] loss_total non-finite at iter {it}; skipping"
+                        + (" (flagged by another rank)" if (self.is_ddp and not local_bad) else "")
+                    )
                     bad_update = True
                     del xs_train, lat_flat
                     gc.collect()
@@ -1328,7 +1489,7 @@ class BaseLAMNrTrainer(abc.ABC):
             # Lazy EMA init (after first successful update)
             if args.ema and self.ema_models is None:
                 self.ema_models = [
-                    copy.deepcopy(m).eval().to(dtype=torch.float32, device=dev)
+                    copy.deepcopy(self._ema_source(m)).eval().to(dtype=torch.float32, device=dev)
                     for m in models
                 ]
                 for em in self.ema_models:
@@ -1336,7 +1497,15 @@ class BaseLAMNrTrainer(abc.ABC):
                         p.requires_grad_(False)
                 with torch.no_grad():
                     for vi, (m, em) in enumerate(zip(models, self.ema_models)):
-                        _copy_actnorm_state(m, em)
+                        # Pre-existing off-by-one bug when m is wrapped
+                        # (DataParallel/DDP): src.modules() then yields an
+                        # extra leading entry (the wrapper itself) that
+                        # dst.modules() (unwrapped em) doesn't have, so the
+                        # zip() inside _copy_actnorm_state silently paired
+                        # up the wrong ActNorm modules. Unwrap m the same
+                        # way em was unwrapped (_ema_source) so both sides
+                        # of the zip start from the same module structure.
+                        _copy_actnorm_state(self._ema_source(m), em)
                         xv_real = self.extract_view(x, vi, dev)
                         warmup_actnorm_with_real_batch(em, xv_real)
                         del xv_real
@@ -1389,70 +1558,103 @@ class BaseLAMNrTrainer(abc.ABC):
             }
             for i in range(n_views):
                 postfix[f"v{i}"] = f"{curr_bpd_views[i]:.3f}/{ema_bpd_views_disp[i]:.3f}"
-            pbar.set_postfix(postfix)
-            pbar.update(1)
+            # Progress bar, file writes (input grids, CSV, samples, plots,
+            # checkpoints) are rank-0-only under DDP: every rank computes an
+            # identical (synced-gradient) update, so having every rank also
+            # write the same files would just race/duplicate for no benefit.
+            if self.rank == 0:
+                pbar.set_postfix(postfix)
+                pbar.update(1)
 
-            # One-time input data grid
-            if not input_data_saved:
-                # _coerce_nchw_4d is defined in this module — call directly
-                eval_m = self.ema_models if self.ema_models else models
-                ok, err = self._save_input_grids(eval_m, it)
-                if ok:
-                    tqdm.write(f"[samples] saved input data grids @ iter {it}")
-                    input_data_saved = True
-                else:
-                    tqdm.write(f"[warn] input data grid failed: {err}")
+                # One-time input data grid
+                if not input_data_saved:
+                    # _coerce_nchw_4d is defined in this module — call directly
+                    eval_m = self.ema_models if self.ema_models else models
+                    ok, err = self._save_input_grids(eval_m, it)
+                    if ok:
+                        tqdm.write(f"[samples] saved input data grids @ iter {it}")
+                        input_data_saved = True
+                    else:
+                        tqdm.write(f"[warn] input data grid failed: {err}")
 
-            # CSV row
-            with open(self.csv_path, "a") as f:
-                f.write(f"{it},{curr_loss:.6f},{sum_bpd:.6f},{lr_now:.6g}\n")
+                # CSV row
+                with open(self.csv_path, "a") as f:
+                    f.write(f"{it},{curr_loss:.6f},{sum_bpd:.6f},{lr_now:.6g}\n")
 
-            # Eval + checkpoint
+            # Eval + checkpoint. _run_eval must be called by *every* rank
+            # (it does a dist.broadcast internally to keep each rank's LR
+            # scheduler in sync -- see its docstring); the rest is rank-0-only.
             if it % args.eval_interval == 0:
                 self._run_eval(it, n_dims)
-                self._run_sample_plots(it)
-                _save_metric_plots(self.csv_path, self.run_dir, remove_spikes=True)
-                self.save_checkpoint(it)
+                if self.rank == 0:
+                    self._run_sample_plots(it)
+                    _save_metric_plots(self.csv_path, self.run_dir, remove_spikes=True)
+                    self.save_checkpoint(it)
+                if self.is_ddp:
+                    dist.barrier()
 
             # ── End-of-iteration cleanup ──────────────────────────────
             del x, x_last
             gc.collect()
             # ─────────────────────────────────────────────────────────
 
-        pbar.close()
-        print("Done. Run dir:", str(self.run_dir))
+        if self.rank == 0:
+            pbar.close()
+            print("Done. Run dir:", str(self.run_dir))
+        if self.is_ddp:
+            dist.barrier()
+            dist.destroy_process_group()
 
     # ------------------------------------------------------------------
     # Eval helpers
     # ------------------------------------------------------------------
 
     def _run_eval(self, it: int, n_dims: int) -> None:
+        # Only rank 0 iterates val_loader (it's unsharded -- every rank
+        # would otherwise redundantly evaluate the identical full val set).
+        # But self.plateau (ReduceLROnPlateau) drives self.opt's LR, and
+        # each rank owns its own independent optimizer instance (DDP only
+        # syncs gradients, not optimizer/scheduler state) -- so if only
+        # rank 0 ever called plateau.step(), only rank 0's LR would get
+        # reduced, silently desynchronizing per-rank optimizers over a long
+        # run. Broadcast rank 0's avg_bpd so every rank's plateau scheduler
+        # advances identically.
         args        = self.args
         dev         = self.dev
         eval_models = self.ema_models if self.ema_models else self.models
 
-        with torch.no_grad():
-            bpd_acc         = []
-            self._tmpl_by_view = [None] * len(eval_models)
-            vbar = tqdm(total=10, leave=False, dynamic_ncols=True, desc=f"val@{it}")
+        if self.rank == 0:
+            with torch.no_grad():
+                bpd_acc         = []
+                self._tmpl_by_view = [None] * len(eval_models)
+                vbar = tqdm(total=10, leave=False, dynamic_ncols=True, desc=f"val@{it}")
 
-            for j, batch_val in enumerate(self.val_loader):
-                for vi, m in enumerate(eval_models):
-                    xv = self.extract_view(batch_val, vi, dev)
-                    self._tmpl_by_view[vi] = xv
-                    lp = m.log_prob(xv.float())
-                    lp = torch.nan_to_num(lp, nan=-1e9, posinf=-1e9, neginf=-1e9)
-                    bpd_acc.append(bits_per_dim(lp, n_dims).mean().item())
-                    del xv
-                vbar.update(1)
-                if len(bpd_acc) >= 10:
-                    break
-            vbar.close()
+                for j, batch_val in enumerate(self.val_loader):
+                    for vi, m in enumerate(eval_models):
+                        xv = self.extract_view(batch_val, vi, dev)
+                        self._tmpl_by_view[vi] = xv
+                        lp = m.log_prob(xv.float())
+                        lp = torch.nan_to_num(lp, nan=-1e9, posinf=-1e9, neginf=-1e9)
+                        bpd_acc.append(bits_per_dim(lp, n_dims).mean().item())
+                        del xv
+                    vbar.update(1)
+                    if len(bpd_acc) >= 10:
+                        break
+                vbar.close()
 
-            avg_bpd = float(np.mean(bpd_acc)) if bpd_acc else float("nan")
+                avg_bpd = float(np.mean(bpd_acc)) if bpd_acc else float("nan")
+        else:
+            avg_bpd = float("nan")
+
+        if self.is_ddp:
+            bpd_tensor = torch.tensor(avg_bpd, device=dev, dtype=torch.float32)
+            dist.broadcast(bpd_tensor, src=0)
+            avg_bpd = float(bpd_tensor.item())
+
         self.plateau.step(avg_bpd)
-        lr_now = self.opt.param_groups[0]["lr"]
-        tqdm.write(f"[eval] iter={it} avg_bpd={avg_bpd:.4f} lr={lr_now:.2e}")
+        if self.rank == 0:
+            lr_now = self.opt.param_groups[0]["lr"]
+            tqdm.write(f"[eval] iter={it} avg_bpd={avg_bpd:.4f} lr={lr_now:.2e}")
 
     def _run_sample_plots(self, it: int) -> None:
         args        = self.args
