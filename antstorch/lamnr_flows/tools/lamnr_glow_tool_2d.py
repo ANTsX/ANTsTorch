@@ -252,9 +252,29 @@ def build_model_from_config_2d(cfg: dict, device: torch.device, target_hw=None):
 
     # Backward compatibility: see the matching comment in
     # lamnr_glow_tool_3d.py's build_model(). Checkpoints trained before
-    # antsnormflows commit 2249ecd need the invertible conv pinned to its
-    # old hardcoded cap (2.5) rather than the configured scale_cap.
-    legacy_conv_cap = None if bool(cfg.get("s_cap_wired_to_conv", False)) else 2.5
+    # antsnormflows commit 2249ecd (2026-07-26, conv) / f047e4e (2026-07-27,
+    # ActNorm) had GlowBlock2d call Invertible1x1Conv(channels, use_lu) and
+    # ActNorm(...) with no cap argument at all, so those layers silently used
+    # their own hardcoded defaults (2.5 / 5.0) instead of the model's
+    # configured scale_cap. Default to those legacy caps whenever the
+    # checkpoint's own saved config doesn't say otherwise: every checkpoint
+    # trained before this option existed simply lacks these keys entirely
+    # (confirmed for all runs2d checkpoints on disk as of 2026-07-29), so an
+    # *absent* key means "legacy, needs the old caps". train_lamnr_glow_2d.py
+    # now always saves both keys (dict(vars(args)) in run_config.json), even
+    # when left at their None default -- so a checkpoint trained after that
+    # change has the key *present* with value None, cfg.get(...) returns
+    # that None (not the 2.5/5.0 default below), and the conv/ActNorm
+    # correctly use scale_cap like everything else.
+    #
+    # `s_cap_wired_to_conv` is honored too, for any older checkpoint config
+    # that was hand-annotated with it before legacy_conv_cap/
+    # actnorm_scale_cap existed as first-class keys.
+    if bool(cfg.get("s_cap_wired_to_conv", False)):
+        legacy_conv_cap = cfg.get("legacy_conv_cap", None)
+    else:
+        legacy_conv_cap = cfg.get("legacy_conv_cap", 2.5)
+    actnorm_scale_cap = cfg.get("actnorm_scale_cap", 5.0)
 
     m = create_glow_normalizing_flow_model_2d(
         input_shape=input_shape,
@@ -272,6 +292,7 @@ def build_model_from_config_2d(cfg: dict, device: torch.device, target_hw=None):
         net_actnorm=bool(cfg.get("net_actnorm", False)),
         scale_cap=float(cfg.get("scale_cap", 2.0)),
         legacy_conv_cap=legacy_conv_cap,
+        actnorm_scale_cap=actnorm_scale_cap,
     ).to(device).float().eval()
 
     if not hasattr(m, "input_shape"):

@@ -35,7 +35,7 @@ except ImportError:
     create_glow_normalizing_flow_model_3d = None
 
 # Import the shared base class
-from antstorch.lamnr_flows.core.lamnr_glow_tool_base import GlowToolBase
+from antstorch.lamnr_flows.core.lamnr_glow_tool_base import GlowToolBase, to01
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3D Helper Functions
@@ -43,31 +43,34 @@ from antstorch.lamnr_flows.core.lamnr_glow_tool_base import GlowToolBase
 
 def _save_nifti(tensor: torch.Tensor, out_path: Path, spacing: Optional[tuple] = None):
     """
-    Save a (1, 1, H, W, D) or (B, C, H, W, D) tensor to NIfTI.
+    Enregistre un SEUL volume 3D (ou une image 2D) au format NIfTI.
 
-    B == 1 -> plain 3D NIfTI (H, W, D).
-    B  > 1 -> 4D NIfTI (H, W, D, B) -- e.g. `recon`'s multi-subject panel
-    (original / reconstruction / diff stacked along the batch dim). ANTs has
-    no 5D image type (`fromNumpyF5` does not exist), so a (B, C, H, W, D)
-    array with B > 1 must be reduced to 4D, not just have leading
-    size-1 dims squeezed away.
+    Accepte un tenseur avec des dimensions de batch/canal superflues en
+    tête (ex : (1, 1, H, W, D)), qui sont retirées avant l'écriture.
+
+    Ne doit JAMAIS recevoir une pile de plusieurs volumes/panneaux
+    empilés le long de l'axe 0 (ex : [x, x_hat, diff] pour plusieurs
+    sujets) — un NIfTI 4D encoderait alors ambiguïment cet empilement
+    comme un axe spatial ou temporel selon la convention ants/NIfTI, ce
+    qui a été la source d'un bug réel (axe "panneaux" pris pour un axe
+    spatial, axe de profondeur D pris pour le temps). Pour sauvegarder
+    plusieurs volumes, utiliser save_volume, qui écrit un fichier NIfTI
+    3D distinct par volume.
     """
     arr = tensor.detach().cpu().numpy()
 
-    # Squeeze out a size-1 Channel dimension first (arr is (B, C, H, W, D)
-    # from _coerce_nchwd_5d, which always forces C == 1).
-    if arr.ndim == 5 and arr.shape[1] == 1:
-        arr = arr[:, 0]  # -> (B, H, W, D)
-
-    # Squeeze out a size-1 leading dim (covers plain 3D/4D inputs too).
+    # Retirer les dimensions de taille 1 en tête (batch, canal) jusqu'à
+    # atteindre une image 2D ou un volume 3D.
     while arr.ndim > 3 and arr.shape[0] == 1:
         arr = arr[0]
 
-    if arr.ndim == 4:
-        # Remaining leading axis (size > 1) is a genuine batch of volumes
-        # (e.g. panels from `recon`) -- move it last so ANTs sees a normal
-        # 4D (H, W, D, N) image instead of failing on a 5D array.
-        arr = np.moveaxis(arr, 0, -1)
+    if arr.ndim not in (2, 3):
+        raise ValueError(
+            f"_save_nifti attend une image 2D ou un volume 3D après "
+            f"réduction des dimensions de taille 1 ; forme obtenue : "
+            f"{arr.shape}. Utilisez save_volume pour sauvegarder "
+            f"plusieurs volumes (un fichier NIfTI 3D par volume)."
+        )
 
     img = ants.from_numpy(arr)
     if spacing is not None:
@@ -102,20 +105,28 @@ def _coerce_nchwd_5d(x, target_hwd=None):
         x = x.mean(dim=1, keepdim=True)
     
     x = x.float()
-    
-    # Normalisation automatique vers [0, 1] si nécessaire
+
+    # Normalisation automatique vers [0, 1] si nécessaire.
+    #
+    # Tolérance epsilon plutôt qu'un seuil strict 0.0/1.0 : un modèle qui
+    # reconstruit quasiment parfaitement peut déborder de quelques 1e-6/1e-5
+    # par pur bruit de calcul flottant (ex : x_hat.min() = -4.45e-06 observé
+    # sur une reconstruction dont l'écart réel avec x était de 0.000115).
+    # Avec un seuil strict, ce dépassement microscopique déclenchait un
+    # winsorize/renormalisation (percentiles 1%/99%) sur TOUT le volume --
+    # ce qui redistribue la dynamique de x_hat très différemment de x (qui,
+    # lui, reste à [0,1] exact et n'est jamais rescalé), gonflant
+    # artificiellement (x - x_hat) bien au-delà de l'erreur réelle. Ce n'est
+    # déclenché maintenant que par un dépassement réel (> tol), signe d'un
+    # vrai problème de décodage plutôt que d'un artefact numérique bénin.
+    tol = 1e-3
     try:
-        # NOTE: if x contains NaN, `x.amin() < 0.0` and `x.amax() > 1.0` are
-        # BOTH silently False (any comparison against NaN is False), so a
-        # fully-NaN tensor used to skip to01() entirely -- no normalization,
-        # no warning, just raw NaN passed downstream. Check finiteness
-        # explicitly so a NaN/Inf decode routes through to01() (which now
-        # warns loudly) instead of slipping past this guard unnoticed.
-        needs_norm = (not torch.isfinite(x).all()) or bool(x.amin() < 0.0) or bool(x.amax() > 1.0)
-        if needs_norm:
+        if x.amin() < -tol or x.amax() > 1.0 + tol:
             x = to01(x, winsorize=True)
-    except Exception:
-        pass
+        else:
+            x = x.clamp(0.0, 1.0)
+    except Exception as e:
+        print(f"[warn] Échec de la normalisation to01 : {e}")
 
     # Interpolation vers la taille cible (H, W, D)
     if target_hwd is not None:
@@ -172,46 +183,7 @@ class GlowTool3D(GlowToolBase):
         
         if isinstance(K, int): K = [K] * L
         if isinstance(hidden, int): hidden = [hidden] * L
-
-        # Diagnostic: surface which architecture hyperparameters came from
-        # the checkpoint's own saved config vs. fell back to this tool's
-        # (possibly different from the training script's) defaults. A
-        # silent fallback here means the built model can numerically
-        # diverge from what was actually trained, even though weight
-        # loading itself succeeds cleanly.
-        _resolved = {
-            "base":                     ("base", "glow"),
-            "glowbase_logscale_factor": ("glowbase_logscale_factor", 3.0),
-            "glowbase_min_log":         ("glowbase_min_log", -1.0),
-            "glowbase_max_log":         ("glowbase_max_log", 1.0),
-            "scale_map":                ("scale_map", "tanh"),
-            "net_actnorm":              ("net_actnorm", False),
-            "scale_cap":                ("scale_cap", 1.5),
-        }
-        for label, (key, default) in _resolved.items():
-            present = key in cfg
-            print(f"  [build_model] {label}={cfg.get(key, default)!r} "
-                  f"({'from checkpoint config' if present else f'FALLBACK DEFAULT, key {key!r} missing from cfg'})")
-
-        # Backward compatibility: checkpoints trained before antsnormflows
-        # commit 2249ecd ("BUG: Minor numerical fixes") were trained with
-        # Invertible1x1x1Conv silently ignoring `scale_cap` and always using
-        # its own hardcoded default (2.5), regardless of what the config
-        # says. Loading those weights under the now-correct (config-driven)
-        # behavior reinterprets the trained log_S parameters under a
-        # different clamp than they were fit under, which can catastrophically
-        # break decode (confirmed empirically: 45/45 subjects non-finite with
-        # the fix vs. 2/45 -- the expected outlier rate -- with the legacy
-        # cap). Checkpoints trained AFTER the fix record
-        # "s_cap_wired_to_conv": True in their config; its absence means the
-        # checkpoint predates the fix and needs the legacy cap preserved.
-        s_cap_wired = bool(cfg.get("s_cap_wired_to_conv", False))
-        legacy_conv_cap = None if s_cap_wired else 2.5
-        print(f"  [build_model] s_cap_wired_to_conv={s_cap_wired!r} "
-              f"({'from checkpoint config' if 's_cap_wired_to_conv' in cfg else 'missing from cfg -- assuming a pre-fix checkpoint'}) "
-              f"-> legacy_conv_cap={legacy_conv_cap!r} "
-              f"({'invertible conv uses scale_cap normally' if legacy_conv_cap is None else 'invertible conv pinned to the pre-fix hardcoded cap'})")
-
+        
         model = create_glow_normalizing_flow_model_3d(
             input_shape=(C, H, W, D),
             L=L,
@@ -221,35 +193,68 @@ class GlowTool3D(GlowToolBase):
             glowbase_logscale_factor=cfg.get("glowbase_logscale_factor", 3.0),
             glowbase_min_log=cfg.get("glowbase_min_log", -1.0),
             glowbase_max_log=cfg.get("glowbase_max_log", 1.0),
-            split_mode="channel",
-            scale=True,
+            split_mode="channel", 
+            scale=True, 
             scale_map=cfg.get("scale_map", "tanh"),
             leaky=0.0,
             net_actnorm=bool(cfg.get("net_actnorm", False)),
             scale_cap=cfg.get("scale_cap", 1.5),
-            legacy_conv_cap=legacy_conv_cap,
+            # Checkpoints trained before antsnormflows commit 2249ecd
+            # (2026-07-26, conv) / f047e4e (2026-07-27, ActNorm) were built
+            # with GlowBlock3d calling Invertible1x1x1Conv(channels, use_lu)
+            # and ActNorm(...) with NO cap argument at all -- so those layers
+            # silently used their own hardcoded defaults (2.5 and 5.0
+            # respectively), never the model's configured scale_cap. Post-fix,
+            # GlowBlock3d always wires the cap explicitly (falling back to
+            # scale_cap when conv_s_cap/actnorm_s_cap are None); loading an old
+            # checkpoint under that code recalibrates those two layers to
+            # whatever scale_cap is configured (e.g. 1.5) instead of what they
+            # were actually trained under -- this is exactly what broke
+            # decode/reconstruction for ventilation_64x48x64_K32_L4_HC96
+            # (trained 2026-07-08/09, before the fix).
+            #
+            # Default to the legacy caps (2.5 / 5.0) whenever the checkpoint's
+            # own saved config doesn't say otherwise: every checkpoint trained
+            # before this option existed simply lacks these keys entirely
+            # (confirmed for all runs3d/runs2d checkpoints on disk as of
+            # 2026-07-29), so an *absent* key means "legacy, needs the old
+            # caps". train_lamnr_glow_3d.py now always saves both keys
+            # (dict(vars(args)) in run_config.json), even when left at their
+            # None default -- so a checkpoint trained after this change has
+            # the key *present* with value None, cfg.get(...) returns that
+            # None (not the 2.5/5.0 default below), and the conv/ActNorm
+            # correctly use scale_cap like everything else. A checkpoint can
+            # still explicitly force legacy behavior (or opt out) by setting
+            # these keys itself.
+            legacy_conv_cap=cfg.get("legacy_conv_cap", 2.5),
+            actnorm_scale_cap=cfg.get("actnorm_scale_cap", 5.0),
         )
-
+        
         return model.to(device)
-
+        
     def prime_if_needed(self, model, target_size, device):
-        """Prime the multiscale 3D Glow model using a data-shaped dummy input."""
+        """Prime the multiscale 3D Glow model using a multi-view dummy list."""
+        # 1. Récupération dynamique du nombre de vues depuis l'arborescence des arguments
         num_views = getattr(model, "views", 1)
-
+        
+        # 2. Construction d'une liste de tenseurs 5D (un par vue)
+        # Chaque tenseur respecte la forme (B=1, C=1, H, W, D)
         dummy_input = [
             torch.zeros([1, 1] + list(target_size), device=device)
             for _ in range(num_views)
         ]
+        
+        # 3. Si le modèle n'a qu'une seule vue, on extrait le tenseur unique 
+        # pour éviter de passer une liste inutile
         if num_views == 1:
             dummy_input = dummy_input[0]
 
+        # 4. Priming sécurisé de l'ActNorm sans calcul de gradient
         with torch.no_grad():
             try:
-                if isinstance(dummy_input, list):
-                    _ = [model.inverse_and_log_det(d) for d in dummy_input]
-                else:
-                    model.inverse_and_log_det(dummy_input)   # ✅ corrigé : même direction que _encode_latents
+                model.forward_and_log_det(dummy_input)
             except Exception:
+                # Fallback de secours sur le calcul de log-probabilité si forward échoue
                 if isinstance(dummy_input, list):
                     _ = [model.log_prob(d) for d in dummy_input]
                 else:
@@ -295,11 +300,81 @@ class GlowTool3D(GlowToolBase):
         _save_nifti(x_tensor, out_path, spacing=spacing)
         
     def save_volume(self, x_tensor: torch.Tensor, out_path: Path, nrow: int = 1, **kwargs):
-        """Save a batch of 3D volumes. For 3D, this creates a 4D NIfTI."""
+        """
+        Enregistre un lot de volumes 3D empilés le long de l'axe 0 (ex :
+        les panneaux [x, x_hat, diff] produits par `recon`, répétés pour
+        plusieurs sujets) sous forme de fichiers NIfTI 3D SÉPARÉS — un par
+        volume — plutôt qu'un unique NIfTI 4D.
+
+        _save_nifti reste volontairement limitée aux volumes 3D/images 2D
+        uniques (voir sa docstring) : empiler plusieurs panneaux dans un
+        NIfTI 4D est ambigu, la convention ants/NIfTI pouvant traiter cet
+        axe comme spatial ou temporel selon sa position — source d'un bug
+        réel rencontré précédemment (axe "panneaux" pris pour un axe
+        spatial, axe de profondeur D pris pour le temps).
+
+        `nrow` est interprété comme le nombre de volumes par groupe (ex :
+        3 pour [x, x_hat, diff], 4 pour [x, x_hat, x_hat_e, diff] avec
+        édition de latents). Fichiers de sortie nommés
+        '{stem}_item{k:03d}_{label}.nii.gz' quand plusieurs groupes sont
+        présents, ou '{stem}_{label}.nii.gz' pour un seul groupe de
+        plusieurs volumes.
+        """
         spacing = kwargs.get("spacing", None)
+        out_path = Path(out_path)
         if out_path.suffix == "":
             out_path = out_path.with_suffix(".nii.gz")
-        _save_nifti(x_tensor, out_path, spacing=spacing)
+
+        arr = x_tensor.detach().cpu()
+        # Retirer l'axe canal (index 1) s'il vaut 1, sans toucher à
+        # l'axe 0 (empilement des volumes/panneaux).
+        if arr.dim() == 5 and arr.shape[1] == 1:
+            arr = arr[:, 0, ...]  # (N_total, H, W, D)
+
+        n_total = int(arr.shape[0]) if arr.dim() >= 4 else 1
+
+        # Cas majoritaire et déjà correct : un seul volume -> comportement
+        # inchangé, un seul fichier écrit directement sous out_path.
+        if n_total <= 1:
+            _save_nifti(x_tensor, out_path, spacing=spacing)
+            return
+
+        n_panels = max(1, int(nrow))
+        if n_total % n_panels != 0:
+            print(
+                f"[warn] save_volume : {n_total} volumes non divisibles "
+                f"par nrow={n_panels} ; sauvegarde individuelle sans "
+                f"regroupement par panneau."
+            )
+            n_panels = 1
+
+        default_labels = {
+            1: ["vol"],
+            3: ["orig", "recon", "diff"],
+            4: ["orig", "recon", "recon_edit", "diff"],
+        }
+        labels = default_labels.get(n_panels, [f"panel{p}" for p in range(n_panels)])
+
+        n_groups = n_total // n_panels
+        stem = out_path.name[:-len(".nii.gz")] if out_path.name.endswith(".nii.gz") else out_path.stem
+        parent = out_path.parent
+        parent.mkdir(parents=True, exist_ok=True)
+
+        written = []
+        for g in range(n_groups):
+            for p in range(n_panels):
+                idx = g * n_panels + p
+                vol = arr[idx]  # (H, W, D) après retrait du canal
+                label = labels[p]
+                if n_groups == 1:
+                    fname = f"{stem}_{label}.nii.gz"
+                else:
+                    fname = f"{stem}_item{g:03d}_{label}.nii.gz"
+                fpath = parent / fname
+                _save_nifti(vol, fpath, spacing=spacing)
+                written.append(fpath)
+
+        print(f"[save_volume] {len(written)} fichier(s) NIfTI 3D écrit(s) sous {parent}/")
 
     def ndim(self) -> int:
         """Retourne le nombre de dimensions spatiales."""

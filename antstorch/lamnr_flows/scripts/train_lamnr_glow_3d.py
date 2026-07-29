@@ -285,6 +285,7 @@ class LAMNrGlow3DTrainer(BaseLAMNrTrainer):
                 split_mode="channel", scale=True, scale_map=args.scale_map,
                 leaky=0.0, net_actnorm=bool(args.net_actnorm), scale_cap=args.scale_cap,
                 actnorm_scale_cap=args.actnorm_scale_cap,
+                legacy_conv_cap=args.legacy_conv_cap,
                 grad_checkpoint={"auto": None, "on": True, "off": False}[args.grad_checkpoint],
             )
 
@@ -442,6 +443,18 @@ def _build_args() -> argparse.Namespace:
              "N sequential ActNorm layers permits a worst-case exp(c*N) blowup "
              "in the generative direction (sample()). Lower this independently "
              "of --scale-cap if sampling still produces non-finite output.")
+    ap.add_argument("--legacy-conv-cap", type=float, default=None,
+        help="Log-scale clamp override for the per-block Invertible1x1x1Conv "
+             "layers. Leave unset (None) for new training runs -- the conv "
+             "then uses --scale-cap like everything else, which is correct "
+             "for antsnormflows built after commit 2249ecd (2026-07-26). Only "
+             "set this when deliberately resuming/fine-tuning from a "
+             "checkpoint trained before that commit, whose conv weights were "
+             "calibrated against the old hardcoded default (2.5) instead of "
+             "--scale-cap. Recorded into run_config.json either way so "
+             "GlowTool3D.build_model can tell a legacy checkpoint (key "
+             "absent) from one explicitly trained post-fix (key present, "
+             "possibly None).")
     ap.add_argument("--net-actnorm", action="store_true")
 
     # Training loop

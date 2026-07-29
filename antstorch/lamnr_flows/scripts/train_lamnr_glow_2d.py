@@ -386,6 +386,8 @@ class LAMNrGlow2DTrainer(BaseLAMNrTrainer):
                 leaky=0.0,
                 net_actnorm=bool(args.net_actnorm),
                 scale_cap=args.scale_cap,
+                actnorm_scale_cap=args.actnorm_scale_cap,
+                legacy_conv_cap=args.legacy_conv_cap,
                 grad_checkpoint={"auto": None, "on": True, "off": False}[args.grad_checkpoint],
             )
             m = m.to(dtype=torch.float32, device=dev).float().train()
@@ -489,6 +491,20 @@ def _build_args() -> argparse.Namespace:
     ap.add_argument("--scale-map", type=str, default="tanh",
         choices=["tanh", "exp", "sigmoid", "sigmoid_inv"])
     ap.add_argument("--scale-cap", type=float, default=2.0)
+    ap.add_argument("--actnorm-scale-cap", type=float, default=None,
+        help="Log-scale clamp for the per-block ActNorm layers. Defaults to "
+             "--scale-cap (see the matching --actnorm-scale-cap help in "
+             "train_lamnr_glow_3d.py for the full rationale).")
+    ap.add_argument("--legacy-conv-cap", type=float, default=None,
+        help="Log-scale clamp override for the per-block Invertible1x1Conv "
+             "layers. Leave unset (None) for new training runs. Only set "
+             "this when resuming/fine-tuning from a checkpoint trained "
+             "before antsnormflows commit 2249ecd (2026-07-26), whose conv "
+             "weights were calibrated against the old hardcoded default "
+             "(2.5) instead of --scale-cap. Recorded into run_config.json "
+             "either way (even as None) so GlowTool2D.build_model can tell "
+             "a legacy checkpoint (key absent) from one explicitly trained "
+             "post-fix (key present).")
     ap.add_argument("--net-actnorm", action="store_true")
 
     # Training loop
