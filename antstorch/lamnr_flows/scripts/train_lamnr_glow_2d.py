@@ -46,7 +46,6 @@ from antstorch.lamnr_flows.core.train_lamnr_glow_base import (
     _extract_views_from_batch,
     set_deterministic,
     to01,
-    screen_dump_run_config,
 )
 
 
@@ -644,7 +643,6 @@ def main():
     args    = _build_args()
     trainer = LAMNrGlow2DTrainer()
     trainer.setup(args)
-    screen_dump_run_config(args, Path(args.out_dir))
     trainer.train()
 
 
