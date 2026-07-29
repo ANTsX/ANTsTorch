@@ -948,8 +948,24 @@ class BaseLAMNrTrainer(abc.ABC):
         self.cleanup_checkpoints()
         tqdm.write(f"[ckpt] saved {iter_path.name} (and updated latest)")
 
-    def cleanup_checkpoints(self, keep_every: int = 10_000) -> None:
-        """Keep only milestone checkpoints that are multiples of keep_every."""
+    def cleanup_checkpoints(self, keep_every: Optional[int] = None) -> None:
+        """
+        Keep only milestone checkpoints that are multiples of keep_every.
+
+        keep_every defaults to args.eval_interval (i.e. every saved
+        milestone is kept) rather than a large fixed constant. Runs that
+        diverge before reaching a large fixed threshold (e.g. the previous
+        hardcoded 10_000/20_000) would otherwise have every intermediate
+        milestone deleted right after it's written -- including the one
+        from the very save that just ran -- leaving only the single
+        "latest" checkpoint as a rollback point, which is often already
+        past the point of numerical drift. Keeping every eval-interval
+        milestone trades disk space for the ability to roll back to a
+        recent, still-healthy checkpoint (see the [DISK ALERT] warning in
+        the 3D override for space monitoring).
+        """
+        if keep_every is None:
+            keep_every = int(getattr(self.args, "eval_interval", 1000)) or 1000
         for f in self.run_dir.glob("training_state_it*.pt"):
             try:
                 it_num = int(f.stem.split("it")[-1])

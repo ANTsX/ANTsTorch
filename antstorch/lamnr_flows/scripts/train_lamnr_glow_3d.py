@@ -340,8 +340,14 @@ class LAMNrGlow3DTrainer(BaseLAMNrTrainer):
             
         return to01(x_v.to(dtype=torch.float32))
 
-    def cleanup_checkpoints(self, keep_every: int = 20_000) -> None:
-        """3D variant — longer milestone interval + disk-space warning."""
+    def cleanup_checkpoints(self, keep_every: Optional[int] = None) -> None:
+        """
+        3D variant — milestone interval (defaults to args.eval_interval, so
+        every saved checkpoint is kept; see base class docstring for why) +
+        disk-space warning, since 3D checkpoints are large.
+        """
+        if keep_every is None:
+            keep_every = int(getattr(self.args, "eval_interval", 1000)) or 1000
         for f in self.run_dir.glob("training_state_it*.pt"):
             try:
                 it_num = int(f.stem.split("it")[-1])
