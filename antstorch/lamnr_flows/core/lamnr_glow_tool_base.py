@@ -1564,34 +1564,61 @@ class GlowToolBase(ABC):
                     raise ValueError(
                         f"The {mode} edit requires covariance estimates from gauss-fit."
                     )
-                if (
+
+                is_lowrank = (
                     isinstance(Sigma_view, dict)
                     and Sigma_view.get("type") == "lowrank"
-                ):
-                    U = np.asarray(Sigma_view["U"], dtype=np.float64)
-                    eig = np.asarray(Sigma_view["eig"], dtype=np.float64)
-                    sigma2 = float(Sigma_view.get("sigma2", 0.0))
-                    covariance = (U * eig[np.newaxis, :]) @ U.T
-                    if sigma2 > 0.0:
-                        covariance += sigma2 * np.eye(dimension, dtype=np.float64)
+                )
+
+                if is_lowrank:
+                    # Work directly off the (dimension x rank) low-rank factor
+                    # instead of forming the (dimension x dimension) dense
+                    # covariance and calling np.linalg.eigh on it. For a Glow
+                    # level, `dimension` can be in the tens of thousands (e.g.
+                    # 24576 for a 512x4x3x4 level) -- densifying + eigh there
+                    # is O(dimension^2) memory and O(dimension^3) time, which
+                    # in practice means the process appears to hang rather
+                    # than crash outright. `--cov-estimator lowrank` (forced
+                    # for 3D to avoid OOM in gauss-fit itself) already keeps
+                    # Sigma as U (dimension x rank) + eig (rank,) + sigma2
+                    # specifically to avoid this; this branch previously threw
+                    # that away right before the expensive step.
+                    #
+                    # Sigma ~= U @ diag(eig) @ U.T + sigma2 * I, with U's
+                    # columns orthonormal, so (eig, U) already *are* the top
+                    # `rank` eigenpairs -- no eigh needed, just sort by eig.
+                    U_raw = np.asarray(Sigma_view["U"], dtype=np.float64)
+                    eig_raw = np.asarray(Sigma_view["eig"], dtype=np.float64)
+                    rank = eig_raw.shape[0]
+                    order = np.argsort(eig_raw)[::-1]  # descending
+                    eig_desc = eig_raw[order]
+                    U_desc = U_raw[:, order]
                 else:
                     covariance = np.asarray(Sigma_view, dtype=np.float64)
                     if covariance.ndim == 1:
                         covariance = np.diag(covariance)
-
-                covariance = 0.5 * (covariance + covariance.T)
-                eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+                    covariance = 0.5 * (covariance + covariance.T)
+                    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+                    # np.linalg.eigh returns ascending order; flip to descending
+                    # so both branches share the same "column 0 = top PC" convention.
+                    eig_desc = eigenvalues[::-1].copy()
+                    U_desc = eigenvectors[:, ::-1].copy()
+                    rank = dimension
 
                 if mode == "pc":
-                    if pc_index < 0 or pc_index >= dimension:
-                        raise ValueError(
-                            f"--edit-pc-index must be in [0, {dimension - 1}]."
+                    if pc_index < 0 or pc_index >= rank:
+                        hint = (
+                            f" (gauss-fit was run with --cov-estimator lowrank "
+                            f"--rank {rank}; re-run with a larger --rank to expose "
+                            f"more components)" if is_lowrank else ""
                         )
-                    column = -1 - pc_index
-                    eigenvalue = float(max(eigenvalues[column], 0.0))
+                        raise ValueError(
+                            f"--edit-pc-index must be in [0, {rank - 1}]{hint}."
+                        )
+                    eigenvalue = float(max(eig_desc[pc_index], 0.0))
                     step = pc_scale * math.sqrt(eigenvalue)
                     direction = torch.as_tensor(
-                        eigenvectors[:, column],
+                        U_desc[:, pc_index],
                         dtype=z_level.dtype,
                         device=z_level.device,
                     ).view(1, -1)
@@ -1606,21 +1633,33 @@ class GlowToolBase(ABC):
                         f"λ={eigenvalue:.3e}, step={step:.3e}, center={pc_center}"
                     )
                 else:
-                    eigenvectors_desc = eigenvectors[:, ::-1].copy()
-                    k_keep = min(max(pc_k, 0), dimension)
+                    k_keep = min(max(pc_k, 0), rank)
                     V = torch.as_tensor(
-                        eigenvectors_desc,
-                        dtype=z_level.dtype,
-                        device=z_level.device,
+                        U_desc, dtype=z_level.dtype, device=z_level.device,
                     )
                     z_flat = z_level.reshape(batch, -1)
-                    scores = (z_flat - mu_flat) @ V
-                    if k_keep < dimension:
-                        scores[:, k_keep:] *= pc_beta
-                    z_edited = (mu_flat + scores @ V.T).view_as(z_level)
+                    centred = z_flat - mu_flat
+                    scores = centred @ V                      # (batch, rank)
+                    scores_kept = scores.clone()
+                    if k_keep < rank:
+                        scores_kept[:, k_keep:] = 0.0
+                    proj_topk = scores_kept @ V.T              # (batch, dimension)
+                    # `centred - proj_topk` is everything not in the retained
+                    # top-k directions. When V is a full basis (dense branch)
+                    # that's exactly the tail eigendirections k_keep:dimension
+                    # -- so this is algebraically identical to the original
+                    # "scale the tail scores by pc_beta, then reconstruct via
+                    # the full V" formulation. When V only spans `rank` < dim
+                    # directions (low-rank branch), the residual also picks up
+                    # the (dimension - rank) directions V doesn't cover, i.e.
+                    # exactly the sigma2-isotropic tail the low-rank model
+                    # assigns to that subspace -- so pc_beta scales "everything
+                    # not explicitly retained" consistently in both cases.
+                    residual = centred - proj_topk
+                    z_edited = (mu_flat + proj_topk + pc_beta * residual).view_as(z_level)
                     print(
                         f"[recon] level {level}, '{view_name}': "
-                        f"pc_denoise k_keep={k_keep}, β={pc_beta:.3f}"
+                        f"pc_denoise k_keep={k_keep}/{rank}, β={pc_beta:.3f}"
                     )
             else:
                 raise ValueError(f"[recon] Unknown edit mode '{mode}'.")
