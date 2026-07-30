@@ -1505,6 +1505,26 @@ class BaseLAMNrTrainer(abc.ABC):
             # cases instead of permanently poisoning the model.
             param_snapshot = [p.detach().clone() for p in all_params]
 
+            # Snapshot Adamax's per-parameter moment state too (exp_avg,
+            # exp_inf, step). .step() mutates self.opt.state[p] in place
+            # unconditionally -- rejecting the resulting *parameters*
+            # below does nothing to undo that. Left unrepaired, this is
+            # self-reinforcing: a parameter whose Adamax exp_inf
+            # (infinity-norm accumulator) has decayed near zero produces
+            # a huge update the instant it next sees a gradient; we reject
+            # the parameters, but exp_inf/exp_avg already absorbed that
+            # gradient, so the very next retry is primed to reproduce the
+            # same blow-up -- observed in practice as the identical
+            # rollback message firing every single iteration with zero
+            # progress. Restore optimizer state in lockstep with
+            # parameters so a rejected step is a true no-op, not just a
+            # cosmetic one.
+            opt_state_snapshot = {
+                p: {k: (v.clone() if torch.is_tensor(v) else v)
+                    for k, v in self.opt.state[p].items()}
+                for p in all_params if p in self.opt.state
+            }
+
             if self.scaler.is_enabled():
                 self.scaler.step(self.opt)
                 self.scaler.update()
@@ -1567,10 +1587,16 @@ class BaseLAMNrTrainer(abc.ABC):
                 with torch.no_grad():
                     for p, snap in zip(all_params, param_snapshot):
                         p.data.copy_(snap)
-                del param_snapshot
+                    for p, st_snap in opt_state_snapshot.items():
+                        for k, v in st_snap.items():
+                            if torch.is_tensor(v):
+                                self.opt.state[p][k].copy_(v)
+                            else:
+                                self.opt.state[p][k] = v
+                del param_snapshot, opt_state_snapshot
                 self.opt.zero_grad(set_to_none=True)
                 continue
-            del param_snapshot
+            del param_snapshot, opt_state_snapshot
 
             # Use last micro-batch for EMA ActNorm warmup
             x = x_last
