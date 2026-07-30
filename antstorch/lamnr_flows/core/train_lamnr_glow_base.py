@@ -1512,10 +1512,43 @@ class BaseLAMNrTrainer(abc.ABC):
                 self.opt.step()
 
             local_bad_params = any(not torch.isfinite(p).all() for p in all_params)
+
+            # Belt-and-suspenders: a *finite* parameter is not the same
+            # guarantee as a *safe* one. Adam can land a parameter on a
+            # value that is technically finite yet numerically extreme
+            # enough that some internal exp()/log()/reciprocal deeper in
+            # the flow overflows on the very next forward pass -- exactly
+            # the failure observed at iter 1318 (params passed a
+            # finiteness check, forward still went permanently non-finite
+            # one iteration later). The only way to actually catch that
+            # is to try a forward pass with the freshly-stepped params
+            # before committing to them, so do a cheap forward-only replay
+            # (no backward, no data augmentation redraw -- reuses x_last)
+            # right here.
+            reason = "non-finite parameter(s) after step"
+            if not local_bad_params and x_last is not None:
+                val_amp_ctx = (
+                    torch.amp.autocast(dev.type, dtype=self.amp_dtype)
+                    if self.amp_enabled else nullcontext()
+                )
+                with torch.no_grad(), val_amp_ctx:
+                    for vi, m in enumerate(models):
+                        x_v_chk = self.extract_view(x_last, vi, dev)
+                        if isinstance(m, (GlowDataParallel, GlowDDP)):
+                            logp_chk, _ = m(x_v_chk.float())
+                        else:
+                            logp_chk = m.log_prob(x_v_chk.float())
+                        chk_bad = not torch.isfinite(logp_chk).all()
+                        del x_v_chk, logp_chk
+                        if chk_bad:
+                            local_bad_params = True
+                            reason = "post-step forward replay went non-finite"
+                            break
+
             if self._sync_skip_flag(local_bad_params):
                 tqdm.write(
                     f"[anomaly] rolling back optimizer step at iter {it} "
-                    "(non-finite parameter(s) after step)"
+                    f"({reason})"
                     + (", flagged by another rank" if (self.is_ddp and not local_bad_params) else "")
                 )
                 with torch.no_grad():
