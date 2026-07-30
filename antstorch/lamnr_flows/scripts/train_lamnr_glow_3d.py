@@ -194,7 +194,15 @@ def build_loaders_from_globs_3d(
     train_ds.global_step_ref = global_step
 
     val_ds = antstorch.ImageDataset(
-        images=(images_val if images_val else images_train[:1]),
+        # val_frac=0.0 (or any rounding that yields zero held-out subjects)
+        # means "no split requested" -- reuse the *entire* training pool
+        # for validation instead of an arbitrary single subject, so the
+        # eval/bpd metric reflects performance across all available data
+        # (still meaningful when combined with heavy augmentation: train
+        # and val draw independent augmented realizations of the same
+        # images, since val's sd_* below are 0, so val scores near-clean
+        # reconstructions of every subject rather than one noisy sample).
+        images=(images_val if images_val else images_train),
         template=tmpl,
         do_data_augmentation=True,
         data_augmentation_transform_type="affineAndDeformation",

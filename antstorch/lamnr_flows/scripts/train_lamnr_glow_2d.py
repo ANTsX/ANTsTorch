@@ -291,7 +291,12 @@ def build_loaders_from_globs(
             aug_scheduler=aug_sched_fn,
         )
         val_ds = antstorch.ImageDataset(
-            images=(images_val if images_val else images_train[:1]),
+            # val_frac=0.0 -> no held-out subjects; reuse the full training
+            # pool for validation (rather than one arbitrary subject) so
+            # the eval/bpd metric covers all available images. Still
+            # informative with augmentation on: val's sd_* are all 0 below,
+            # so it scores near-clean reconstructions of every subject.
+            images=(images_val if images_val else images_train),
             template=tmpl,
             do_data_augmentation=True,
             data_augmentation_transform_type="affineAndDeformation",
@@ -311,9 +316,14 @@ def build_loaders_from_globs(
         )
         
         # La validation NE DOIT PAS être augmentée
+        # val_frac=0.0 -> aucun sujet retenu ; on réutilise tout le pool
+        # d'entraînement pour la validation (au lieu d'un seul sujet
+        # arbitraire) afin que le bpd de validation couvre toutes les
+        # images disponibles, en clair (do_aug=False, donc pas de fuite
+        # d'augmentation train->val même si les images sont partagées).
         val_ds = PNGMultiViewDataset(
-            images_list=(images_val if images_val else images_train[:1]),
-            target_size=(H, W), 
+            images_list=(images_val if images_val else images_train),
+            target_size=(H, W),
             do_aug=False  # CRITIQUE : Toujours False pour l'évaluation !
         )
 
