@@ -1538,11 +1538,24 @@ class BaseLAMNrTrainer(abc.ABC):
                             logp_chk, _ = m(x_v_chk.float())
                         else:
                             logp_chk = m.log_prob(x_v_chk.float())
-                        chk_bad = not torch.isfinite(logp_chk).all()
-                        del x_v_chk, logp_chk
+                        # isfinite() alone isn't enough: a wildly exploded
+                        # (but still finite) bpd -- ~1e31, seen in
+                        # practice -- sails right through an isfinite()
+                        # check yet is exactly the kind of blown-up state
+                        # that poisons every later iteration. Apply the
+                        # same >1e7 magnitude guard the main loop already
+                        # uses for L_nll (see local_bad below) so this
+                        # replay check can't be fooled by "finite but
+                        # absurd" the way the plain finiteness checks were.
+                        bpd_chk = bits_per_dim(logp_chk, n_dims).mean()
+                        chk_bad = (
+                            not torch.isfinite(bpd_chk).all()
+                            or abs(bpd_chk.item()) > 1e7
+                        )
+                        del x_v_chk, logp_chk, bpd_chk
                         if chk_bad:
                             local_bad_params = True
-                            reason = "post-step forward replay went non-finite"
+                            reason = "post-step forward replay non-finite or exploded"
                             break
 
             if self._sync_skip_flag(local_bad_params):
