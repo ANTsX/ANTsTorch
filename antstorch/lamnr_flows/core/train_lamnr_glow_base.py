@@ -1484,11 +1484,47 @@ class BaseLAMNrTrainer(abc.ABC):
                 self.opt.zero_grad(set_to_none=True)
                 continue
 
+            # Post-step parameter-finiteness guard.
+            #
+            # isfinite(total_norm) above only proves the *gradient* going
+            # into Adam was finite -- it says nothing about whether the
+            # *parameters* Adam produces from that gradient stay
+            # well-behaved. A small, cleanly-clipped gradient can still
+            # nudge a numerically sensitive parameter into a regime where
+            # the *next* forward pass overflows internally. Unlike the
+            # bad_batch/non-finite-grad-norm checks above (which catch
+            # trouble before stepping), this failure mode has no recovery
+            # once it happens: forward becomes permanently non-finite, so
+            # every later iteration just re-enters those earlier skip
+            # branches forever without ever attempting a fresh update --
+            # a training run that stalls for good after a single bad step,
+            # often long before the next checkpoint (eval_interval-gated)
+            # can save a clean state to fall back to. Snapshot params
+            # before stepping and, if the step leaves any parameter
+            # non-finite, roll back and treat it like the other skip
+            # cases instead of permanently poisoning the model.
+            param_snapshot = [p.detach().clone() for p in all_params]
+
             if self.scaler.is_enabled():
                 self.scaler.step(self.opt)
                 self.scaler.update()
             else:
                 self.opt.step()
+
+            local_bad_params = any(not torch.isfinite(p).all() for p in all_params)
+            if self._sync_skip_flag(local_bad_params):
+                tqdm.write(
+                    f"[anomaly] rolling back optimizer step at iter {it} "
+                    "(non-finite parameter(s) after step)"
+                    + (", flagged by another rank" if (self.is_ddp and not local_bad_params) else "")
+                )
+                with torch.no_grad():
+                    for p, snap in zip(all_params, param_snapshot):
+                        p.data.copy_(snap)
+                del param_snapshot
+                self.opt.zero_grad(set_to_none=True)
+                continue
+            del param_snapshot
 
             # Use last micro-batch for EMA ActNorm warmup
             x = x_last
