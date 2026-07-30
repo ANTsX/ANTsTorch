@@ -26,7 +26,7 @@ def _gaussian_blob(shapes, means, covariances):
 
 
 def _edit(z_list, blob, levels, mode, **kwargs):
-    return GlowToolBase.edit_latents_to_mean(
+    return GlowToolBase.edit_latents(
         None,
         z_list,
         blob,

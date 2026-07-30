@@ -1361,7 +1361,7 @@ class GlowToolBase(ABC):
         ...
 
     @torch.no_grad()
-    def edit_latents_to_mean(
+    def edit_latents(
         self,
         z_list: List[torch.Tensor],
         gauss_blob: dict,
@@ -1371,9 +1371,6 @@ class GlowToolBase(ABC):
     ) -> List[torch.Tensor]:
         """
         Edit selected latent levels using one dimension-agnostic implementation.
-
-        The legacy method name is retained for API compatibility. Supported
-        modes are mean, zero, pc, pc_denoise, winsorize, shrink, and sample.
         """
         if not levels_to_edit:
             return z_list
@@ -1389,6 +1386,22 @@ class GlowToolBase(ABC):
         sample_temperature = float(kw.get("sample_temperature", 1.0))
         sample_seed = int(kw.get("sample_seed", 12345))
 
+        def _stats(t: torch.Tensor) -> str:
+            """Compact [debug] summary of a tensor's values (detached, fp32)."""
+            t32 = t.detach().to(torch.float32)
+            return (
+                f"shape={tuple(t.shape)} mean={t32.mean().item():.4g} "
+                f"std={t32.std().item():.4g} min={t32.min().item():.4g} "
+                f"max={t32.max().item():.4g}"
+            )
+
+        print(
+            f"[debug] edit_latents: mode={mode!r} levels_to_edit={levels_to_edit} "
+            f"pc_index={pc_index} pc_scale={pc_scale} pc_center={pc_center!r} "
+            f"pc_k={pc_k} pc_beta={pc_beta} shrink_strength={shrink_strength} "
+            f"sample_temperature={sample_temperature} sample_seed={sample_seed}"
+        )
+
         if str(gauss_blob.get("mode", "perlevel")).lower() != "perlevel":
             raise ValueError(
                 "Level-specific latent editing requires a Gaussian model fitted "
@@ -1401,6 +1414,12 @@ class GlowToolBase(ABC):
             raise RuntimeError(
                 f"[recon] View '{view_name}' not in Gaussian header {views}."
             ) from exc
+
+        print(
+            f"[debug] edit_latents: view={view_name!r} view_idx={view_idx} "
+            f"n_levels={n_levels} len(z_list)={len(z_list)} "
+            f"gauss_mode={gauss_blob.get('mode', 'perlevel')!r}"
+        )
 
         levels = [int(level) for level in levels_to_edit]
         if len(set(levels)) != len(levels):
@@ -1435,6 +1454,7 @@ class GlowToolBase(ABC):
 
         for level, z_level in enumerate(z_list):
             if level not in levels_set:
+                print(f"[debug] level {level}: hors levels_to_edit -> conservé tel quel (encodage réel)")
                 z_out.append(z_level)
                 continue
 
@@ -1465,6 +1485,16 @@ class GlowToolBase(ABC):
                 Sigma_list[level]
                 if isinstance(Sigma_list, (list, tuple))
                 else Sigma_list
+            )
+
+            sigma_kind = (
+                Sigma_level.get("type") if isinstance(Sigma_level, dict) else
+                ("dense" if Sigma_level is not None else "none")
+            )
+            print(
+                f"[debug] level {level}: dimension={dimension} slice=[{start}:{stop}] "
+                f"batch={batch} actual_shape={actual_shape} Sigma_type={sigma_kind!r} "
+                f"z_level: {_stats(z_level)}  mu_level: {_stats(mu_level)}"
             )
 
             if mode == "mean":
@@ -1524,12 +1554,22 @@ class GlowToolBase(ABC):
                         device=z_level.device,
                     )
                     sigma2 = max(float(Sigma_level.get("sigma2", 0.0)), 0.0)
+                    sum_eig = float(eig.sum().item())
+                    isotropic_var = sigma2 * dimension
+                    frac_modeled = sum_eig / max(sum_eig + isotropic_var, 1e-12)
+                    print(
+                        f"[debug] level {level} sample: rank={eig.numel()} "
+                        f"sum_eig={sum_eig:.4g} sigma2={sigma2:.4g} "
+                        f"isotropic_var(=sigma2*dim)={isotropic_var:.4g} "
+                        f"frac_var_modeled={frac_modeled:.4f}"
+                    )
                     eps_rank = _randn(batch, eig.numel())
                     centred = (eps_rank * eig.sqrt()) @ U.T
                     if sigma2 > 0.0:
                         centred = centred + math.sqrt(sigma2) * _randn(
                             batch, dimension
                         )
+                    print(f"[debug] level {level} sample: centred (avant T) {_stats(centred)}")
                 else:
                     covariance = np.asarray(Sigma_level, dtype=np.float64)
                     if covariance.ndim == 1:
@@ -1605,6 +1645,11 @@ class GlowToolBase(ABC):
                     U_desc = eigenvectors[:, ::-1].copy()
                     rank = dimension
 
+                print(
+                    f"[debug] level {level} {mode}: is_lowrank={is_lowrank} rank={rank} "
+                    f"top5_eig={np.round(eig_desc[:5], 4).tolist()}"
+                )
+
                 if mode == "pc":
                     if pc_index < 0 or pc_index >= rank:
                         hint = (
@@ -1631,6 +1676,11 @@ class GlowToolBase(ABC):
                     print(
                         f"[recon] level {level}, '{view_name}': PC{pc_index} "
                         f"λ={eigenvalue:.3e}, step={step:.3e}, center={pc_center}"
+                    )
+                    print(
+                        f"[debug] level {level} pc: direction_norm="
+                        f"{float(np.linalg.norm(U_desc[:, pc_index])):.4f} "
+                        f"base: {_stats(base)}"
                     )
                 else:
                     k_keep = min(max(pc_k, 0), rank)
@@ -1661,8 +1711,18 @@ class GlowToolBase(ABC):
                         f"[recon] level {level}, '{view_name}': "
                         f"pc_denoise k_keep={k_keep}/{rank}, β={pc_beta:.3f}"
                     )
+                    print(
+                        f"[debug] level {level} pc_denoise: scores {_stats(scores)}  "
+                        f"proj_topk {_stats(proj_topk)}  residual {_stats(residual)}"
+                    )
             else:
                 raise ValueError(f"[recon] Unknown edit mode '{mode}'.")
+
+            delta = (z_edited.detach() - z_level.detach()).to(torch.float32)
+            print(
+                f"[debug] level {level} ({mode}): z_edited: {_stats(z_edited)}  "
+                f"||Δz||_2={delta.norm().item():.4g}  mean|Δz|={delta.abs().mean().item():.4g}"
+            )
 
             z_out.append(z_edited)
         return z_out
@@ -2428,11 +2488,59 @@ class GlowToolBase(ABC):
             "--edit-levels", nargs="+", default=["none"],
             help="Latent levels to edit: space/comma-separated indices, 'all', or 'none'.",
         )
-        ap.add_argument("--edit-what",    default="mean",
-                        choices=[
-                            "mean", "zero", "pc", "pc_denoise",
-                            "winsorize", "shrink", "sample",
-                        ])
+        ap.add_argument(
+            "--edit-what", default="mean",
+            choices=[
+                "mean", "zero", "pc", "pc_denoise",
+                "winsorize", "shrink", "sample",
+            ],
+            help=(
+                "How to replace each selected latent level (--edit-levels). "
+                "mean: total replacement by the Gaussian model's mean mu -- "
+                "removes all subject-specific variation at this level, "
+                "collapsing every subject toward the same population value. "
+                "zero: total replacement by the zero vector -- distinct from "
+                "'mean' whenever mu != 0 (usually true); probes decoder "
+                "behaviour outside the learned mean, often far more "
+                "destructive than 'mean'. "
+                "shrink: partial pull toward the mean, z' = mu + alpha*(z-mu) "
+                "with alpha=--edit-strength in [0,1] -- a dial between no "
+                "edit (alpha=1) and full 'mean' replacement (alpha=0), "
+                "useful for graded rather than all-or-nothing ablation. "
+                "winsorize: clips each latent value to [mu - q*sigma, "
+                "mu + q*sigma] (q=--edit-quantile or per-level "
+                "--edit-quantiles; sigma from the fitted covariance) -- "
+                "leaves already-plausible values untouched and only reins "
+                "in outliers, so it is a no-op whenever z is already within "
+                "range (as is typical for real encoded subjects). "
+                "sample: total replacement by a fresh Gaussian draw "
+                "mu + T*N(0,Sigma) (T=--edit-temperature, "
+                "seed=--edit-seed) -- requires the covariance from gauss-fit "
+                "and stress-tests the model's *generative* quality at this "
+                "level (as opposed to reconstruction quality); quality "
+                "depends heavily on how much of the level's total variance "
+                "the fitted covariance actually captures (low-rank fits "
+                "with few training subjects can leave most variance in an "
+                "unmodelled isotropic residual, producing static-like "
+                "output when sampled). "
+                "pc: moves along a single principal component of the "
+                "fitted covariance, z' = base + (edit-pc-scale * "
+                "sqrt(eigenvalue)) * U[:, edit-pc-index], where base is "
+                "either the population mean or this subject's own encoded z "
+                "(--edit-pc-center = mean|sample) -- explores one specific, "
+                "interpretable axis of anatomical variation; large "
+                "edit-pc-scale values can push far outside the training "
+                "distribution and produce localized decoder artefacts. "
+                "pc_denoise: projects onto the top --edit-pc-k principal "
+                "components and attenuates everything else (the residual) "
+                "by --edit-pc-beta in [0,1] (0=discard the tail entirely, "
+                "1=keep it, i.e. a no-op) -- a denoising/smoothing edit "
+                "along the dominant variance directions; if --edit-pc-k is "
+                ">= the covariance's achieved rank (itself capped at "
+                "N_subjects-1 from gauss-fit), no component is actually "
+                "discarded and this mode is silently equivalent to no edit."
+            ),
+        )
         quantile_group = ap.add_mutually_exclusive_group()
         quantile_group.add_argument(
             "--edit-quantile", type=float, default=None,
@@ -2454,12 +2562,26 @@ class GlowToolBase(ABC):
             "--edit-seed", type=int, default=12345,
             help="Base random seed for reproducible Gaussian replacement samples.",
         )
-        ap.add_argument("--edit-pc-index",  type=int,   default=0)
-        ap.add_argument("--edit-pc-scale",  type=float, default=2.0)
-        ap.add_argument("--edit-pc-center", default="sample",
-                        choices=["sample", "mean"])
-        ap.add_argument("--edit-pc-k",   type=int,   default=64)
-        ap.add_argument("--edit-pc-beta",type=float, default=0.0)
+        ap.add_argument(
+            "--edit-pc-index", type=int, default=0,
+            help="[--edit-what pc] Index (0=top) of the principal component to move along.",
+        )
+        ap.add_argument(
+            "--edit-pc-scale", type=float, default=2.0,
+            help="[--edit-what pc] Step size in units of sqrt(eigenvalue) along the chosen PC.",
+        )
+        ap.add_argument(
+            "--edit-pc-center", default="sample", choices=["sample", "mean"],
+            help="[--edit-what pc] Move from the subject's own encoded z ('sample') or from the population mean ('mean').",
+        )
+        ap.add_argument(
+            "--edit-pc-k", type=int, default=64,
+            help="[--edit-what pc_denoise] Number of leading principal components to keep (rest is the attenuated residual).",
+        )
+        ap.add_argument(
+            "--edit-pc-beta", type=float, default=0.0,
+            help="[--edit-what pc_denoise] Residual attenuation: 0=discard everything beyond the top-k components, 1=no-op.",
+        )
         ap.add_argument("--ema",         action=argparse.BooleanOptionalAction, default=True)
         ap.add_argument("--reference-image", type=str, default=None)
         self._add_size_arg(ap, required=True)
@@ -2520,7 +2642,7 @@ class GlowToolBase(ABC):
                           "aggregate to01() warning threshold (>50% non-finite "
                           "across the WHOLE multi-subject panel) may not fire.")
                 if gauss_blob and levels_to_edit:
-                    z_edited = self.edit_latents_to_mean(
+                    z_edited = self.edit_latents(
                         z_list, gauss_blob, v_name, levels_to_edit,
                         mode=args.edit_what,
                         pc_index=args.edit_pc_index,
