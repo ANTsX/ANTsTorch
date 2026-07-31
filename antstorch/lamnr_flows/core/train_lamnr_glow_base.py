@@ -1532,6 +1532,35 @@ class BaseLAMNrTrainer(abc.ABC):
                 self.opt.step()
 
             local_bad_params = any(not torch.isfinite(p).all() for p in all_params)
+            reason = "non-finite parameter(s) after step"
+
+            # A forward replay on x_last (below) only proves the new
+            # parameters are safe *for the exact batch that produced their
+            # gradient* -- nearly tautological, since the step was
+            # computed to fit that batch. It does not prove they're safe
+            # for the *next* (different, randomly-augmented) batch, and in
+            # practice a step has passed that replay check and still gone
+            # on to permanently break forward one or two iterations later
+            # (iter 1214 here: replay-clean step committed, then iter 1215
+            # onward stuck non-finite forever). Adamax's known failure
+            # mode -- a parameter whose exp_inf (infinity-norm
+            # accumulator) has decayed near zero produces a huge update
+            # the instant it next sees a gradient -- shows up as an
+            # implausibly large *single-step* jump for that parameter
+            # specifically, regardless of whether that jump happens to
+            # still "read fine" on x_last. Catch that directly and
+            # data-independently: no healthy Adamax step at this LR
+            # should move any single parameter by more than ~1.0 in one
+            # iteration, so treat one that does as bad without needing a
+            # forward pass to prove it.
+            if not local_bad_params:
+                max_delta = max(
+                    (p.detach() - snap).abs().max().item()
+                    for p, snap in zip(all_params, param_snapshot)
+                )
+                if max_delta > 1.0:
+                    local_bad_params = True
+                    reason = f"implausibly large single-step parameter update (max |delta|={max_delta:.3g})"
 
             # Belt-and-suspenders: a *finite* parameter is not the same
             # guarantee as a *safe* one. Adam can land a parameter on a
@@ -1544,8 +1573,9 @@ class BaseLAMNrTrainer(abc.ABC):
             # is to try a forward pass with the freshly-stepped params
             # before committing to them, so do a cheap forward-only replay
             # (no backward, no data augmentation redraw -- reuses x_last)
-            # right here.
-            reason = "non-finite parameter(s) after step"
+            # right here. Kept as a second line of defense alongside the
+            # delta check above, since the two catch different failure
+            # shapes.
             if not local_bad_params and x_last is not None:
                 val_amp_ctx = (
                     torch.amp.autocast(dev.type, dtype=self.amp_dtype)
