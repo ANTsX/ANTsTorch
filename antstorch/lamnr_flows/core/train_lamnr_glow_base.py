@@ -905,7 +905,17 @@ class BaseLAMNrTrainer(abc.ABC):
             param_groups.append(
                 {"params": [self.s_nll, self.s_align], "weight_decay": 0.0}
             )
-        self.opt = torch.optim.Adamax(
+        # AdamW, not Adamax: Adamax tracks a per-parameter *max* gradient
+        # magnitude (exp_inf) that can decay near zero for a parameter
+        # that goes a while without a meaningful gradient, then produce a
+        # huge update the instant it next sees one -- root-caused (across
+        # several rollback iterations on the 96x64x96/L=5/hidden=128 run)
+        # as the recurring source of "finite but exploded" and "briefly
+        # plausible then permanently NaN" training blowups that kept
+        # slipping past per-step safety nets. AdamW's second-moment
+        # estimate is an EMA of squared gradients, which is smoother and
+        # doesn't have that same collapse-then-spike failure mode.
+        self.opt = torch.optim.AdamW(
             param_groups, lr=args.lr, weight_decay=args.weight_decay
         )
         self.warm = make_warmup(
@@ -1143,18 +1153,47 @@ class BaseLAMNrTrainer(abc.ABC):
         start_iter = int(blob.get("iter", 1))
 
         # Optimizer
-        try:
-            self.opt.load_state_dict(blob["opt"])
-        except Exception as e:
-            print(f"[resume] optimizer not loaded ({e}); using fresh.")
+        #
+        # A checkpoint saved under a different optimizer *class* (e.g. an
+        # older run's Adamax, before the AdamW switch) stores per-param
+        # state keyed 'exp_inf' instead of AdamW's 'exp_avg_sq'.
+        # load_state_dict() itself doesn't validate key names against the
+        # target optimizer's step() -- it happily copies the dict over --
+        # so a mismatch wouldn't surface here, it would KeyError much
+        # later inside .step(), deep into training. Detect it up front
+        # and fall back to fresh optimizer state (keeping the checkpoint's
+        # lr/betas/eps/weight_decay) instead of risking that.
+        def _copy_opt_hparams(saved_blob):
             try:
-                g0 = blob["opt"]["param_groups"][0]
+                g0 = saved_blob["opt"]["param_groups"][0]
                 for k in ("lr", "betas", "eps", "weight_decay"):
                     if k in g0:
                         for g in self.opt.param_groups:
                             g[k] = g0[k]
             except Exception:
                 pass
+
+        saved_state = blob.get("opt", {}).get("state", {})
+        current_needs_avg_sq = isinstance(self.opt, (torch.optim.Adam, torch.optim.AdamW))
+        opt_state_incompatible = (
+            current_needs_avg_sq
+            and bool(saved_state)
+            and not any("exp_avg_sq" in v for v in saved_state.values())
+        )
+
+        if opt_state_incompatible:
+            print(
+                "[resume] checkpoint optimizer state looks like it's from a "
+                "different optimizer class (e.g. Adamax); starting optimizer "
+                "moment buffers fresh instead of loading incompatible state."
+            )
+            _copy_opt_hparams(blob)
+        else:
+            try:
+                self.opt.load_state_dict(blob["opt"])
+            except Exception as e:
+                print(f"[resume] optimizer not loaded ({e}); using fresh.")
+                _copy_opt_hparams(blob)
 
         # Scaler
         if self.scaler is not None and "scaler" in blob:
