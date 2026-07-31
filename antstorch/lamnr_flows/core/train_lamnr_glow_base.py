@@ -1111,6 +1111,11 @@ class BaseLAMNrTrainer(abc.ABC):
 
     def _maybe_resume(self, args) -> int:
         """Return start_iter (1 if fresh, resumed iter otherwise)."""
+        # Set unconditionally so the post-reset re-warmup check in train()
+        # (getattr(self, "_opt_reset_at_iter", None)) has a defined value
+        # on every path, not just the one that actually resets optimizer
+        # state below.
+        self._opt_reset_at_iter = None
         resume_path = None
         if args.resume:
             rp = Path(args.resume)
@@ -1188,12 +1193,20 @@ class BaseLAMNrTrainer(abc.ABC):
                 "moment buffers fresh instead of loading incompatible state."
             )
             _copy_opt_hparams(blob)
+            # Flag the reset so train()'s post-reset re-warmup can damp the
+            # applied lr for the first few hundred iterations -- a fresh
+            # AdamW's t=1 bias correction otherwise lands a full-nominal-lr
+            # update on every parameter at once, which a model already
+            # trained this far can't absorb (see train() for the full
+            # explanation).
+            self._opt_reset_at_iter = start_iter
         else:
             try:
                 self.opt.load_state_dict(blob["opt"])
             except Exception as e:
                 print(f"[resume] optimizer not loaded ({e}); using fresh.")
                 _copy_opt_hparams(blob)
+                self._opt_reset_at_iter = start_iter
 
         # Scaler
         if self.scaler is not None and "scaler" in blob:
@@ -1564,11 +1577,50 @@ class BaseLAMNrTrainer(abc.ABC):
                 for p in all_params if p in self.opt.state
             }
 
+            # Post-optimizer-reset re-warmup.
+            #
+            # When _maybe_resume() falls back to a fresh optimizer state
+            # (e.g. the Adamax -> AdamW switch: incompatible moment
+            # buffers, see _maybe_resume), step 1 of a brand-new AdamW is
+            # not "gentle" just because args.lr/warmup have already
+            # damped the *nominal* lr down to ~2e-6 by this point in the
+            # outer warmup schedule. Adam-family bias correction at t=1
+            # normalizes exp_avg by (1-beta1^1) and exp_avg_sq by
+            # (1-beta2^1), which makes the *first* update for every
+            # parameter with a nonzero gradient land at roughly the full
+            # nominal lr magnitude, uniformly across all ~742M
+            # parameters simultaneously, regardless of how small that
+            # parameter's gradient history "should" make its effective
+            # step. On a model already trained 1000 iterations (not a
+            # fresh random init, where this same shock is normal and
+            # harmless), that uniform simultaneous nudge compounds through
+            # L=5 levels of multiplicative/exponential flow math into an
+            # exploded forward pass -- reproducing identically on every
+            # retry since it's structural (driven by t=1 bias correction),
+            # not data-dependent, so the earlier per-step rollback just
+            # spins forever without progress. Temporarily scale down the
+            # *applied* lr (restored immediately after step()) for a
+            # short window following any optimizer-state reset, so the
+            # moment estimates get a chance to build up real history
+            # before bias correction lets the full nominal lr through.
+            reset_at = getattr(self, "_opt_reset_at_iter", None)
+            reset_rewarmup_iters = 300
+            damped_lrs = None
+            if reset_at is not None and (it - reset_at) < reset_rewarmup_iters:
+                damp = 0.02 + 0.98 * ((it - reset_at) / reset_rewarmup_iters)
+                damped_lrs = [g["lr"] for g in self.opt.param_groups]
+                for g in self.opt.param_groups:
+                    g["lr"] = g["lr"] * damp
+
             if self.scaler.is_enabled():
                 self.scaler.step(self.opt)
                 self.scaler.update()
             else:
                 self.opt.step()
+
+            if damped_lrs is not None:
+                for g, lr0 in zip(self.opt.param_groups, damped_lrs):
+                    g["lr"] = lr0
 
             local_bad_params = any(not torch.isfinite(p).all() for p in all_params)
             reason = "non-finite parameter(s) after step"
