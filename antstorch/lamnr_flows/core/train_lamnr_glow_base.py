@@ -1349,6 +1349,24 @@ class BaseLAMNrTrainer(abc.ABC):
         train_iter      = iter(self.train_loader)
         input_data_saved = False
 
+        # Rollback-streak LR backoff.
+        #
+        # The rollback safety net (params + optimizer state + delta +
+        # replay checks) reliably prevents corruption, but on its own it
+        # has no way to *escape* a fragile region: it keeps retrying at
+        # the same lr, and if that lr is what's causing the blowup, nothing
+        # about a plain retry changes the outcome -- observed in practice
+        # as dozens to hundreds of consecutive rollbacks with zero
+        # progress (e.g. iter 3163 onward). Track a streak counter and, once
+        # rollbacks start piling up, automatically back off the *applied*
+        # lr (same restore-after-step mechanism as the post-reset
+        # re-warmup) so later retries are progressively gentler instead of
+        # identical. Recovers gradually back to full lr on the next
+        # successful step, and resets fully once training is clearly
+        # healthy again.
+        rollback_streak = 0
+        lr_backoff = 1.0
+
         if self.rank == 0:
             tqdm.write(
                 f"[info] training {n_views} view(s); "
@@ -1411,6 +1429,41 @@ class BaseLAMNrTrainer(abc.ABC):
                     bad_batch = False
                     for vi, m in enumerate(models):
                         x_v = self.extract_view(x, vi, dev)
+
+                        # Diagnostic only (does not alter control flow).
+                        #
+                        # Every optimizer-side fix so far (Adamax->AdamW,
+                        # tighter grad_clip, post-reset re-warmup) failed
+                        # to move the failure point, and a *fresh* run
+                        # (no resumed weights, no Adamax history to carry
+                        # fragility) still broke in nearly the same
+                        # iteration range as every resumed attempt. With
+                        # seed=0 fixing the DistributedSampler's shuffle
+                        # order and ImageDataset's augmentation draws, the
+                        # sequence of samples hitting the model at a given
+                        # iteration is nearly identical run to run --
+                        # consistent with a specific pathological sample
+                        # (corrupt voxels, or an extreme augmentation draw
+                        # on one of only 50 CuratedCohort subjects) rather
+                        # than an optimizer dynamics problem. Log it if the
+                        # *input* itself is already non-finite or extreme,
+                        # before it ever reaches the model, so we can
+                        # confirm or rule this out directly instead of
+                        # continuing to guess on the optimizer side.
+                        if not torch.isfinite(x_v).all():
+                            n_bad = int((~torch.isfinite(x_v)).sum().item())
+                            tqdm.write(
+                                f"[data] non-finite INPUT at view {vi}, iter {it}: "
+                                f"{n_bad}/{x_v.numel()} elements non-finite"
+                            )
+                        else:
+                            x_min = float(x_v.min().item())
+                            x_max = float(x_v.max().item())
+                            if abs(x_min) > 1e4 or abs(x_max) > 1e4:
+                                tqdm.write(
+                                    f"[data] extreme INPUT range at view {vi}, "
+                                    f"iter {it}: min={x_min:.4g} max={x_max:.4g}"
+                                )
 
                         # Forward pass. Must go through __call__ (m(...))
                         # for both GlowDataParallel and GlowDDP -- calling
@@ -1504,6 +1557,15 @@ class BaseLAMNrTrainer(abc.ABC):
             # ── End of gradient accumulation ─────────────────────────
 
             if bad_update:
+                # Count toward the same streak as post-step rollbacks below
+                # -- in practice the two interleave during a stuck stretch
+                # (forward already non-finite on some batches, others make
+                # it to a step that then gets rolled back), and only
+                # tracking one type would undercount how long training's
+                # actually been stuck and delay the lr backoff.
+                rollback_streak += 1
+                if rollback_streak % 15 == 0:
+                    lr_backoff = max(0.02, lr_backoff * 0.5)
                 self.opt.zero_grad(set_to_none=True)
                 continue
 
@@ -1605,9 +1667,13 @@ class BaseLAMNrTrainer(abc.ABC):
             # before bias correction lets the full nominal lr through.
             reset_at = getattr(self, "_opt_reset_at_iter", None)
             reset_rewarmup_iters = 300
-            damped_lrs = None
+            reset_damp = 1.0
             if reset_at is not None and (it - reset_at) < reset_rewarmup_iters:
-                damp = 0.02 + 0.98 * ((it - reset_at) / reset_rewarmup_iters)
+                reset_damp = 0.02 + 0.98 * ((it - reset_at) / reset_rewarmup_iters)
+
+            damp = min(reset_damp, lr_backoff)
+            damped_lrs = None
+            if damp < 1.0:
                 damped_lrs = [g["lr"] for g in self.opt.param_groups]
                 for g in self.opt.param_groups:
                     g["lr"] = g["lr"] * damp
@@ -1700,10 +1766,21 @@ class BaseLAMNrTrainer(abc.ABC):
                             break
 
             if self._sync_skip_flag(local_bad_params):
+                rollback_streak += 1
+                backoff_note = ""
+                if rollback_streak % 15 == 0:
+                    prev_backoff = lr_backoff
+                    lr_backoff = max(0.02, lr_backoff * 0.5)
+                    if lr_backoff != prev_backoff:
+                        backoff_note = (
+                            f"; {rollback_streak} in a row, backing lr off to "
+                            f"{lr_backoff:.3g}x"
+                        )
                 tqdm.write(
                     f"[anomaly] rolling back optimizer step at iter {it} "
                     f"({reason})"
                     + (", flagged by another rank" if (self.is_ddp and not local_bad_params) else "")
+                    + backoff_note
                 )
                 with torch.no_grad():
                     for p, snap in zip(all_params, param_snapshot):
@@ -1718,6 +1795,13 @@ class BaseLAMNrTrainer(abc.ABC):
                 self.opt.zero_grad(set_to_none=True)
                 continue
             del param_snapshot, opt_state_snapshot
+
+            # A successful step: let the rollback streak/backoff heal
+            # instead of resetting instantly to full lr, in case the same
+            # fragile region is still nearby.
+            rollback_streak = 0
+            if lr_backoff < 1.0:
+                lr_backoff = min(1.0, lr_backoff * 1.2)
 
             # Use last micro-batch for EMA ActNorm warmup
             x = x_last
