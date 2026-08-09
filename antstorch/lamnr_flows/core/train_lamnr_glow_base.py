@@ -1418,6 +1418,16 @@ class BaseLAMNrTrainer(abc.ABC):
     # fires.
     ROLLBACK_WATCHDOG_LIMIT = 50
 
+    # Sanity ceiling on the raw per-iteration loss magnitude for an
+    # otherwise-accepted step. This problem's healthy loss/bpd range is
+    # roughly [-5, 5] (see the [eval] avg_bpd lines in the training log);
+    # a step whose loss lands orders of magnitude beyond that (e.g. the
+    # 76433.73 observed in practice) is not a healthy update just because
+    # it happened to pass the finiteness/delta/replay checks. Counted
+    # toward the same rollback_streak/watchdog machinery as an explicitly
+    # rejected step -- see the comment at its use site in train().
+    BAD_LOSS_MAGNITUDE = 100.0
+
     def _watchdog_check(self, rollback_streak: int, lr_backoff: float):
         """
         Call after every rollback_streak increment. Once the streak
@@ -1931,6 +1941,40 @@ class BaseLAMNrTrainer(abc.ABC):
             L_align_log    = float(align_acc.item()) / float(grad_accum)
             sum_bpd        = bpd_acc / float(grad_accum)
             curr_bpd_views = [v / float(grad_accum) for v in (bpd_views_acc or [])]
+
+            # Magnitude-based watchdog trigger.
+            #
+            # The consecutive-rollback counter (above, reset to 0 a few
+            # lines up) only fires on steps that get explicitly REJECTED
+            # (non-finite grad, non-finite params, oversized delta, or a
+            # bad forward replay). A step can pass every one of those
+            # checks yet still land on a catastrophically bad-but-finite
+            # loss -- observed in practice (iter 2027, loss=76433.73,
+            # against a healthy range of roughly [-5, 5] for this
+            # problem). Such a step is accepted as "successful" above,
+            # which resets rollback_streak to 0 and heals lr_backoff
+            # upward, even though nothing about it was healthy. If this
+            # then alternates with stretches of rejected rollbacks that
+            # individually never reach ROLLBACK_WATCHDOG_LIMIT before the
+            # next bad-but-accepted step resets the count, the
+            # consecutive-streak watchdog can never fire at all --
+            # training stays stuck in a terrible-loss regime indefinitely
+            # with no automatic recovery (observed in practice: repeated
+            # "skipping optimizer step (non-finite grad norm=inf)" bursts
+            # that never individually reach 50-in-a-row). Catch this
+            # directly: any accepted step whose loss magnitude is far
+            # outside the sane range counts toward the same watchdog
+            # streak regardless of the per-step checks it happened to
+            # pass.
+            if abs(curr_loss) > self.BAD_LOSS_MAGNITUDE:
+                rollback_streak += 1
+                tqdm.write(
+                    f"[watchdog] accepted step at iter {it} has an absurd "
+                    f"loss magnitude (loss={curr_loss:.3g}); counting it "
+                    f"toward the rollback streak despite passing the "
+                    f"per-step checks."
+                )
+                rollback_streak, lr_backoff = self._watchdog_check(rollback_streak, lr_backoff)
 
             # Lazy EMA init (after first successful update)
             if args.ema and self.ema_models is None:
