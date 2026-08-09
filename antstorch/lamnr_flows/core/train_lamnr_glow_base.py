@@ -1326,6 +1326,124 @@ class BaseLAMNrTrainer(abc.ABC):
     # Training loop
     # ------------------------------------------------------------------
 
+    def _reload_last_checkpoint_inplace(self) -> bool:
+        """
+        Reload model/EMA/optimizer/scaler/warmup state IN PLACE from the
+        last "latest" checkpoint on disk (self.state_path), WITHOUT
+        touching the training-loop iteration counter `it`.
+
+        Used by the rollback watchdog in train(): the per-step rollback
+        (params + optimizer state restored from an in-memory snapshot
+        taken one iteration ago) can only undo the *most recent* step --
+        if the forward pass is already permanently non-finite by the time
+        that snapshot was taken (see the long comment above the snapshot
+        in train() for why this happens despite the delta/replay checks),
+        every retry re-enters the same broken state and the per-step
+        rollback can never escape it on its own (observed in practice as
+        hundreds to thousands of consecutive "[anomaly] skipping..."
+        messages with zero progress). The last checkpoint written to disk
+        is always a point where a full eval pass already succeeded (see
+        save_checkpoint() / train()'s eval branch, which only runs after a
+        *successful* step), so it's the nearest known-good state to fall
+        back to automatically instead of requiring an operator to notice
+        the stall, kill the job, and restart with --resume by hand.
+
+        Deliberately does NOT rewind `it`: the outer loop is a plain
+        `for it in range(start_iter, max_iter+1)`, so rewinding it would
+        require restructuring the loop into a manually-driven `while`.
+        Reloading weights/optimizer state to a healthy point while letting
+        `it` (and therefore the lr schedule) continue climbing is a
+        smaller, lower-risk change -- the model becomes healthy again and
+        training makes real progress again, just measured against a
+        slightly more-advanced lr/warmup position than the reloaded
+        weights originally saw. The existing lr_backoff mechanism already
+        damps the applied lr for a while after any rollback streak, which
+        covers this gap.
+
+        Returns True if a checkpoint existed and was reloaded, False if
+        self.state_path doesn't exist yet (e.g. the run stalled before its
+        first eval_interval) -- in that case there is no fallback and the
+        caller should let the existing skip-forever behavior continue
+        rather than raising.
+        """
+        if not self.state_path.exists():
+            return False
+
+        blob = torch.load(self.state_path, map_location=self.dev, weights_only=False)
+
+        if blob.get("models") is not None:
+            for m, sd in zip(self.models, blob["models"]):
+                self._load_model_state(m, sd)
+
+        if self.args.ema and blob.get("ema") is not None and self.ema_models is not None:
+            for em, sd in zip(self.ema_models, blob["ema"]):
+                self._load_model_state(em, sd)
+
+        try:
+            self.opt.load_state_dict(blob["opt"])
+        except Exception as e:
+            tqdm.write(
+                f"[watchdog] optimizer state not reloaded ({e}); keeping "
+                f"current optimizer state alongside the reloaded weights."
+            )
+
+        if self.scaler is not None and blob.get("scaler") is not None:
+            try:
+                self.scaler.load_state_dict(blob["scaler"])
+            except Exception:
+                pass
+
+        if self.warm and blob.get("warm") is not None:
+            try:
+                self.warm.load_state_dict(blob["warm"])
+            except Exception:
+                pass
+
+        ckpt_iter = int(blob.get("iter", -1))
+        tqdm.write(
+            f"[watchdog] stuck rollback streak detected -- reloaded last "
+            f"known-good checkpoint (saved at iter {ckpt_iter}) from "
+            f"{self.state_path}; continuing forward without rewinding the "
+            f"iteration counter."
+        )
+        return True
+
+    # Number of consecutive rollbacks (per-step skip or post-step undo,
+    # tracked by the same `rollback_streak` counter) after which the
+    # per-step rollback is treated as having failed to recover and the
+    # watchdog falls back to reloading the last checkpoint from disk
+    # instead of continuing to skip indefinitely. Deliberately well above
+    # the existing lr-backoff threshold (15) -- that backoff is tried
+    # first and given a real chance to work before this heavier fallback
+    # fires.
+    ROLLBACK_WATCHDOG_LIMIT = 50
+
+    def _watchdog_check(self, rollback_streak: int, lr_backoff: float):
+        """
+        Call after every rollback_streak increment. Once the streak
+        crosses ROLLBACK_WATCHDOG_LIMIT, the per-step rollback has
+        provably failed to recover on its own -- fall back to the last
+        on-disk checkpoint (see _reload_last_checkpoint_inplace) instead
+        of skipping forever. Returns the (possibly reset) streak/backoff.
+        """
+        if rollback_streak > 0 and rollback_streak % self.ROLLBACK_WATCHDOG_LIMIT == 0:
+            reloaded = self._reload_last_checkpoint_inplace()
+            if reloaded:
+                rollback_streak = 0
+                # Cool down harder than a normal post-rollback backoff:
+                # the model was just healed from a confirmed permanent
+                # corruption, so give it a wider margin before trusting
+                # the full nominal lr again. Heals back up via the
+                # existing lr_backoff *= 1.2 on each later successful step.
+                lr_backoff = min(lr_backoff, 0.1)
+            else:
+                tqdm.write(
+                    f"[watchdog] {rollback_streak} consecutive rollbacks "
+                    f"and no checkpoint on disk yet to fall back to -- "
+                    f"continuing to skip and hoping for recovery."
+                )
+        return rollback_streak, lr_backoff
+
     def train(self) -> None:  # noqa: C901
         args      = self.args
         dev       = self.dev
@@ -1566,6 +1684,7 @@ class BaseLAMNrTrainer(abc.ABC):
                 rollback_streak += 1
                 if rollback_streak % 15 == 0:
                     lr_backoff = max(0.02, lr_backoff * 0.5)
+                rollback_streak, lr_backoff = self._watchdog_check(rollback_streak, lr_backoff)
                 self.opt.zero_grad(set_to_none=True)
                 continue
 
@@ -1792,6 +1911,7 @@ class BaseLAMNrTrainer(abc.ABC):
                             else:
                                 self.opt.state[p][k] = v
                 del param_snapshot, opt_state_snapshot
+                rollback_streak, lr_backoff = self._watchdog_check(rollback_streak, lr_backoff)
                 self.opt.zero_grad(set_to_none=True)
                 continue
             del param_snapshot, opt_state_snapshot
