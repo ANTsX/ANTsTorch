@@ -1724,8 +1724,27 @@ class BaseLAMNrTrainer(abc.ABC):
                     f"[anomaly] skipping optimizer step at iter {it} "
                     f"(non-finite grad norm={float(total_norm):.2f})"
                 )
+                # Count toward the same watchdog streak as the other anomaly
+                # branches (bad_update above, post-step rollback below). Previously
+                # this branch skipped straight to `continue` without touching
+                # rollback_streak at all -- every repeat of this exact message
+                # (the one seen looping hundreds of times in practice) counted for
+                # nothing, so the consecutive-streak watchdog could never reach its
+                # threshold no matter how long training stayed stuck this way. No
+                # extra DDP sync needed here (unlike bad_update/local_bad_params):
+                # DDP's backward() already all-reduces gradients across ranks before
+                # this point, so total_norm's finiteness already agrees across ranks.
+                rollback_streak += 1
+                if rollback_streak % 15 == 0:
+                    lr_backoff = max(0.02, lr_backoff * 0.5)
+                rollback_streak, lr_backoff = self._watchdog_check(rollback_streak, lr_backoff)
                 self.opt.zero_grad(set_to_none=True)
                 continue
+
+
+
+
+
 
             # Post-step parameter-finiteness guard.
             #
