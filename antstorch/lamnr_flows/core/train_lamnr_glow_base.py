@@ -1966,13 +1966,29 @@ class BaseLAMNrTrainer(abc.ABC):
             # outside the sane range counts toward the same watchdog
             # streak regardless of the per-step checks it happened to
             # pass.
-            if abs(curr_loss) > self.BAD_LOSS_MAGNITUDE:
+            #
+            # MUST go through _sync_skip_flag, same as every other
+            # anomaly branch above: under DDP each rank sees a different
+            # micro-batch, so curr_loss differs across ranks. An earlier
+            # version of this check incremented rollback_streak (and
+            # could trigger _reload_last_checkpoint_inplace) locally,
+            # per-rank, with no synchronization -- if only the rank that
+            # happened to see the bad batch reloaded the checkpoint while
+            # the other rank did not, the two ranks' weights permanently
+            # diverge. All-reducing gradients from mismatched replicas
+            # after that point is mathematically incoherent and produced
+            # exactly the symptom observed in practice: an unrecoverable
+            # "non-finite grad norm=inf" stall for the rest of the run,
+            # immediately following a magnitude-triggered watchdog event.
+            local_bad_loss = abs(curr_loss) > self.BAD_LOSS_MAGNITUDE
+            if self._sync_skip_flag(local_bad_loss):
                 rollback_streak += 1
                 tqdm.write(
                     f"[watchdog] accepted step at iter {it} has an absurd "
-                    f"loss magnitude (loss={curr_loss:.3g}); counting it "
-                    f"toward the rollback streak despite passing the "
-                    f"per-step checks."
+                    f"loss magnitude (loss={curr_loss:.3g}"
+                    + (", flagged by another rank" if (self.is_ddp and not local_bad_loss) else "")
+                    + f"); counting it toward the rollback streak despite "
+                    f"passing the per-step checks."
                 )
                 rollback_streak, lr_backoff = self._watchdog_check(rollback_streak, lr_backoff)
 
