@@ -809,7 +809,9 @@ class HybridLAMNrTrainer:
             self.s_align = nn.Parameter(torch.tensor([0.0], device=self.dev))
             parameters += [self.s_nll, self.s_align]
         self.opt = torch.optim.AdamW(parameters, lr=args.lr, weight_decay=args.weight_decay)
-        self.warm = make_warmup(self.opt, args.warmup_iters, 1.0, 0)
+        self.warm = make_warmup(
+            self.opt, args.warmup_iters, args.lr_decay_gamma, args.lr_decay_steps
+        )
         self.plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.opt, factor=args.plateau_factor,
             patience=args.plateau_patience,
@@ -886,16 +888,33 @@ class HybridLAMNrTrainer:
             )
         else:
             input_shape = (view.channels, *view.shape)
+            hidden = self._cfg(view, "hidden", self.args.image_hidden)
+            hidden = (
+                [int(value) for value in hidden]
+                if isinstance(hidden, (list, tuple))
+                else int(hidden)
+            )
+            base = str(self._cfg(view, "base", self.args.image_base)).lower()
+            base = {"glowbase": "glow", "diaggaussian": "diag"}.get(base, base)
+            if base not in {"glow", "diag"}:
+                raise ValueError(f"Unsupported image base distribution {base!r}.")
             kwargs = dict(
                 input_shape=input_shape,
                 L=int(self._cfg(view, "L", self.args.image_L)),
                 K=self._cfg(view, "K", self.args.image_K),
-                hidden_channels=int(self._cfg(view, "hidden", self.args.image_hidden)),
-                base=str(self._cfg(view, "base", self.args.image_base)),
+                hidden_channels=hidden,
+                base=base,
+                glowbase_logscale_factor=float(
+                    self._cfg(view, "glowbase_logscale_factor", 1.0)
+                ),
+                glowbase_min_log=float(self._cfg(view, "glowbase_min_log", -5.0)),
+                glowbase_max_log=float(self._cfg(view, "glowbase_max_log", 5.0)),
                 split_mode="channel", scale=True,
                 scale_map=str(self._cfg(view, "scale_map", "sigmoid")),
                 leaky=0.0, net_actnorm=bool(self._cfg(view, "net_actnorm", False)),
                 scale_cap=float(self._cfg(view, "scale_cap", self.args.scale_cap)),
+                actnorm_scale_cap=self._cfg(view, "actnorm_scale_cap", None),
+                legacy_conv_cap=self._cfg(view, "legacy_conv_cap", None),
                 grad_checkpoint={"auto": None, "on": True, "off": False}[
                     str(self._cfg(view, "grad_checkpoint", self.args.grad_checkpoint))
                 ],
@@ -1419,7 +1438,10 @@ class HybridLAMNrTrainer:
             )
             if self.args.sample_mode == "model":
                 flow = self._flow(model)
-                sampled = flow.sample(self.args.preview_samples)
+                sampled = flow.sample(
+                    self.args.preview_samples,
+                    temperature=self.args.sample_temp,
+                )
                 sampled = sampled[0] if isinstance(sampled, (tuple, list)) else sampled
                 self._write_grid(
                     [self._display_slice(item) for item in sampled],
@@ -1531,6 +1553,8 @@ def _build_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-5)
     parser.add_argument("--warmup-iters", type=int, default=200)
+    parser.add_argument("--lr-decay-gamma", type=float, default=1.0)
+    parser.add_argument("--lr-decay-steps", type=int, default=0)
     parser.add_argument("--grad-clip", type=float, default=5.0)
     parser.add_argument("--exploding-grad-norm", type=float, default=1e4)
     parser.add_argument("--max-update-norm", type=float, default=1e3)
@@ -1575,7 +1599,7 @@ def _build_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--image-L", type=int, default=3)
     parser.add_argument("--image-K", type=int, default=16)
     parser.add_argument("--image-hidden", type=int, default=128)
-    parser.add_argument("--image-base", default="GlowBase")
+    parser.add_argument("--image-base", default="glow", choices=["glow", "diag"])
     parser.add_argument("--grad-checkpoint", default="auto", choices=["auto", "on", "off"])
     parser.add_argument("--scale-cap", type=float, default=3.0)
     parser.add_argument("--tabular-K", type=int, default=32)
@@ -1609,6 +1633,7 @@ def _build_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--preview-interval", type=int, default=500)
     parser.add_argument("--preview-samples", type=int, default=8)
     parser.add_argument("--sample-mode", default="model", choices=["off", "model"])
+    parser.add_argument("--sample-temp", type=float, default=1.0)
     parser.add_argument("--keep-last", type=int, default=3)
     parser.add_argument("--keep-every", type=int, default=5000)
     parser.add_argument("--disk-warning-gb", type=float, default=10.0)

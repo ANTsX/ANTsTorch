@@ -207,9 +207,11 @@ def test_hybrid_trainer_real_flow_smoke(tmp_path):
         "subject_column": "subject",
         "views": [
             {"name": "im2", "type": "image2d", "path_column": "im2",
-             "shape": [8, 8], "model": {"L": 1, "K": 1, "hidden": 4}},
+             "shape": [8, 8], "model": {"L": 1, "K": [1], "hidden": [4],
+              "glowbase_logscale_factor": 1.0, "glowbase_min_log": -5.0,
+              "glowbase_max_log": 5.0}},
             {"name": "im3", "type": "image3d", "path_column": "im3",
-             "shape": [8, 8, 8], "model": {"L": 1, "K": 1, "hidden": 4}},
+             "shape": [8, 8, 8], "model": {"L": 1, "K": [1], "hidden": [4]}},
             {"name": "tau", "type": "tabular", "columns": ["b1", "b2", "b3"],
              "model": {"K": 1, "hidden": 4}},
         ],
