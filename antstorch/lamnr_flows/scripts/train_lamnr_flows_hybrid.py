@@ -623,6 +623,15 @@ class HybridLAMNrTrainer:
     def setup(self, args: argparse.Namespace) -> None:
         self.args = args
         set_deterministic(args.seed)
+        # Optional: torch.autograd.set_detect_anomaly(True) pinpoints the
+        # exact forward op behind a NaN/Inf gradient at the cost of a large
+        # slowdown. Off by default; mirrors BaseLAMNrTrainer's --detect-anomaly.
+        if bool(getattr(args, "detect_anomaly", False)):
+            torch.autograd.set_detect_anomaly(True)
+            tqdm.write(
+                "[debug] torch.autograd.set_detect_anomaly(True) enabled — "
+                "expect a large slowdown"
+            )
         self.rank = int(os.environ.get("RANK", "0"))
         self.local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         self.world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -641,7 +650,26 @@ class HybridLAMNrTrainer:
         else:
             self.dev = torch.device("cpu")
 
+        self.run_dir = Path(args.out_dir)
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.state_path = self.run_dir / "training_state.pt"
+        self.metrics_path = self.run_dir / "metrics.csv"
+
         self.views, config = load_hybrid_config(args.config)
+
+        # Resolve the resume checkpoint (if any) *before* the manifest and
+        # models are built, so --use-ckpt-config can steer view/architecture
+        # construction instead of only being reconciled after models already
+        # exist (which risks a confusing state_dict shape-mismatch error, or
+        # worse, a silent load onto the wrong architecture).
+        self._resume_path: Optional[Path] = None
+        if args.resume:
+            self._resume_path = Path(args.resume)
+        elif args.auto_resume and self.state_path.exists():
+            self._resume_path = self.state_path
+        if self._resume_path is not None and self._resume_path.exists():
+            self._reconcile_config_with_checkpoint(self._resume_path)
+
         frame = (
             pd.read_csv(args.manifest)
             if args.manifest
@@ -656,6 +684,13 @@ class HybridLAMNrTrainer:
             raise ValueError(f"Manifest is missing columns: {missing_columns}")
 
         subject_column = config.get("subject_column", args.subject_column or None)
+        if args.subject_limit > 0:
+            if subject_column and subject_column in frame.columns:
+                keep_ids = frame[subject_column].drop_duplicates().iloc[: args.subject_limit]
+                frame = frame[frame[subject_column].isin(keep_ids)].reset_index(drop=True)
+            else:
+                frame = frame.iloc[: args.subject_limit].reset_index(drop=True)
+            self.full_frame = frame.reset_index(drop=True)
         train_frame, val_frame = _split_manifest(
             frame, args.val_fraction, args.seed, subject_column
         )
@@ -805,8 +840,12 @@ class HybridLAMNrTrainer:
         if self.projectors is not None:
             parameters += list(self.projectors.parameters())
         if args.weighting == "kendall" and args.align != "none":
-            self.s_nll = nn.Parameter(torch.tensor([0.0], device=self.dev))
-            self.s_align = nn.Parameter(torch.tensor([0.0], device=self.dev))
+            self.s_nll = nn.Parameter(
+                torch.tensor([args.init_logvar_nll], device=self.dev)
+            )
+            self.s_align = nn.Parameter(
+                torch.tensor([args.init_logvar_align], device=self.dev)
+            )
             parameters += [self.s_nll, self.s_align]
         self.opt = torch.optim.AdamW(parameters, lr=args.lr, weight_decay=args.weight_decay)
         self.warm = make_warmup(
@@ -828,15 +867,11 @@ class HybridLAMNrTrainer:
         self.ema_projectors: Optional[nn.ModuleList] = None
         self.anomaly_streak = 0
 
-        self.run_dir = Path(args.out_dir)
-        self.run_dir.mkdir(parents=True, exist_ok=True)
-        self.state_path = self.run_dir / "training_state.pt"
-        self.metrics_path = self.run_dir / "metrics.csv"
         self.start_iter = 1
-        if args.resume:
-            self.start_iter = self._load_checkpoint(Path(args.resume))
-        elif args.auto_resume and self.state_path.exists():
-            self.start_iter = self._load_checkpoint(self.state_path)
+        if self._resume_path is not None:
+            self.start_iter = self._load_checkpoint(self._resume_path)
+        if args.extra_iters > 0:
+            args.max_iter = (self.start_iter - 1) + args.extra_iters
         if self.rank == 0 and not self.metrics_path.exists():
             columns = ["iter", "loss", "align", "sum_bpd", "val_loss", "lr"]
             columns.extend(f"bpd_{view.name}" for view in self.views)
@@ -874,8 +909,8 @@ class HybridLAMNrTrainer:
                 D=dim,
                 base=base_name,
                 pca_latent_dim=min(int(self._cfg(view, "pca_latent_dimension", 4)), dim),
-                base_min_log=-5.0,
-                base_max_log=5.0,
+                base_min_log=float(self._cfg(view, "base_min_log", -5.0)),
+                base_max_log=float(self._cfg(view, "base_max_log", 5.0)),
                 base_sigma=float(self._cfg(view, "base_sigma", 0.1)),
             )
             model = create_real_nvp_normalizing_flow_model(
@@ -885,6 +920,12 @@ class HybridLAMNrTrainer:
                 mlp_width=self._cfg(view, "hidden", self.args.tabular_hidden),
                 scale_cap=float(self._cfg(view, "scale_cap", self.args.scale_cap)),
                 mask_mode=str(self._cfg(view, "mask_mode", "alternating")),
+                leaky_relu_negative_slope=float(
+                    self._cfg(view, "leaky_relu_negative_slope", 0.0)
+                ),
+                spectral_norm_scales=bool(self._cfg(view, "spectral_norm_scales", False)),
+                additive_first_n=int(self._cfg(view, "additive_first_n", 0)),
+                actnorm_every=int(self._cfg(view, "actnorm_every", 1)),
             )
         else:
             input_shape = (view.channels, *view.shape)
@@ -1098,6 +1139,9 @@ class HybridLAMNrTrainer:
     def train(self) -> None:
         iterator = iter(self.train_loader)
         epoch = 0
+        smooth_alpha = float(self.args.smooth_alpha)
+        ema_loss_disp: Optional[float] = None
+        ema_align_disp: Optional[float] = None
         pbar = tqdm(
             range(self.start_iter, self.args.max_iter + 1), desc="train-hybrid",
             disable=self.rank != 0,
@@ -1217,7 +1261,19 @@ class HybridLAMNrTrainer:
                 val_loss = self.validate(iteration)
                 self.plateau.step(val_loss)
             if self.rank == 0:
-                pbar.set_postfix(loss=f"{mean_loss:.4f}", align=f"{mean_align:.4f}")
+                if smooth_alpha > 0:
+                    ema_loss_disp = (
+                        mean_loss if ema_loss_disp is None
+                        else (1.0 - smooth_alpha) * ema_loss_disp + smooth_alpha * mean_loss
+                    )
+                    ema_align_disp = (
+                        mean_align if ema_align_disp is None
+                        else (1.0 - smooth_alpha) * ema_align_disp + smooth_alpha * mean_align
+                    )
+                    disp_loss, disp_align = ema_loss_disp, ema_align_disp
+                else:
+                    disp_loss, disp_align = mean_loss, mean_align
+                pbar.set_postfix(loss=f"{disp_loss:.4f}", align=f"{disp_align:.4f}")
                 row = [
                     iteration, mean_loss, mean_align, sum_bpd, val_loss, lr,
                     *bpds, *self.last_val_bpds,
@@ -1340,6 +1396,78 @@ class HybridLAMNrTrainer:
             if path not in keep:
                 path.unlink()
 
+    def _reconcile_config_with_checkpoint(self, resume_path: Path) -> None:
+        """Compare the current --config views/architecture against a checkpoint.
+
+        Without --use-ckpt-config, a resumed run whose --config drifted from
+        the one used to produce the checkpoint (different shape, K, hidden
+        width, base distribution, ...) would previously proceed silently and
+        either crash deep inside `load_state_dict` with a confusing shape
+        error, or -- if shapes happened to coincide -- load weights onto the
+        wrong architecture without any warning. This fails fast instead, with
+        --use-ckpt-config as the explicit opt-in to adopt the checkpoint's
+        architecture (mirroring BaseLAMNrTrainer's --use-ckpt-config).
+        """
+        blob_cpu = torch.load(resume_path, map_location="cpu", weights_only=False)
+        ckpt_views = blob_cpu.get("views")
+        ckpt_cfg = blob_cpu.get("config", {})
+        if not ckpt_views:
+            return
+
+        current_by_name = {v.name: v for v in self.views}
+        view_mismatches: List[Tuple[str, str, Any, Any]] = []
+        for raw in ckpt_views:
+            name = raw.get("name")
+            current = current_by_name.get(name)
+            if current is None:
+                view_mismatches.append((name, "<view>", "absent from --config", "present in checkpoint"))
+                continue
+            for field_name in ("kind", "shape", "channels", "columns", "model"):
+                current_value = getattr(current, field_name)
+                ckpt_value = raw.get(field_name)
+                if current_value != ckpt_value:
+                    view_mismatches.append((name, field_name, current_value, ckpt_value))
+
+        global_arch_keys = [
+            "image_L", "image_K", "image_hidden", "image_base", "grad_checkpoint",
+            "scale_cap", "tabular_K", "tabular_hidden", "tabular_base",
+        ]
+        arg_mismatches = [
+            k for k in global_arch_keys
+            if k in ckpt_cfg and getattr(self.args, k, None) != ckpt_cfg[k]
+        ]
+
+        if not view_mismatches and not arg_mismatches:
+            return
+
+        if self.args.use_ckpt_config:
+            if view_mismatches:
+                self.views = [HybridViewSpec.from_dict(raw) for raw in ckpt_views]
+            for k in arg_mismatches:
+                setattr(self.args, k, ckpt_cfg[k])
+            if self.rank == 0:
+                tqdm.write(
+                    f"[resume] --use-ckpt-config: adopted the checkpoint's architecture "
+                    f"({len(view_mismatches)} view field(s), {len(arg_mismatches)} "
+                    f"global arg(s) overridden from {resume_path})."
+                )
+        else:
+            details = "; ".join(
+                f"view {name!r} field {field!r}: --config={current!r} vs checkpoint={ckpt!r}"
+                for name, field, current, ckpt in view_mismatches
+            )
+            if arg_mismatches:
+                arg_details = "; ".join(
+                    f"{k}: --config={getattr(self.args, k)!r} vs checkpoint={ckpt_cfg[k]!r}"
+                    for k in arg_mismatches
+                )
+                details = f"{details}; {arg_details}" if details else arg_details
+            raise ValueError(
+                "Resume architecture mismatch between --config and the checkpoint "
+                f"at {resume_path}: {details}. Fix --config to match the checkpoint, "
+                "or pass --use-ckpt-config to adopt the checkpoint's architecture."
+            )
+
     def _load_checkpoint(self, path: Path, load_iteration: bool = True) -> int:
         blob = torch.load(path, map_location=self.dev, weights_only=False)
         for model, state in zip(self.models, blob["models"]):
@@ -1388,15 +1516,30 @@ class HybridLAMNrTrainer:
         return z, reconstructed
 
     @staticmethod
-    def _display_slice(tensor: torch.Tensor) -> np.ndarray:
+    def _display_slice(tensor: torch.Tensor, mode: str = "clamp") -> np.ndarray:
         array = tensor.detach().float().cpu().numpy()
         if array.ndim == 4:  # C,H,W,D
             array = array[0, :, :, array.shape[-1] // 2]
         elif array.ndim == 3:  # C,H,W
             array = array[0]
         array = np.nan_to_num(array)
-        lo, hi = np.percentile(array, [1, 99])
-        return np.clip((array - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
+
+        def _minmax(a: np.ndarray) -> np.ndarray:
+            lo, hi = float(a.min()), float(a.max())
+            return np.clip((a - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
+
+        def _pclamp(a: np.ndarray) -> np.ndarray:
+            lo, hi = np.percentile(a, [1, 99])
+            return np.clip((a - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
+
+        # "clamp" (default) preserves the previous reconstruction-preview
+        # behavior exactly. "to01"/"both" mirror --sample-grid-norm from the
+        # 2D/3D trainers and are used for the *generated-samples* grid only.
+        if mode == "to01":
+            return _minmax(array)
+        if mode == "both":
+            return _minmax(_pclamp(array))
+        return _pclamp(array)
 
     @staticmethod
     def _write_grid(images: Sequence[np.ndarray], path: Path, columns: int = 4) -> None:
@@ -1443,13 +1586,27 @@ class HybridLAMNrTrainer:
             )
             if self.args.sample_mode == "model":
                 flow = self._flow(model)
-                sampled = flow.sample(
-                    self.args.preview_samples,
-                    temperature=self.args.sample_temp,
-                )
-                sampled = sampled[0] if isinstance(sampled, (tuple, list)) else sampled
+                # Chunk generative sampling instead of drawing all
+                # preview_samples in one shot, to bound the peak memory of
+                # deep Glow flows at full resolution (mirrors
+                # BaseLAMNrTrainer's --sample-chunk-size / _save_samples_grid).
+                chunk_size = max(1, int(self.args.sample_chunk_size))
+                remaining = int(self.args.preview_samples)
+                sampled_chunks: List[torch.Tensor] = []
+                while remaining > 0:
+                    k = min(chunk_size, remaining)
+                    chunk = flow.sample(k, temperature=self.args.sample_temp)
+                    chunk = chunk[0] if isinstance(chunk, (tuple, list)) else chunk
+                    sampled_chunks.append(chunk.detach().cpu())
+                    remaining -= k
+                    if self.dev.type == "cuda":
+                        torch.cuda.empty_cache()
+                sampled = torch.cat(sampled_chunks, dim=0)
                 self._write_grid(
-                    [self._display_slice(item) for item in sampled],
+                    [
+                        self._display_slice(item, mode=self.args.sample_grid_norm)
+                        for item in sampled
+                    ],
                     preview_dir / f"{view.name}_samples_it{iteration:06d}.png",
                 )
 
@@ -1587,6 +1744,21 @@ def _build_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--anomaly-reload-after", type=int, default=5)
     parser.add_argument("--resume", default="")
     parser.add_argument("--auto-resume", action="store_true")
+    parser.add_argument("--use-ckpt-config", action="store_true",
+        help="On resume, adopt the checkpoint's view/architecture config "
+             "instead of failing on a mismatch with the current --config.")
+    parser.add_argument("--extra-iters", type=int, default=0,
+        help="After resuming, run this many additional iterations past the "
+             "checkpoint's iteration instead of stopping at --max-iter.")
+    parser.add_argument("--subject-limit", type=int, default=0,
+        help="Debug: cap the number of subjects/rows loaded from the "
+             "manifest to this many; 0 disables the cap.")
+    parser.add_argument("--detect-anomaly", action="store_true",
+        help="Enable torch.autograd.set_detect_anomaly(True) to pinpoint the "
+             "exact forward op behind a NaN/Inf gradient. Substantially slower.")
+    parser.add_argument("--smooth-alpha", type=float, default=0.1,
+        help="EMA smoothing factor for the loss/align values shown in the "
+             "progress bar; does not affect the raw values logged to metrics.csv.")
     parser.add_argument("--image-noise-std", type=float, default=0.05)
     parser.add_argument("--tabular-noise-std", type=float, default=0.0)
     parser.add_argument("--disable-augmentation", action="store_true",
@@ -1619,8 +1791,11 @@ def _build_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--scale-cap", type=float, default=3.0)
     parser.add_argument("--tabular-K", type=int, default=32)
     parser.add_argument("--tabular-hidden", type=int, default=None)
-    parser.add_argument("--tabular-base", default="DiagGaussian",
-                        choices=["DiagGaussian", "GaussianPCA"])
+    parser.add_argument("--tabular-base", default="GaussianPCA",
+                        choices=["DiagGaussian", "GaussianPCA"],
+                        help="Matches the standalone tabular trainer's default "
+                             "(GaussianPCA). Override per view via the config's "
+                             '"model": {"base_distribution": ...}.')
 
     parser.add_argument("--align", default="vicreg",
         choices=["none", "infonce", "barlow", "vicreg", "hsic", "pearson", "mse"])
@@ -1634,6 +1809,10 @@ def _build_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.1)
     parser.add_argument("--barlow-lambda", type=float, default=5e-3)
     parser.add_argument("--weighting", default="fixed", choices=["fixed", "kendall"])
+    parser.add_argument("--init-logvar-nll", type=float, default=0.0,
+        help="Initial value of the learnable NLL log-variance under --weighting kendall.")
+    parser.add_argument("--init-logvar-align", type=float, default=0.0,
+        help="Initial value of the learnable alignment log-variance under --weighting kendall.")
     parser.add_argument("--vicreg-inv", type=float, default=25.0)
     parser.add_argument("--vicreg-cov", type=float, default=1.0)
     parser.add_argument("--vicreg-var", type=float, nargs="+", default=[25.0])
@@ -1649,6 +1828,13 @@ def _build_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--preview-samples", type=int, default=8)
     parser.add_argument("--sample-mode", default="model", choices=["off", "model"])
     parser.add_argument("--sample-temp", type=float, default=1.0)
+    parser.add_argument("--sample-grid-norm", default="to01",
+        choices=["to01", "clamp", "both"],
+        help="Display normalization for the generated-samples preview grid "
+             "(reconstruction previews always use percentile clamping).")
+    parser.add_argument("--sample-chunk-size", type=int, default=20,
+        help="Max number of samples generated per flow.sample() call during "
+             "preview grids, to bound the peak memory of generative sampling.")
     parser.add_argument("--keep-last", type=int, default=3)
     parser.add_argument("--keep-every", type=int, default=5000)
     parser.add_argument("--disk-warning-gb", type=float, default=10.0)
