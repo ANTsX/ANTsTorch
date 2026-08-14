@@ -61,9 +61,16 @@ from antstorch.lamnr_flows.misc.latent_alignment import (
 class GlowStepWrapper(nn.Module):
     """Wraps a Glow model so DataParallel can scatter the forward pass."""
 
-    def __init__(self, model: nn.Module):
+    def __init__(
+        self,
+        model: nn.Module,
+        alignment_latents: str = "all-pooled",
+        alignment_pool_size: int = 2,
+    ):
         super().__init__()
         self.model = model
+        self.alignment_latents = alignment_latents
+        self.alignment_pool_size = alignment_pool_size
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         z, logdet = self.model.inverse_and_log_det(x)
@@ -83,7 +90,11 @@ class GlowStepWrapper(nn.Module):
         else:
             base_lp = bases[0].log_prob(z)
         log_prob = base_lp + logdet
-        z_flat = flatten_latents(z)
+        z_flat = flatten_latents(
+            z,
+            target_pool_size=self.alignment_pool_size,
+            strategy=self.alignment_latents,
+        )
         return log_prob, z_flat
 
     def inverse_and_log_det(self, x):
@@ -873,7 +884,11 @@ class BaseLAMNrTrainer(abc.ABC):
             with torch.no_grad():
                 x_tmpl = to01(xs[0][:1].to(dtype=torch.float32, device=dev))
                 z_probe, _ = self.models[0].inverse_and_log_det(x_tmpl)
-                flat_dim = flatten_latents(z_probe).size(1)
+                flat_dim = flatten_latents(
+                    z_probe,
+                    target_pool_size=args.alignment_pool_size,
+                    strategy=args.alignment_latents,
+                ).size(1)
             self.projectors = nn.ModuleList([
                 Projector(flat_dim, args.proj_hidden, args.proj_dim)
                 .to(dtype=torch.float32, device=dev)
@@ -1606,7 +1621,11 @@ class BaseLAMNrTrainer(abc.ABC):
                         else:
                             logp_v = m.log_prob(x_v.float())
                             z_v, _ = m.inverse_and_log_det(x_v.float())
-                            zflat  = flatten_latents(z_v)
+                            zflat = flatten_latents(
+                                z_v,
+                                target_pool_size=args.alignment_pool_size,
+                                strategy=args.alignment_latents,
+                            )
 
                         if not torch.isfinite(logp_v).all():
                             tqdm.write(f"[nan] non-finite logp at view {vi}, iter {it}")

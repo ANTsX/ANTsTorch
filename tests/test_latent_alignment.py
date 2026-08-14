@@ -6,6 +6,7 @@ import pytest
 import torch
 
 import antstorch
+from antstorch.lamnr_flows.misc import flatten_latents
 
 # ---------- Global fixtures ----------
 
@@ -20,6 +21,43 @@ def _make_views(B=128, D=32, V=2, noise=0.05, device="cpu"):
     base = torch.randn(B, D, device=device)
     views = [base + noise * torch.randn(B, D, device=device) for _ in range(V)]
     return views
+
+
+@pytest.mark.parametrize("spatial_dims", [2, 3])
+def test_flatten_latents_multiscale_strategies(spatial_dims):
+    batch = 3
+    if spatial_dims == 2:
+        levels = [
+            torch.randn(batch, 2, 8, 8),
+            torch.randn(batch, 4, 4, 4),
+            torch.randn(batch, 8, 2, 2),
+        ]
+        pooled_dim = (2 + 4 + 8) * 2**2
+    else:
+        levels = [
+            torch.randn(batch, 2, 8, 8, 8),
+            torch.randn(batch, 4, 4, 4, 4),
+            torch.randn(batch, 8, 2, 2, 2),
+        ]
+        pooled_dim = (2 + 4 + 8) * 2**3
+
+    all_pooled = flatten_latents(levels, strategy="all-pooled")
+    all_flat = flatten_latents(levels, strategy="all-flat")
+
+    assert all_pooled.shape == (batch, pooled_dim)
+    assert all_flat.shape == (
+        batch,
+        sum(level[0].numel() for level in levels),
+    )
+
+
+def test_flatten_latents_rejects_invalid_options():
+    z = [torch.randn(2, 4, 4, 4)]
+    for strategy in ("deepest", "unknown"):
+        with pytest.raises(ValueError, match="strategy"):
+            flatten_latents(z, strategy=strategy)
+    with pytest.raises(ValueError, match="target_pool_size"):
+        flatten_latents(z, target_pool_size=0)
 
 
 # ---------- Basic shape / dtype / finiteness ----------

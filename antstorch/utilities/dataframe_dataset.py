@@ -27,6 +27,61 @@ def _finite_mask(a: np.ndarray) -> np.ndarray:
     return np.isfinite(a).astype(np.float32)
 
 
+def transform_tabular_numeric(
+    values: np.ndarray,
+    *,
+    normalization: Optional[str] = "0mean",
+    mean: Optional[np.ndarray] = None,
+    std: Optional[np.ndarray] = None,
+    vmin: Optional[np.ndarray] = None,
+    vrange: Optional[np.ndarray] = None,
+    noise_scale: Union[float, np.ndarray] = 0.0,
+    noise_space: str = "none",
+    impute: str = "none",
+) -> np.ndarray:
+    """Shared numeric normalization, jitter, and imputation primitive.
+
+    This function defines the numeric transformation used by both
+    ``MultiViewDataFrameDataset`` and heterogeneous LAMNr tabular views.
+    Statistics are supplied by the caller so training-split ownership remains
+    explicit and no validation leakage is introduced.
+    """
+    if normalization not in {None, "0mean", "01", "none"}:
+        raise ValueError(f"Unsupported normalization mode: {normalization!r}")
+    if noise_space not in {"raw", "normalized", "none"}:
+        raise ValueError("noise_space must be 'raw', 'normalized', or 'none'.")
+    if impute not in {"none", "mean", "zero"}:
+        raise ValueError("impute must be 'none', 'mean', or 'zero'.")
+
+    x = np.asarray(values, dtype=np.float32).copy()
+    mean = np.zeros_like(x) if mean is None else np.asarray(mean, dtype=np.float32)
+    std = np.ones_like(x) if std is None else np.asarray(std, dtype=np.float32)
+    vmin = np.zeros_like(x) if vmin is None else np.asarray(vmin, dtype=np.float32)
+    vrange = np.ones_like(x) if vrange is None else np.asarray(vrange, dtype=np.float32)
+    noise_scale = np.asarray(noise_scale, dtype=np.float32)
+
+    if noise_space == "raw" and np.any(noise_scale > 0):
+        x = x + np.random.normal(0.0, noise_scale, size=x.shape).astype(np.float32)
+
+    if normalization == "0mean":
+        x = (x - mean) / np.maximum(std, 1e-8)
+    elif normalization == "01":
+        x = (x - vmin) / np.maximum(vrange, 1e-8)
+
+    if noise_space == "normalized" and np.any(noise_scale > 0):
+        x = x + np.random.normal(0.0, noise_scale, size=x.shape).astype(np.float32)
+
+    if normalization == "01":
+        x = np.clip(x, 0.0, 1.0)
+
+    if impute == "mean":
+        fill = mean if normalization in {None, "none"} else np.zeros_like(x)
+        x = np.where(np.isfinite(x), x, fill)
+    elif impute == "zero":
+        x = np.where(np.isfinite(x), x, 0.0)
+    return x.astype(np.float32, copy=False)
+
+
 @dataclass
 class _ViewState:
     columns: List[str]
@@ -398,37 +453,23 @@ class MultiViewDataFrameDataset(Dataset):
 
             # --- Normalization and augmentation ---
             if num_pos.size > 0:
-                x_num = x[num_pos]
-
-                if self.add_noise_in == 'raw' and self.alpha > 0:
-                    x_num = x_num + np.random.normal(0.0, self.alpha * st.eps_std).astype(np.float32)
-
                 norm_mode = self._norm_mode[v]
-                if norm_mode == '0mean':
-                    x_num = (x_num - st.mean) / st.eps_std
-                elif norm_mode == '01':
-                    x_num = (x_num - st.vmin) / st.eps_rng
-                # else: no normalization
-
-                if self.add_noise_in == 'normalized' and self.alpha > 0:
-                    x_num = x_num + np.random.normal(0.0, self.alpha, size=x_num.shape).astype(np.float32)
-
-                # Automatic clamp for '01' mode
-                if norm_mode == '01':
-                    x_num = np.clip(x_num, 0.0, 1.0)
-
-                # Imputation (after normalization)
-                if self.impute == 'mean':
-                    if norm_mode == '0mean':
-                        imp = np.zeros_like(st.mean, dtype=np.float32)  # mean->0 after z-score
-                    elif norm_mode == '01':
-                        imp = np.zeros_like(st.vmin, dtype=np.float32)  # default to 0 (min) in [0,1]
-                    else:
-                        imp = st.mean  # raw space mean
-                    x_num = np.where(np.isfinite(x_num), x_num, imp)
-                elif self.impute == 'zero':
-                    x_num = np.where(np.isfinite(x_num), x_num, 0.0)
-
+                noise_scale = (
+                    self.alpha * st.eps_std
+                    if self.add_noise_in == 'raw'
+                    else self.alpha
+                )
+                x_num = transform_tabular_numeric(
+                    x[num_pos],
+                    normalization=norm_mode,
+                    mean=st.mean,
+                    std=st.eps_std,
+                    vmin=st.vmin,
+                    vrange=st.eps_rng,
+                    noise_scale=noise_scale,
+                    noise_space=self.add_noise_in,
+                    impute=self.impute,
+                )
                 x[num_pos] = x_num
 
             # Dummies are already 0/1; keep as-is. If NaNs appear, handle per impute

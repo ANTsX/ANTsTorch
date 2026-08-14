@@ -60,7 +60,10 @@ import antsnormflows as nf
 from antstorch.lamnr_flows.architectures.create_normalizing_flow_model import (
     create_real_nvp_normalizing_flow_model as create_rnvp,
 )
-from antstorch.utilities.dataframe_dataset import MultiViewDataFrameDataset
+from antstorch.utilities.dataframe_dataset import (
+    MultiViewDataFrameDataset,
+    transform_tabular_numeric,
+)
 
 from antstorch.lamnr_flows.core.train_lamnr_glow_base import (
     BaseLAMNrTrainer,
@@ -133,31 +136,30 @@ class TabularNormalizer:
         self._fitted = True
         return self
 
-    def transform(self, X: np.ndarray) -> torch.Tensor:
+    def transform(
+        self,
+        X: np.ndarray,
+        noise_std: float = 0.0,
+        noise_space: str = "normalized",
+    ) -> torch.Tensor:
         """
         Apply the fitted normalization.
 
         Returns a ``torch.float32`` tensor — always, regardless of input dtype.
         """
-        X = np.asarray(X, dtype=np.float64)
-        # Impute NaN
-        if not np.all(np.isfinite(X)):
-            col_means = (
-                self._mean.astype(np.float64)
-                if self._mean is not None
-                else np.zeros(X.shape[1])
-            )
-            nan_mask = ~np.isfinite(X)
-            X[nan_mask] = col_means[np.where(nan_mask)[1]]
-
-        if self.mode == "0mean" and self._fitted:
-            X = (X - self._mean) / self._std
-        elif self.mode == "01" and self._fitted:
-            X = (X - self._vmin) / self._vrng
-            X = np.clip(X, 0.0, 1.0)
-
-        # Explicit float32 cast — critical for GPU/MPS correctness
-        return torch.from_numpy(X.astype(np.float32, copy=False))
+        X = np.asarray(X, dtype=np.float32)
+        transformed = transform_tabular_numeric(
+            X,
+            normalization=(None if self.mode == "none" else self.mode),
+            mean=self._mean,
+            std=self._std,
+            vmin=self._vmin,
+            vrange=self._vrng,
+            noise_scale=float(noise_std),
+            noise_space=(noise_space if noise_std > 0 else "none"),
+            impute="mean",
+        )
+        return torch.from_numpy(transformed)
 
     def inverse_transform(self, t: torch.Tensor) -> torch.Tensor:
         """Invert the normalization (for reconstruction export)."""
@@ -242,10 +244,8 @@ class CSVMultiViewDataset(Dataset):
         out = []
         for arr, norm in zip(self._arrays, self.normalizers):
             row = arr[idx : idx + 1]      # shape (1, D) — 2-D for transform()
-            t   = norm.transform(row)     # always float32
+            t   = norm.transform(row, noise_std=self.noise_std)  # always float32
             t   = t.squeeze(0)            # → (D,)
-            if self.noise_std > 0.0:
-                t = t + torch.randn_like(t) * self.noise_std
             out.append(t)
         return out
 
