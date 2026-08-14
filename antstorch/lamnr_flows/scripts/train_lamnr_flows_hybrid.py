@@ -775,7 +775,7 @@ class HybridLAMNrTrainer:
                 DistributedDataParallel(
                     model, device_ids=[self.local_rank],
                     output_device=self.local_rank,
-                    find_unused_parameters=True,
+                    find_unused_parameters=args.ddp_find_unused,
                 )
                 for model in self.models
             ])
@@ -784,7 +784,7 @@ class HybridLAMNrTrainer:
                     DistributedDataParallel(
                         projector, device_ids=[self.local_rank],
                         output_device=self.local_rank,
-                        find_unused_parameters=True,
+                        find_unused_parameters=args.ddp_find_unused,
                     )
                     for projector in self.projectors
                 ])
@@ -1069,12 +1069,17 @@ class HybridLAMNrTrainer:
 
     def _recover_after_anomaly(self, iteration: int, reason: str) -> None:
         self.anomaly_streak += 1
-        backed_off_lr = max(
-            self.args.min_lr,
-            self.opt.param_groups[0]["lr"] * self.args.nan_lr_backoff,
-        )
+        def _backed_off(current_lr: float) -> float:
+            # During warmup the current LR may legitimately be below min_lr.
+            # An anomaly "backoff" must never increase it to the plateau floor.
+            return min(
+                current_lr,
+                max(self.args.min_lr, current_lr * self.args.nan_lr_backoff),
+            )
+
+        backed_off_lr = _backed_off(self.opt.param_groups[0]["lr"])
         for group in self.opt.param_groups:
-            group["lr"] = max(self.args.min_lr, group["lr"] * self.args.nan_lr_backoff)
+            group["lr"] = _backed_off(group["lr"])
         if self.rank == 0:
             tqdm.write(
                 f"[anomaly] iter={iteration}: {reason}; update rejected, "
@@ -1556,9 +1561,19 @@ def _build_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--lr-decay-gamma", type=float, default=1.0)
     parser.add_argument("--lr-decay-steps", type=int, default=0)
     parser.add_argument("--grad-clip", type=float, default=5.0)
-    parser.add_argument("--exploding-grad-norm", type=float, default=1e4)
+    parser.add_argument(
+        "--exploding-grad-norm", type=float, default=0.0,
+        help=(
+            "Optional pre-clipping gradient-norm rejection threshold; 0 disables it. "
+            "Finite gradients are still clipped by --grad-clip."
+        ),
+    )
     parser.add_argument("--max-update-norm", type=float, default=1e3)
     parser.add_argument("--accum-steps", type=int, default=1)
+    parser.add_argument(
+        "--ddp-find-unused", action=argparse.BooleanOptionalAction, default=False,
+        help="Enable DDP's unused-parameter graph traversal only for conditional models.",
+    )
     parser.add_argument("--precision", default="mixed", choices=["float", "mixed"])
     parser.add_argument("--amp-dtype", default="fp16", choices=["fp16", "bf16"])
     parser.add_argument("--ema", action=argparse.BooleanOptionalAction, default=True)
