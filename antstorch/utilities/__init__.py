@@ -18,8 +18,8 @@ from .t1_grader import t1_grader
 
 from .chexnet import chexnet
 
-from .dataframe_dataset import MultiViewDataFrameDataset
-from .image_dataset import ImageDataset
+from .dataframe_dataset import MultiViewDataFrameDataset, transform_tabular_numeric
+from .image_dataset import ImageDataset, augment_image_modalities
 
 from .mutual_information import MINE
 from .mutual_information import mutual_information_mine
@@ -30,5 +30,3 @@ from .correlation import absolute_pearson_correlation
 from .schedulers import ParamSchedule, MultiParamScheduler, parse_schedules
 
 from .device_manager import set_default_device, get_default_device
-
-

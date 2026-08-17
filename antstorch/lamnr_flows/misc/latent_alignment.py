@@ -292,29 +292,49 @@ class Projector(nn.Module):
 # Latent flattening helper (shared 2D / 3D)
 # ---------------------------------------------------------------------------
 
-def flatten_latents(z, target_pool_size: int = 2) -> torch.Tensor:
-    """
-    LAMNr strategy: extract only the deepest latent level and adaptive-pool
-    it to a fixed size before feeding the Projector MLP.
+def flatten_latents(
+    z,
+    target_pool_size: int = 2,
+    strategy: str = "all-pooled",
+) -> torch.Tensor:
+    """Build the feature vector used by the latent-alignment projector.
 
-    Supports 2D (N, C, H, W) and 3D (N, C, H, W, D) tensors.
+    ``all-pooled`` pools every latent level independently before concatenating
+    the results. ``all-flat`` flattens and concatenates every latent coordinate
+    without pooling; this is exact but can make the first projector layer very
+    large.
+
+    Supports 2D ``(N, C, H, W)`` and 3D ``(N, C, H, W, D)`` tensors.
     """
+    if strategy not in {"all-pooled", "all-flat"}:
+        raise ValueError(
+            "strategy must be one of 'all-pooled' or 'all-flat'; "
+            f"got {strategy!r}."
+        )
+    if target_pool_size < 1:
+        raise ValueError("target_pool_size must be >= 1.")
+
     zs = z if isinstance(z, (list, tuple)) else [z]
-    deepest_z = zs[-1]
+    features = []
 
-    if deepest_z.ndim == 5:
-        z_pooled = F.adaptive_avg_pool3d(
-            deepest_z,
-            (target_pool_size, target_pool_size, target_pool_size),
-        )
-        return z_pooled.flatten(1)
-    elif deepest_z.ndim == 4:
-        z_pooled = F.adaptive_avg_pool2d(
-            deepest_z, (target_pool_size, target_pool_size)
-        )
-        return z_pooled.flatten(1)
-    else:
-        return deepest_z.flatten(1)
+    for level in zs:
+        if strategy == "all-flat":
+            feature = level.flatten(1)
+        elif level.ndim == 5:
+            feature = F.adaptive_avg_pool3d(
+                level,
+                (target_pool_size, target_pool_size, target_pool_size),
+            ).flatten(1)
+        elif level.ndim == 4:
+            feature = F.adaptive_avg_pool2d(
+                level,
+                (target_pool_size, target_pool_size),
+            ).flatten(1)
+        else:
+            feature = level.flatten(1)
+        features.append(feature)
+
+    return features[0] if len(features) == 1 else torch.cat(features, dim=1)
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +387,7 @@ class LatentAlignmentLossManager:
         it: int,
         s_nll: Optional[nn.Parameter],
         s_align: Optional[nn.Parameter],
+        masks: Optional[List[torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, float, float]:
         """
         Returns
@@ -384,11 +405,17 @@ class LatentAlignmentLossManager:
             feats = [self.projectors[i](lat_flat[i]) for i in range(len(lat_flat))]
             feats = [f.float() for f in feats]
 
-            # 2. Optional shared-subspace screening
-            feats_screened = self._maybe_screen(feats, it)
+            if masks is None:
+                # 2. Optional shared-subspace screening
+                feats_screened = self._maybe_screen(feats, it)
 
-            # 3. Dispatch to alignment loss
-            L_align = self._compute_raw_align(feats_screened)
+                # 3. Dispatch to alignment loss
+                L_align = self._compute_raw_align(feats_screened)
+            else:
+                # Each view pair can have a different observed-row
+                # intersection. Screening assumes one shared rectangular
+                # batch, so masked alignment is evaluated pairwise.
+                L_align = self._compute_masked_align(feats, masks)
 
         # 4. Combine with NLL
         loss_total, w_nll, w_align = self._combine(L_nll, L_align, s_nll, s_align, it)
@@ -403,7 +430,11 @@ class LatentAlignmentLossManager:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _compute_raw_align(self, feats: List[torch.Tensor]) -> torch.Tensor:
+    def _compute_raw_align(
+        self,
+        feats: List[torch.Tensor],
+        view_indices: Optional[List[int]] = None,
+    ) -> torch.Tensor:
         """Dispatch to the correct alignment loss function."""
         import antstorch.lamnr_flows.misc.alignment_losses as al
         args = self.args
@@ -418,7 +449,8 @@ class LatentAlignmentLossManager:
                 gamma=1.0,
             )
             L_var = torch.tensor(0.0, device=dev)
-            for vi, feat in enumerate(feats):
+            for local_vi, feat in enumerate(feats):
+                vi = view_indices[local_vi] if view_indices is not None else local_vi
                 w_var_v = (
                     args.vicreg_var[vi]
                     if vi < len(args.vicreg_var)
@@ -449,6 +481,34 @@ class LatentAlignmentLossManager:
             return al.lpnorm_multi(feats, p=2.0)
 
         return torch.tensor(0.0, device=self.device)
+
+    def _compute_masked_align(
+        self,
+        feats: List[torch.Tensor],
+        masks: List[torch.Tensor],
+    ) -> torch.Tensor:
+        """Average alignment over observed intersections of view pairs."""
+        if len(feats) != len(masks):
+            raise ValueError("feats and masks must have the same number of views.")
+
+        losses = []
+        for i in range(len(feats)):
+            mask_i = masks[i].to(device=feats[i].device, dtype=torch.bool)
+            for j in range(i + 1, len(feats)):
+                mask_j = masks[j].to(device=feats[j].device, dtype=torch.bool)
+                paired = mask_i & mask_j
+                if int(paired.sum().item()) < 2:
+                    continue
+                losses.append(
+                    self._compute_raw_align(
+                        [feats[i][paired], feats[j][paired]],
+                        view_indices=[i, j],
+                    )
+                )
+
+        if not losses:
+            return torch.tensor(0.0, dtype=torch.float32, device=self.device)
+        return torch.stack(losses).mean()
 
     def _maybe_screen(
         self, feats: List[torch.Tensor], it: int

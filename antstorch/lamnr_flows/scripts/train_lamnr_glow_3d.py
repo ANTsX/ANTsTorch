@@ -330,7 +330,11 @@ class LAMNrGlow3DTrainer(BaseLAMNrTrainer):
                           f"(world_size={self.world_size}, device={dev})")
                 models.append(
                     GlowDDP(
-                        GlowStepWrapper(m),
+                        GlowStepWrapper(
+                            m,
+                            alignment_latents=args.alignment_latents,
+                            alignment_pool_size=args.alignment_pool_size,
+                        ),
                         device_ids=[self.local_rank],
                         output_device=self.local_rank,
                     )
@@ -338,7 +342,14 @@ class LAMNrGlow3DTrainer(BaseLAMNrTrainer):
             elif torch.cuda.device_count() > 1 and len(args.devices.split(",")) > 1:
                 print(f"[info] Wrapping view {vi} in DataParallel on {args.devices}")
                 device_ids = [int(d.split(":")[-1]) for d in args.devices.split(",")]
-                models.append(GlowDataParallel(GlowStepWrapper(m), device_ids=device_ids))
+                models.append(GlowDataParallel(
+                    GlowStepWrapper(
+                        m,
+                        alignment_latents=args.alignment_latents,
+                        alignment_pool_size=args.alignment_pool_size,
+                    ),
+                    device_ids=device_ids,
+                ))
             else:
                 models.append(m)
 
@@ -523,6 +534,14 @@ def _build_args() -> argparse.Namespace:
     ap.add_argument("--align-warmup",      type=int,   default=500)
     ap.add_argument("--proj-dim",          type=int,   default=256)
     ap.add_argument("--proj-hidden",       type=int,   default=512)
+    ap.add_argument("--alignment-latents", default="all-pooled",
+        choices=["all-pooled", "all-flat"],
+        help="Latent levels supplied to the alignment projector. 'all-pooled' "
+             "pools and concatenates every level; 'all-flat' concatenates "
+             "every latent coordinate.")
+    ap.add_argument("--alignment-pool-size", type=int, default=2,
+        help="Adaptive pooling size per spatial axis for 'all-pooled' "
+             "alignment features.")
     ap.add_argument("--temperature",       type=float, default=0.1)
     ap.add_argument("--barlow-lambda",     type=float, default=5e-3)
     ap.add_argument("--weighting",         default="fixed", choices=["fixed","kendall"])

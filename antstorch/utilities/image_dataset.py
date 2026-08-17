@@ -9,6 +9,54 @@ import random
 from typing import Callable, Dict, Optional
 
 
+def augment_image_modalities(
+    images,
+    reference_image,
+    *,
+    transform_type="affineAndDeformation",
+    noise_model="additivegaussian",
+    noise_parameters=(0.0, 0.05),
+    sd_simulated_bias_field=1.0,
+    sd_histogram_warping=0.05,
+    sd_affine=0.05,
+    sd_deformation=0.2,
+    segmentation_image=None,
+):
+    """Apply one ANTs augmentation simulation to aligned image modalities.
+
+    All ``images`` are passed to the same simulation and therefore receive
+    the same spatial transformation. This is the shared augmentation primitive
+    used by both :class:`ImageDataset` and the heterogeneous LAMNr dataset.
+
+    Returns
+    -------
+    tuple[list[ants.ANTsImage], Optional[ants.ANTsImage]]
+        Augmented modalities and, when supplied, the augmented segmentation.
+    """
+    if not images:
+        raise ValueError("augment_image_modalities requires at least one image.")
+    data_aug = ants.data_augmentation(
+        input_image_list=[list(images)],
+        segmentation_image_list=segmentation_image,
+        pointset_list=None,
+        number_of_simulations=1,
+        reference_image=reference_image,
+        transform_type=transform_type,
+        noise_model=noise_model,
+        noise_parameters=noise_parameters,
+        sd_simulated_bias_field=sd_simulated_bias_field,
+        sd_histogram_warping=sd_histogram_warping,
+        sd_affine=sd_affine,
+        sd_deformation=sd_deformation,
+        output_numpy_file_prefix=None,
+        verbose=False,
+    )
+    augmented_segmentation = None
+    if segmentation_image is not None:
+        augmented_segmentation = data_aug["simulated_segmentation_images"][0]
+    return data_aug["simulated_images"][0], augmented_segmentation
+
+
 class ImageDataset(Dataset):
 
     """
@@ -179,12 +227,9 @@ class ImageDataset(Dataset):
                     noise_std = float(vals.get("noise_std", base_std))
                     noise_params = (base_mean, max(0.0, noise_std))
 
-            data_aug = ants.data_augmentation(
-                input_image_list=[image],
-                segmentation_image_list=output,
-                pointset_list=None,
-                number_of_simulations=1,
-                reference_image=self.template,
+            image, output = augment_image_modalities(
+                image,
+                self.template,
                 transform_type=self.data_augmentation_transform_type,
                 noise_model=self.data_augmentation_noise_model,
                 noise_parameters=noise_params,
@@ -192,13 +237,8 @@ class ImageDataset(Dataset):
                 sd_histogram_warping=sd_hist,
                 sd_affine=sd_affine,
                 sd_deformation=sd_deformation,
-                output_numpy_file_prefix=None,
-                verbose=False
+                segmentation_image=output,
             )
-
-            image = data_aug['simulated_images'][0]
-            if output is not None: 
-                output = data_aug['simulated_segmentation_images'][0]
         else:    
             center_of_mass_template = ants.get_center_of_mass(self.template*0 + 1)
             center_of_mass_image = ants.get_center_of_mass(image[0]*0 + 1)
@@ -266,4 +306,3 @@ class ImageDataset(Dataset):
             return image_tensor.clone()
         else:
             return image_tensor.clone(), output
-
