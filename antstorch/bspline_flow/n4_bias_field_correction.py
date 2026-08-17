@@ -111,17 +111,26 @@ def _fit_bspline_update(
 ) -> Tensor:
     """One ITK-style scattered-data update, returned in PyTorch lattice order."""
     dimension = domain.dimension
-    slices = (slice(None), slice(None)) + (slice(None, None, shrink_factor),) * dimension
+    spatial_slices = []
+    for dense_size in residual.shape[2:]:
+        shrunk_size = dense_size // shrink_factor
+        center_offset = int(0.5 * (dense_size - 1 - shrink_factor * (shrunk_size - 1)) + 0.5)
+        spatial_slices.append(
+            slice(center_offset, center_offset + shrunk_size * shrink_factor, shrink_factor)
+        )
+    slices = (slice(None), slice(None)) + tuple(spatial_slices)
     residual = residual[slices]
     weights = weights[slices]
     sample_shape = residual.shape[2:]
     torch_coordinates = torch.meshgrid(
-        *[torch.arange(n, device=residual.device) * shrink_factor for n in sample_shape], indexing="ij"
+        *[torch.arange(n, device=residual.device) for n in sample_shape], indexing="ij"
     )
     itk_coordinates = tuple(reversed(torch_coordinates))
 
     neighbors, basis = [], []
-    for coordinate, dense_size, lattice_size in zip(itk_coordinates, domain.size, lattice_itk):
+    for coordinate, dense_size, lattice_size in zip(
+        itk_coordinates, tuple(reversed(sample_shape)), lattice_itk
+    ):
         spans = lattice_size - 3
         u = coordinate.to(residual.dtype) * (float(spans) / float(dense_size - 1))
         u = u.clamp_max(torch.nextafter(u.new_tensor(float(spans)), u.new_tensor(float("-inf"))))
