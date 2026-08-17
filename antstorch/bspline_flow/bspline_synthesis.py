@@ -75,6 +75,19 @@ def synthesize_bspline_velocity(
         offsets.append(stride)
         stride *= k
 
+    spans_per_axis = tuple(
+        lattice_size if periodic else lattice_size - 3
+        for lattice_size, periodic in zip(lattice_itk, closed_axes)
+    )
+    # A single open axis with only one span (the minimal 4-control-point
+    # mesh) makes every dense sample along that axis share the same 4
+    # neighbor indices, so the whole combined index table collapses onto a
+    # handful of distinct values repeated over every sample. Gathering that
+    # pattern in one vectorized ``index_select`` measures reliably slower
+    # than the plain per-corner loop (~1.4x slower at spans==1, vs. ~2.5-3x
+    # faster at spans>=2), so the loop is kept for that one degenerate case.
+    use_vectorized_gather = min(spans_per_axis) > 1
+
     for begin in range(0, point_count, chunk_size):
         linear = torch.arange(begin, min(begin + chunk_size, point_count), device=coefficients.device)
         remaining = linear
@@ -102,15 +115,40 @@ def synthesize_bspline_velocity(
             neighbors.append(index.remainder(lattice_size) if periodic else index)
             weights.append(cubic_bspline_basis(coordinate[:, None] - index.to(coordinate.dtype) + 1.0))
 
-        chunk = coefficients.new_zeros((coefficients.shape[0], coefficients.shape[1], linear.numel()))
-        for support in product(range(4), repeat=domain.dimension):
-            coefficient_index = sum(
-                neighbors[d][:, support[d]] * offsets[d] for d in range(domain.dimension)
+        if use_vectorized_gather:
+            # Combine the per-axis 4-point stencils into one (chunk, 4**D)
+            # index/weight table via broadcasting, then gather and reduce in
+            # a single fused pass. This replaces a Python-level loop over
+            # the 4**D corner combinations (each doing its own index_select
+            # + multiply-add) with one vectorized gather; the result is
+            # identical up to floating-point summation order. A flattened
+            # index_select is used rather than the equivalent
+            # multi-dimensional advanced-indexing gather
+            # (``flat_coefficients[:, :, combined_index]``), since it lowers
+            # to a single specialized gather kernel instead of the more
+            # general (and costlier) advanced-indexing path.
+            combined_index = neighbors[0] * offsets[0]
+            combined_weight = weights[0]
+            for d in range(1, domain.dimension):
+                combined_index = combined_index.unsqueeze(-1) + (neighbors[d] * offsets[d]).unsqueeze(1)
+                combined_weight = combined_weight.unsqueeze(-1) * weights[d].unsqueeze(1)
+                combined_index = combined_index.reshape(combined_index.shape[0], -1)
+                combined_weight = combined_weight.reshape(combined_weight.shape[0], -1)
+            support_count = combined_index.shape[1]
+            gathered = flat_coefficients.index_select(2, combined_index.reshape(-1)).reshape(
+                coefficients.shape[0], coefficients.shape[1], linear.numel(), support_count
             )
-            weight = torch.ones(linear.numel(), dtype=coefficients.dtype, device=coefficients.device)
-            for d in range(domain.dimension):
-                weight = weight * weights[d][:, support[d]]
-            chunk = chunk + flat_coefficients.index_select(2, coefficient_index) * weight[None, None, :]
+            chunk = (gathered * combined_weight[None, None]).sum(dim=-1)
+        else:
+            chunk = coefficients.new_zeros((coefficients.shape[0], coefficients.shape[1], linear.numel()))
+            for support in product(range(4), repeat=domain.dimension):
+                coefficient_index = sum(
+                    neighbors[d][:, support[d]] * offsets[d] for d in range(domain.dimension)
+                )
+                weight = torch.ones(linear.numel(), dtype=coefficients.dtype, device=coefficients.device)
+                for d in range(domain.dimension):
+                    weight = weight * weights[d][:, support[d]]
+                chunk = chunk + flat_coefficients.index_select(2, coefficient_index) * weight[None, None, :]
         output_chunks.append(chunk)
 
     output = torch.cat(output_chunks, dim=2).reshape(coefficients.shape[:2] + domain.torch_size)

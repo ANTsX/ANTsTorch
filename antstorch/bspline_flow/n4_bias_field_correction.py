@@ -7,7 +7,7 @@ scalar and dimensionless in log-intensity space.
 """
 
 from itertools import product
-from math import ceil, log2, prod
+from math import ceil, log2
 from typing import Optional, Sequence, Union
 
 import torch
@@ -134,23 +134,30 @@ def _shrink_slices(spatial_shape, shrink_factor: int):
     return tuple(spatial_slices)
 
 
-def _fit_bspline_update(
-    residual: Tensor,
-    weights: Tensor,
-    domain: BSplineDomain,
+def _bspline_fit_geometry(
+    sample_shape: Sequence[int],
     lattice_itk: Sequence[int],
-    shrink_factor: int,
+    dtype: torch.dtype,
+    device: torch.device,
     eps: float,
-    stable_accumulation: bool,
-) -> Tensor:
-    """One ITK-style scattered-data update, returned in PyTorch lattice order."""
-    dimension = domain.dimension
-    slices = (slice(None), slice(None)) + _shrink_slices(residual.shape[2:], shrink_factor)
-    residual = residual[slices]
-    weights = weights[slices]
-    sample_shape = residual.shape[2:]
+):
+    """Support-point indices/weights for one B-spline scattered-data update.
+
+    ``sample_shape`` is the already-shrunk spatial shape, in PyTorch order.
+    This only depends on geometry (shapes and the lattice resolution), never
+    on image intensities, so it is computed once per refinement level and
+    reused for every convergence iteration at that level rather than being
+    rebuilt on every iteration.
+    """
+    dimension = len(lattice_itk)
+    if any(size < 2 for size in sample_shape):
+        raise ValueError(
+            "shrink_factor is too large for this image: a shrunk spatial "
+            f"dimension has fewer than 2 samples {tuple(sample_shape)}; "
+            "use a smaller shrink_factor."
+        )
     torch_coordinates = torch.meshgrid(
-        *[torch.arange(n, device=residual.device) for n in sample_shape], indexing="ij"
+        *[torch.arange(n, device=device) for n in sample_shape], indexing="ij"
     )
     itk_coordinates = tuple(reversed(torch_coordinates))
 
@@ -159,10 +166,10 @@ def _fit_bspline_update(
         itk_coordinates, tuple(reversed(sample_shape)), lattice_itk
     ):
         spans = lattice_size - 3
-        u = coordinate.to(residual.dtype) * (float(spans) / float(dense_size - 1))
+        u = coordinate.to(dtype) * (float(spans) / float(dense_size - 1))
         u = u.clamp_max(torch.nextafter(u.new_tensor(float(spans)), u.new_tensor(float("-inf"))))
         base = torch.floor(u).to(torch.long)
-        local = torch.arange(4, device=residual.device)
+        local = torch.arange(4, device=device)
         index = base[..., None] + local
         neighbors.append(index)
         basis.append(cubic_bspline_basis(u[..., None] - index.to(u.dtype) + 1.0))
@@ -174,56 +181,102 @@ def _fit_bspline_update(
         stride *= size
     for support in product(range(4), repeat=dimension):
         index = sum(neighbors[d][..., support[d]] * strides[d] for d in range(dimension))
-        value = torch.ones(sample_shape, dtype=residual.dtype, device=residual.device)
+        value = torch.ones(sample_shape, dtype=dtype, device=device)
         for d in range(dimension):
             value = value * basis[d][..., support[d]]
         support_indices.append(index.flatten())
         support_basis.append(value.flatten())
-    basis_values = torch.stack(support_basis)
-    squared_sum = basis_values.square().sum(dim=0).clamp_min(eps)
 
     indices = torch.stack(support_indices)
     basis_values = torch.stack(support_basis)
-    batch_channels = residual.shape[0] * residual.shape[1]
-    residual_flat = residual.reshape(batch_channels, -1)
-    weight_flat = weights.reshape(batch_channels, -1)
-    coefficient_count = prod(lattice_itk)
-    delta = residual.new_zeros((batch_channels, coefficient_count))
-    omega = residual.new_zeros(delta.shape)
+    squared_sum = basis_values.square().sum(dim=0).clamp_min(eps)
+    coefficient_count = stride
+    return indices, basis_values, squared_sum, coefficient_count
+
+
+def _bspline_fit_context(weight_flat: Tensor, geometry, stable_accumulation: bool):
+    """Precompute the residual-independent half of the scattered-data update.
+
+    ``omega`` (the normal-equation weight accumulator) depends only on the
+    fit weights and the B-spline geometry -- never on the current residual --
+    so it is identical on every convergence iteration within a level.
+    Computing it once here, instead of on every iteration, removes the
+    single largest redundant cost of the original per-iteration
+    implementation (an unordered/one-hot reduction over every sample and
+    every one of the ``4**D`` local support points). It also matters most on
+    MPS, where the chunked one-hot reduction used for stability is the most
+    expensive step in the whole N4 loop.
+    """
+    indices, basis_values, squared_sum, coefficient_count = geometry
+    batch_channels = weight_flat.shape[0]
+    omega = weight_flat.new_zeros((batch_channels, coefficient_count))
+    support_count, sample_count = indices.shape
     if stable_accumulation:
-        # Avoid MPS atomic scatter reductions. Chunked one-hot support matrices
-        # are reduced in a fixed order and accumulated with matrix products.
-        support_count, sample_count = indices.shape
+        # Avoid MPS atomic scatter reductions. Chunked one-hot support
+        # matrices are reduced in a fixed order and accumulated with matrix
+        # products. The chunk-wise ``delta_basis`` factors are geometry-only
+        # and are cached for reuse by every iteration's solve step.
         max_one_hot_elements = 8_000_000
         sample_chunk = max(1, max_one_hot_elements // (support_count * coefficient_count))
+        coefficient_axis = torch.arange(coefficient_count, device=indices.device)
+        chunks = []
         for begin in range(0, sample_count, sample_chunk):
             end = min(begin + sample_chunk, sample_count)
             chunk_indices = indices[:, begin:end].transpose(0, 1)
             chunk_basis = basis_values[:, begin:end].transpose(0, 1)
-            coefficient_axis = torch.arange(coefficient_count, device=residual.device)
-            assignment = (chunk_indices[..., None] == coefficient_axis).to(residual.dtype)
+            assignment = (chunk_indices[..., None] == coefficient_axis).to(basis_values.dtype)
             omega_basis = (assignment * chunk_basis.square().unsqueeze(-1)).sum(dim=1)
             delta_basis = (
-                assignment
-                * (chunk_basis.pow(3) / squared_sum[begin:end, None]).unsqueeze(-1)
+                assignment * (chunk_basis.pow(3) / squared_sum[begin:end, None]).unsqueeze(-1)
             ).sum(dim=1)
             omega = omega + weight_flat[:, begin:end] @ omega_basis
-            delta = delta + (residual_flat[:, begin:end] * weight_flat[:, begin:end]) @ delta_basis
+            chunks.append((begin, end, delta_basis))
+        return {"mode": "stable", "chunks": chunks, "omega": omega}
     else:
         # A single vectorized scatter per statistic replaces 4**D kernel
-        # launches while preserving the sparse ITK update formula.
-        flat_indices = indices.reshape(-1)
-        expanded_indices = flat_indices[None].expand(batch_channels, -1)
-        omega_values = weight_flat[:, None, :] * basis_values.square()[None]
-        delta_values = (
-            residual_flat[:, None, :]
-            * weight_flat[:, None, :]
-            * (basis_values.pow(3) / squared_sum[None])[None]
-        )
-        omega.scatter_add_(1, expanded_indices, omega_values.reshape(batch_channels, -1))
-        delta.scatter_add_(1, expanded_indices, delta_values.reshape(batch_channels, -1))
-    coefficients = torch.where(omega > eps, delta / omega.clamp_min(eps), torch.zeros_like(delta))
-    return coefficients.reshape((residual.shape[0], residual.shape[1]) + tuple(reversed(lattice_itk)))
+        # launches while preserving the sparse ITK update formula. Sample
+        # chunking bounds peak memory for large (e.g. shrink_factor=1 3-D)
+        # volumes instead of materializing one (batch*support*sample) tensor.
+        max_scatter_elements = 32_000_000
+        sample_chunk = max(1, max_scatter_elements // (batch_channels * support_count))
+        cubed_over_squared_sum = basis_values.pow(3) / squared_sum[None]
+        for begin in range(0, sample_count, sample_chunk):
+            end = min(begin + sample_chunk, sample_count)
+            expanded_indices = indices[:, begin:end].reshape(-1)[None].expand(batch_channels, -1)
+            omega_values = weight_flat[:, None, begin:end] * basis_values[:, begin:end].square()[None]
+            omega.scatter_add_(1, expanded_indices, omega_values.reshape(batch_channels, -1))
+        return {
+            "mode": "vectorized",
+            "omega": omega,
+            "indices": indices,
+            "cubed_over_squared_sum": cubed_over_squared_sum,
+            "sample_chunk": sample_chunk,
+        }
+
+
+def _bspline_fit_solve(residual_flat: Tensor, weight_flat: Tensor, context: dict, eps: float) -> Tensor:
+    """Per-iteration scattered-data update given a level-fixed context."""
+    batch_channels = residual_flat.shape[0]
+    omega = context["omega"]
+    delta = residual_flat.new_zeros(omega.shape)
+    if context["mode"] == "stable":
+        for begin, end, delta_basis in context["chunks"]:
+            delta = delta + (residual_flat[:, begin:end] * weight_flat[:, begin:end]) @ delta_basis
+    else:
+        indices = context["indices"]
+        cubed_over_squared_sum = context["cubed_over_squared_sum"]
+        sample_chunk = context["sample_chunk"]
+        sample_count = residual_flat.shape[1]
+        for begin in range(0, sample_count, sample_chunk):
+            end = min(begin + sample_chunk, sample_count)
+            expanded_indices = indices[:, begin:end].reshape(-1)[None].expand(batch_channels, -1)
+            delta_values = (
+                residual_flat[:, None, begin:end]
+                * weight_flat[:, None, begin:end]
+                * cubed_over_squared_sum[None, :, begin:end]
+            )
+            delta.scatter_add_(1, expanded_indices, delta_values.reshape(batch_channels, -1))
+    return torch.where(omega > eps, delta / omega.clamp_min(eps), torch.zeros_like(delta))
 
 
 def _initial_lattice_size(domain: BSplineDomain, spline_param) -> tuple:
@@ -283,8 +336,9 @@ def n4_bias_field_correction(
     confidence = _expand_like_image(weight_mask, image, "weight_mask", 1.0).clamp_min(0.0)
     included = (mask_value != 0) & (confidence > 0)
     fit_weights = included.to(image.dtype) * confidence
+    fit_slices = (slice(None), slice(None)) + _shrink_slices(image.shape[2:], shrink_factor)
     shrink_selector = torch.zeros_like(included)
-    shrink_selector[(slice(None), slice(None)) + _shrink_slices(image.shape[2:], shrink_factor)] = True
+    shrink_selector[fit_slices] = True
     histogram_included = included & shrink_selector
     if stable_accumulation is None:
         stable_accumulation = image.device.type == "mps"
@@ -293,12 +347,26 @@ def n4_bias_field_correction(
     log_bias = torch.zeros_like(image)
     lattice_itk = _initial_lattice_size(domain, spline_param)
 
+    # The shrunk fit weights and their flattened view never change across
+    # iterations or refinement levels (only the mesh resolution does), so
+    # they are sliced/flattened once and reused everywhere below.
+    batch_channels = image.shape[0] * image.shape[1]
+    fit_sample_shape = tuple(n // shrink_factor for n in image.shape[2:])
+    weight_flat = fit_weights[fit_slices].reshape(batch_channels, -1)
+
     for level, maximum_iterations in enumerate(iterations):
         active = torch.ones(
             (image.shape[0], image.shape[1]) + (1,) * dimension,
             dtype=image.dtype,
             device=image.device,
         )
+        # Geometry (support indices/weights) and omega (the residual-
+        # independent normal-equation term) depend only on the current
+        # lattice resolution, so both are computed once per level and
+        # reused for every convergence iteration at that level instead of
+        # being rebuilt on every one of ``maximum_iterations`` iterations.
+        geometry = _bspline_fit_geometry(fit_sample_shape, lattice_itk, image.dtype, image.device, eps)
+        fit_context = _bspline_fit_context(weight_flat, geometry, stable_accumulation)
         for _ in range(maximum_iterations):
             uncorrected = log_input - log_bias
             sharpened = _histogram_sharpen(
@@ -311,14 +379,9 @@ def n4_bias_field_correction(
                 stable_accumulation=stable_accumulation,
             )
             residual = uncorrected - sharpened
-            coefficients = _fit_bspline_update(
-                residual,
-                fit_weights,
-                domain,
-                lattice_itk,
-                shrink_factor,
-                eps,
-                stable_accumulation,
+            residual_flat = residual[fit_slices].reshape(batch_channels, -1)
+            coefficients = _bspline_fit_solve(residual_flat, weight_flat, fit_context, eps).reshape(
+                (image.shape[0], image.shape[1]) + tuple(reversed(lattice_itk))
             )
             update = synthesize_bspline_velocity(coefficients, domain)
             new_log_bias = log_bias + active * update
