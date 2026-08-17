@@ -99,6 +99,24 @@ def test_n4_gradcheck_at_generic_intensities():
     assert torch.autograd.gradcheck(correction, (image,), eps=1e-6, atol=2e-4, rtol=2e-3)
 
 
+@pytest.mark.parametrize("size", [(12, 10), (8, 7, 6)])
+def test_stable_and_vectorized_atomic_accumulation_agree(size):
+    torch.manual_seed(1)
+    dimension = len(size)
+    domain = BSplineDomain(size)
+    image = torch.rand((1, 1) + domain.torch_size, dtype=torch.double) + 1.0
+    options = dict(
+        shrink_factor=2,
+        convergence={"iters": [2], "tol": 0.0},
+        spline_param=(1,) * dimension,
+        number_of_histogram_bins=16,
+        return_bias_field=True,
+    )
+    atomic = n4_bias_field_correction(image, domain, stable_accumulation=False, **options)
+    stable = n4_bias_field_correction(image, domain, stable_accumulation=True, **options)
+    torch.testing.assert_close(stable, atomic, rtol=1e-13, atol=1e-13)
+
+
 def test_rescale_restores_masked_intensity_range():
     domain = BSplineDomain((14, 12))
     image = torch.linspace(1, 5, 14 * 12).reshape(1, 1, 12, 14)
@@ -154,3 +172,26 @@ def test_cpu_cuda_agreement():
     cpu = n4_bias_field_correction(image, domain, **options)
     gpu = n4_bias_field_correction(image.cuda(), domain, **options).cpu()
     torch.testing.assert_close(gpu, cpu, rtol=2e-5, atol=2e-5)
+
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS is not available")
+def test_mps_is_repeatable_and_agrees_with_cpu():
+    torch.manual_seed(91)
+    domain = BSplineDomain((24, 20))
+    y = torch.linspace(-1, 1, 20)[:, None]
+    x = torch.linspace(-1, 1, 24)[None, :]
+    image = (1.0 + 0.3 * torch.exp(-3.0 * (x.square() + y.square()))) * torch.exp(0.2 * x - 0.1 * y)
+    image = image[None, None].float()
+    options = dict(
+        shrink_factor=2,
+        convergence={"iters": [4, 4], "tol": 0.0},
+        spline_param=(1, 1),
+        number_of_histogram_bins=32,
+        return_bias_field=True,
+    )
+    cpu = n4_bias_field_correction(image, domain, stable_accumulation=True, **options)
+    first = n4_bias_field_correction(image.to("mps"), domain, **options).cpu()
+    second = n4_bias_field_correction(image.to("mps"), domain, **options).cpu()
+    assert torch.isfinite(first).all()
+    torch.testing.assert_close(second, first, rtol=2e-5, atol=2e-5)
+    torch.testing.assert_close(first, cpu, rtol=2e-3, atol=2e-3)

@@ -50,6 +50,7 @@ def _histogram_sharpen(
     wiener_filter_noise: float,
     bias_field_fwhm: float,
     eps: float,
+    stable_accumulation: bool,
 ) -> Tensor:
     """PyTorch translation of ITK N4 ``SharpenImage``."""
     bins = number_of_histogram_bins
@@ -64,8 +65,29 @@ def _histogram_sharpen(
 
     flat_shape = (log_image.shape[0] * log_image.shape[1], -1)
     histogram = log_image.new_zeros((flat_shape[0], bins))
-    histogram.scatter_add_(1, lower.reshape(flat_shape), ((1.0 - fraction) * valid_weight).reshape(flat_shape))
-    histogram.scatter_add_(1, upper.reshape(flat_shape), (fraction * valid_weight).reshape(flat_shape))
+    flat_lower = lower.reshape(flat_shape)
+    flat_upper = upper.reshape(flat_shape)
+    flat_fraction = fraction.reshape(flat_shape)
+    flat_valid = valid_weight.reshape(flat_shape)
+    if stable_accumulation:
+        # MPS scatter reductions use unordered atomics. A chunked categorical
+        # reduction costs more arithmetic but is repeatable and numerically
+        # much closer to the ordered CPU implementation.
+        bin_axis = torch.arange(bins, device=log_image.device)
+        sample_chunk = max(1, 8_000_000 // bins)
+        for begin in range(0, flat_lower.shape[1], sample_chunk):
+            end = min(begin + sample_chunk, flat_lower.shape[1])
+            lower_assignment = (flat_lower[:, begin:end, None] == bin_axis).to(log_image.dtype)
+            upper_assignment = (flat_upper[:, begin:end, None] == bin_axis).to(log_image.dtype)
+            fraction_chunk = flat_fraction[:, begin:end, None]
+            valid_chunk = flat_valid[:, begin:end, None]
+            histogram = histogram + (
+                ((1.0 - fraction_chunk) * lower_assignment + fraction_chunk * upper_assignment)
+                * valid_chunk
+            ).sum(dim=1)
+    else:
+        histogram.scatter_add_(1, flat_lower, ((1.0 - flat_fraction) * flat_valid))
+        histogram.scatter_add_(1, flat_upper, (flat_fraction * flat_valid))
 
     padded_size = 2 ** (ceil(log2(bins)) + 1)
     offset = (padded_size - bins) // 2
@@ -101,6 +123,17 @@ def _histogram_sharpen(
     return torch.where(included, sharpened, torch.zeros_like(sharpened))
 
 
+def _shrink_slices(spatial_shape, shrink_factor: int):
+    spatial_slices = []
+    for dense_size in spatial_shape:
+        shrunk_size = dense_size // shrink_factor
+        center_offset = int(0.5 * (dense_size - 1 - shrink_factor * (shrunk_size - 1)) + 0.5)
+        spatial_slices.append(
+            slice(center_offset, center_offset + shrunk_size * shrink_factor, shrink_factor)
+        )
+    return tuple(spatial_slices)
+
+
 def _fit_bspline_update(
     residual: Tensor,
     weights: Tensor,
@@ -108,17 +141,11 @@ def _fit_bspline_update(
     lattice_itk: Sequence[int],
     shrink_factor: int,
     eps: float,
+    stable_accumulation: bool,
 ) -> Tensor:
     """One ITK-style scattered-data update, returned in PyTorch lattice order."""
     dimension = domain.dimension
-    spatial_slices = []
-    for dense_size in residual.shape[2:]:
-        shrunk_size = dense_size // shrink_factor
-        center_offset = int(0.5 * (dense_size - 1 - shrink_factor * (shrunk_size - 1)) + 0.5)
-        spatial_slices.append(
-            slice(center_offset, center_offset + shrunk_size * shrink_factor, shrink_factor)
-        )
-    slices = (slice(None), slice(None)) + tuple(spatial_slices)
+    slices = (slice(None), slice(None)) + _shrink_slices(residual.shape[2:], shrink_factor)
     residual = residual[slices]
     weights = weights[slices]
     sample_shape = residual.shape[2:]
@@ -155,19 +182,46 @@ def _fit_bspline_update(
     basis_values = torch.stack(support_basis)
     squared_sum = basis_values.square().sum(dim=0).clamp_min(eps)
 
+    indices = torch.stack(support_indices)
+    basis_values = torch.stack(support_basis)
     batch_channels = residual.shape[0] * residual.shape[1]
     residual_flat = residual.reshape(batch_channels, -1)
     weight_flat = weights.reshape(batch_channels, -1)
-    delta = residual.new_zeros((batch_channels, prod(lattice_itk)))
+    coefficient_count = prod(lattice_itk)
+    delta = residual.new_zeros((batch_channels, coefficient_count))
     omega = residual.new_zeros(delta.shape)
-    for index, value in zip(support_indices, support_basis):
-        expanded_index = index[None].expand(batch_channels, -1)
-        omega.scatter_add_(1, expanded_index, weight_flat * value.square()[None])
-        delta.scatter_add_(
-            1,
-            expanded_index,
-            residual_flat * weight_flat * (value.pow(3) / squared_sum)[None],
+    if stable_accumulation:
+        # Avoid MPS atomic scatter reductions. Chunked one-hot support matrices
+        # are reduced in a fixed order and accumulated with matrix products.
+        support_count, sample_count = indices.shape
+        max_one_hot_elements = 8_000_000
+        sample_chunk = max(1, max_one_hot_elements // (support_count * coefficient_count))
+        for begin in range(0, sample_count, sample_chunk):
+            end = min(begin + sample_chunk, sample_count)
+            chunk_indices = indices[:, begin:end].transpose(0, 1)
+            chunk_basis = basis_values[:, begin:end].transpose(0, 1)
+            coefficient_axis = torch.arange(coefficient_count, device=residual.device)
+            assignment = (chunk_indices[..., None] == coefficient_axis).to(residual.dtype)
+            omega_basis = (assignment * chunk_basis.square().unsqueeze(-1)).sum(dim=1)
+            delta_basis = (
+                assignment
+                * (chunk_basis.pow(3) / squared_sum[begin:end, None]).unsqueeze(-1)
+            ).sum(dim=1)
+            omega = omega + weight_flat[:, begin:end] @ omega_basis
+            delta = delta + (residual_flat[:, begin:end] * weight_flat[:, begin:end]) @ delta_basis
+    else:
+        # A single vectorized scatter per statistic replaces 4**D kernel
+        # launches while preserving the sparse ITK update formula.
+        flat_indices = indices.reshape(-1)
+        expanded_indices = flat_indices[None].expand(batch_channels, -1)
+        omega_values = weight_flat[:, None, :] * basis_values.square()[None]
+        delta_values = (
+            residual_flat[:, None, :]
+            * weight_flat[:, None, :]
+            * (basis_values.pow(3) / squared_sum[None])[None]
         )
+        omega.scatter_add_(1, expanded_indices, omega_values.reshape(batch_channels, -1))
+        delta.scatter_add_(1, expanded_indices, delta_values.reshape(batch_channels, -1))
     coefficients = torch.where(omega > eps, delta / omega.clamp_min(eps), torch.zeros_like(delta))
     return coefficients.reshape((residual.shape[0], residual.shape[1]) + tuple(reversed(lattice_itk)))
 
@@ -202,6 +256,7 @@ def n4_bias_field_correction(
     wiener_filter_noise: float = 0.01,
     bias_field_fwhm: float = 0.15,
     eps: float = 1e-6,
+    stable_accumulation: Optional[bool] = None,
 ) -> Tensor:
     """Differentiable N4-style correction for batched 2-D/3-D scalar images.
 
@@ -228,6 +283,11 @@ def n4_bias_field_correction(
     confidence = _expand_like_image(weight_mask, image, "weight_mask", 1.0).clamp_min(0.0)
     included = (mask_value != 0) & (confidence > 0)
     fit_weights = included.to(image.dtype) * confidence
+    shrink_selector = torch.zeros_like(included)
+    shrink_selector[(slice(None), slice(None)) + _shrink_slices(image.shape[2:], shrink_factor)] = True
+    histogram_included = included & shrink_selector
+    if stable_accumulation is None:
+        stable_accumulation = image.device.type == "mps"
     positive_image = image.clamp_min(eps)
     log_input = positive_image.log()
     log_bias = torch.zeros_like(image)
@@ -243,14 +303,23 @@ def n4_bias_field_correction(
             uncorrected = log_input - log_bias
             sharpened = _histogram_sharpen(
                 uncorrected,
-                included,
+                histogram_included,
                 number_of_histogram_bins=number_of_histogram_bins,
                 wiener_filter_noise=wiener_filter_noise,
                 bias_field_fwhm=bias_field_fwhm,
                 eps=eps,
+                stable_accumulation=stable_accumulation,
             )
             residual = uncorrected - sharpened
-            coefficients = _fit_bspline_update(residual, fit_weights, domain, lattice_itk, shrink_factor, eps)
+            coefficients = _fit_bspline_update(
+                residual,
+                fit_weights,
+                domain,
+                lattice_itk,
+                shrink_factor,
+                eps,
+                stable_accumulation,
+            )
             update = synthesize_bspline_velocity(coefficients, domain)
             new_log_bias = log_bias + active * update
             difference = torch.exp(new_log_bias - log_bias)

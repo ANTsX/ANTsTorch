@@ -52,6 +52,14 @@ def normalized_bias_array(image: ants.ANTsImage) -> np.ndarray:
     return array / np.exp(np.log(np.clip(array, 1e-12, None)).mean())
 
 
+def synchronize(device: torch.device) -> None:
+    """Wait for asynchronous accelerator work before timing boundaries."""
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elif device.type == "mps":
+        torch.mps.synchronize()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -85,6 +93,8 @@ def main() -> None:
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("--device cuda was requested, but CUDA is not available")
+    if device.type == "mps" and not torch.backends.mps.is_available():
+        raise RuntimeError("--device mps was requested, but MPS is not available")
 
     input_path = args.image or ants.get_ants_data("r16")
     t1 = ants.image_read(input_path).clone("float")
@@ -123,7 +133,7 @@ def main() -> None:
 
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
-        torch.cuda.synchronize(device)
+    synchronize(device)
     start = time.perf_counter()
     n4_torch_tensor = antstorch.n4_bias_field_correction(
         t1_tensor,
@@ -142,8 +152,7 @@ def main() -> None:
         spline_param=tuple(mesh_size),
         return_bias_field=True,
     )
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
+    synchronize(device)
     torch_seconds = time.perf_counter() - start
 
     n4_torch = torch_to_ants(n4_torch_tensor, t1)
@@ -167,6 +176,7 @@ def main() -> None:
     print(f"Geometry: size={t1.shape}, spacing={t1.spacing}, origin={t1.origin}")
     print(f"ANTs runtime:      {ants_seconds:.3f} s (correction + bias-field run)")
     print(f"ANTsTorch runtime: {torch_seconds:.3f} s on {device} (correction + bias-field run)")
+    print(f"B-spline accumulation: {'stable matrix reduction' if device.type == 'mps' else 'vectorized scatter'}")
     print(f"Corrected-image RMSE: {np.sqrt(np.mean(corrected_difference**2)):.6g}")
     print(
         "Scale-aligned corrected-image RMSE: "
