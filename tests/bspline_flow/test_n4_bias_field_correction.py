@@ -164,6 +164,47 @@ def test_agrees_with_antspy_n4_on_smooth_2d_phantom():
     np.testing.assert_allclose(torch_bias, ants_bias, rtol=1e-4, atol=1e-4)
 
 
+def test_agrees_with_antspy_n4_multiresolution():
+    ants = pytest.importorskip("ants")
+    r16 = ants.image_read(ants.get_data("r16")).clone("float")
+    mask = r16 * 0 + 1
+    ants_bias = ants.n4_bias_field_correction(
+        r16,
+        mask=mask,
+        shrink_factor=4,
+        convergence={"iters": [20, 20], "tol": 0.0},
+        spline_param=[4, 4],
+        return_bias_field=True,
+    ).numpy()
+
+    image_torch = torch.from_numpy(r16.numpy().T)[None, None]
+    mask_torch = torch.from_numpy(mask.numpy().T)[None, None]
+    domain = BSplineDomain(
+        size=r16.shape,
+        spacing=r16.spacing,
+        origin=r16.origin,
+        direction=tuple(tuple(row) for row in r16.direction),
+    )
+    torch_bias = n4_bias_field_correction(
+        image_torch,
+        domain,
+        mask_torch,
+        shrink_factor=4,
+        convergence={"iters": [20, 20], "tol": 0.0},
+        spline_param=(4, 4),
+        return_bias_field=True,
+        number_of_histogram_bins=200,
+    )[0, 0].numpy().T
+
+    ants_bias /= np.exp(np.log(ants_bias).mean())
+    torch_bias /= np.exp(np.log(torch_bias).mean())
+    log_ants = np.log(ants_bias)
+    log_torch = np.log(torch_bias)
+    assert np.corrcoef(log_ants.ravel(), log_torch.ravel())[0, 1] > 0.99
+    assert np.mean(np.abs(log_ants - log_torch)) < 0.02
+
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
 def test_cpu_cuda_agreement():
     domain = BSplineDomain((14, 12))
