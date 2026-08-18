@@ -228,6 +228,33 @@ class GlowTool3D(GlowToolBase):
             # these keys itself.
             legacy_conv_cap=cfg.get("legacy_conv_cap", 2.5),
             actnorm_scale_cap=cfg.get("actnorm_scale_cap", 5.0),
+            # Inference-time-only safety net for the affine coupling's
+            # unbounded shift term (see AffineCoupling's docstring): traced
+            # empirically to be the dominant cause of the temperature > 1.0
+            # sample blow-up (values reaching +-hundreds vs the healthy
+            # [~0, ~1] range at temp<=1.0), not Invertible1x1x1Conv/mixing.py,
+            # which already has its own (separately fixed) off-diagonal cap
+            # and was not the bottleneck here. 15.0 is generous relative to
+            # every in-distribution activation magnitude observed while
+            # tracing temp=1.0 sampling on this checkpoint, so it is inert
+            # for temp<=1.0 use and only engages in the temperature>1 tail.
+            # Not a learned parameter -- purely a runtime bound, so applying
+            # it here does not require retraining and does not affect the
+            # separate, currently-running training process (which builds
+            # its own model instance via train_lamnr_glow_3d.py, untouched
+            # by this tool-only default).
+            shift_cap=cfg.get("shift_cap", 15.0),
+            # This is the actual lever that fixes temperature > 1.0 blow-up
+            # (see gen_clamp's docstring on create_glow_normalizing_flow_model_3d):
+            # traced empirically -- the affine coupling's multiplicative
+            # scale term pins at its own cap for several consecutive blocks
+            # once sampling drifts out of distribution, compounding
+            # exponentially; shift_cap above does not touch this. 25.0 is
+            # generous relative to the largest inter-block activation
+            # magnitude observed at temperature<=1.0 on this checkpoint
+            # (stays under ~10), so it is inert for temp<=1.0 use and only
+            # interrupts the temperature>1 runaway feedback loop.
+            gen_clamp=cfg.get("gen_clamp", 25.0),
         )
         
         return model.to(device)

@@ -370,6 +370,8 @@ def create_glow_normalizing_flow_model_3d(
     legacy_conv_cap: Optional[float] = None,
     actnorm_scale_cap: Optional[float] = None,
     grad_checkpoint: Optional[bool] = None,
+    shift_cap: Optional[float] = None,
+    gen_clamp: float = 1.0e4,
     verbose: bool = False,
 ) -> nf.MultiscaleFlow:
     """
@@ -439,6 +441,34 @@ def create_glow_normalizing_flow_model_3d(
         level has more than 10 flow steps). Pass True/False to force it on
         or off regardless of depth -- useful for A/B-testing throughput vs.
         peak memory.
+    shift_cap : float, optional
+        Optional tanh clamp on each GlowBlock3d's affine-coupling shift term
+        (see GlowBlock3d/AffineCoupling docstrings). Unlike the scale head,
+        shift has no bounding nonlinearity of its own; it stays small during
+        training/reconstruction (param_map only ever sees in-distribution
+        z1) but can compound block-to-block during generation once inputs
+        drift out of distribution, e.g. when sampling at temperature > 1.
+        None (default) reproduces exact prior behavior/checkpoints -- this
+        is purely an inference-time numerical safety net, not a learned
+        parameter, so it is safe to enable when loading an existing
+        checkpoint without retraining.
+    gen_clamp : float, default=1.0e4
+        Forwarded to every GlowBlock3d (see its docstring): a symmetric
+        nan_to_num+clamp bound applied to the block's output tensor after
+        each of its 2-3 sub-flows, in both forward() and inverse(). Traced
+        empirically to be the right lever for temperature > 1 sampling
+        blow-up: the actual driver is the affine coupling's multiplicative
+        scale term getting pinned at its own cap (exp(s_cap)) for several
+        *consecutive* blocks once inputs drift out of distribution, which
+        compounds exponentially (e.g. ~4.5x per block for several blocks in
+        a row is already a >1000x amplification) -- shift-term bounding
+        alone (shift_cap above) does not stop this, since shift is not what
+        saturates. The default 1.0e4 is a loose last-resort safety net
+        (matches pre-existing hardcoded behavior); pass a tighter value
+        (generous relative to the largest inter-block activation magnitude
+        observed at temperature<=1.0, e.g. ~20-30 on checkpoints validated
+        so far) at inference time to interrupt the runaway feedback loop
+        before it compounds, without perturbing in-distribution behavior.
 
     Returns
     -------
@@ -488,6 +518,8 @@ def create_glow_normalizing_flow_model_3d(
                 s_cap=scale_cap,
                 conv_s_cap=legacy_conv_cap,
                 actnorm_s_cap=actnorm_scale_cap,
+                shift_cap=shift_cap,
+                gen_clamp=gen_clamp,
             )
             for _ in range(k_level)
         ]
