@@ -176,6 +176,10 @@ def main() -> None:
     print(f"Geometry: size={t1.shape}, spacing={t1.spacing}, origin={t1.origin}")
     print(f"ANTs runtime:      {ants_seconds:.3f} s (correction + bias-field run)")
     print(f"ANTsTorch runtime: {torch_seconds:.3f} s on {device} (correction + bias-field run)")
+    print(f"ANTs intensity range: {corrected_ants_array.min():.6g} to {corrected_ants_array.max():.6g}")
+    print(f"ANTsTorch intensity range: {corrected_torch_array.min():.6g} to {corrected_torch_array.max():.6g}") 
+    print(f"ANTs bias-field range: {normalized_ants_bias.min():.6g} to {normalized_ants_bias.max():.6g}")
+    print(f"ANTsTorch bias-field range: {normalized_torch_bias.min():.6g} to {normalized_torch_bias.max():.6g}")
     print(f"B-spline accumulation: {'stable matrix reduction' if device.type == 'mps' else 'vectorized scatter'}")
     print(f"Corrected-image RMSE: {np.sqrt(np.mean(corrected_difference**2)):.6g}")
     print(
