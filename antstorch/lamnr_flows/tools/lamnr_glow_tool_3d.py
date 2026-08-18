@@ -249,16 +249,18 @@ class GlowTool3D(GlowToolBase):
         if num_views == 1:
             dummy_input = dummy_input[0]
 
-        # 4. Priming sécurisé de l'ActNorm sans calcul de gradient
+        # 4. Priming sécurisé de l'ActNorm sans calcul de gradient.
+        # Doit passer par inverse_and_log_det (x -> z) : c'est la seule
+        # méthode qui met en cache model._latent_shapes (cf. core.py), ce
+        # dont sample()/sample_with_temperature() ont besoin ensuite.
+        # forward_and_log_det va dans l'autre sens (z -> x) et ne met
+        # jamais en cache les shapes, quel que soit l'input qu'on lui donne.
         with torch.no_grad():
-            try:
-                model.forward_and_log_det(dummy_input)
-            except Exception:
-                # Fallback de secours sur le calcul de log-probabilité si forward échoue
-                if isinstance(dummy_input, list):
-                    _ = [model.log_prob(d) for d in dummy_input]
-                else:
-                    model.log_prob(dummy_input)
+            if isinstance(dummy_input, list):
+                for d in dummy_input:
+                    model.inverse_and_log_det(d)
+            else:
+                model.inverse_and_log_det(dummy_input)
 
     def read_image(self, path: "Path", target_size, **kw) -> torch.Tensor:
         import ants
