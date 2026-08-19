@@ -122,9 +122,6 @@ def test_fit_bspline_object_to_scattered_data_agrees_with_antspy_vector():
 
 
 def test_fit_bspline_displacement_field_from_points_agrees_with_antspy():
-    # enforce_stationary_boundary=False isolates the underlying fit itself
-    # from the (documented, intentionally different) boundary treatment --
-    # see the enforce_stationary_boundary note in the docstring.
     ants = pytest.importorskip("ants")
     rng = np.random.default_rng(7)
     size = [60, 45]
@@ -169,10 +166,13 @@ def test_fit_bspline_displacement_field_enforces_stationary_boundary():
         mesh_size=1,
         enforce_stationary_boundary=True,
     )
-    assert torch.all(fitted[..., 0, :] == 0)
-    assert torch.all(fitted[..., -1, :] == 0)
-    assert torch.all(fitted[..., :, 0] == 0)
-    assert torch.all(fitted[..., :, -1] == 0)
+    # ITK's finite 1e10 boundary weight constrains these values very close
+    # to zero; unlike the former post-fit mask, it does not make them
+    # bitwise zero.
+    assert torch.all(fitted[..., 0, :].abs() < 1e-9)
+    assert torch.all(fitted[..., -1, :].abs() < 1e-9)
+    assert torch.all(fitted[..., :, 0].abs() < 1e-9)
+    assert torch.all(fitted[..., :, -1].abs() < 1e-9)
 
 
 def test_fit_bspline_displacement_field_combines_grid_and_points():
@@ -189,9 +189,14 @@ def test_fit_bspline_displacement_field_combines_grid_and_points():
         domain=domain,
         number_of_fitting_levels=2,
         mesh_size=1,
+        enforce_stationary_boundary=False,
     )
     field_only = fit_bspline_displacement_field(
-        displacement_field=field, domain=domain, number_of_fitting_levels=2, mesh_size=1
+        displacement_field=field,
+        domain=domain,
+        number_of_fitting_levels=2,
+        mesh_size=1,
+        enforce_stationary_boundary=False,
     )
     assert torch.isfinite(combined).all()
     assert not torch.allclose(combined, field_only)

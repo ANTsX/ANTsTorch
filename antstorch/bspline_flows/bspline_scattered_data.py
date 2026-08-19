@@ -133,6 +133,30 @@ def _concat_bspline_fit_geometries(geometries):
     return indices, basis_values, squared_sum, coefficient_count
 
 
+def _select_bspline_fit_geometry(geometry, point_mask: Tensor):
+    """Select a subset of samples from a fit geometry."""
+    indices, basis_values, squared_sum, coefficient_count = geometry
+    return (
+        indices[:, point_mask],
+        basis_values[:, point_mask],
+        squared_sum[point_mask],
+        coefficient_count,
+    )
+
+
+def _domain_boundary_mask(domain: BSplineDomain, device) -> Tensor:
+    """Flattened torch-order mask for the outermost voxel layer."""
+    mask = torch.zeros(domain.torch_size, dtype=torch.bool, device=device)
+    for axis in range(domain.dimension):
+        lower = [slice(None)] * domain.dimension
+        upper = [slice(None)] * domain.dimension
+        lower[axis] = 0
+        upper[axis] = -1
+        mask[tuple(lower)] = True
+        mask[tuple(upper)] = True
+    return mask.reshape(-1)
+
+
 def _evaluate_bspline_at_points(coefficients: Tensor, geometry) -> Tensor:
     """Evaluate a coefficient lattice at the points described by
     ``geometry`` (from ``_bspline_fit_geometry_points``) -- the
@@ -355,19 +379,13 @@ def fit_bspline_displacement_field(
       scope here.
     * ``rasterize_points`` is not applicable -- this implementation is
       already fully vectorized rather than looping over points.
-    * ``enforce_stationary_boundary`` zeros the reconstructed field's
-      outermost voxel layer directly (``synthesize_bspline_velocity``'s
-      ``stationary_boundary`` option) rather than ITK's approach of adding
-      high-weight zero observations *during* the fit -- a documented
-      simplification, not a numerically identical reproduction. With a
-      coarse ``mesh_size`` the two approaches can disagree well beyond the
-      boundary voxels themselves: ITK's synthetic zero observations are
-      still just points fit like any other, so with few control points
-      (wide basis support) they pull the *whole* coefficient lattice
-      towards zero, not just its edge. Set ``enforce_stationary_boundary=
-      False`` when validating the fit itself against ANTsPy -- the two
-      agree to float precision in that case (see
-      ``test_bspline_scattered_data.py``).
+    * ``enforce_stationary_boundary`` follows ITK by fitting zero-valued
+      observations on the domain's outermost voxel layer with weight
+      ``1e10``. For a dense input field these replace its boundary samples;
+      when fitting scattered points only they are added as synthetic
+      observations. Consequently the boundary constraint affects the whole
+      coefficient lattice when the B-spline basis has wide support; it is
+      not a post-fit output mask.
 
     Returns a dense tensor, shape ``(1, D, *domain.torch_size)``. Pass
     ``return_coefficients=True`` to additionally get the raw coefficient
@@ -410,6 +428,8 @@ def fit_bspline_displacement_field(
     geometries = []
     values_parts = []
     weight_parts = []
+    boundary_mask = _domain_boundary_mask(domain, device) if enforce_stationary_boundary else None
+    boundary_weight = 1.0e10
 
     if displacement_field is not None:
         if displacement_weight_image is None:
@@ -421,8 +441,24 @@ def fit_bspline_displacement_field(
         grid_geometry = _bspline_fit_geometry(domain.torch_size, lattice_itk, dtype, device, eps)
         grid_point_count = grid_geometry[0].shape[1]
         geometries.append(grid_geometry)
-        values_parts.append(displacement_field.reshape(dimension, -1))
-        weight_parts.append(weight_field.reshape(1, -1).expand(dimension, grid_point_count))
+        field_values = displacement_field.reshape(dimension, -1)
+        field_weights = weight_field.reshape(1, -1).expand(dimension, grid_point_count)
+        if boundary_mask is not None:
+            field_values = field_values.masked_fill(boundary_mask.unsqueeze(0), 0.0)
+            field_weights = field_weights.masked_fill(boundary_mask.unsqueeze(0), boundary_weight)
+        values_parts.append(field_values)
+        weight_parts.append(field_weights)
+
+    if displacement_field is None and boundary_mask is not None:
+        boundary_geometry = _select_bspline_fit_geometry(
+            _bspline_fit_geometry(domain.torch_size, lattice_itk, dtype, device, eps), boundary_mask
+        )
+        boundary_point_count = int(boundary_mask.sum().item())
+        geometries.append(boundary_geometry)
+        values_parts.append(torch.zeros(dimension, boundary_point_count, dtype=dtype, device=device))
+        weight_parts.append(
+            torch.full((dimension, boundary_point_count), boundary_weight, dtype=dtype, device=device)
+        )
 
     if displacement_origins is not None:
         origins = torch.as_tensor(displacement_origins, dtype=dtype, device=device)
@@ -469,6 +505,13 @@ def fit_bspline_displacement_field(
             parts = []
             if displacement_field is not None:
                 parts.append(_bspline_fit_geometry(domain.torch_size, current_lattice, dtype, device, eps))
+            elif boundary_mask is not None:
+                parts.append(
+                    _select_bspline_fit_geometry(
+                        _bspline_fit_geometry(domain.torch_size, current_lattice, dtype, device, eps),
+                        boundary_mask,
+                    )
+                )
             if displacement_origins is not None:
                 u_current = tuple(
                     _parametric_to_u(
@@ -497,9 +540,7 @@ def fit_bspline_displacement_field(
             accumulated_coefficients = refine_bspline_coefficients(accumulated_coefficients)
             current_lattice = tuple(2 * v - 3 for v in current_lattice)
 
-    dense = synthesize_bspline_velocity(
-        accumulated_coefficients, domain, stationary_boundary=enforce_stationary_boundary
-    )
+    dense = synthesize_bspline_velocity(accumulated_coefficients, domain)
     if return_coefficients:
         return dense, accumulated_coefficients
     return dense
