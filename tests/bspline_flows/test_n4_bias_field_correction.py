@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import torch
 
-from antstorch.bspline_flow import BSplineDomain, N4BiasFieldCorrection, n4_bias_field_correction
+from antstorch.bspline_flows import BSplineDomain, N4BiasFieldCorrection, n4_bias_field_correction
 
 
 def _options(dimension, iterations=3):

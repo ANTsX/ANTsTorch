@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from antstorch.bspline_flow import BSplineDomain, compose_displacements, scaling_and_squaring
+from antstorch.bspline_flows import BSplineDomain, compose_displacements, scaling_and_squaring
 
 
 @pytest.mark.parametrize("size", [(8, 7), (7, 6, 5)])
@@ -39,4 +39,3 @@ def test_convergence_with_squaring_steps():
     finest = (values[3] - values[2]).abs().mean()
     assert finer < coarse
     assert finest < finer
-

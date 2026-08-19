@@ -2,8 +2,8 @@ import numpy as np
 import pytest
 import torch
 
-from antstorch.bspline_flow import BSplineDomain, CubicBSplineSynthesis
-from antstorch.bspline_flow.itk_reference import coefficient_lattice_metadata, numpy_itk_reconstruction
+from antstorch.bspline_flows import BSplineDomain, CubicBSplineSynthesis
+from antstorch.bspline_flows.itk_reference import coefficient_lattice_metadata, numpy_itk_reconstruction
 
 
 @pytest.mark.parametrize("dimension", [2, 3])

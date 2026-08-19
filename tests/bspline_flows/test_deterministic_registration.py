@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from antstorch.bspline_flow import BSplineDomain, DeterministicBSplineRegistration, warp_image
+from antstorch.bspline_flows import BSplineDomain, DeterministicBSplineRegistration, warp_image
 
 
 @pytest.mark.parametrize(
@@ -56,4 +56,3 @@ def test_regularization_terms_are_optional_and_reported():
         + 0.3 * result["bending_regularization"]
     )
     torch.testing.assert_close(result["loss"], expected)
-
