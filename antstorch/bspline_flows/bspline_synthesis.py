@@ -223,6 +223,77 @@ def _bspline_fit_geometry(
     return indices, basis_values, squared_sum, coefficient_count
 
 
+def _bspline_fit_geometry_points(
+    parametric_u: Sequence[Tensor],
+    lattice_itk: Sequence[int],
+    closed_axes: Sequence[bool],
+    eps: float,
+):
+    """Build fit geometry for arbitrary parametric sample locations.
+
+    This is the scattered-point analogue of :func:`_bspline_fit_geometry`.
+    Each tensor in ``parametric_u`` contains one axis's internal B-spline
+    coordinate for all samples. The returned representation is accepted by
+    the same context and solve primitives as regular-grid geometry.
+    """
+    dimension = len(lattice_itk)
+    device = parametric_u[0].device
+    dtype = parametric_u[0].dtype
+    point_count = parametric_u[0].shape[0]
+
+    neighbors, basis = [], []
+    for u, lattice_size, closed in zip(parametric_u, lattice_itk, closed_axes):
+        base = torch.floor(u).to(torch.long)
+        local = torch.arange(4, device=device)
+        index = base[:, None] + local
+        neighbors.append(index.remainder(lattice_size) if closed else index)
+        basis.append(cubic_bspline_basis(u[:, None] - index.to(u.dtype) + 1.0))
+
+    support_indices, support_basis = [], []
+    strides, stride = [], 1
+    for size in lattice_itk:
+        strides.append(stride)
+        stride *= size
+    for support in product(range(4), repeat=dimension):
+        index = sum(neighbors[d][:, support[d]] * strides[d] for d in range(dimension))
+        value = torch.ones(point_count, dtype=dtype, device=device)
+        for d in range(dimension):
+            value = value * basis[d][:, support[d]]
+        support_indices.append(index)
+        support_basis.append(value)
+
+    indices = torch.stack(support_indices)
+    basis_values = torch.stack(support_basis)
+    squared_sum = basis_values.square().sum(dim=0).clamp_min(eps)
+    return indices, basis_values, squared_sum, stride
+
+
+def _concat_bspline_fit_geometries(geometries):
+    """Concatenate sample axes of geometries sharing one coefficient lattice."""
+    if not geometries:
+        raise ValueError("at least one B-spline fit geometry is required")
+    coefficient_count = geometries[0][3]
+    if any(geometry[3] != coefficient_count for geometry in geometries[1:]):
+        raise ValueError("B-spline fit geometries must share a coefficient lattice")
+    return (
+        torch.cat([geometry[0] for geometry in geometries], dim=1),
+        torch.cat([geometry[1] for geometry in geometries], dim=1),
+        torch.cat([geometry[2] for geometry in geometries], dim=0),
+        coefficient_count,
+    )
+
+
+def _select_bspline_fit_geometry(geometry, point_mask: Tensor):
+    """Select a subset of samples from a fit geometry."""
+    indices, basis_values, squared_sum, coefficient_count = geometry
+    return (
+        indices[:, point_mask],
+        basis_values[:, point_mask],
+        squared_sum[point_mask],
+        coefficient_count,
+    )
+
+
 def _bspline_fit_context(weight_flat: Tensor, geometry, stable_accumulation: bool):
     """Precompute the value-independent half of the scattered-data update.
 
@@ -444,4 +515,3 @@ class CubicBSplineSynthesis(nn.Module):
             stationary_boundary=self.stationary_boundary,
             chunk_size=self.chunk_size,
         )
-

@@ -28,9 +28,11 @@ from .bspline_domain import BSplineDomain
 from .bspline_synthesis import (
     _bspline_fit_context,
     _bspline_fit_geometry,
+    _bspline_fit_geometry_points,
     _bspline_fit_solve,
     _as_bools,
-    cubic_bspline_basis,
+    _concat_bspline_fit_geometries,
+    _select_bspline_fit_geometry,
     refine_bspline_coefficients,
     synthesize_bspline_velocity,
 )
@@ -61,87 +63,6 @@ def _parametric_to_u(
         return u
     upper = torch.nextafter(u.new_tensor(spans), u.new_tensor(float("-inf")))
     return u.clamp(0.0, upper)
-
-
-def _bspline_fit_geometry_points(
-    parametric_u: Sequence[Tensor],
-    lattice_itk: Sequence[int],
-    closed_axes: Sequence[bool],
-    eps: float,
-):
-    """Support-point indices/weights for a B-spline scattered-data update at
-    arbitrary (non-grid) parametric points -- the scattered-point analogue
-    of ``_bspline_fit_geometry``. Shares the exact same knot convention and
-    per-point accumulation math (and the exact same downstream
-    ``_bspline_fit_context``/``_bspline_fit_solve``, which only ever look at
-    the returned ``(indices, basis_values, squared_sum, coefficient_count)``
-    tuple and are agnostic to whether it came from a grid or scattered
-    points), but without assuming the points form a regular grid.
-
-    ``parametric_u`` is one 1-D tensor of length ``P`` per axis (ITK order),
-    each already this axis's u-coordinate in ``[0, spans]`` (or any real
-    value for a closed axis -- see ``_parametric_to_u``).
-    """
-    dimension = len(lattice_itk)
-    device = parametric_u[0].device
-    dtype = parametric_u[0].dtype
-    point_count = parametric_u[0].shape[0]
-
-    neighbors, basis = [], []
-    for u, lattice_size, closed in zip(parametric_u, lattice_itk, closed_axes):
-        base = torch.floor(u).to(torch.long)
-        local = torch.arange(4, device=device)
-        index = base[:, None] + local
-        neighbors.append(index.remainder(lattice_size) if closed else index)
-        basis.append(cubic_bspline_basis(u[:, None] - index.to(u.dtype) + 1.0))
-
-    support_indices, support_basis = [], []
-    strides, stride = [], 1
-    for size in lattice_itk:
-        strides.append(stride)
-        stride *= size
-    from itertools import product
-
-    for support in product(range(4), repeat=dimension):
-        index = sum(neighbors[d][:, support[d]] * strides[d] for d in range(dimension))
-        value = torch.ones(point_count, dtype=dtype, device=device)
-        for d in range(dimension):
-            value = value * basis[d][:, support[d]]
-        support_indices.append(index)
-        support_basis.append(value)
-
-    indices = torch.stack(support_indices)
-    basis_values = torch.stack(support_basis)
-    squared_sum = basis_values.square().sum(dim=0).clamp_min(eps)
-    coefficient_count = stride
-    return indices, basis_values, squared_sum, coefficient_count
-
-
-def _concat_bspline_fit_geometries(geometries):
-    """Merge independently-built geometries (e.g. one from a dense grid, one
-    from scattered points) into a single one, so ``_bspline_fit_context``
-    accumulates ``omega`` from every sample together. Valid because
-    ``indices``/``basis_values``/``squared_sum`` are all per-sample -- each
-    sample's contribution never depends on any other sample -- and every
-    geometry being merged shares the same ``lattice_itk`` (hence the same
-    ``coefficient_count``).
-    """
-    indices = torch.cat([g[0] for g in geometries], dim=1)
-    basis_values = torch.cat([g[1] for g in geometries], dim=1)
-    squared_sum = torch.cat([g[2] for g in geometries], dim=0)
-    coefficient_count = geometries[0][3]
-    return indices, basis_values, squared_sum, coefficient_count
-
-
-def _select_bspline_fit_geometry(geometry, point_mask: Tensor):
-    """Select a subset of samples from a fit geometry."""
-    indices, basis_values, squared_sum, coefficient_count = geometry
-    return (
-        indices[:, point_mask],
-        basis_values[:, point_mask],
-        squared_sum[point_mask],
-        coefficient_count,
-    )
 
 
 def _domain_boundary_mask(domain: BSplineDomain, device) -> Tensor:
