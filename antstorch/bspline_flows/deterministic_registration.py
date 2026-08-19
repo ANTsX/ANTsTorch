@@ -7,7 +7,13 @@ from torch import Tensor, nn
 from .bspline_domain import BSplineDomain
 from .bspline_synthesis import CubicBSplineSynthesis
 from .scaling_and_squaring import ScalingAndSquaring
-from .similarity import bending_energy, mean_squared_error, normalized_cross_correlation_loss, squared_l2_energy
+from .similarity import (
+    ants_neighborhood_correlation_loss,
+    bending_energy,
+    mean_squared_error,
+    normalized_cross_correlation_loss,
+    squared_l2_energy,
+)
 from .spatial_transform import jacobian_determinant, warp_image
 
 
@@ -21,6 +27,7 @@ class DeterministicBSplineRegistration(nn.Module):
         *,
         squaring_steps: int = 7,
         similarity: str = "mse",
+        neighborhood_radius=2,
         padding_mode: str = "zeros",
         coefficient_weight: float = 0.0,
         velocity_weight: float = 0.0,
@@ -39,9 +46,10 @@ class DeterministicBSplineRegistration(nn.Module):
             chunk_size=synthesis_chunk_size,
         )
         self.exponential = ScalingAndSquaring(fixed_domain, squaring_steps)
-        if similarity not in ("mse", "ncc"):
-            raise ValueError("similarity must be 'mse' or 'ncc'")
+        if similarity not in ("mse", "ncc", "ants_ncc"):
+            raise ValueError("similarity must be 'mse', 'ncc', or 'ants_ncc'")
         self.similarity = similarity
+        self.neighborhood_radius = neighborhood_radius
         self.padding_mode = padding_mode
         self.coefficient_weight = float(coefficient_weight)
         self.velocity_weight = float(velocity_weight)
@@ -61,11 +69,14 @@ class DeterministicBSplineRegistration(nn.Module):
 
     def forward(self, coefficients: Tensor, moving: Tensor, fixed: Tensor) -> Dict[str, Tensor]:
         result = self.transform(coefficients, moving)
-        similarity = (
-            mean_squared_error(fixed, result["warped_moving"])
-            if self.similarity == "mse"
-            else normalized_cross_correlation_loss(fixed, result["warped_moving"])
-        )
+        if self.similarity == "mse":
+            similarity = mean_squared_error(fixed, result["warped_moving"])
+        elif self.similarity == "ncc":
+            similarity = normalized_cross_correlation_loss(fixed, result["warped_moving"])
+        else:
+            similarity = ants_neighborhood_correlation_loss(
+                fixed, result["warped_moving"], self.neighborhood_radius
+            )
         coefficient_regularization = squared_l2_energy(coefficients)
         velocity_regularization = squared_l2_energy(result["velocity"])
         bending_regularization = bending_energy(result["velocity"], self.fixed_domain)
@@ -86,4 +97,3 @@ class DeterministicBSplineRegistration(nn.Module):
             }
         )
         return result
-
