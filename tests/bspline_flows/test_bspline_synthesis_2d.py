@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from antstorch.bspline_flow import BSplineDomain, CubicBSplineSynthesis
+from antstorch.bspline_flows import BSplineDomain, CubicBSplineSynthesis
 
 
 def test_zero_and_constant_vector_fields_2d():

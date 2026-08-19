@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from antstorch.bspline_flow import BSplineDomain, DeterministicBSplineRegistration
+from antstorch.bspline_flows import BSplineDomain, DeterministicBSplineRegistration
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")

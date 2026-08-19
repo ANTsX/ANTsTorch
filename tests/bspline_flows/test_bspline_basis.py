@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from antstorch.bspline_flow import cubic_bspline_basis
+from antstorch.bspline_flows import cubic_bspline_basis
 
 
 def test_cubic_basis_known_values_and_support():

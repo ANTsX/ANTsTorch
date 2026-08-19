@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from antstorch.bspline_flow import (
+from antstorch.bspline_flows import (
     BSplineDomain,
     compose_displacements,
     jacobian_determinant,

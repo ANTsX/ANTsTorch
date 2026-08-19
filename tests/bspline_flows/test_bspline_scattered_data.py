@@ -2,12 +2,12 @@ import numpy as np
 import pytest
 import torch
 
-from antstorch.bspline_flow import BSplineDomain, fit_bspline_coefficients
-from antstorch.bspline_flow.bspline_scattered_data import (
+from antstorch.bspline_flows import BSplineDomain, fit_bspline_coefficients
+from antstorch.bspline_flows.bspline_scattered_data import (
     fit_bspline_displacement_field,
     fit_bspline_object_to_scattered_data,
 )
-from antstorch.bspline_flow.bspline_synthesis import synthesize_bspline_velocity
+from antstorch.bspline_flows.bspline_synthesis import synthesize_bspline_velocity
 
 
 def test_single_level_scattered_fit_matches_dense_grid_fit():
