@@ -11,8 +11,15 @@ from .bspline_synthesis import (
 )
 from .deterministic_registration import DeterministicBSplineRegistration
 from .n4_bias_field_correction import N4BiasFieldCorrection, n4_bias_field_correction
+from .registration import registration
 from .scaling_and_squaring import ScalingAndSquaring, scaling_and_squaring
-from .similarity import bending_energy, mean_squared_error, normalized_cross_correlation_loss, squared_l2_energy
+from .similarity import (
+    ants_neighborhood_correlation_loss,
+    bending_energy,
+    mean_squared_error,
+    normalized_cross_correlation_loss,
+    squared_l2_energy,
+)
 from .spatial_transform import (
     ALIGN_CORNERS,
     compose_displacements,
@@ -35,9 +42,11 @@ __all__ = [
     "DeterministicBSplineRegistration",
     "N4BiasFieldCorrection",
     "n4_bias_field_correction",
+    "registration",
     "ScalingAndSquaring",
     "scaling_and_squaring",
     "bending_energy",
+    "ants_neighborhood_correlation_loss",
     "mean_squared_error",
     "normalized_cross_correlation_loss",
     "squared_l2_energy",
