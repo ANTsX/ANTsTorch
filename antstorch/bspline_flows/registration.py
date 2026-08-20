@@ -10,6 +10,7 @@ from torch.nn import functional as F
 from .bspline_domain import BSplineDomain
 from .bspline_synthesis import refine_bspline_coefficients
 from .deterministic_registration import DeterministicBSplineRegistration
+from .physical_gradient_descent import PhysicalGradientDescent
 
 
 def _axis_values(value, dimension: int, name: str, *, minimum: int) -> tuple:
@@ -148,8 +149,10 @@ def registration(
     coefficient_grid_size: Optional[Union[int, Sequence[int]]] = None,
     iterations: Union[int, Sequence[int]] = 100,
     learning_rate: Union[float, Sequence[float]] = 1e-2,
-    optimizer: str = "physical_gradient_descent",
+    optimizer: Union[str, PhysicalGradientDescent] = "physical_gradient_descent",
     gradient_step: float = 0.2,
+    momentum: float = 0.0,
+    gradient_smoothing_sigma: float = 0.0,
     similarity: str = "mse",
     neighborhood_radius: Union[int, Sequence[int]] = 2,
     coefficient_weight: float = 0.0,
@@ -186,6 +189,8 @@ def registration(
     maximum dense velocity update has physical magnitude ``gradient_step``
     times the current level's voxel diagonal. ``gradient_step`` must be in
     ``[0.1, 0.25]``. ``learning_rate`` is ignored by this optimizer.
+    A configured :class:`PhysicalGradientDescent` instance can be supplied
+    instead to enable coefficient-gradient momentum and physical smoothing.
 
     ``mesh_size`` is the number of B-spline spans. For open axes the
     coefficient-grid size is ``mesh_size + 3``; for closed axes it equals the
@@ -221,15 +226,16 @@ def registration(
     factors, sigmas, level_iterations, level_rates = _pyramid_configuration(
         shrink_factors, smoothing_sigmas, iterations, learning_rate
     )
-    if optimizer not in ("adam", "lbfgs", "physical_gradient_descent"):
+    optimizer_name = "physical_gradient_descent" if isinstance(optimizer, PhysicalGradientDescent) else optimizer
+    if optimizer_name not in ("adam", "lbfgs", "physical_gradient_descent"):
         raise ValueError("optimizer must be 'adam', 'lbfgs', or 'physical_gradient_descent'")
-    if (
-        not isinstance(gradient_step, (int, float))
-        or isinstance(gradient_step, bool)
-        or not isfinite(gradient_step)
-        or not 0.1 <= gradient_step <= 0.25
-    ):
-        raise ValueError("gradient_step must be finite and between 0.1 and 0.25")
+    physical_optimizer = (
+        optimizer
+        if isinstance(optimizer, PhysicalGradientDescent)
+        else PhysicalGradientDescent(gradient_step, momentum, gradient_smoothing_sigma)
+        if optimizer_name == "physical_gradient_descent"
+        else None
+    )
     if similarity not in ("mse", "ncc", "ants_ncc"):
         raise ValueError("similarity must be 'mse', 'ncc', or 'ants_ncc'")
     if padding_mode not in ("zeros", "border", "reflection"):
@@ -293,8 +299,13 @@ def registration(
             ("smoothing_sigmas", sigmas),
             ("iterations", level_iterations),
             ("learning_rate", level_rates),
-            ("optimizer", optimizer),
-            ("gradient_step", gradient_step),
+            ("optimizer", optimizer_name),
+            ("gradient_step", physical_optimizer.gradient_step if physical_optimizer else gradient_step),
+            ("momentum", physical_optimizer.momentum if physical_optimizer else momentum),
+            (
+                "gradient_smoothing_sigma",
+                physical_optimizer.smoothing_sigma if physical_optimizer else gradient_smoothing_sigma,
+            ),
             ("similarity", similarity),
             ("neighborhood_radius", neighborhood_radius),
             ("coefficient_weight", coefficient_weight),
@@ -337,10 +348,10 @@ def registration(
                 f"total_control_points={prod(control_points)}, "
                 f"iterations={iteration_count}"
             )
-            if optimizer == "physical_gradient_descent":
+            if optimizer_name == "physical_gradient_descent":
                 print(
-                    f"  physical_gradient_step={gradient_step * voxel_diagonal:.8g} "
-                    f"({gradient_step:g} * voxel_diagonal {voxel_diagonal:.8g})"
+                    f"  physical_gradient_step={physical_optimizer.gradient_step * voxel_diagonal:.8g} "
+                    f"({physical_optimizer.gradient_step:g} * voxel_diagonal {voxel_diagonal:.8g})"
                 )
         model = DeterministicBSplineRegistration(
             fixed_level_domain,
@@ -356,12 +367,13 @@ def registration(
             stationary_boundary=stationary_boundary,
             synthesis_chunk_size=synthesis_chunk_size,
         )
-        if optimizer == "adam":
+        if optimizer_name == "adam":
             optimizer_impl = torch.optim.Adam([coefficients], lr=rate)
-        elif optimizer == "lbfgs":
+        elif optimizer_name == "lbfgs":
             optimizer_impl = torch.optim.LBFGS([coefficients], lr=rate, max_iter=20)
         else:
             optimizer_impl = None
+            physical_optimizer.reset()
         current_level_history = []
         previous = None
         for _ in range(iteration_count):
@@ -382,21 +394,12 @@ def registration(
                     )
                 return loss
 
-            if optimizer == "physical_gradient_descent":
+            if optimizer_name == "physical_gradient_descent":
                 closure()
-                with torch.no_grad():
-                    dense_gradient = model.synthesis(coefficients.grad)
-                    maximum_norm = dense_gradient.square().sum(dim=1).sqrt().flatten(start_dim=1).amax(dim=1)
-                    voxel_diagonal = sum(spacing**2 for spacing in fixed_level_domain.spacing) ** 0.5
-                    target_step = gradient_step * voxel_diagonal
-                    scale = torch.where(
-                        maximum_norm > 0,
-                        maximum_norm.new_full(maximum_norm.shape, target_step) / maximum_norm,
-                        torch.zeros_like(maximum_norm),
-                    )
-                    scale = scale.reshape((coefficients.shape[0], 1) + (1,) * dimension)
-                    coefficients.add_(coefficients.grad * scale, alpha=-1.0)
-            elif optimizer == "lbfgs":
+                physical_optimizer.step(
+                    coefficients, model.synthesis, fixed_level_domain, closed=closed
+                )
+            elif optimizer_name == "lbfgs":
                 optimizer_impl.step(closure)
             else:
                 closure()

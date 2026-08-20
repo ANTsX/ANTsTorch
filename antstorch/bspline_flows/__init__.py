@@ -11,6 +11,7 @@ from .bspline_synthesis import (
 )
 from .deterministic_registration import DeterministicBSplineRegistration
 from .n4_bias_field_correction import N4BiasFieldCorrection, n4_bias_field_correction
+from .physical_gradient_descent import PhysicalGradientDescent
 from .registration import registration
 from .scaling_and_squaring import ScalingAndSquaring, scaling_and_squaring
 from .similarity import (
@@ -42,6 +43,7 @@ __all__ = [
     "DeterministicBSplineRegistration",
     "N4BiasFieldCorrection",
     "n4_bias_field_correction",
+    "PhysicalGradientDescent",
     "registration",
     "ScalingAndSquaring",
     "scaling_and_squaring",

@@ -17,7 +17,14 @@ def test_synthetic_constant_translation_registration(size, lattice):
     known = torch.zeros((1, dimension) + domain.torch_size, dtype=torch.double)
     known[:, 0] = 0.4
     fixed = warp_image(moving, known, domain, padding_mode="border")
-    model = DeterministicBSplineRegistration(domain, squaring_steps=5, padding_mode="border")
+    # A non-zero constant translation is incompatible with a stationary
+    # boundary, so disable that independently useful registration default.
+    model = DeterministicBSplineRegistration(
+        domain,
+        squaring_steps=5,
+        padding_mode="border",
+        stationary_boundary=False,
+    )
     result = model(coefficients, moving, fixed)
     torch.testing.assert_close(result["velocity"], known, rtol=2e-14, atol=2e-14)
     torch.testing.assert_close(result["displacement"], known, rtol=2e-14, atol=2e-14)
