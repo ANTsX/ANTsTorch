@@ -1,6 +1,6 @@
 """High-level optimization interface for B-spline SVF registration."""
 
-from math import isfinite
+from math import isfinite, prod
 from typing import Dict, Optional, Sequence, Union
 
 import torch
@@ -149,6 +149,7 @@ def registration(
     iterations: Union[int, Sequence[int]] = 100,
     learning_rate: Union[float, Sequence[float]] = 1e-2,
     optimizer: str = "adam",
+    gradient_step: float = 0.2,
     similarity: str = "mse",
     neighborhood_radius: Union[int, Sequence[int]] = 2,
     coefficient_weight: float = 0.0,
@@ -179,6 +180,12 @@ def registration(
     ``similarity="ants_ncc"`` selects the squared local neighborhood
     correlation used by ITK/ANTs. ``neighborhood_radius`` is an integer or an
     ITK-order ``(x, y[, z])`` tuple; its default of 2 matches ITK.
+
+    ``optimizer="physical_gradient_descent"`` normalizes each batch item's
+    coefficient-gradient direction after B-spline synthesis so that the
+    maximum dense velocity update has physical magnitude ``gradient_step``
+    times the current level's voxel diagonal. ``gradient_step`` must be in
+    ``[0.1, 0.25]``. ``learning_rate`` is ignored by this optimizer.
 
     ``mesh_size`` is the number of B-spline spans. For open axes the
     coefficient-grid size is ``mesh_size + 3``; for closed axes it equals the
@@ -214,8 +221,15 @@ def registration(
     factors, sigmas, level_iterations, level_rates = _pyramid_configuration(
         shrink_factors, smoothing_sigmas, iterations, learning_rate
     )
-    if optimizer not in ("adam", "lbfgs"):
-        raise ValueError("optimizer must be 'adam' or 'lbfgs'")
+    if optimizer not in ("adam", "lbfgs", "physical_gradient_descent"):
+        raise ValueError("optimizer must be 'adam', 'lbfgs', or 'physical_gradient_descent'")
+    if (
+        not isinstance(gradient_step, (int, float))
+        or isinstance(gradient_step, bool)
+        or not isfinite(gradient_step)
+        or not 0.1 <= gradient_step <= 0.25
+    ):
+        raise ValueError("gradient_step must be finite and between 0.1 and 0.25")
     if similarity not in ("mse", "ncc", "ants_ncc"):
         raise ValueError("similarity must be 'mse', 'ncc', or 'ants_ncc'")
     if padding_mode not in ("zeros", "border", "reflection"):
@@ -280,6 +294,7 @@ def registration(
             ("iterations", level_iterations),
             ("learning_rate", level_rates),
             ("optimizer", optimizer),
+            ("gradient_step", gradient_step),
             ("similarity", similarity),
             ("neighborhood_radius", neighborhood_radius),
             ("coefficient_weight", coefficient_weight),
@@ -311,12 +326,22 @@ def registration(
             _smooth_image(moving, moving_domain, sigma), moving_domain, factor
         )
         if verbose:
+            voxel_diagonal = sum(spacing**2 for spacing in fixed_level_domain.spacing) ** 0.5
+            control_points = tuple(reversed(coefficients.shape[2:]))
             print(
                 f"Resolution level {level + 1}/{len(factors)}: "
                 f"shrink_factor={factor}, smoothing_sigma={sigma:g}, "
                 f"fixed_size={fixed_level_domain.size}, "
-                f"moving_size={moving_level_domain.size}, iterations={iteration_count}"
+                f"moving_size={moving_level_domain.size}, "
+                f"control_points={control_points}, "
+                f"total_control_points={prod(control_points)}, "
+                f"iterations={iteration_count}"
             )
+            if optimizer == "physical_gradient_descent":
+                print(
+                    f"  physical_gradient_step={gradient_step * voxel_diagonal:.8g} "
+                    f"({gradient_step:g} * voxel_diagonal {voxel_diagonal:.8g})"
+                )
         model = DeterministicBSplineRegistration(
             fixed_level_domain,
             moving_level_domain,
@@ -331,16 +356,20 @@ def registration(
             stationary_boundary=stationary_boundary,
             synthesis_chunk_size=synthesis_chunk_size,
         )
-        optimizer_impl = (
-            torch.optim.Adam([coefficients], lr=rate)
-            if optimizer == "adam"
-            else torch.optim.LBFGS([coefficients], lr=rate, max_iter=20)
-        )
+        if optimizer == "adam":
+            optimizer_impl = torch.optim.Adam([coefficients], lr=rate)
+        elif optimizer == "lbfgs":
+            optimizer_impl = torch.optim.LBFGS([coefficients], lr=rate, max_iter=20)
+        else:
+            optimizer_impl = None
         current_level_history = []
         previous = None
         for _ in range(iteration_count):
             def closure():
-                optimizer_impl.zero_grad()
+                if optimizer_impl is None:
+                    coefficients.grad = None
+                else:
+                    optimizer_impl.zero_grad()
                 loss = model(coefficients, moving_level, fixed_level)["loss"]
                 if not torch.isfinite(loss):
                     raise FloatingPointError(
@@ -353,7 +382,21 @@ def registration(
                     )
                 return loss
 
-            if optimizer == "lbfgs":
+            if optimizer == "physical_gradient_descent":
+                closure()
+                with torch.no_grad():
+                    dense_gradient = model.synthesis(coefficients.grad)
+                    maximum_norm = dense_gradient.square().sum(dim=1).sqrt().flatten(start_dim=1).amax(dim=1)
+                    voxel_diagonal = sum(spacing**2 for spacing in fixed_level_domain.spacing) ** 0.5
+                    target_step = gradient_step * voxel_diagonal
+                    scale = torch.where(
+                        maximum_norm > 0,
+                        maximum_norm.new_full(maximum_norm.shape, target_step) / maximum_norm,
+                        torch.zeros_like(maximum_norm),
+                    )
+                    scale = scale.reshape((coefficients.shape[0], 1) + (1,) * dimension)
+                    coefficients.add_(coefficients.grad * scale, alpha=-1.0)
+            elif optimizer == "lbfgs":
                 optimizer_impl.step(closure)
             else:
                 closure()

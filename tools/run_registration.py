@@ -77,13 +77,24 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default="cpu", help="PyTorch device: cpu, cuda, or mps")
     parser.add_argument("--output-dir", type=Path, default=Path("registration_output"))
-    parser.add_argument("--mesh-size", type=int, nargs=2, default=(10, 10), metavar=("X", "Y"))
+    parser.add_argument("--mesh-size", type=int, nargs=2, default=(5, 5), metavar=("X", "Y"))
     parser.add_argument("--shrink-factors", type=int, nargs="+", default=(8, 4, 2, 1))
     parser.add_argument("--smoothing-sigmas", type=float, nargs="+", default=(3.0, 2.0, 1.0, 0.0))
     parser.add_argument("--iterations", type=int, nargs="+", default=(100, 70, 40, 20))
     parser.add_argument("--learning-rate", type=float, nargs="+", default=(0.03, 0.02, 0.01, 0.005))
+    parser.add_argument(
+        "--optimizer",
+        choices=("physical_gradient_descent", "adam", "lbfgs"),
+        default="physical_gradient_descent",
+    )
+    parser.add_argument(
+        "--gradient-step",
+        type=float,
+        default=0.2,
+        help="Physical gradient step lambda in [0.1, 0.25] (default: 0.2)",
+    )
     parser.add_argument("--similarity", choices=("mse", "ncc", "ants_ncc"), default="ants_ncc")
-    parser.add_argument("--neighborhood-radius", type=int, default=2)
+    parser.add_argument("--neighborhood-radius", type=int, default=4)
     parser.add_argument("--coefficient-weight", type=float, default=0.0)
     parser.add_argument("--velocity-weight", type=float, default=0.0)
     parser.add_argument("--bending-weight", type=float, default=0.0)
@@ -125,6 +136,8 @@ def main() -> None:
         smoothing_sigmas=tuple(args.smoothing_sigmas),
         iterations=tuple(args.iterations),
         learning_rate=tuple(args.learning_rate),
+        optimizer=args.optimizer,
+        gradient_step=args.gradient_step,
         similarity=args.similarity,
         neighborhood_radius=args.neighborhood_radius,
         coefficient_weight=args.coefficient_weight,

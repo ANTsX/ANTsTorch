@@ -180,14 +180,39 @@ def test_verbose_reports_levels_and_iterations(capsys):
     assert "iterations: (1, 1)" in output
     assert "Resolution level 1/2" in output
     assert "Resolution level 2/2" in output
+    assert "control_points=(4, 4), total_control_points=16" in output
+    assert "control_points=(5, 5), total_control_points=25" in output
     assert output.count("iteration 0001") == 2
     assert "loss=" in output
+
+
+def test_physical_gradient_descent_controls_dense_update_magnitude():
+    torch.manual_seed(12)
+    domain = BSplineDomain((9, 8), spacing=(2.0, 3.0))
+    moving = torch.randn(1, 1, *domain.torch_size)
+    fixed = torch.roll(moving, 1, -1)
+    gradient_step = 0.1
+    result = registration(
+        fixed,
+        moving,
+        domain,
+        optimizer="physical_gradient_descent",
+        gradient_step=gradient_step,
+        iterations=1,
+        stationary_boundary=False,
+        squaring_steps=1,
+    )
+    maximum_update = result["velocity"].square().sum(dim=1).sqrt().amax()
+    expected = gradient_step * (2.0**2 + 3.0**2) ** 0.5
+    torch.testing.assert_close(maximum_update, maximum_update.new_tensor(expected))
 
 
 @pytest.mark.parametrize(
     "kwargs,match",
     [
         ({"optimizer": "sgd"}, "optimizer"),
+        ({"optimizer": "physical_gradient_descent", "gradient_step": 0.09}, "gradient_step"),
+        ({"optimizer": "physical_gradient_descent", "gradient_step": 0.26}, "gradient_step"),
         ({"similarity": "mi"}, "similarity"),
         ({"iterations": -1}, "iterations"),
         ({"mesh_size": (1, 2, 3)}, "mesh_size"),
