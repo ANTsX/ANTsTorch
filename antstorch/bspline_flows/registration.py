@@ -148,7 +148,7 @@ def registration(
     coefficient_grid_size: Optional[Union[int, Sequence[int]]] = None,
     iterations: Union[int, Sequence[int]] = 100,
     learning_rate: Union[float, Sequence[float]] = 1e-2,
-    optimizer: str = "adam",
+    optimizer: str = "physical_gradient_descent",
     gradient_step: float = 0.2,
     similarity: str = "mse",
     neighborhood_radius: Union[int, Sequence[int]] = 2,

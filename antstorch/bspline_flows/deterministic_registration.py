@@ -26,14 +26,14 @@ class DeterministicBSplineRegistration(nn.Module):
         moving_domain: Optional[BSplineDomain] = None,
         *,
         squaring_steps: int = 7,
-        similarity: str = "mse",
+        similarity: str = "ants_ncc",
         neighborhood_radius=2,
         padding_mode: str = "zeros",
         coefficient_weight: float = 0.0,
         velocity_weight: float = 0.0,
         bending_weight: float = 0.0,
         closed=False,
-        stationary_boundary: bool = False,
+        stationary_boundary: bool = True,
         synthesis_chunk_size: Optional[int] = 262144,
     ):
         super().__init__()
