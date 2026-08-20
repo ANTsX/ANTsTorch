@@ -27,7 +27,7 @@ import ants
 import numpy as np
 import torch
 
-from antstorch.bspline_flows import BSplineDomain, registration
+from antstorch.bspline_flows import BSplineDomain, PhysicalGradientDescent, registration
 
 
 def ants_to_torch(image: ants.ANTsImage, device: torch.device) -> torch.Tensor:
@@ -93,6 +93,13 @@ def parse_args() -> argparse.Namespace:
         default=0.2,
         help="Physical gradient step lambda in [0.1, 0.25] (default: 0.2)",
     )
+    parser.add_argument("--momentum", type=float, default=0.9)
+    parser.add_argument(
+        "--gradient-smoothing-sigma",
+        type=float,
+        default=1.0,
+        help="Coefficient-gradient smoothing sigma in physical units (default: 1.0)",
+    )
     parser.add_argument("--similarity", choices=("mse", "ncc", "ants_ncc"), default="ants_ncc")
     parser.add_argument("--neighborhood-radius", type=int, default=4)
     parser.add_argument("--coefficient-weight", type=float, default=0.0)
@@ -126,6 +133,15 @@ def main() -> None:
     moving_domain = image_domain(moving_ants)
 
     start = time.perf_counter()
+    optimizer = (
+        PhysicalGradientDescent(
+            gradient_step=args.gradient_step,
+            momentum=args.momentum,
+            smoothing_sigma=args.gradient_smoothing_sigma,
+        )
+        if args.optimizer == "physical_gradient_descent"
+        else args.optimizer
+    )
     result = registration(
         fixed=fixed,
         moving=moving,
@@ -136,7 +152,7 @@ def main() -> None:
         smoothing_sigmas=tuple(args.smoothing_sigmas),
         iterations=tuple(args.iterations),
         learning_rate=tuple(args.learning_rate),
-        optimizer=args.optimizer,
+        optimizer=optimizer,
         gradient_step=args.gradient_step,
         similarity=args.similarity,
         neighborhood_radius=args.neighborhood_radius,

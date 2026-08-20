@@ -3,6 +3,7 @@ import torch
 
 from antstorch.bspline_flows import (
     BSplineDomain,
+    PhysicalGradientDescent,
     compose_displacements,
     registration,
     warp_image,
@@ -205,6 +206,30 @@ def test_physical_gradient_descent_controls_dense_update_magnitude():
     maximum_update = result["velocity"].square().sum(dim=1).sqrt().amax()
     expected = gradient_step * (2.0**2 + 3.0**2) ** 0.5
     torch.testing.assert_close(maximum_update, maximum_update.new_tensor(expected))
+
+
+def test_physical_gradient_descent_instance_supports_momentum_and_smoothing():
+    torch.manual_seed(13)
+    domain = BSplineDomain((9, 8), spacing=(1.5, 2.0))
+    moving = torch.randn(1, 1, *domain.torch_size)
+    fixed = torch.roll(moving, 1, -2)
+    optimizer = PhysicalGradientDescent(
+        gradient_step=0.1,
+        momentum=0.9,
+        smoothing_sigma=1.0,
+    )
+    result = registration(
+        fixed,
+        moving,
+        domain,
+        optimizer=optimizer,
+        iterations=2,
+        stationary_boundary=False,
+        squaring_steps=1,
+    )
+    assert torch.isfinite(result["loss"])
+    assert optimizer._momentum_buffer is not None
+    assert torch.isfinite(optimizer._momentum_buffer).all()
 
 
 @pytest.mark.parametrize(
