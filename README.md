@@ -61,6 +61,10 @@ ANTsTorch supports several applications (ANTsPyNet weights):
 - Deep FLASH
 - Cerebellar morphology
 - MRI modality classification
+- Lung extraction (proton MRI, lobes, whole lung mask, CT, ventilation MRI, X-ray)
+- Lung segmentation (El Bicho airway/vessel/lobe segmentation, pulmonary artery, pulmonary airway)
+- Mouse brain extraction, parcellation, cortical thickness, and histology (brain mask, hemisphere/coronal mask, cerebellum mask, histology super-resolution)
+- White matter hyperintensity segmentation (SYSU-Media, HyperMapp3r, ANTsXNet WMH, SHIVA PVS/WMH ensembles)
 
 Other ANTsPyNet ports are a WIP.  
 
@@ -90,3 +94,4 @@ The ANTsTorch package is released under an [Apache License](https://github.com/A
 
 - [ANTsTorch Documentation (coming soon)](https://antsx.github.io/ANTsTorch/)  
 - [ANTsTorch self-contained examples](https://gist.github.com/ntustison/12a656a5fc2f6f9c4494c88dc09c5621#antsxnet)  
+- [ANTsTorch N4 and diffeomorphic B-spline registration tutorial](docs/antsx_tutorial_bspline_flows.md)

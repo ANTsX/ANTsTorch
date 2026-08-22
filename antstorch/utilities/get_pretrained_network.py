@@ -69,9 +69,59 @@ def get_pretrained_network(file_id: Optional[str] = None,
             "deep_nbm_rank_pytorch": "https://ndownloader.figshare.com/files/64608699",
             "deepCIT168_pytorch": "https://ndownloader.figshare.com/files/64608723",
             "deepCIT168_sn_pytorch": "https://ndownloader.figshare.com/files/64608726",
-            "resnet_grader_pytorch": "https://figshare.com/ndownloader/files/64896243",
+            "resnet_grader_pytorch": "https://ndownloader.figshare.com/files/64896243",
+            "protonLungMri_pytorch": "https://ndownloader.figshare.com/files/67757418",
+            "protonLobes_pytorch": "https://ndownloader.figshare.com/files/67757424",
+            "maskLobes_pytorch": "https://ndownloader.figshare.com/files/67757427",
+            "lungCtWithPriorsSegmentationWeights_pytorch": "https://ndownloader.figshare.com/files/67757430",
+            "wholeLungMaskFromVentilation_pytorch": "https://ndownloader.figshare.com/files/67757433",
+            "xrayLungExtraction_pytorch": "https://ndownloader.figshare.com/files/67754508",
+            "elBicho_pytorch": "https://ndownloader.figshare.com/files/67757439",
+            "pulmonaryArteryWeights_pytorch": "https://ndownloader.figshare.com/files/67757448",
+            "pulmonaryAirwayWeights_pytorch": "https://ndownloader.figshare.com/files/67757454",
+            "mouseT2wBrainExtraction3D_pytorch": "https://ndownloader.figshare.com/files/67757457",
+            "ex5_coronal_weights_pytorch": "https://ndownloader.figshare.com/files/67757460",
+            "ex5_sagittal_weights_pytorch": "https://ndownloader.figshare.com/files/67757463",
+            "mouseT2wBrainParcellation3DNick_pytorch": "https://ndownloader.figshare.com/files/67757466",
+            "mouseT2wBrainParcellation3DTct_pytorch": "https://ndownloader.figshare.com/files/67757469",
+            "mouseSTPTBrainParcellation3DJay_pytorch": "https://ndownloader.figshare.com/files/67757472",
+            # "allen_brain_mask_weights_pytorch": "https://ndownloader.figshare.com/files/67757478",
+            # "allen_brain_leftright_coronal_mask_weights_pytorch": "",
+            # "allen_cerebellum_sagittal_mask_weights_pytorch": "",
+            # "allen_cerebellum_coronal_mask_weights_pytorch": "",
+            # "allen_sr_weights_pytorch": "",
+            "sysuMediaWmhFlairOnlyModel0_pytorch": "https://ndownloader.figshare.com/files/67757481",
+            "sysuMediaWmhFlairOnlyModel1_pytorch": "https://ndownloader.figshare.com/files/67757484",
+            "sysuMediaWmhFlairOnlyModel2_pytorch": "https://ndownloader.figshare.com/files/67757493",
+            "sysuMediaWmhFlairT1Model0_pytorch": "https://ndownloader.figshare.com/files/67757496",
+            "sysuMediaWmhFlairT1Model1_pytorch": "https://ndownloader.figshare.com/files/67757502",
+            "sysuMediaWmhFlairT1Model2_pytorch": "https://ndownloader.figshare.com/files/67757508",
+            "hyperMapp3r_pytorch": "https://ndownloader.figshare.com/files/67755978",
+            "antsxnetWmhOr_pytorch": "https://ndownloader.figshare.com/files/67757520",
+            "antsxnetWmh_pytorch": "https://ndownloader.figshare.com/files/67757550",
+            "pvs_shiva_t1_0_pytorch": "https://ndownloader.figshare.com/files/67757583",
+            "pvs_shiva_t1_1_pytorch": "https://ndownloader.figshare.com/files/67757592",
+            "pvs_shiva_t1_2_pytorch": "https://ndownloader.figshare.com/files/67757604",
+            "pvs_shiva_t1_3_pytorch": "https://ndownloader.figshare.com/files/67757634",
+            "pvs_shiva_t1_4_pytorch": "https://ndownloader.figshare.com/files/67757664",
+            "pvs_shiva_t1_5_pytorch": "https://ndownloader.figshare.com/files/67757670",
+            "pvs_shiva_t1_flair_0_pytorch": "https://ndownloader.figshare.com/files/67757676",
+            "pvs_shiva_t1_flair_1_pytorch": "https://ndownloader.figshare.com/files/67757826",
+            "pvs_shiva_t1_flair_2_pytorch": "https://ndownloader.figshare.com/files/67757841",
+            "pvs_shiva_t1_flair_3_pytorch": "https://ndownloader.figshare.com/files/67757889",
+            "pvs_shiva_t1_flair_4_pytorch": "https://ndownloader.figshare.com/files/67757940",
+            "wmh_shiva_flair_0_pytorch": "https://ndownloader.figshare.com/files/67757943",
+            "wmh_shiva_flair_1_pytorch": "https://ndownloader.figshare.com/files/67758108",
+            "wmh_shiva_flair_2_pytorch": "https://ndownloader.figshare.com/files/67758813",
+            "wmh_shiva_flair_3_pytorch": "https://ndownloader.figshare.com/files/67759557",
+            "wmh_shiva_flair_4_pytorch": "https://ndownloader.figshare.com/files/67759596",
+            "wmh_shiva_t1_flair_0_pytorch": "https://ndownloader.figshare.com/files/67759620",
+            "wmh_shiva_t1_flair_1_pytorch": "https://ndownloader.figshare.com/files/67759698",
+            "wmh_shiva_t1_flair_2_pytorch": "https://ndownloader.figshare.com/files/67759836",
+            "wmh_shiva_t1_flair_3_pytorch": "https://ndownloader.figshare.com/files/67759845",
+            "wmh_shiva_t1_flair_4_pytorch": "https://ndownloader.figshare.com/files/67759848",
         }
-        return(switcher.get(argument, "Invalid argument."))
+        return(switcher.get(argument, None))
 
     if file_id == None:
         raise ValueError("Missing file id.")
@@ -110,6 +160,56 @@ def get_pretrained_network(file_id: Optional[str] = None,
                   "deepCIT168_pytorch",
                   "deepCIT168_sn_pytorch",
                   "resnet_grader_pytorch",
+                  "protonLungMri_pytorch",
+                  "protonLobes_pytorch",
+                  "maskLobes_pytorch",
+                  "lungCtWithPriorsSegmentationWeights_pytorch",
+                  "wholeLungMaskFromVentilation_pytorch",
+                  "xrayLungExtraction_pytorch",
+                  "elBicho_pytorch",
+                  "pulmonaryArteryWeights_pytorch",
+                  "pulmonaryAirwayWeights_pytorch",
+                  "mouseT2wBrainExtraction3D_pytorch",
+                  "ex5_coronal_weights_pytorch",
+                  "ex5_sagittal_weights_pytorch",
+                  "mouseT2wBrainParcellation3DNick_pytorch",
+                  "mouseT2wBrainParcellation3DTct_pytorch",
+                  "mouseSTPTBrainParcellation3DJay_pytorch",
+                  # "allen_brain_mask_weights_pytorch",
+                  # "allen_brain_leftright_coronal_mask_weights_pytorch",
+                  # "allen_cerebellum_sagittal_mask_weights_pytorch",
+                  # "allen_cerebellum_coronal_mask_weights_pytorch",
+                  # "allen_sr_weights_pytorch",
+                  "sysuMediaWmhFlairOnlyModel0_pytorch",
+                  "sysuMediaWmhFlairOnlyModel1_pytorch",
+                  "sysuMediaWmhFlairOnlyModel2_pytorch",
+                  "sysuMediaWmhFlairT1Model0_pytorch",
+                  "sysuMediaWmhFlairT1Model1_pytorch",
+                  "sysuMediaWmhFlairT1Model2_pytorch",
+                  "hyperMapp3r_pytorch",
+                  "antsxnetWmhOr_pytorch",
+                  "antsxnetWmh_pytorch",
+                  "pvs_shiva_t1_0_pytorch",
+                  "pvs_shiva_t1_1_pytorch",
+                  "pvs_shiva_t1_2_pytorch",
+                  "pvs_shiva_t1_3_pytorch",
+                  "pvs_shiva_t1_4_pytorch",
+                  "pvs_shiva_t1_5_pytorch",
+                  "pvs_shiva_t1_flair_0_pytorch",
+                  "pvs_shiva_t1_flair_1_pytorch",
+                  "pvs_shiva_t1_flair_2_pytorch",
+                  "pvs_shiva_t1_flair_3_pytorch",
+                  "pvs_shiva_t1_flair_4_pytorch",
+                  "wmh_shiva_flair_0_pytorch",
+                  "wmh_shiva_flair_1_pytorch",
+                  "wmh_shiva_flair_2_pytorch",
+                  "wmh_shiva_flair_3_pytorch",
+                  "wmh_shiva_flair_4_pytorch",
+                  "wmh_shiva_t1_flair_0_pytorch",
+                  "wmh_shiva_t1_flair_1_pytorch",
+                  "wmh_shiva_t1_flair_2_pytorch",
+                  "wmh_shiva_t1_flair_3_pytorch",
+                  "wmh_shiva_t1_flair_4_pytorch",
                   "show")
 
     if not file_id in valid_list:
@@ -135,13 +235,14 @@ def get_pretrained_network(file_id: Optional[str] = None,
 
     url = switch_networks(file_id)
 
-    if url is not None:
+    if url:
         # Download only if needed
         if not os.path.exists(target_file_name_path):
             download_url_to_file(url, target_file_name_path, hash_prefix=None, progress=show_progress)
         return target_file_name_path
     else:
-        # No URL mapping: allow cache‑only ids, but be explicit.
+        # No URL mapping (missing from switcher, or explicitly "" for a known
+        # but not-yet-hosted id): allow cache-only ids, but be explicit.
         if os.path.exists(target_file_name_path):
             return target_file_name_path
         # Only get here if no URL mapping and not found in cache
@@ -152,4 +253,3 @@ def get_pretrained_network(file_id: Optional[str] = None,
                 "Add a mapping in get_pretrained_network(), or place the file in the cache."
             )
         )
-

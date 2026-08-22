@@ -36,3 +36,8 @@ include = ["antstorch*"]
 
 [project.urls]
 "Homepage" = "https://github.com/ANTsX/ANTsTorch"
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow (deselect with -m \"not slow\")",
+]
