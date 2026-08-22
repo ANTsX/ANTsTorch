@@ -1,0 +1,1050 @@
+import numpy as np
+import torch
+import torch.nn as nn
+import ants
+
+
+def _load_state_dict(weights_file_name):
+    sd = torch.load(weights_file_name, map_location="cpu", weights_only=True)
+    if isinstance(sd, dict) and "state_dict" in sd and isinstance(sd["state_dict"], dict):
+        sd = sd["state_dict"]
+    return sd
+
+
+def _enable_mc_dropout(model):
+    """
+    Put only the Dropout*d submodules of `model` into train() mode (so they
+    remain stochastic during inference), while everything else keeps its
+    current (eval) behavior.  Used for Monte Carlo dropout inference.
+    """
+    for m in model.modules():
+        if isinstance(m, (nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
+            m.train()
+
+
+def sysu_media_wmh_segmentation(flair,
+                                t1=None,
+                                use_ensemble=True,
+                                device=None,
+                                verbose=False):
+
+    """
+    Perform WMH segmentation using the winning submission in the MICCAI
+    2017 challenge by the sysu_media team using FLAIR or T1/FLAIR.  The
+    MICCAI challenge is discussed in
+
+    https://pubmed.ncbi.nlm.nih.gov/30908194/
+
+    with the sysu_media's team entry is discussed in
+
+     https://pubmed.ncbi.nlm.nih.gov/30125711/
+
+    with the original implementation available here:
+
+    https://github.com/hongweilibran/wmh_ibbmTum
+
+    The original implementation used global thresholding as a quick
+    brain extraction approach.  Due to possible generalization difficulties,
+    we leave such post-processing steps to the user.  For brain or white
+    matter masking see functions brain_extraction or deep_atropos,
+    respectively.
+
+    Arguments
+    ---------
+    flair : ANTsImage
+        input 3-D FLAIR brain image (not skull-stripped).
+
+    t1 : ANTsImage
+        input 3-D T1 brain image (not skull-stripped).
+
+    use_ensemble : boolean
+        check whether to use all 3 sets of weights.
+
+    device : torch.device or string, optional
+        Device to run inference on.  Defaults to antstorch's default device.
+
+    verbose : boolean
+        Print progress to the screen.
+
+    Returns
+    -------
+    WMH segmentation probability image
+
+    Example
+    -------
+    >>> image = ants.image_read("flair.nii.gz")
+    >>> probability_mask = sysu_media_wmh_segmentation(image)
+    """
+
+    from ..architectures import create_sysu_media_unet_model_2d
+    from ..utilities import get_pretrained_network
+    from ..utilities import preprocess_brain_image
+    from ..utilities.device_manager import get_default_device
+
+    if device is None:
+        device = get_default_device()
+    elif isinstance(device, str):
+        device = torch.device(device)
+
+    if flair.dimension != 3:
+        raise ValueError("Image dimension must be 3.")
+
+    image_size = (200, 200)
+
+    ################################
+    #
+    # Preprocess images
+    #
+    ################################
+
+    def closest_simplified_direction_matrix(direction):
+        closest = (np.abs(direction) + 0.5).astype(int).astype(float)
+        closest[direction < 0] *= -1.0
+        return closest
+
+    simplified_direction = closest_simplified_direction_matrix(flair.direction)
+
+    flair_preprocessing = preprocess_brain_image(flair,
+        truncate_intensity=None,
+        brain_extraction_modality=None,
+        do_bias_correction=False,
+        do_denoising=False,
+        verbose=verbose)
+    flair_preprocessed = flair_preprocessing["preprocessed_image"]
+    flair_preprocessed.set_direction(simplified_direction)
+    flair_preprocessed.set_origin((0, 0, 0))
+    flair_preprocessed.set_spacing((1, 1, 1))
+    number_of_channels = 1
+
+    t1_preprocessed = None
+    if t1 is not None:
+        t1_preprocessing = preprocess_brain_image(t1,
+            truncate_intensity=None,
+            brain_extraction_modality=None,
+            do_bias_correction=False,
+            do_denoising=False,
+            verbose=verbose)
+        t1_preprocessed = t1_preprocessing["preprocessed_image"]
+        t1_preprocessed.set_direction(simplified_direction)
+        t1_preprocessed.set_origin((0, 0, 0))
+        t1_preprocessed.set_spacing((1, 1, 1))
+        number_of_channels = 2
+
+    ################################
+    #
+    # Reorient images
+    #
+    ################################
+
+    reference_image = ants.make_image((256, 256, 256),
+                                       voxval=0,
+                                       spacing=(1, 1, 1),
+                                       origin=(0, 0, 0),
+                                       direction=np.identity(3))
+    center_of_mass_reference = np.floor(ants.get_center_of_mass(reference_image * 0 + 1))
+    center_of_mass_image = np.floor(ants.get_center_of_mass(flair_preprocessed))
+    translation = np.asarray(center_of_mass_image) - np.asarray(center_of_mass_reference)
+    xfrm = ants.create_ants_transform(transform_type="Euler3DTransform",
+        center=np.asarray(center_of_mass_reference), translation=translation)
+    flair_preprocessed_warped = ants.apply_ants_transform_to_image(
+        xfrm, flair_preprocessed, reference_image, interpolation="nearestneighbor")
+    crop_image = ants.image_clone(flair_preprocessed) * 0 + 1
+    crop_image_warped = ants.apply_ants_transform_to_image(
+        xfrm, crop_image, reference_image, interpolation="nearestneighbor")
+    flair_preprocessed_warped = ants.crop_image(flair_preprocessed_warped, crop_image_warped, 1)
+
+    if t1 is not None:
+        t1_preprocessed_warped = ants.apply_ants_transform_to_image(
+            xfrm, t1_preprocessed, reference_image, interpolation="nearestneighbor")
+        t1_preprocessed_warped = ants.crop_image(t1_preprocessed_warped, crop_image_warped, 1)
+
+    ################################
+    #
+    # Gaussian normalize intensity
+    #
+    ################################
+
+    mean_flair = flair_preprocessed.mean()
+    std_flair = flair_preprocessed.std()
+    if number_of_channels == 2:
+        mean_t1 = t1_preprocessed.mean()
+        std_t1 = t1_preprocessed.std()
+
+    flair_preprocessed_warped = (flair_preprocessed_warped - mean_flair) / std_flair
+    if number_of_channels == 2:
+        t1_preprocessed_warped = (t1_preprocessed_warped - mean_t1) / std_t1
+
+    ################################
+    #
+    # Build models and load weights
+    #
+    ################################
+
+    number_of_models = 1
+    if use_ensemble:
+        number_of_models = 3
+
+    if verbose:
+        print("White matter hyperintensity:  retrieving model weights.")
+
+    models = list()
+    for i in range(number_of_models):
+        if number_of_channels == 1:
+            weights_file_name = get_pretrained_network("sysuMediaWmhFlairOnlyModel" + str(i) + "_pytorch",
+                target_file_name="sysuMediaWmhFlairOnlyModel" + str(i) + "_pytorch.pt")
+        else:
+            weights_file_name = get_pretrained_network("sysuMediaWmhFlairT1Model" + str(i) + "_pytorch",
+                target_file_name="sysuMediaWmhFlairT1Model" + str(i) + "_pytorch.pt")
+        model = create_sysu_media_unet_model_2d(number_of_channels)
+        model.load_state_dict(_load_state_dict(weights_file_name), strict=True)
+        model.eval()
+        model = model.to(device)
+        models.append(model)
+
+    ################################
+    #
+    # Extract slices
+    #
+    ################################
+
+    dimensions_to_predict = [2]
+
+    total_number_of_slices = 0
+    for d in range(len(dimensions_to_predict)):
+        total_number_of_slices += flair_preprocessed_warped.shape[dimensions_to_predict[d]]
+
+    batchX = np.zeros((total_number_of_slices, *image_size, number_of_channels), dtype=np.float32)
+
+    slice_count = 0
+    for d in range(len(dimensions_to_predict)):
+        number_of_slices = flair_preprocessed_warped.shape[dimensions_to_predict[d]]
+
+        if verbose:
+            print("Extracting slices for dimension ", dimensions_to_predict[d], ".")
+
+        for i in range(number_of_slices):
+            flair_slice = ants.pad_or_crop_image_to_size(ants.slice_image(flair_preprocessed_warped, dimensions_to_predict[d], i), image_size)
+            batchX[slice_count, :, :, 0] = flair_slice.numpy()
+            if number_of_channels == 2:
+                t1_slice = ants.pad_or_crop_image_to_size(ants.slice_image(t1_preprocessed_warped, dimensions_to_predict[d], i), image_size)
+                batchX[slice_count, :, :, 1] = t1_slice.numpy()
+            slice_count += 1
+
+    ################################
+    #
+    # Do prediction and then restack into the image
+    #
+    ################################
+
+    if verbose:
+        print("Prediction.")
+
+    # NOTE: the sysu_media network was trained on H/W-transposed slices, so
+    # we must swap the two spatial axes both before and after inference --
+    # this mirrors the original Keras code's
+    # `np.transpose(batchX, axes=(0, 2, 1, 3))` / `np.transpose(prediction,
+    # axes=(0, 2, 1, 3))` exactly.
+    with torch.no_grad():
+        x_in = torch.from_numpy(batchX).float().to(device)
+        x_in = x_in.permute(0, 3, 1, 2)   # NHWC -> NCHW
+        x_in = x_in.transpose(2, 3)       # swap H/W
+
+        y_sum = models[0](x_in)
+        if number_of_models > 1:
+            for i in range(1, number_of_models):
+                y_sum = y_sum + models[i](x_in)
+        y_sum = y_sum / number_of_models
+
+        y_sum = y_sum.transpose(2, 3)     # swap H/W back
+        prediction = y_sum.permute(0, 2, 3, 1).cpu().numpy()
+
+    permutations = list()
+    permutations.append((0, 1, 2))
+    permutations.append((1, 0, 2))
+    permutations.append((1, 2, 0))
+
+    prediction_image_average = ants.image_clone(flair_preprocessed_warped) * 0
+
+    current_start_slice = 0
+    for d in range(len(dimensions_to_predict)):
+        current_end_slice = current_start_slice + flair_preprocessed_warped.shape[dimensions_to_predict[d]]
+        which_batch_slices = range(current_start_slice, current_end_slice)
+        prediction_per_dimension = prediction[which_batch_slices, :, :, :]
+        prediction_array = np.transpose(np.squeeze(prediction_per_dimension), permutations[dimensions_to_predict[d]])
+        prediction_image = ants.copy_image_info(flair_preprocessed_warped,
+          ants.pad_or_crop_image_to_size(ants.from_numpy(prediction_array),
+            flair_preprocessed_warped.shape))
+        prediction_image_average = prediction_image_average + (prediction_image - prediction_image_average) / (d + 1)
+        current_start_slice = current_end_slice
+
+    probability_image = ants.apply_ants_transform_to_image(
+        ants.invert_ants_transform(xfrm), prediction_image_average, flair_preprocessed)
+    probability_image = ants.copy_image_info(flair, probability_image)
+
+    return probability_image
+
+
+def hypermapp3r_segmentation(t1,
+                             flair,
+                             number_of_monte_carlo_iterations=30,
+                             do_preprocessing=True,
+                             device=None,
+                             verbose=False):
+
+    """
+    Perform HyperMapp3r (white matter hyperintensities) segmentation described in
+
+    https://pubmed.ncbi.nlm.nih.gov/35088930/
+
+    with models and architecture ported from
+
+    https://github.com/mgoubran/HyperMapp3r
+
+    Preprocessing consists of:
+       * n4 bias correction and
+       * brain extraction
+    The input T1 should undergo the same steps.  If the input T1 is the raw
+    T1, these steps can be performed by the internal preprocessing, i.e. set
+    do_preprocessing = True
+
+    Arguments
+    ---------
+    t1 : ANTsImage
+        input 3-D t1-weighted MR image.  Assumed to be aligned with the flair.
+
+    flair : ANTsImage
+        input 3-D flair MR image.  Assumed to be aligned with the t1.
+
+    number_of_monte_carlo_iterations : integer
+        Number of Monte Carlo dropout draws used to compute the running mean
+        prediction.
+
+    do_preprocessing : boolean
+        See description above.
+
+    device : torch.device or string, optional
+        Device to run inference on.  Defaults to antstorch's default device.
+
+    verbose : boolean
+        Print progress to the screen.
+
+    Returns
+    -------
+    ANTs labeled wmh segmentation image.
+
+    Example
+    -------
+    >>> mask = hypermapp3r_segmentation(t1, flair)
+    """
+
+    from ..architectures import create_hypermapp3r_unet_model_3d
+    from ..utilities import preprocess_brain_image
+    from ..utilities import get_pretrained_network
+    from ..utilities.device_manager import get_default_device
+
+    if device is None:
+        device = get_default_device()
+    elif isinstance(device, str):
+        device = torch.device(device)
+
+    if t1.dimension != 3:
+        raise ValueError("Image dimension must be 3.")
+
+    ################################
+    #
+    # Preprocess images
+    #
+    ################################
+
+    if verbose:
+        print("*************  Preprocessing  ***************")
+        print("")
+
+    t1_preprocessed = t1
+    brain_mask = None
+    if do_preprocessing:
+        t1_preprocessing = preprocess_brain_image(t1,
+            truncate_intensity=(0.01, 0.99),
+            brain_extraction_modality="t1",
+            do_bias_correction=True,
+            do_denoising=False,
+            verbose=verbose)
+        brain_mask = t1_preprocessing['brain_mask']
+        t1_preprocessed = t1_preprocessing["preprocessed_image"] * brain_mask
+    else:
+        # If we don't generate the mask from the preprocessing, we assume that we
+        # can extract the brain directly from the foreground of the t1 image.
+        brain_mask = ants.threshold_image(t1, 0, 0, 0, 1)
+
+    t1_preprocessed_mean = t1_preprocessed[brain_mask > 0].mean()
+    t1_preprocessed_std = t1_preprocessed[brain_mask > 0].std()
+    t1_preprocessed[brain_mask > 0] = (t1_preprocessed[brain_mask > 0] - t1_preprocessed_mean) / t1_preprocessed_std
+
+    flair_preprocessed = flair
+    if do_preprocessing:
+        flair_preprocessing = preprocess_brain_image(flair,
+            truncate_intensity=(0.01, 0.99),
+            brain_extraction_modality=None,
+            do_bias_correction=True,
+            do_denoising=False,
+            verbose=verbose)
+        flair_preprocessed = flair_preprocessing["preprocessed_image"] * brain_mask
+
+    flair_preprocessed_mean = flair_preprocessed[brain_mask > 0].mean()
+    flair_preprocessed_std = flair_preprocessed[brain_mask > 0].std()
+    flair_preprocessed[brain_mask > 0] = (flair_preprocessed[brain_mask > 0] - flair_preprocessed_mean) / flair_preprocessed_std
+
+    if verbose:
+        print("    HyperMapp3r: reorient input images.")
+
+    channel_size = 2
+    input_image_size = (224, 224, 224)
+    template_array = np.ones(input_image_size)
+    template_direction = np.eye(3)
+    template_direction[1, 1] = -1.0
+    reorient_template = ants.from_numpy(template_array, origin=(0, 0, 0), spacing=(1, 1, 1),
+        direction=template_direction)
+
+    center_of_mass_template = ants.get_center_of_mass(reorient_template)
+    center_of_mass_image = ants.get_center_of_mass(brain_mask)
+    translation = np.asarray(center_of_mass_image) - np.asarray(center_of_mass_template)
+    xfrm = ants.create_ants_transform(transform_type="Euler3DTransform",
+        center=np.asarray(center_of_mass_template), translation=translation)
+
+    batchX = np.zeros((1, *input_image_size, channel_size), dtype=np.float32)
+
+    t1_preprocessed_warped = ants.apply_ants_transform_to_image(xfrm, t1_preprocessed, reorient_template)
+    batchX[0, :, :, :, 0] = t1_preprocessed_warped.numpy()
+
+    flair_preprocessed_warped = ants.apply_ants_transform_to_image(xfrm, flair_preprocessed, reorient_template)
+    batchX[0, :, :, :, 1] = flair_preprocessed_warped.numpy()
+
+    if verbose:
+        print("    HyperMapp3r: generate network and load weights.")
+
+    model = create_hypermapp3r_unet_model_3d(channel_size)
+    weights_file_name = get_pretrained_network("hyperMapp3r_pytorch",
+        target_file_name="hyperMapp3r_pytorch.pt")
+    model.load_state_dict(_load_state_dict(weights_file_name), strict=True)
+    model.eval()
+    model = model.to(device)
+    _enable_mc_dropout(model)
+
+    if verbose:
+        print("    HyperMapp3r: prediction.")
+
+    if verbose:
+        print("    HyperMapp3r: Monte Carlo iterations (SpatialDropout).")
+
+    x = torch.from_numpy(batchX).float().permute(0, 4, 1, 2, 3).to(device)
+
+    prediction_array = np.zeros(input_image_size, dtype=np.float32)
+    with torch.no_grad():
+        for i in range(number_of_monte_carlo_iterations):
+            if verbose:
+                print("        Monte Carlo iteration", i + 1, "out of", number_of_monte_carlo_iterations)
+            y = model(x).squeeze(0).squeeze(0).cpu().numpy()
+            prediction_array = (y + i * prediction_array) / (i + 1)
+
+    prediction_image = ants.from_numpy(prediction_array, origin=reorient_template.origin,
+        spacing=reorient_template.spacing, direction=reorient_template.direction)
+
+    xfrm_inv = xfrm.invert()
+    probability_image = xfrm_inv.apply_to_image(prediction_image, t1)
+    return probability_image
+
+
+def wmh_segmentation(flair,
+                     t1,
+                     white_matter_mask=None,
+                     use_combined_model=True,
+                     prediction_batch_size=16,
+                     patch_stride_length=32,
+                     do_preprocessing=True,
+                     device=None,
+                     verbose=False):
+
+    """
+    Perform White matter hyperintensity probabilistic segmentation
+    given a pre-aligned FLAIR and T1 images.  Note that the underlying
+    model is 3-D and requires images to be of > 64 voxels in each
+    dimension.
+
+    Preprocessing on the training data consisted of:
+       * n4 bias correction,
+       * brain extraction
+
+    The input T1 should undergo the same steps.  If the input T1 is the raw
+    T1, these steps can be performed by the internal preprocessing, i.e. set
+    do_preprocessing = True
+
+    Arguments
+    ---------
+    flair : ANTsImage
+        input 3-D FLAIR brain image (not skull-stripped).
+
+    t1 : ANTsImage
+        input 3-D T1 brain image (not skull-stripped).
+
+    white_matter_mask : ANTsImage
+        input white matter mask for patch extraction. If None, calculated using
+        deep_atropos (labels 3 and 4).
+
+    use_combined_model : boolean
+        Original or combined.
+
+    prediction_batch_size : int
+        Control memory usage for prediction.  More consequential for GPU-usage.
+
+    patch_stride_length : 3-D tuple or int
+        Dictates the stride length for accumulating predicting patches.
+
+    do_preprocessing : boolean
+        perform n4 bias correction, intensity truncation, brain extraction.
+
+    device : torch.device or string, optional
+        Device to run inference on.  Defaults to antstorch's default device.
+
+    verbose : boolean
+        Print progress to the screen.
+
+    Returns
+    -------
+    WMH segmentation probability image
+
+    Example
+    -------
+    >>> flair = ants.image_read("flair.nii.gz")
+    >>> t1 = ants.image_read("t1.nii.gz")
+    >>> probability_mask = wmh_segmentation(flair, t1)
+    """
+
+    from ..architectures import create_sysu_media_unet_model_3d
+    from ..utilities import deep_atropos
+    from ..utilities import get_pretrained_network
+    from ..utilities import preprocess_brain_image
+    from ..utilities.device_manager import get_default_device
+
+    if device is None:
+        device = get_default_device()
+    elif isinstance(device, str):
+        device = torch.device(device)
+
+    if np.any(t1.shape < np.array((64, 64, 64))):
+        raise ValueError("Images must be > 64 voxels per dimension.")
+
+    ################################
+    #
+    # Preprocess images
+    #
+    ################################
+
+    if white_matter_mask is None:
+        if verbose:
+            print("Calculate white matter mask.")
+        atropos = deep_atropos(t1, do_preprocessing=True, device=device, verbose=verbose)
+        white_matter_mask = ants.threshold_image(atropos['segmentation_image'], 3, 4, 1, 0)
+
+    t1_preprocessed = None
+    flair_preprocessed = None
+
+    if do_preprocessing:
+        if verbose:
+            print("Preprocess T1 and FLAIR images.")
+
+        t1_preprocessing = preprocess_brain_image(t1,
+            truncate_intensity=(0.01, 0.995),
+            brain_extraction_modality="t1",
+            do_bias_correction=True,
+            do_denoising=False,
+            verbose=verbose)
+        brain_mask = ants.threshold_image(t1_preprocessing["brain_mask"], 0.5, 1, 1, 0)
+        t1_preprocessed = t1_preprocessing["preprocessed_image"] * brain_mask
+
+        flair_preprocessing = preprocess_brain_image(flair,
+            truncate_intensity=None,
+            brain_extraction_modality=None,
+            do_bias_correction=True,
+            do_denoising=False,
+            verbose=verbose)
+        flair_preprocessed = flair_preprocessing["preprocessed_image"] * brain_mask
+
+    else:
+        t1_preprocessed = ants.image_clone(t1)
+        flair_preprocessed = ants.image_clone(flair)
+
+    white_matter_indices = white_matter_mask > 0
+    t1_preprocessed_min = t1_preprocessed[white_matter_indices].min()
+    t1_preprocessed_max = t1_preprocessed[white_matter_indices].max()
+    flair_preprocessed_min = flair_preprocessed[white_matter_indices].min()
+    flair_preprocessed_max = flair_preprocessed[white_matter_indices].max()
+
+    t1_preprocessed = (t1_preprocessed - t1_preprocessed_min) / (t1_preprocessed_max - t1_preprocessed_min)
+    flair_preprocessed = (flair_preprocessed - flair_preprocessed_min) / (flair_preprocessed_max - flair_preprocessed_min)
+
+    ################################
+    #
+    # Build model and load weights
+    #
+    ################################
+
+    if verbose:
+        print("Load model and weights.")
+
+    patch_size = (64, 64, 64)
+    if isinstance(patch_stride_length, int):
+        patch_stride_length = (patch_stride_length,) * 3
+    number_of_filters = (64, 96, 128, 256, 512)
+    channel_size = 2
+
+    model = create_sysu_media_unet_model_3d(channel_size, number_of_filters=number_of_filters)
+    if use_combined_model:
+        weights_file_name = get_pretrained_network("antsxnetWmhOr_pytorch",
+            target_file_name="antsxnetWmhOr_pytorch.pt")
+    else:
+        weights_file_name = get_pretrained_network("antsxnetWmh_pytorch",
+            target_file_name="antsxnetWmh_pytorch.pt")
+    model.load_state_dict(_load_state_dict(weights_file_name), strict=True)
+    model.eval()
+    model = model.to(device)
+
+    ################################
+    #
+    # Extract patches
+    #
+    ################################
+
+    if verbose:
+        print("Extract patches.")
+
+    t1_patches = ants.extract_image_patches(t1_preprocessed,
+                                       patch_size=patch_size,
+                                       max_number_of_patches="all",
+                                       stride_length=patch_stride_length,
+                                       mask_image=white_matter_mask,
+                                       random_seed=None,
+                                       return_as_array=True)
+    flair_patches = ants.extract_image_patches(flair_preprocessed,
+                                          patch_size=patch_size,
+                                          max_number_of_patches="all",
+                                          stride_length=patch_stride_length,
+                                          mask_image=white_matter_mask,
+                                          random_seed=None,
+                                          return_as_array=True)
+
+    total_number_of_patches = t1_patches.shape[0]
+
+    ################################
+    #
+    # Do prediction and then restack into the image
+    #
+    ################################
+
+    number_of_batches = total_number_of_patches // prediction_batch_size
+    residual_number_of_patches = total_number_of_patches - number_of_batches * prediction_batch_size
+    if residual_number_of_patches > 0:
+        number_of_batches = number_of_batches + 1
+
+    if verbose:
+        print("Total number of patches: ", str(total_number_of_patches))
+        print("Prediction batch size: ", str(prediction_batch_size))
+        print("Number of batches: ", str(number_of_batches + 1))
+
+    prediction = np.zeros((total_number_of_patches, *patch_size, 1), dtype=np.float32)
+    for b in range(number_of_batches):
+        batchX = None
+        if b < number_of_batches - 1 or residual_number_of_patches == 0:
+            batchX = np.zeros((prediction_batch_size, *patch_size, channel_size), dtype=np.float32)
+        else:
+            batchX = np.zeros((residual_number_of_patches, *patch_size, channel_size), dtype=np.float32)
+
+        indices = range(b * prediction_batch_size, b * prediction_batch_size + batchX.shape[0])
+        batchX[:, :, :, :, 0] = flair_patches[indices, :, :, :]
+        batchX[:, :, :, :, 1] = t1_patches[indices, :, :, :]
+
+        if verbose:
+            print("Predicting batch ", str(b + 1), " of ", str(number_of_batches))
+
+        with torch.no_grad():
+            x = torch.from_numpy(batchX).float().permute(0, 4, 1, 2, 3).to(device)
+            y = model(x)
+            y_np = y.permute(0, 2, 3, 4, 1).cpu().numpy()
+        prediction[indices, :, :, :, :] = y_np
+
+    if verbose:
+        print("Predict patches and reconstruct.")
+
+    wmh_probability_image = ants.reconstruct_image_from_patches(np.squeeze(prediction),
+                                                           stride_length=patch_stride_length,
+                                                           domain_image=white_matter_mask,
+                                                           domain_image_is_mask=True)
+
+    return wmh_probability_image
+
+
+def shiva_pvs_segmentation(t1,
+                           flair=None,
+                           which_model="all",
+                           do_preprocessing=True,
+                           device=None,
+                           verbose=False):
+
+    """
+    Perform segmentation of perivascular (PVS) or Vircho-Robin spaces (VRS).
+
+    https://pubmed.ncbi.nlm.nih.gov/34262443/
+
+    with the original implementation available here:
+
+    https://github.com/pboutinaud/SHIVA_PVS
+
+    Arguments
+    ---------
+    t1 : ANTsImage
+        input 3-D T1 brain image (not skull-stripped).
+
+    flair : ANTsImage
+        (Optional) input 3-D FLAIR brain image (not skull-stripped) aligned to the T1 image.
+
+    which_model : integer or string
+        Several models were trained for the case of T1-only or T1/FLAIR image
+        pairs.  One can use a specific single trained model or the average of
+        the entire ensemble.  I.e., options are:
+            * For T1-only:  0, 1, 2, 3, 4, 5.
+            * For T1/FLAIR: 0, 1, 2, 3, 4.
+            * Or "all" for using the entire ensemble.
+
+    do_preprocessing : boolean
+        perform n4 bias correction, intensity truncation, brain extraction.
+
+    device : torch.device or string, optional
+        Device to run inference on.  Defaults to antstorch's default device.
+
+    verbose : boolean
+        Print progress to the screen.
+
+    Returns
+    -------
+    PVS or VRS segmentation probability image
+
+    Example
+    -------
+    >>> image = ants.image_read("flair.nii.gz")
+    >>> probability_mask = shiva_pvs_segmentation(image)
+    """
+
+    from ..utilities import get_pretrained_network
+    from ..utilities import preprocess_brain_image
+    from ..architectures import create_shiva_unet_model_3d
+    from ..utilities.device_manager import get_default_device
+
+    if device is None:
+        device = get_default_device()
+    elif isinstance(device, str):
+        device = torch.device(device)
+
+    ################################
+    #
+    # Preprocess images
+    #
+    ################################
+
+    t1_preprocessed = None
+    flair_preprocessed = None
+    brain_mask = None
+
+    if do_preprocessing:
+        if verbose:
+            print("Preprocess image(s).")
+
+        t1_preprocessing = preprocess_brain_image(t1,
+            truncate_intensity=(0.0, 0.99),
+            brain_extraction_modality="t1",
+            do_bias_correction=True,
+            do_denoising=False,
+            intensity_normalization_type="01",
+            verbose=verbose)
+        brain_mask = ants.threshold_image(t1_preprocessing["brain_mask"], 0.5, 1, 1, 0)
+        t1_preprocessed = t1_preprocessing["preprocessed_image"] * brain_mask
+
+        if flair is not None:
+            flair_preprocessing = preprocess_brain_image(flair,
+                truncate_intensity=(0.0, 0.99),
+                brain_extraction_modality=None,
+                do_bias_correction=True,
+                do_denoising=False,
+                intensity_normalization_type="01",
+                verbose=verbose)
+            flair_preprocessed = flair_preprocessing["preprocessed_image"] * brain_mask
+
+    else:
+        t1_preprocessed = ants.image_clone(t1)
+        if flair is not None:
+            flair_preprocessed = ants.image_clone(flair)
+        brain_mask = ants.threshold_image(t1, 0, 0, 0, 1)
+
+    image_shape = (160, 214, 176)
+    reorient_template = ants.from_numpy(np.ones(image_shape), origin=(0, 0, 0),
+                                        spacing=(1, 1, 1), direction=np.eye(3))
+
+    center_of_mass_template = ants.get_center_of_mass(reorient_template)
+    center_of_mass_image = ants.get_center_of_mass(brain_mask)
+    translation = np.round(np.asarray(center_of_mass_image) - np.asarray(center_of_mass_template))
+    xfrm = ants.create_ants_transform(transform_type="Euler3DTransform",
+        center=np.round(np.asarray(center_of_mass_template)), translation=translation)
+
+    t1_preprocessed = ants.apply_ants_transform_to_image(xfrm, t1_preprocessed, reorient_template)
+    if flair is not None:
+        flair_preprocessed = ants.apply_ants_transform_to_image(xfrm, flair_preprocessed, reorient_template)
+
+    ################################
+    #
+    # Load models and predict
+    #
+    ################################
+
+    batchY = None
+    if flair is None:
+        batchX = np.zeros((1, *image_shape, 1), dtype=np.float32)
+        batchX[0, :, :, :, 0] = t1_preprocessed.numpy()
+
+        model_ids = [which_model, ]
+        if which_model == "all":
+            model_ids = [0, 1, 2, 3, 4, 5]
+
+        for i in range(len(model_ids)):
+            weights_file_name = get_pretrained_network("pvs_shiva_t1_" + str(model_ids[i]) + "_pytorch",
+                target_file_name="pvs_shiva_t1_" + str(model_ids[i]) + "_pytorch.pt")
+            if verbose:
+                print("Loading", weights_file_name)
+            model = create_shiva_unet_model_3d(number_of_modalities=1)
+            model.load_state_dict(_load_state_dict(weights_file_name), strict=True)
+            model.eval()
+            model = model.to(device)
+            with torch.no_grad():
+                x = torch.from_numpy(batchX).float().permute(0, 4, 1, 2, 3).to(device)
+                y_np = model(x).permute(0, 2, 3, 4, 1).cpu().numpy()
+            if i == 0:
+                batchY = y_np
+            else:
+                batchY = batchY + y_np
+
+        batchY = batchY / len(model_ids)
+
+    else:
+        batchX = np.zeros((1, *image_shape, 2), dtype=np.float32)
+        batchX[0, :, :, :, 0] = t1_preprocessed.numpy()
+        batchX[0, :, :, :, 1] = flair_preprocessed.numpy()
+
+        model_ids = [which_model, ]
+        if which_model == "all":
+            model_ids = [0, 1, 2, 3, 4]
+
+        for i in range(len(model_ids)):
+            weights_file_name = get_pretrained_network("pvs_shiva_t1_flair_" + str(model_ids[i]) + "_pytorch",
+                target_file_name="pvs_shiva_t1_flair_" + str(model_ids[i]) + "_pytorch.pt")
+            if verbose:
+                print("Loading", weights_file_name)
+            model = create_shiva_unet_model_3d(number_of_modalities=2)
+            model.load_state_dict(_load_state_dict(weights_file_name), strict=True)
+            model.eval()
+            model = model.to(device)
+            with torch.no_grad():
+                x = torch.from_numpy(batchX).float().permute(0, 4, 1, 2, 3).to(device)
+                y_np = model(x).permute(0, 2, 3, 4, 1).cpu().numpy()
+            if i == 0:
+                batchY = y_np
+            else:
+                batchY = batchY + y_np
+
+        batchY = batchY / len(model_ids)
+
+    pvs = ants.from_numpy(np.squeeze(batchY), origin=reorient_template.origin,
+                          spacing=reorient_template.spacing,
+                          direction=reorient_template.direction)
+    pvs = ants.apply_ants_transform_to_image(xfrm.invert(), pvs, t1)
+    return pvs
+
+
+def shiva_wmh_segmentation(flair,
+                           t1=None,
+                           which_model="all",
+                           do_preprocessing=True,
+                           device=None,
+                           verbose=False):
+
+    """
+    Perform segmentation of white matter hyperintensities.
+
+    https://pubmed.ncbi.nlm.nih.gov/38050769/
+
+    with the original implementation available here:
+
+    https://github.com/pboutinaud/SHIVA_WMH
+
+    Arguments
+    ---------
+    flair : ANTsImage
+        input 3-D FLAIR brain image (not skull-stripped) aligned to the T1 image.
+
+    t1 : ANTsImage
+        (optional) input 3-D T1 brain image (not skull-stripped).
+
+    which_model : integer or string
+        Several models were trained for the case of T1-only or T1/FLAIR image
+        pairs.  One can use a specific single trained model or the average of
+        the entire ensemble.  I.e., options are:
+            * For T1-only:  0, 1, 2, 3, 4.
+            * For T1/FLAIR: 0, 1, 2, 3, 4.
+            * Or "all" for using the entire ensemble.
+
+    do_preprocessing : boolean
+        perform n4 bias correction, intensity truncation, brain extraction.
+
+    device : torch.device or string, optional
+        Device to run inference on.  Defaults to antstorch's default device.
+
+    verbose : boolean
+        Print progress to the screen.
+
+    Returns
+    -------
+    PVS or VRS segmentation probability image
+
+    Example
+    -------
+    >>> image = ants.image_read("flair.nii.gz")
+    >>> probability_mask = shiva_wmh_segmentation(image)
+    """
+
+    from ..utilities import get_pretrained_network
+    from ..utilities import preprocess_brain_image
+    from ..architectures import create_shiva_unet_model_3d
+    from ..utilities.device_manager import get_default_device
+
+    if device is None:
+        device = get_default_device()
+    elif isinstance(device, str):
+        device = torch.device(device)
+
+    ################################
+    #
+    # Preprocess images
+    #
+    ################################
+
+    t1_preprocessed = None
+    flair_preprocessed = None
+    brain_mask = None
+
+    if do_preprocessing:
+        if verbose:
+            print("Preprocess image(s).")
+
+        flair_preprocessing = preprocess_brain_image(flair,
+            truncate_intensity=(0.0, 0.99),
+            brain_extraction_modality="flair",
+            do_bias_correction=True,
+            do_denoising=False,
+            intensity_normalization_type="01",
+            verbose=verbose)
+        brain_mask = ants.threshold_image(flair_preprocessing["brain_mask"], 0.5, 1, 1, 0)
+        flair_preprocessed = flair_preprocessing["preprocessed_image"] * brain_mask
+
+        if t1 is not None:
+            t1_preprocessing = preprocess_brain_image(t1,
+                truncate_intensity=(0.0, 0.99),
+                brain_extraction_modality=None,
+                do_bias_correction=True,
+                do_denoising=False,
+                intensity_normalization_type="01",
+                verbose=verbose)
+            t1_preprocessed = t1_preprocessing["preprocessed_image"] * brain_mask
+
+    else:
+        flair_preprocessed = ants.image_clone(flair)
+        if t1 is not None:
+            t1_preprocessed = ants.image_clone(t1)
+        brain_mask = ants.threshold_image(flair, 0, 0, 0, 1)
+
+    image_shape = (160, 214, 176)
+    reorient_template = ants.from_numpy(np.ones(image_shape), origin=(0, 0, 0),
+                                        spacing=(1, 1, 1), direction=np.eye(3))
+
+    center_of_mass_template = ants.get_center_of_mass(reorient_template)
+    center_of_mass_image = ants.get_center_of_mass(brain_mask)
+    translation = np.round(np.asarray(center_of_mass_image) - np.asarray(center_of_mass_template))
+    xfrm = ants.create_ants_transform(transform_type="Euler3DTransform",
+        center=np.round(np.asarray(center_of_mass_template)), translation=translation)
+
+    flair_preprocessed = ants.apply_ants_transform_to_image(xfrm, flair_preprocessed, reorient_template)
+    if t1 is not None:
+        t1_preprocessed = ants.apply_ants_transform_to_image(xfrm, t1_preprocessed, reorient_template)
+
+    ################################
+    #
+    # Load models and predict
+    #
+    ################################
+
+    batchY = None
+    if t1 is None:
+        batchX = np.zeros((1, *image_shape, 1), dtype=np.float32)
+        batchX[0, :, :, :, 0] = flair_preprocessed.numpy()
+
+        model_ids = [which_model, ]
+        if which_model == "all":
+            model_ids = [0, 1, 2, 3, 4]
+
+        for i in range(len(model_ids)):
+            weights_file_name = get_pretrained_network("wmh_shiva_flair_" + str(model_ids[i]) + "_pytorch",
+                target_file_name="wmh_shiva_flair_" + str(model_ids[i]) + "_pytorch.pt")
+            if verbose:
+                print("Loading", weights_file_name)
+            model = create_shiva_unet_model_3d(number_of_modalities=1)
+            model.load_state_dict(_load_state_dict(weights_file_name), strict=True)
+            model.eval()
+            model = model.to(device)
+            with torch.no_grad():
+                x = torch.from_numpy(batchX).float().permute(0, 4, 1, 2, 3).to(device)
+                y_np = model(x).permute(0, 2, 3, 4, 1).cpu().numpy()
+            if i == 0:
+                batchY = y_np
+            else:
+                batchY = batchY + y_np
+
+        batchY = batchY / len(model_ids)
+
+    else:
+        batchX = np.zeros((1, *image_shape, 2), dtype=np.float32)
+        batchX[0, :, :, :, 0] = t1_preprocessed.numpy()
+        batchX[0, :, :, :, 1] = flair_preprocessed.numpy()
+
+        model_ids = [which_model, ]
+        if which_model == "all":
+            model_ids = [0, 1, 2, 3, 4]
+
+        for i in range(len(model_ids)):
+            weights_file_name = get_pretrained_network("wmh_shiva_t1_flair_" + str(model_ids[i]) + "_pytorch",
+                target_file_name="wmh_shiva_t1_flair_" + str(model_ids[i]) + "_pytorch.pt")
+            if verbose:
+                print("Loading", weights_file_name)
+            model = create_shiva_unet_model_3d(number_of_modalities=2)
+            model.load_state_dict(_load_state_dict(weights_file_name), strict=True)
+            model.eval()
+            model = model.to(device)
+            with torch.no_grad():
+                x = torch.from_numpy(batchX).float().permute(0, 4, 1, 2, 3).to(device)
+                y_np = model(x).permute(0, 2, 3, 4, 1).cpu().numpy()
+            if i == 0:
+                batchY = y_np
+            else:
+                batchY = batchY + y_np
+
+        batchY = batchY / len(model_ids)
+
+    wmh = ants.from_numpy(np.squeeze(batchY), origin=reorient_template.origin,
+                          spacing=reorient_template.spacing,
+                          direction=reorient_template.direction)
+    wmh = ants.apply_ants_transform_to_image(xfrm.invert(), wmh, flair)
+    return wmh

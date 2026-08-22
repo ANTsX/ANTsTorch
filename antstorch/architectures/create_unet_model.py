@@ -317,7 +317,17 @@ class create_multihead_unet_model_3d(nn.Module):
         if self._heads_built: return
         if self._feat is None: raise RuntimeError("Penultimate feature is not captured yet; run one forward pass first.")
         in_ch = self._feat.shape[1]
-        for _ in range(self.n_aux_heads): self.heads.append(nn.Conv3d(in_ch, 1, kernel_size=1, bias=True))
+        # New submodules default to CPU regardless of where the rest of the
+        # model already lives (e.g. after model.to("mps")/model.to("cuda")
+        # was called before the first forward pass, as lung_extraction.py
+        # does for modality="protonLobes"). Without this, the lazily-built
+        # heads stay on CPU while `self._feat` (and every other parameter)
+        # is on the accelerator, causing a device-mismatch RuntimeError on
+        # the very next forward call.
+        device = self._feat.device
+        dtype = self._feat.dtype
+        for _ in range(self.n_aux_heads):
+            self.heads.append(nn.Conv3d(in_ch, 1, kernel_size=1, bias=True).to(device=device, dtype=dtype))
         self._heads_built = True
     @torch.no_grad()
     def warmup(self, sample):
@@ -341,11 +351,15 @@ class create_unet_model_2d(nn.Module):
         self.add_attention_gating_2d = False
         self.add_nn_unet_activation = False
         self.use_keras_deconv = False
+        initial_convolution_kernel_size = convolution_kernel_size
         if additional_options is not None:
             opts = set(additional_options) if isinstance(additional_options, (list, tuple, set)) else {additional_options}
             if ("attentionGating" in opts) or ("attention_gating" in opts): self.add_attention_gating_2d = True
             if ("nnUnetActivationStyle" in opts) or ("nn_unet_activation_style" in opts): self.add_nn_unet_activation = True
             if ("kerasDeconvolutionStyle" in opts) or ("keras_deconvolution_style" in opts): self.use_keras_deconv = True
+            init_ks_opt = [o for o in opts if isinstance(o, str) and o.startswith("initialConvolutionKernelSize")]
+            if init_ks_opt:
+                initial_convolution_kernel_size = int(init_ks_opt[0].replace("initialConvolutionKernelSize", "").replace("[", "").replace("]", ""))
 
         def _get_activation():
             if self.add_nn_unet_activation: return nn.Sequential(ANTsPyNetInstanceNorm(eps=1e-3), nn.LeakyReLU(negative_slope=0.01, inplace=True))
@@ -362,8 +376,9 @@ class create_unet_model_2d(nn.Module):
         self.pad_crop = pad_crop
         for i in range(number_of_layers):
             in_ch = input_channel_size if i == 0 else number_of_filters[i - 1]
-            conv1 = _Conv2dSame(in_ch, number_of_filters[i], kernel_size=convolution_kernel_size, stride=1, bias=True)
-            conv2 = _Conv2dSame(number_of_filters[i], number_of_filters[i], kernel_size=convolution_kernel_size, stride=1, bias=True)
+            layer_kernel_size = initial_convolution_kernel_size if i == 0 else convolution_kernel_size
+            conv1 = _Conv2dSame(in_ch, number_of_filters[i], kernel_size=layer_kernel_size, stride=1, bias=True)
+            conv2 = _Conv2dSame(number_of_filters[i], number_of_filters[i], kernel_size=layer_kernel_size, stride=1, bias=True)
             block = [conv1, _get_activation()]
             if dropout_rate > 0.0: block += [nn.Dropout(dropout_rate)]
             block += [conv2, _get_activation()]
@@ -441,12 +456,16 @@ class create_unet_model_3d(nn.Module):
         self.add_attention_gating_3d = False
         self.add_nn_unet_activation = False
         self.use_keras_deconv = False
-        
+        initial_convolution_kernel_size = convolution_kernel_size
+
         if additional_options is not None:
             opts = set(additional_options) if isinstance(additional_options, (list, tuple, set)) else {additional_options}
             if ("attentionGating" in opts) or ("attention_gating" in opts): self.add_attention_gating_3d = True
             if ("nnUnetActivationStyle" in opts) or ("nn_unet_activation_style" in opts): self.add_nn_unet_activation = True
             if ("kerasDeconvolutionStyle" in opts) or ("keras_deconvolution_style" in opts): self.use_keras_deconv = True
+            init_ks_opt = [o for o in opts if isinstance(o, str) and o.startswith("initialConvolutionKernelSize")]
+            if init_ks_opt:
+                initial_convolution_kernel_size = int(init_ks_opt[0].replace("initialConvolutionKernelSize", "").replace("[", "").replace("]", ""))
 
         def _get_activation():
             if self.add_nn_unet_activation: return nn.Sequential(ANTsPyNetInstanceNorm(eps=1e-3), nn.LeakyReLU(negative_slope=0.01, inplace=True))
@@ -463,8 +482,9 @@ class create_unet_model_3d(nn.Module):
         self.pad_crop = pad_crop
         for i in range(number_of_layers):
             in_ch = input_channel_size if i == 0 else number_of_filters[i - 1]
-            conv1 = _Conv3dSame(in_ch, number_of_filters[i], kernel_size=convolution_kernel_size, stride=1, bias=True)
-            conv2 = _Conv3dSame(number_of_filters[i], number_of_filters[i], kernel_size=convolution_kernel_size, stride=1, bias=True)
+            layer_kernel_size = initial_convolution_kernel_size if i == 0 else convolution_kernel_size
+            conv1 = _Conv3dSame(in_ch, number_of_filters[i], kernel_size=layer_kernel_size, stride=1, bias=True)
+            conv2 = _Conv3dSame(number_of_filters[i], number_of_filters[i], kernel_size=layer_kernel_size, stride=1, bias=True)
             block = [conv1, _get_activation()]
             if dropout_rate > 0.0: block += [nn.Dropout(dropout_rate)]
             block += [conv2, _get_activation()]

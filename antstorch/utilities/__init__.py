@@ -18,6 +18,25 @@ from .t1_grader import t1_grader
 
 from .chexnet import chexnet
 
+from .lung_extraction import lung_extraction
+from .lung_segmentation import el_bicho
+from .lung_segmentation import lung_pulmonary_artery_segmentation
+from .lung_segmentation import lung_airway_segmentation
+
+from .mouse import mouse_brain_extraction
+from .mouse import mouse_brain_parcellation
+from .mouse import mouse_cortical_thickness
+from .mouse import mouse_histology_brain_mask
+from .mouse import mouse_histology_hemispherical_coronal_mask
+from .mouse import mouse_histology_cerebellum_mask
+from .mouse import mouse_histology_super_resolution
+
+from .white_matter_hyperintensity_segmentation import sysu_media_wmh_segmentation
+from .white_matter_hyperintensity_segmentation import hypermapp3r_segmentation
+from .white_matter_hyperintensity_segmentation import wmh_segmentation
+from .white_matter_hyperintensity_segmentation import shiva_pvs_segmentation
+from .white_matter_hyperintensity_segmentation import shiva_wmh_segmentation
+
 from .dataframe_dataset import MultiViewDataFrameDataset, transform_tabular_numeric
 from .image_dataset import ImageDataset, augment_image_modalities
 
