@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-PyTorch ports of a subset of antspynet.architectures.create_custom_unet_model,
-restricted to the architectures needed by white_matter_hyperintensity_segmentation:
+PyTorch ports of a subset of antspynet.architectures.create_custom_unet_model:
 
-    * create_sysu_media_unet_model_2d
-    * create_sysu_media_unet_model_3d
-    * create_hypermapp3r_unet_model_3d
-    * create_shiva_unet_model_3d
+    * create_sysu_media_unet_model_2d          (white_matter_hyperintensity_segmentation, claustrum_segmentation)
+    * create_sysu_media_unet_model_3d          (white_matter_hyperintensity_segmentation)
+    * create_hypermapp3r_unet_model_3d         (white_matter_hyperintensity_segmentation)
+    * create_shiva_unet_model_3d               (white_matter_hyperintensity_segmentation)
+    * create_hippmapp3r_unet_model_3d          (hippmapp3r_segmentation, added 2026-08-22)
+    * create_hypothalamus_unet_model_3d        (hypothalamus_segmentation, added 2026-08-22)
 
 Ported layer for layer, matching the Keras originals, so that weights
 converted via tools/convert_antspynet_weights_to_antstorch.py map cleanly
@@ -429,3 +430,255 @@ class create_shiva_unet_model_3d(nn.Module):
         outputs = self.final_conv2(outputs)
         outputs = self.output_conv(outputs)
         return self.output_act(outputs)
+
+
+# ---------------------------------------------------------------------------
+# HippMapp3r (hippocampus segmentation, 2-stage)
+# ---------------------------------------------------------------------------
+
+class create_hippmapp3r_unet_model_3d(nn.Module):
+    """
+    3-D HippMapp3r U-net (hippocampal segmentation, 2-stage network).
+
+    https://www.ncbi.nlm.nih.gov/pubmed/31609046
+    https://github.com/mgoubran/HippMapp3r
+
+    Shares its encoding/decoding building blocks (residual-augmented conv
+    blocks, nearest-neighbor upsample blocks, feature blocks, dual side-output
+    "back64"/"back32" heads combined additively before the final sigmoid)
+    with create_hypermapp3r_unet_model_3d above -- ported layer for layer from
+    the same Keras source family. The two differ in: number of encoding
+    layers (variable here: 6 for the initial-stage network, 5 for the
+    refine-stage network, vs. always 4 for hypermapp3r), the initial-stage
+    network has one extra decoding stage the refine-stage network skips, and
+    the initial-stage network's back64/back32/final-output 1x1 convs include
+    InstanceNorm+LeakyReLU (matching Keras `convB_3d_layer`) while the
+    refine-stage network's use plain Conv3d (matching Keras `Conv3D` with no
+    normalization) -- this asymmetry is exactly what the original Keras
+    source does (see `do_first_network` branches in
+    antspynet.architectures.create_hippmapp3r_unet_model_3d).
+
+    Note: like hypermapp3r, the refine-stage network relies on Monte Carlo
+    SpatialDropout3D at inference time (30 iterations in
+    antspynet.utilities.hippmapp3r_segmentation) -- callers doing Monte Carlo
+    inference should call `.train()` on just the Dropout3d submodules (inside
+    the residual blocks), leaving everything else in eval-equivalent behavior
+    (InstanceNorm3d here has track_running_stats=False and is mode-independent).
+
+    Arguments
+    ---------
+    input_channel_size : integer
+        Number of input channels (1 -- single T1 channel).
+
+    do_first_network : boolean
+        True builds the initial-stage (coarse mask) network (6 encoding
+        layers); False builds the refine-stage network (5 encoding layers).
+
+    Example
+    -------
+    >>> model_initial = create_hippmapp3r_unet_model_3d(1, do_first_network=True)
+    >>> model_refine = create_hippmapp3r_unet_model_3d(1, do_first_network=False)
+    """
+    def __init__(self, input_channel_size, do_first_network=True):
+        super().__init__()
+        self.do_first_network = do_first_network
+
+        number_of_filters_at_base_layer = 16
+        number_of_layers = 6 if do_first_network else 5
+        self.number_of_layers = number_of_layers
+
+        filters = [number_of_filters_at_base_layer * 2 ** i for i in range(number_of_layers)]
+        self.filters = filters
+
+        # Encoding path: same conv(stride)+residual+Add pattern as hypermapp3r.
+        self.encoding_conv = nn.ModuleList()
+        self.encoding_residual = nn.ModuleList()
+        in_ch = input_channel_size
+        for i in range(number_of_layers):
+            stride = 1 if i == 0 else 2
+            self.encoding_conv.append(_ConvBBlock3D(in_ch, filters[i], kernel_size=3, stride=stride))
+            self.encoding_residual.append(_HyperMapp3rResidualBlock(filters[i]))
+            in_ch = filters[i]
+
+        # Decoding path.
+        top_filters = filters[number_of_layers - 2]
+        self.up_top = _HyperMapp3rUpsampleBlock(filters[number_of_layers - 1], top_filters)
+
+        if do_first_network:
+            self.feature_extra = _HyperMapp3rFeatureBlock(top_filters + filters[4], top_filters)
+            next_filters = top_filters // 2
+            self.up_extra = _HyperMapp3rUpsampleBlock(top_filters, next_filters)
+            stage3_in = next_filters
+        else:
+            stage3_in = top_filters
+
+        self.feature3 = _HyperMapp3rFeatureBlock(stage3_in + filters[3], stage3_in)
+        f2 = stage3_in // 2
+        self.up3 = _HyperMapp3rUpsampleBlock(stage3_in, f2)
+
+        self.feature64 = _HyperMapp3rFeatureBlock(f2 + filters[2], f2)
+        f1 = f2 // 2
+        self.up64 = _HyperMapp3rUpsampleBlock(f2, f1)
+
+        self.feature32 = _HyperMapp3rFeatureBlock(f1 + filters[1], f1)
+        f0 = f1 // 2
+        self.up32 = _HyperMapp3rUpsampleBlock(f1, f0)
+
+        # back64 / back32 / final-output 1x1 convs: convB (norm+act) for the
+        # initial-stage network, plain Conv3d for the refine-stage network.
+        if do_first_network:
+            self.back64_conv = _ConvBBlock3D(f2, 1, kernel_size=1)
+            self.back32_conv = _ConvBBlock3D(f1, 1, kernel_size=1)
+            self.final_out_conv = _ConvBBlock3D(f0, 1, kernel_size=1)
+        else:
+            self.back64_conv = _Conv3dSame(f2, 1, kernel_size=1, stride=1, bias=True)
+            self.back32_conv = _Conv3dSame(f1, 1, kernel_size=1, stride=1, bias=True)
+            self.final_out_conv = _Conv3dSame(f0, 1, kernel_size=1, stride=1, bias=True)
+
+        self.final_conv1 = _ConvBBlock3D(f0 + filters[0], f0, kernel_size=3)
+        self.final_conv2 = _ConvBBlock3D(f0, f0, kernel_size=1)
+
+        self.upsample = nn.Upsample(scale_factor=2, mode="nearest")
+        self.output_act = nn.Sigmoid()
+
+    def forward(self, x):
+        add = None
+        encoding = []
+        for i in range(self.number_of_layers):
+            conv = self.encoding_conv[i](x if i == 0 else add)
+            residual = self.encoding_residual[i](conv)
+            add = conv + residual
+            encoding.append(add)
+
+        outputs = encoding[self.number_of_layers - 1]
+        outputs = self.up_top(outputs)
+
+        if self.do_first_network:
+            skip4 = _align_leading_3d(encoding[4], outputs.shape[-3:])
+            outputs = self.feature_extra(torch.cat([skip4, outputs], dim=1))
+            outputs = self.up_extra(outputs)
+
+        skip3 = _align_leading_3d(encoding[3], outputs.shape[-3:])
+        outputs = self.feature3(torch.cat([skip3, outputs], dim=1))
+        outputs = self.up3(outputs)
+
+        skip2 = _align_leading_3d(encoding[2], outputs.shape[-3:])
+        feature64 = self.feature64(torch.cat([skip2, outputs], dim=1))
+        outputs = self.up64(feature64)
+        back64 = self.back64_conv(feature64)
+        back64 = self.upsample(back64)
+
+        skip1 = _align_leading_3d(encoding[1], outputs.shape[-3:])
+        feature32 = self.feature32(torch.cat([skip1, outputs], dim=1))
+        outputs = self.up32(feature32)
+        back32 = self.back32_conv(feature32)
+        back32 = _align_leading_3d(back32, back64.shape[-3:]) if back32.shape[-3:] != back64.shape[-3:] else back32
+        back32 = back64 + back32
+        back32 = self.upsample(back32)
+
+        skip0 = _align_leading_3d(encoding[0], outputs.shape[-3:])
+        outputs = self.final_conv1(torch.cat([skip0, outputs], dim=1))
+        outputs = self.final_conv2(outputs)
+        outputs = self.final_out_conv(outputs)
+        back32 = _align_leading_3d(back32, outputs.shape[-3:]) if back32.shape[-3:] != outputs.shape[-3:] else back32
+        outputs = back32 + outputs
+
+        return self.output_act(outputs)
+
+
+# ---------------------------------------------------------------------------
+# Hypothalamus segmentation
+# ---------------------------------------------------------------------------
+
+class create_hypothalamus_unet_model_3d(nn.Module):
+    """
+    3-D U-net for hypothalamus (and subunit) segmentation.
+
+    https://pubmed.ncbi.nlm.nih.gov/32853816/
+    https://github.com/BBillot/hypothalamus_seg
+
+    A simple 3-level U-net: 24 -> 48 -> 96 filters, ELU activations,
+    BatchNorm3d after each encoding/decoding block, softmax (11-class)
+    output. Ported layer for layer from the Keras source, including one
+    subtlety: each encoder level's skip connection is taken from the
+    convolution output *before* BatchNorm is applied (BatchNorm updates the
+    variable used for pooling/bottleneck only) -- matching
+    antspynet.architectures.create_hypothalamus_unet_model_3d exactly.
+
+    Arguments
+    ---------
+    input_channel_size : integer
+        Number of input channels (1 -- single T1 channel; the original
+        Keras constructor hardcodes this itself via `Input(shape=(*size, 1))`).
+
+    number_of_outputs : integer
+        Number of segmentation classes (11: background + 10 subunit labels).
+
+    Example
+    -------
+    >>> model = create_hypothalamus_unet_model_3d()
+    """
+    def __init__(self, input_channel_size=1, number_of_outputs=11):
+        super().__init__()
+
+        number_of_layers = 3
+        self.number_of_layers = number_of_layers
+        base = 24
+        filters = [base * 2 ** i for i in range(number_of_layers)]
+        self.filters = filters
+
+        def conv_elu(in_ch, out_ch):
+            return nn.Sequential(
+                _Conv3dSame(in_ch, out_ch, kernel_size=3, stride=1, bias=True),
+                nn.ELU(),
+            )
+
+        self.encoding_conv1 = nn.ModuleList()
+        self.encoding_conv2 = nn.ModuleList()
+        self.encoding_bn = nn.ModuleList()
+        in_ch = input_channel_size
+        for i in range(number_of_layers):
+            self.encoding_conv1.append(conv_elu(in_ch, filters[i]))
+            self.encoding_conv2.append(conv_elu(filters[i], filters[i]))
+            self.encoding_bn.append(nn.BatchNorm3d(filters[i]))
+            in_ch = filters[i]
+
+        self.pool = nn.MaxPool3d(kernel_size=2, stride=2)
+        self.upsample = nn.Upsample(scale_factor=2, mode="nearest")
+
+        self.decoding_conv1 = nn.ModuleList()
+        self.decoding_conv2 = nn.ModuleList()
+        self.decoding_bn = nn.ModuleList()
+        for i in range(1, number_of_layers):
+            idx = number_of_layers - i - 1
+            concat_ch = filters[idx] + filters[number_of_layers - i]
+            self.decoding_conv1.append(conv_elu(concat_ch, filters[idx]))
+            self.decoding_conv2.append(conv_elu(filters[idx], filters[idx]))
+            self.decoding_bn.append(nn.BatchNorm3d(filters[idx]))
+
+        self.output_conv = _Conv3dSame(filters[0], number_of_outputs, kernel_size=1, stride=1, bias=True)
+        self.output_act = nn.Softmax(dim=1)
+
+    def forward(self, x):
+        skips = []
+        pool = None
+        outputs = None
+        for i in range(self.number_of_layers):
+            conv = self.encoding_conv1[i](x if i == 0 else pool)
+            conv = self.encoding_conv2[i](conv)
+            skips.append(conv)  # pre-BatchNorm skip -- matches Keras exactly
+            conv = self.encoding_bn[i](conv)
+            if i < self.number_of_layers - 1:
+                pool = self.pool(conv)
+            else:
+                outputs = conv
+
+        for idx, i in enumerate(range(1, self.number_of_layers)):
+            deconv = self.upsample(outputs)
+            skip = _align_leading_3d(skips[self.number_of_layers - i - 1], deconv.shape[-3:])
+            outputs = torch.cat([skip, deconv], dim=1)
+            outputs = self.decoding_conv1[idx](outputs)
+            outputs = self.decoding_conv2[idx](outputs)
+            outputs = self.decoding_bn[idx](outputs)
+
+        return self.output_act(self.output_conv(outputs))

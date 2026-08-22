@@ -3,10 +3,14 @@
 download_antspynet_h5_weights.py
 
 Batch/parallel downloader for the *original* ANTsPyNet Keras `.h5` weight
-files (lung_extraction, lung_segmentation, mouse.py, and
-white_matter_hyperintensity_segmentation) -- the inputs that
-tools/convert_wmh_bespoke.py and tools/convert_lung_mouse_bespoke.py read
-from `~/.keras/ANTsXNet/` to produce the ANTsTorch `_pytorch.pt` files.
+files (lung_extraction, lung_segmentation, mouse.py,
+white_matter_hyperintensity_segmentation, hippmapp3r_segmentation/
+hypothalamus_segmentation/claustrum_segmentation, and -- added 2026-08-22 --
+mri_super_resolution.py's SIQ DBPN models) -- the inputs that
+tools/convert_wmh_bespoke.py, tools/convert_lung_mouse_bespoke.py,
+tools/convert_hippmapp3r_hypothalamus_claustrum_bespoke.py, and
+tools/convert_mri_super_resolution_bespoke.py read from
+`~/.keras/ANTsXNet/` to produce the ANTsTorch `_pytorch.pt` files.
 
 Figshare does not offer FTP access -- every one of these files is served
 over plain HTTPS from a fixed `ndownloader.figshare.com/files/<id>` URL
@@ -91,6 +95,35 @@ MANIFEST = {
     "wmh_shiva_t1_flair_2": 48660499,
     "wmh_shiva_t1_flair_3": 48660550,
     "wmh_shiva_t1_flair_4": 48660544,
+
+    # -- hippmapp3r_segmentation / hypothalamus_segmentation / claustrum_segmentation
+    #    (added 2026-08-22, same double-checked-against-source method as above) --
+    "hippMapp3rInitial": 18068408,
+    "hippMapp3rRefine": 18068411,
+    "hypothalamus": 28344378,
+    "claustrum_axial_0": 27844068,
+    "claustrum_axial_1": 27844059,
+    "claustrum_axial_2": 27844062,
+    "claustrum_coronal_0": 27844074,
+    "claustrum_coronal_1": 27844071,
+    "claustrum_coronal_2": 27844065,
+
+    # -- mri_super_resolution.py (SIQ DBPN models, https://github.com/stnava/siq)
+    #    (added 2026-08-22) -- unlike every id above, these already have real
+    #    figshare URLs directly in ANTsPyNet's own get_pretrained_network.py
+    #    switcher dict (not "cache-only" placeholders), confirmed by the same
+    #    double-checked-against-source method as above --
+    "sig_smallshort_train_1x1x2_1chan_featgraderL6_best_mdl": 49339837,
+    "sig_smallshort_train_1x1x2_1chan_featvggL6_best_mdl": 49339840,
+    "sig_smallshort_train_1x1x3_1chan_featgraderL6_best_mdl": 49339843,
+    "sig_smallshort_train_1x1x3_1chan_featvggL6_best_mdl": 49339846,
+    "sig_smallshort_train_1x1x4_1chan_featgraderL6_best_mdl": 49339849,
+    "sig_smallshort_train_1x1x4_1chan_featvggL6_best_mdl": 49339852,
+    "sig_smallshort_train_1x1x6_1chan_featvggL6_best_mdl": 49339855,  # no grader variant
+    "sig_smallshort_train_2x2x2_1chan_featgraderL6_best_mdl": 49339858,
+    "sig_smallshort_train_2x2x2_1chan_featvggL6_best_mdl": 49339861,
+    "sig_smallshort_train_2x2x4_1chan_featgraderL6_best_mdl": 49339867,
+    "sig_smallshort_train_2x2x4_1chan_featvggL6_best_mdl": 49339864,
 }
 
 # Ids used by convert_lung_mouse_bespoke.py that have NO entry in ANTsPyNet's

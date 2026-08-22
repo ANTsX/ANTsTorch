@@ -120,6 +120,35 @@ def get_pretrained_network(file_id: Optional[str] = None,
             "wmh_shiva_t1_flair_2_pytorch": "https://ndownloader.figshare.com/files/67759836",
             "wmh_shiva_t1_flair_3_pytorch": "https://ndownloader.figshare.com/files/67759845",
             "wmh_shiva_t1_flair_4_pytorch": "https://ndownloader.figshare.com/files/67759848",
+            # mri_super_resolution (SIQ DBPN models, https://github.com/stnava/siq) --
+            # not yet converted; ANTsPyNet-side figshare file ids noted for reference
+            # when a bespoke convert_mri_super_resolution.py is written.
+            "sig_smallshort_train_1x1x2_1chan_featgraderL6_best_mdl_pytorch": "",  # figshare 49339837
+            "sig_smallshort_train_1x1x2_1chan_featvggL6_best_mdl_pytorch": "",  # figshare 49339840
+            "sig_smallshort_train_1x1x3_1chan_featgraderL6_best_mdl_pytorch": "",  # figshare 49339843
+            "sig_smallshort_train_1x1x3_1chan_featvggL6_best_mdl_pytorch": "",  # figshare 49339846
+            "sig_smallshort_train_1x1x4_1chan_featgraderL6_best_mdl_pytorch": "",  # figshare 49339849
+            "sig_smallshort_train_1x1x4_1chan_featvggL6_best_mdl_pytorch": "",  # figshare 49339852
+            "sig_smallshort_train_1x1x6_1chan_featvggL6_best_mdl_pytorch": "",  # figshare 49339855
+            "sig_smallshort_train_2x2x2_1chan_featgraderL6_best_mdl_pytorch": "",  # figshare 49339858
+            "sig_smallshort_train_2x2x2_1chan_featvggL6_best_mdl_pytorch": "",  # figshare 49339861
+            "sig_smallshort_train_2x2x4_1chan_featgraderL6_best_mdl_pytorch": "",  # figshare 49339867
+            "sig_smallshort_train_2x2x4_1chan_featvggL6_best_mdl_pytorch": "",  # figshare 49339864
+            # hippmapp3r_segmentation, hypothalamus_segmentation,
+            # claustrum_segmentation, quality_assessment -- not yet converted.
+            "hippMapp3rInitial_pytorch": "",
+            "hippMapp3rRefine_pytorch": "",
+            "hypothalamus_pytorch": "",
+            "claustrum_axial_0_pytorch": "",
+            "claustrum_axial_1_pytorch": "",
+            "claustrum_axial_2_pytorch": "",
+            "claustrum_coronal_0_pytorch": "",
+            "claustrum_coronal_1_pytorch": "",
+            "claustrum_coronal_2_pytorch": "",
+            "tidsQualityAssessment_pytorch": "",
+            "koniqMS_pytorch": "",
+            "koniqMS2_pytorch": "",
+            "koniqMS3_pytorch": "",
         }
         return(switcher.get(argument, None))
 
@@ -210,6 +239,30 @@ def get_pretrained_network(file_id: Optional[str] = None,
                   "wmh_shiva_t1_flair_2_pytorch",
                   "wmh_shiva_t1_flair_3_pytorch",
                   "wmh_shiva_t1_flair_4_pytorch",
+                  "sig_smallshort_train_1x1x2_1chan_featgraderL6_best_mdl_pytorch",
+                  "sig_smallshort_train_1x1x2_1chan_featvggL6_best_mdl_pytorch",
+                  "sig_smallshort_train_1x1x3_1chan_featgraderL6_best_mdl_pytorch",
+                  "sig_smallshort_train_1x1x3_1chan_featvggL6_best_mdl_pytorch",
+                  "sig_smallshort_train_1x1x4_1chan_featgraderL6_best_mdl_pytorch",
+                  "sig_smallshort_train_1x1x4_1chan_featvggL6_best_mdl_pytorch",
+                  "sig_smallshort_train_1x1x6_1chan_featvggL6_best_mdl_pytorch",
+                  "sig_smallshort_train_2x2x2_1chan_featgraderL6_best_mdl_pytorch",
+                  "sig_smallshort_train_2x2x2_1chan_featvggL6_best_mdl_pytorch",
+                  "sig_smallshort_train_2x2x4_1chan_featgraderL6_best_mdl_pytorch",
+                  "sig_smallshort_train_2x2x4_1chan_featvggL6_best_mdl_pytorch",
+                  "hippMapp3rInitial_pytorch",
+                  "hippMapp3rRefine_pytorch",
+                  "hypothalamus_pytorch",
+                  "claustrum_axial_0_pytorch",
+                  "claustrum_axial_1_pytorch",
+                  "claustrum_axial_2_pytorch",
+                  "claustrum_coronal_0_pytorch",
+                  "claustrum_coronal_1_pytorch",
+                  "claustrum_coronal_2_pytorch",
+                  "tidsQualityAssessment_pytorch",
+                  "koniqMS_pytorch",
+                  "koniqMS2_pytorch",
+                  "koniqMS3_pytorch",
                   "show")
 
     if not file_id in valid_list:

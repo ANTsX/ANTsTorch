@@ -124,6 +124,31 @@ KNOWN_IDS = [
     "wmh_shiva_flair_3_pytorch", "wmh_shiva_flair_4_pytorch",
     "wmh_shiva_t1_flair_0_pytorch", "wmh_shiva_t1_flair_1_pytorch", "wmh_shiva_t1_flair_2_pytorch",
     "wmh_shiva_t1_flair_3_pytorch", "wmh_shiva_t1_flair_4_pytorch",
+
+    # hippmapp3r_segmentation / hypothalamus_segmentation / claustrum_segmentation
+    # (added 2026-08-22 -- convertible via convert_hippmapp3r_hypothalamus_claustrum_bespoke.py).
+    # Note: quality_assessment's 4 ids (tidsQualityAssessment/koniqMS*) are
+    # deliberately NOT included here -- no real weights can be produced for
+    # them yet, since no source architecture is known (see the confidence
+    # note in antstorch/utilities/quality_assessment.py).
+    "hippMapp3rInitial_pytorch", "hippMapp3rRefine_pytorch", "hypothalamus_pytorch",
+    "claustrum_axial_0_pytorch", "claustrum_axial_1_pytorch", "claustrum_axial_2_pytorch",
+    "claustrum_coronal_0_pytorch", "claustrum_coronal_1_pytorch", "claustrum_coronal_2_pytorch",
+
+    # mri_super_resolution.py (SIQ DBPN, added 2026-08-22) -- 11 ids, no
+    # grader variant for 1x1x6. Convertible via
+    # convert_mri_super_resolution_bespoke.py.
+    "sig_smallshort_train_1x1x2_1chan_featgraderL6_best_mdl_pytorch",
+    "sig_smallshort_train_1x1x2_1chan_featvggL6_best_mdl_pytorch",
+    "sig_smallshort_train_1x1x3_1chan_featgraderL6_best_mdl_pytorch",
+    "sig_smallshort_train_1x1x3_1chan_featvggL6_best_mdl_pytorch",
+    "sig_smallshort_train_1x1x4_1chan_featgraderL6_best_mdl_pytorch",
+    "sig_smallshort_train_1x1x4_1chan_featvggL6_best_mdl_pytorch",
+    "sig_smallshort_train_1x1x6_1chan_featvggL6_best_mdl_pytorch",
+    "sig_smallshort_train_2x2x2_1chan_featgraderL6_best_mdl_pytorch",
+    "sig_smallshort_train_2x2x2_1chan_featvggL6_best_mdl_pytorch",
+    "sig_smallshort_train_2x2x4_1chan_featgraderL6_best_mdl_pytorch",
+    "sig_smallshort_train_2x2x4_1chan_featvggL6_best_mdl_pytorch",
 ]
 
 
@@ -404,11 +429,12 @@ def main():
         print(f"  tags: {tags}")
         article_id = create_article(
             token,
-            title="ANTsTorch pretrained weights (lung/mouse/WMH)",
+            title="ANTsTorch pretrained weights (lung/mouse/WMH/hippocampus/hypothalamus/claustrum)",
             description=(
                 "PyTorch (.pt) weight files for the ANTsTorch port of ANTsPyNet's "
-                "lung_extraction, lung_segmentation, mouse.py, and "
-                "white_matter_hyperintensity_segmentation applications. "
+                "lung_extraction, lung_segmentation, mouse.py, "
+                "white_matter_hyperintensity_segmentation, hippmapp3r_segmentation, "
+                "hypothalamus_segmentation, and claustrum_segmentation applications. "
                 "See https://github.com/ANTsX/ANTsTorch."
             ),
             tags=tags,
