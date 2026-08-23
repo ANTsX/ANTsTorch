@@ -2,30 +2,47 @@
 PyTorch port of antspynet.utilities.quality_assessment (random_mask,
 tid_neural_image_assessment).
 
-IMPORTANT -- confidence note (read before using tid_neural_image_assessment):
+Confidence note (updated 2026-08-23 -- read before using
+tid_neural_image_assessment):
 
 Unlike hippmapp3r_segmentation / hypothalamus_segmentation / claustrum_segmentation
-(ported the same day, 2026-08-22), the ResNet architecture(s) behind
-"tidsQualityAssessment" / "koniqMS" / "koniqMS2" / "koniqMS3" are NOT built via
-any explicit architecture-constructor function anywhere in ANTsPyNet -- they
-are always loaded whole via tf.keras.models.load_model(...) from a saved
-model file. There is therefore no source of truth in the ANTsPyNet source
-tree for the exact ResNet hyperparameters (depth, lowest_resolution,
-cardinality, squeeze_and_excite, etc.) these particular models were trained
-with -- nothing analogous to the isotropic-kernel rule that made the
-mri_super_resolution DBPN port at least an informed extrapolation.
+(ported 2026-08-22), the ResNet architecture(s) behind "tidsQualityAssessment"
+/ "koniqMS" / "koniqMS2" / "koniqMS3" are NOT built via any explicit
+architecture-constructor function anywhere in ANTsPyNet's source tree --
+quality_assessment.py always loads a full saved model via
+tf.keras.models.load_model(...). For a long stretch of this session that
+meant _default_qa_resnet_model() below was a pure guess, with no way to
+confirm it.
 
-Consequently, _default_qa_resnet_model() below is a **best-effort placeholder**
-built from antstorch's already-ported create_resnet_model_2d with its plain
-defaults (mode="regression", 2 outputs) -- it is not known to match the real
-trained models and should be treated as a stand-in, not a verified port. The
-recommended way to use tid_neural_image_assessment today is to pass an
-already-built-and-weight-loaded torch.nn.Module directly via `which_model`
-(exactly mirroring ANTsPyNet's own support for passing a user-defined Keras
-model), which sidesteps this uncertainty entirely. If/when a real
-tidsQualityAssessment/koniq weights+architecture pair is obtained, use
-`architecture_kwargs` to correct the default, or inspect the real model to
-fix _default_qa_resnet_model() directly.
+That changed once real figshare URLs were found for these 4 ids (they were
+NOT "cache-only" placeholders after all, see the project's gap-analysis
+doc) and koniqMS3.h5 -- a full model.save() -- turned out to embed a
+model_config JSON, exactly like the SIQ DBPN files that resolved
+mri_super_resolution's uncertainty. Parsing it layer-by-layer (all 53
+Conv2D + 53 BatchNormalization layers) against antspynet's real
+create_resnet_model_2d() source **confirms the placeholder was correct all
+along**: input_channel_size=3, number_of_outputs=2, mode="regression",
+every other argument at its plain default (layers=(1,2,3,4),
+residual_block_schedule=(3,4,6,3), lowest_resolution=64, cardinality=1,
+squeeze_and_excite=False -- i.e. a standard ResNet-50). See
+tools/convert_quality_assessment_bespoke.py for the full derivation and a
+dedicated converter.
+
+This has only been independently confirmed against koniqMS3. It is
+presumed -- not yet independently verified -- that tidsQualityAssessment/
+koniqMS/koniqMS2 share the same base architecture (very likely the same
+regression head fine-tuned on different MOS datasets). The converter
+validates each file's own model_config against this exact schedule before
+converting anything, so a file that doesn't match will fail loudly rather
+than silently producing wrong weights.
+
+_default_qa_resnet_model() now takes a full architecture_kwargs dict
+(mirroring mri_super_resolution.py's pattern) rather than assuming values
+itself. Passing an already-built-and-weight-loaded torch.nn.Module directly
+via `which_model` remains supported (mirrors ANTsPyNet's own support for a
+user-defined Keras model) and is still the safest option for
+tidsQualityAssessment/koniqMS/koniqMS2 until they are independently
+converted and verified.
 """
 
 import random
@@ -35,11 +52,31 @@ import torch
 import ants
 
 
-def _load_state_dict(weights_file_name):
-    sd = torch.load(weights_file_name, map_location="cpu", weights_only=True)
-    if isinstance(sd, dict) and "state_dict" in sd and isinstance(sd["state_dict"], dict):
-        sd = sd["state_dict"]
-    return sd
+# Fallback architecture, used only if a weights file does not carry its own
+# embedded "architecture_kwargs" (see _load_state_dict_and_kwargs below).
+# These are antstorch's create_resnet_model_2d plain defaults -- confirmed
+# to match the real koniqMS3.h5 exactly (see the confidence note above and
+# tools/convert_quality_assessment_bespoke.py). Every .pt produced by that
+# script embeds this same config directly (re-derived per file, not
+# assumed), so this fallback should only matter for an older bare-state_dict
+# .pt that predates that script.
+_QA_FALLBACK_KWARGS = dict(input_channel_size=3, number_of_outputs=2, mode="regression")
+
+
+def _load_state_dict_and_kwargs(weights_file_name):
+    """Returns (state_dict, architecture_kwargs). Prefers the
+    "architecture_kwargs" saved alongside the weights by
+    tools/convert_quality_assessment_bespoke.py (read directly from the real
+    ANTsPyNet .h5's own model_config JSON at conversion time); falls back to
+    _QA_FALLBACK_KWARGS for a bare state_dict .pt that doesn't carry this
+    metadata."""
+    loaded = torch.load(weights_file_name, map_location="cpu", weights_only=True)
+    if isinstance(loaded, dict) and "state_dict" in loaded and isinstance(loaded["state_dict"], dict):
+        kwargs = loaded.get("architecture_kwargs")
+        if kwargs is None:
+            kwargs = dict(_QA_FALLBACK_KWARGS)
+        return loaded["state_dict"], kwargs
+    return loaded, dict(_QA_FALLBACK_KWARGS)
 
 
 def random_mask(x, n):
@@ -84,11 +121,10 @@ def random_mask(x, n):
     return xnew
 
 
-def _default_qa_resnet_model(number_of_outputs=2, architecture_kwargs=None, device=None):
+def _default_qa_resnet_model(architecture_kwargs=None, device=None):
     from ..architectures import create_resnet_model_2d
 
-    config = dict(input_channel_size=3, number_of_outputs=number_of_outputs,
-                  mode="regression")
+    config = dict(_QA_FALLBACK_KWARGS)
     config.update(architecture_kwargs or {})
     model = create_resnet_model_2d(**config)
     model.eval()
@@ -223,12 +259,13 @@ def tid_neural_image_assessment(image,
         if verbose:
             print("Neural QA:  retrieving model and weights.")
 
-        number_of_outputs = 2
         weights_file_name = get_pretrained_network(which_model + "_pytorch",
             target_file_name=which_model + "_pytorch.pt")
-        tid_model = _default_qa_resnet_model(number_of_outputs=number_of_outputs,
-            architecture_kwargs=architecture_kwargs, device=device)
-        tid_model.load_state_dict(_load_state_dict(weights_file_name), strict=True)
+        state_dict, config = _load_state_dict_and_kwargs(weights_file_name)
+        config = dict(config)
+        config.update(architecture_kwargs or {})
+        tid_model = _default_qa_resnet_model(architecture_kwargs=config, device=device)
+        tid_model.load_state_dict(state_dict, strict=True)
         tid_model.eval()
 
     def predict(batch_X):

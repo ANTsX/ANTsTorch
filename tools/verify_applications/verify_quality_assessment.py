@@ -1,22 +1,24 @@
 """
 Verify antstorch.tid_neural_image_assessment on real data.
 
-IMPORTANT -- unlike every other script in this folder, this one does NOT
-exercise real trained weights: no tidsQualityAssessment/koniqMS* weights
-exist to convert, because no explicit ResNet architecture-constructor for
-those models exists anywhere in ANTsPyNet to convert them against (see the
-module-level confidence note at the top of
-antstorch/utilities/quality_assessment.py, and the project's gap-analysis
-doc).
+Updated 2026-08-23: unlike when this script was first written, real weights
+CAN now exist for these models -- koniqMS3.h5's embedded model_config JSON
+confirmed the ResNet architecture antstorch already assumed (see the
+confidence note at the top of antstorch/utilities/quality_assessment.py and
+tools/convert_quality_assessment_bespoke.py). This script now tries the
+real built-in path first (which_model="koniqMS3", the one file whose
+architecture has actually been confirmed against a real model_config), and
+falls back to the untrained-placeholder smoke test if the weights haven't
+been converted yet on this machine.
 
-Instead this smoke-tests the documented work-around: passing an
-already-built torch.nn.Module directly via `which_model`, which is the
-recommended way to sidestep the architecture uncertainty. The model built
-here is randomly initialized (untrained), so the resulting MOS numbers are
-MEANINGLESS as quality scores -- this only confirms the real code path
-(patch/global extraction, batching, prediction, reconstruction) runs
-end-to-end on a real image without crashing. patch_size="global" is used to
-keep this fast (no patch extraction/reconstruction).
+If the real path succeeds, the printed MOS/sharpness numbers are genuine
+model output (for whatever that's worth pointed at a T1 slice rather than
+a natural photograph -- koniqMS3 was trained on photographic MOS data, not
+medical images, so don't read anything into the actual score). If it falls
+back, the numbers are MEANINGLESS (random weights) and only confirm the
+real code path (patch/global extraction, batching, prediction,
+reconstruction) runs end-to-end without crashing. patch_size="global" is
+used in both cases to keep this fast.
 """
 import ants
 import antstorch
@@ -30,12 +32,19 @@ def main():
     t1 = ants.image_read(t1_path)
     image_2d = middle_slice(t1, axis=2)
 
-    # Untrained stand-in model -- see module docstring above.
-    model = _default_qa_resnet_model(number_of_outputs=2)
+    try:
+        result = antstorch.tid_neural_image_assessment(
+            image_2d, which_model="koniqMS3", patch_size="global", verbose=True
+        )
+        print("Used real converted koniqMS3 weights.")
+    except ValueError as e:
+        print(f"koniqMS3_pytorch not converted yet ({e}); "
+              "falling back to an untrained placeholder model -- see module docstring.")
+        model = _default_qa_resnet_model()
+        result = antstorch.tid_neural_image_assessment(
+            image_2d, which_model=model, patch_size="global", verbose=True
+        )
 
-    result = antstorch.tid_neural_image_assessment(
-        image_2d, which_model=model, patch_size="global", verbose=True
-    )
     summarize(result)
     return result
 

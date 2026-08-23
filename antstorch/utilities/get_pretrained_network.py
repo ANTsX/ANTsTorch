@@ -120,35 +120,30 @@ def get_pretrained_network(file_id: Optional[str] = None,
             "wmh_shiva_t1_flair_2_pytorch": "https://ndownloader.figshare.com/files/67759836",
             "wmh_shiva_t1_flair_3_pytorch": "https://ndownloader.figshare.com/files/67759845",
             "wmh_shiva_t1_flair_4_pytorch": "https://ndownloader.figshare.com/files/67759848",
-            # mri_super_resolution (SIQ DBPN models, https://github.com/stnava/siq) --
-            # not yet converted; ANTsPyNet-side figshare file ids noted for reference
-            # when a bespoke convert_mri_super_resolution.py is written.
-            "sig_smallshort_train_1x1x2_1chan_featgraderL6_best_mdl_pytorch": "",  # figshare 49339837
-            "sig_smallshort_train_1x1x2_1chan_featvggL6_best_mdl_pytorch": "",  # figshare 49339840
-            "sig_smallshort_train_1x1x3_1chan_featgraderL6_best_mdl_pytorch": "",  # figshare 49339843
-            "sig_smallshort_train_1x1x3_1chan_featvggL6_best_mdl_pytorch": "",  # figshare 49339846
-            "sig_smallshort_train_1x1x4_1chan_featgraderL6_best_mdl_pytorch": "",  # figshare 49339849
-            "sig_smallshort_train_1x1x4_1chan_featvggL6_best_mdl_pytorch": "",  # figshare 49339852
-            "sig_smallshort_train_1x1x6_1chan_featvggL6_best_mdl_pytorch": "",  # figshare 49339855
-            "sig_smallshort_train_2x2x2_1chan_featgraderL6_best_mdl_pytorch": "",  # figshare 49339858
-            "sig_smallshort_train_2x2x2_1chan_featvggL6_best_mdl_pytorch": "",  # figshare 49339861
-            "sig_smallshort_train_2x2x4_1chan_featgraderL6_best_mdl_pytorch": "",  # figshare 49339867
-            "sig_smallshort_train_2x2x4_1chan_featvggL6_best_mdl_pytorch": "",  # figshare 49339864
-            # hippmapp3r_segmentation, hypothalamus_segmentation,
-            # claustrum_segmentation, quality_assessment -- not yet converted.
-            "hippMapp3rInitial_pytorch": "",
-            "hippMapp3rRefine_pytorch": "",
-            "hypothalamus_pytorch": "",
-            "claustrum_axial_0_pytorch": "",
-            "claustrum_axial_1_pytorch": "",
-            "claustrum_axial_2_pytorch": "",
-            "claustrum_coronal_0_pytorch": "",
-            "claustrum_coronal_1_pytorch": "",
-            "claustrum_coronal_2_pytorch": "",
-            "tidsQualityAssessment_pytorch": "",
-            "koniqMS_pytorch": "",
-            "koniqMS2_pytorch": "",
-            "koniqMS3_pytorch": "",
+            "sig_smallshort_train_1x1x2_1chan_featgraderL6_best_mdl_pytorch": "https://ndownloader.figshare.com/files/67761963",
+            "sig_smallshort_train_1x1x2_1chan_featvggL6_best_mdl_pytorch": "https://ndownloader.figshare.com/files/67761855",  
+            "sig_smallshort_train_1x1x3_1chan_featgraderL6_best_mdl_pytorch": "https://ndownloader.figshare.com/files/67761966",
+            "sig_smallshort_train_1x1x3_1chan_featvggL6_best_mdl_pytorch": "https://ndownloader.figshare.com/files/67761969", 
+            "sig_smallshort_train_1x1x4_1chan_featgraderL6_best_mdl_pytorch": "https://ndownloader.figshare.com/files/67761972", 
+            "sig_smallshort_train_1x1x4_1chan_featvggL6_best_mdl_pytorch": "https://ndownloader.figshare.com/files/67761975", 
+            "sig_smallshort_train_1x1x6_1chan_featvggL6_best_mdl_pytorch": "https://ndownloader.figshare.com/files/67761978", 
+            "sig_smallshort_train_2x2x2_1chan_featgraderL6_best_mdl_pytorch": "https://ndownloader.figshare.com/files/67761984", 
+            "sig_smallshort_train_2x2x2_1chan_featvggL6_best_mdl_pytorch": "https://ndownloader.figshare.com/files/67761987",  # 
+            "sig_smallshort_train_2x2x4_1chan_featgraderL6_best_mdl_pytorch": "https://ndownloader.figshare.com/files/67761990", 
+            "sig_smallshort_train_2x2x4_1chan_featvggL6_best_mdl_pytorch": "https://ndownloader.figshare.com/files/67761993", 
+            "hippMapp3rInitial_pytorch": "https://ndownloader.figshare.com/files/67761933",
+            "hippMapp3rRefine_pytorch": "https://ndownloader.figshare.com/files/67761939",
+            "hypothalamus_pytorch": "https://ndownloader.figshare.com/files/67761942",
+            "claustrum_axial_0_pytorch": "https://ndownloader.figshare.com/files/67761945",
+            "claustrum_axial_1_pytorch": "https://ndownloader.figshare.com/files/67761948",
+            "claustrum_axial_2_pytorch": "https://ndownloader.figshare.com/files/67761951",
+            "claustrum_coronal_0_pytorch": "https://ndownloader.figshare.com/files/67761954",
+            "claustrum_coronal_1_pytorch": "https://ndownloader.figshare.com/files/67761957",
+            "claustrum_coronal_2_pytorch": "https://ndownloader.figshare.com/files/67761960",
+            "tidsQualityAssessment_pytorch": "https://ndownloader.figshare.com/files/67762350",
+            "koniqMS_pytorch": "https://ndownloader.figshare.com/files/67762356",
+            "koniqMS2_pytorch": "https://ndownloader.figshare.com/files/67762359",
+            "koniqMS3_pytorch": "https://ndownloader.figshare.com/files/67762362",
         }
         return(switcher.get(argument, None))
 

@@ -5,12 +5,15 @@ download_antspynet_h5_weights.py
 Batch/parallel downloader for the *original* ANTsPyNet Keras `.h5` weight
 files (lung_extraction, lung_segmentation, mouse.py,
 white_matter_hyperintensity_segmentation, hippmapp3r_segmentation/
-hypothalamus_segmentation/claustrum_segmentation, and -- added 2026-08-22 --
-mri_super_resolution.py's SIQ DBPN models) -- the inputs that
-tools/convert_wmh_bespoke.py, tools/convert_lung_mouse_bespoke.py,
+hypothalamus_segmentation/claustrum_segmentation, mri_super_resolution.py's
+SIQ DBPN models -- added 2026-08-22 -- and, added 2026-08-23,
+quality_assessment.py's tidsQualityAssessment/koniqMS* models) -- the
+inputs that tools/convert_wmh_bespoke.py, tools/convert_lung_mouse_bespoke.py,
 tools/convert_hippmapp3r_hypothalamus_claustrum_bespoke.py, and
 tools/convert_mri_super_resolution_bespoke.py read from
-`~/.keras/ANTsXNet/` to produce the ANTsTorch `_pytorch.pt` files.
+`~/.keras/ANTsXNet/` to produce the ANTsTorch `_pytorch.pt` files. (No
+dedicated converter exists yet for quality_assessment -- see the manifest
+entry below for why downloading these 4 files is still useful.)
 
 Figshare does not offer FTP access -- every one of these files is served
 over plain HTTPS from a fixed `ndownloader.figshare.com/files/<id>` URL
@@ -124,6 +127,21 @@ MANIFEST = {
     "sig_smallshort_train_2x2x2_1chan_featvggL6_best_mdl": 49339861,
     "sig_smallshort_train_2x2x4_1chan_featgraderL6_best_mdl": 49339867,
     "sig_smallshort_train_2x2x4_1chan_featvggL6_best_mdl": 49339864,
+
+    # -- quality_assessment.py (tid_neural_image_assessment) (added 2026-08-23) --
+    # These DO have real figshare URLs in ANTsPyNet's own get_pretrained_network.py
+    # (confirmed by the same double-checked-against-source method as above) --
+    # not "cache-only" as previously assumed. koniqMS3.h5's embedded model_config
+    # JSON confirmed the real architecture (a standard ResNet-50, exactly matching
+    # antstorch's already-ported create_resnet_model_2d defaults) the same way it
+    # did for the SIQ DBPN models used by mri_super_resolution -- see
+    # tools/convert_quality_assessment_bespoke.py, now a real dedicated converter
+    # for these 4 ids (confirmed against koniqMS3 only so far; the other 3 are
+    # presumed, not yet independently verified, to share the same architecture).
+    "tidsQualityAssessment": 35295391,
+    "koniqMS": 35295403,
+    "koniqMS2": 35295397,
+    "koniqMS3": 25474847,
 }
 
 # Ids used by convert_lung_mouse_bespoke.py that have NO entry in ANTsPyNet's

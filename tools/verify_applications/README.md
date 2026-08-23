@@ -46,8 +46,10 @@ summary of the returned image(s). A non-zero exit code means it raised.
   `verify_hypothalamus_segmentation.py`, `verify_claustrum_segmentation.py`,
   `verify_quality_assessment.py`) reuse the same real T1/FLAIR pair as the
   white-matter-hyperintensity scripts (only T1 is needed for the first
-  three). `verify_quality_assessment.py` is a special case -- see its
-  docstring and the "Weights status" note below.
+  three). `verify_quality_assessment.py` was updated 2026-08-23 (see its
+  docstring and the "Weights status" note below) to try real converted
+  weights first, falling back to an untrained placeholder only if they
+  haven't been converted yet.
 - `verify_mri_super_resolution.py` (added 2026-08-22, after the SIQ DBPN
   architecture correction and `convert_mri_super_resolution_bespoke.py`)
   also reuses the same real T1. It runs with the function's defaults
@@ -55,18 +57,22 @@ summary of the returned image(s). A non-zero exit code means it raised.
   why this is the least-verified script in the folder (new architecture,
   new converter, never yet run against a real SIQ `.h5`).
 
-## Weights status (as of 2026-08-22)
+## Weights status (as of 2026-08-23)
 
-11 of the 30 scripts should work out of the box, using weights already
-converted and delivered to `~/.antstorch/` earlier this session. Most of
-the rest need weights that are either not yet converted (run
-`tools/convert_wmh_bespoke.py` locally -- see the project's gap-analysis
-doc for the exact command) or whose source `.h5` was never located in
-`~/.keras/ANTsXNet/` at all. `verify_quality_assessment.py` is different
-again: there is no known architecture to convert real weights *against* in
-the first place (see its docstring) -- it will always run with an
-untrained placeholder model until that's resolved, not merely "fail until
-weights are converted".
+12 of the 30 scripts should work out of the box, using weights already
+converted and delivered to `~/.antstorch/` earlier this session (11 from
+2026-08-22, plus `sig_smallshort_train_1x1x2_1chan_featvggL6_best_mdl`
+converted and uploaded 2026-08-22 evening). Most of the rest need weights
+that are either not yet converted (run the relevant `tools/convert_*_bespoke.py`
+locally -- see the project's gap-analysis doc for the exact commands) or
+whose source `.h5` was never located in `~/.keras/ANTsXNet/` at all.
+`verify_quality_assessment.py` no longer needs a special case: as of
+2026-08-23 the real ResNet-50 architecture behind
+`tidsQualityAssessment`/`koniqMS`/`koniqMS2`/`koniqMS3` was confirmed
+(see `tools/convert_quality_assessment_bespoke.py`), so it now behaves
+like any other `⏳` script for `koniqMS3` -- it just also has a documented
+fallback (untrained placeholder model) if the weights aren't converted
+yet, so it never hard-fails.
 
 | Script | Needs | Status |
 |---|---|---|
@@ -98,7 +104,7 @@ weights are converted".
 | `verify_hippmapp3r_segmentation.py` | `hippMapp3rInitial_pytorch` + `hippMapp3rRefine_pytorch` | ⏳ never converted |
 | `verify_hypothalamus_segmentation.py` | `hypothalamus_pytorch` | ⏳ never converted |
 | `verify_claustrum_segmentation.py` | `claustrum_axial_0_pytorch` + `claustrum_coronal_0_pytorch` | ⏳ never converted |
-| `verify_quality_assessment.py` | none (uses an untrained placeholder model on purpose) | ⚠️ runs, but output is not meaningful -- see docstring |
+| `verify_quality_assessment.py` | `koniqMS3_pytorch` (falls back to an untrained placeholder if absent) | ⏳ run `convert_quality_assessment_bespoke.py --only koniqMS3` -- **architecture confirmed 2026-08-23, never yet converted against the real `.h5`, see docstring** |
 | `verify_mri_super_resolution.py` | `sig_smallshort_train_1x1x2_1chan_featvggL6_best_mdl_pytorch` | ⏳ run `convert_mri_super_resolution_bespoke.py` -- **never tested against a real SIQ `.h5`, see docstring** |
 
 A script marked "⏳" will fail immediately at the weight-loading step with
@@ -106,6 +112,8 @@ a clear error from `get_pretrained_network` (no cached weights, no
 download URL registered) -- that's expected and not a bug in the script;
 it's exactly the gap the gap-analysis doc already tracks. Re-run it once
 the corresponding weights exist in `~/.antstorch/`. `verify_quality_assessment.py`
-is the one script marked "⚠️" instead: it will run to completion today, but
-against an untrained model, so a passing run confirms only that the code
-path works -- not that the output means anything (see its docstring).
+is the one exception to "fails immediately": it catches that exact error
+and falls back to an untrained placeholder model instead of failing, so a
+passing run before conversion confirms only that the code path works --
+not that the output means anything (see its docstring). After conversion
+it uses the real weights and a passing run means what it says.
