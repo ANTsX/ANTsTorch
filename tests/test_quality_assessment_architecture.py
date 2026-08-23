@@ -80,9 +80,12 @@ class Test_default_qa_resnet_model(unittest.TestCase):
         pass
 
     def test_forward_shape_and_finite(self):
+        # _default_qa_resnet_model() takes a single architecture_kwargs dict
+        # (mirrors mri_super_resolution.py's pattern, since 2026-08-23) --
+        # number_of_outputs goes inside it now, not as a separate top-level
+        # kwarg.
         model = _default_qa_resnet_model(
-            number_of_outputs=2,
-            architecture_kwargs=dict(layers=(1, 2), residual_block_schedule=(1, 1),
+            architecture_kwargs=dict(number_of_outputs=2, layers=(1, 2), residual_block_schedule=(1, 1),
                                       lowest_resolution=8),
         ).to(DEVICE)
 
