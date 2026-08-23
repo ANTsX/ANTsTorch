@@ -335,8 +335,18 @@ def tid_neural_image_assessment(image,
             del not_padded_image_size[dimensions_to_predict[d]]
             newsize = [number_of_channels, padded_image_size[dimensions_to_predict[d]]] + not_padded_image_size
             batchX = np.zeros(newsize, dtype=np.float32)[np.newaxis, ...]
+            # NOTE (2026-08-23, same bug class as the patchwise branch fixed
+            # just below in this file): evaluation_image.numpy() keeps the
+            # image's original axis order (D0,D1,D2), but `newsize` expects
+            # dimensions_to_predict[d]'s axis moved to the front (with the
+            # remaining axes in their original relative order). Only
+            # dimensions_to_predict[d]==0 (the default) left this as a
+            # silent identity before; ==1 or ==2 would raise the same
+            # broadcast ValueError reported for the patchwise branch, for
+            # any non-default `dimensions_to_predict`.
+            reordered_image = np.moveaxis(evaluation_image.numpy(), dimensions_to_predict[d], 0)
             for k in range(number_of_channels):
-                batchX[0, k, :, :, :] = evaluation_image.numpy()
+                batchX[0, k, :, :, :] = reordered_image
             predicted_data = predict(batchX)
             mos_mean += predicted_data[0, 0]
             mos_standard_deviation += predicted_data[0, 1]
@@ -374,9 +384,22 @@ def tid_neural_image_assessment(image,
 
     for d in range(len(dimensions_to_predict)):
         if image.dimension == 3:
+            # NOTE (2026-08-23 bug fix): ANTsPyNet's original permutations
+            # here -- (0,1,2), (0,2,1), (1,2,0) -- move the channel axis to
+            # the LAST position, because its batchX is channels-last
+            # (len(patches), patch, patch, channels). antstorch's batchX is
+            # channels-FIRST (len(patches), channels, patch, patch) (see the
+            # 2-D branch just below, which already writes channel-major), so
+            # the permutation must instead move the channel axis to the
+            # FIRST position -- these 3 replace the copied-verbatim originals
+            # that caused a real broadcast failure (patch_image shape
+            # (101,101,3) into batchX slot shape (3,101,101)):
+            #   dimensions_to_predict[d]==0: patch_image is (patch,patch,chan)  -> (2,0,1)
+            #   dimensions_to_predict[d]==1: patch_image is (patch,chan,patch)  -> (1,0,2)
+            #   dimensions_to_predict[d]==2: patch_image is (chan,patch,patch)  -> (0,1,2) (already channels-first)
+            permutations.append((2, 0, 1))
+            permutations.append((1, 0, 2))
             permutations.append((0, 1, 2))
-            permutations.append((0, 2, 1))
-            permutations.append((1, 2, 0))
 
             if dimensions_to_predict[d] == 0:
                 patch_size_vector = (patch_size, patch_size, number_of_channels)
