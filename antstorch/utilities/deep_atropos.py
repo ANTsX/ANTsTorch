@@ -219,9 +219,20 @@ def deep_atropos(
                 batchX[idx, :, :, :] = patches[h, :, :, :]
                 idx += 1
 
-                with torch.no_grad():
-                    xt = torch.from_numpy(batchX[None, ...]).to(device)  # [1,C,D,H,W]
-                    yt = model(xt).squeeze(0).permute(1, 2, 3, 0).cpu().numpy()  # [C_out,D,H,W]
+            # NOTE (2026-08-23 perf fix): this forward pass was previously
+            # nested one level too deep, inside the priors loop above -- so
+            # it ran once per prior (6x) per octant instead of once per
+            # octant, with the first 5 calls seeing a still-partially-filled
+            # batchX (only the modalities + priors filled so far). The
+            # result was still numerically correct (only the LAST call, once
+            # all 6 priors were filled, is ever kept -- `yt` is overwritten
+            # every iteration and only read after the loop), but it wasted
+            # ~6x the compute (48 forward passes instead of 8 across the 8
+            # octants). Dedented so it now runs exactly once per octant,
+            # after batchX is fully populated.
+            with torch.no_grad():
+                xt = torch.from_numpy(batchX[None, ...]).to(device)  # [1,C,D,H,W]
+                yt = model(xt).squeeze(0).permute(1, 2, 3, 0).cpu().numpy()  # [C_out,D,H,W]
 
             predicted_data[h, ...] = yt
 
