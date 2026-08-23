@@ -65,6 +65,11 @@ ANTsTorch supports several applications (ANTsPyNet weights):
 - Lung segmentation (El Bicho airway/vessel/lobe segmentation, pulmonary artery, pulmonary airway)
 - Mouse brain extraction, parcellation, cortical thickness, and histology (brain mask, hemisphere/coronal mask, cerebellum mask, histology super-resolution)
 - White matter hyperintensity segmentation (SYSU-Media, HyperMapp3r, ANTsXNet WMH, SHIVA PVS/WMH ensembles)
+- MRI super-resolution (deep back-projection network, anisotropic 2x-6x)
+- Hippocampus segmentation (HippMapp3r, 2-stage coarse/refine network)
+- Hypothalamus and subunit segmentation
+- Claustrum segmentation (axial/coronal multi-view ensemble)
+- Neural image quality assessment (patchwise and global MOS/sharpness scoring)
 
 Other ANTsPyNet ports are a WIP.  
 

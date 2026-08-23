@@ -31,11 +31,20 @@ from .mouse import mouse_histology_hemispherical_coronal_mask
 from .mouse import mouse_histology_cerebellum_mask
 from .mouse import mouse_histology_super_resolution
 
+from .super_resolution_utilities import apply_super_resolution_model_to_image
+from .mri_super_resolution import mri_super_resolution
+
 from .white_matter_hyperintensity_segmentation import sysu_media_wmh_segmentation
 from .white_matter_hyperintensity_segmentation import hypermapp3r_segmentation
 from .white_matter_hyperintensity_segmentation import wmh_segmentation
 from .white_matter_hyperintensity_segmentation import shiva_pvs_segmentation
 from .white_matter_hyperintensity_segmentation import shiva_wmh_segmentation
+
+from .hippmapp3r_segmentation import hippmapp3r_segmentation
+from .hypothalamus_segmentation import hypothalamus_segmentation
+from .claustrum_segmentation import claustrum_segmentation
+from .quality_assessment import tid_neural_image_assessment
+from .quality_assessment import random_mask
 
 from .dataframe_dataset import MultiViewDataFrameDataset, transform_tabular_numeric
 from .image_dataset import ImageDataset, augment_image_modalities
