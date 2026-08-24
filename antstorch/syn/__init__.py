@@ -12,6 +12,14 @@ rather than files on disk) plus the ``ants.ANTsImage`` <-> tensor bridge in
 the affine initialization stage reuses/extends
 :func:`antstorch.bspline_flows.affine_registration.affine_registration`
 rather than porting ``syntx``'s separate ``robust_affine`` module.
+Phase 1 of the syntx → ANTsTorch integration exposes only the shared
+low-level primitives in :mod:`antstorch.syn.core` (grid sampling,
+smoothing/regularization, similarity losses, Jacobian computation, field
+inversion, and CFL-bounded optimizers). The top-level registration
+entry point (``syn_registration``, mirroring ``ants.registration``'s
+``warpedmovout`` / ``fwdtransforms`` / ``invtransforms`` output
+convention) and the ``robust_affine`` initializer are planned for a later
+phase and are not yet available here.
 
 Exports are explicit and non-wildcard: ``antstorch/__init__.py`` does
 ``from .bspline_flows import *``, and this package must never silently
@@ -44,4 +52,7 @@ __all__ = [
     'metadata_tensors',
     'metadata_tensors_from_dict',
     'flip_affine_xyz_to_zyx',
+
+__all__ = [
+    'core',
 ]
