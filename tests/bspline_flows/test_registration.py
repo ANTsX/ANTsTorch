@@ -4,6 +4,7 @@ import torch
 from antstorch.bspline_flows import (
     BSplineDomain,
     PhysicalGradientDescent,
+    affine_displacement_field,
     compose_displacements,
     registration,
     warp_image,
@@ -93,6 +94,98 @@ def test_forward_inverse_composition_is_near_identity():
         result["fwdtransforms"], result["invtransforms"], domain
     )
     assert composition.abs().max() < 2e-3
+
+
+def test_registration_initial_affine_with_zero_svf_matches_affine_alone():
+    # With mesh_size=1, iterations=0 the coefficients (and hence the SVF)
+    # are exactly zero, so the total transform must reduce to initial_affine.
+    domain = BSplineDomain((10, 9), spacing=(1.0, 1.0))
+    moving = _blob(domain, dtype=torch.double)
+    matrix = torch.eye(2, dtype=torch.double)
+    translation = torch.tensor([1.5, -0.5], dtype=torch.double)
+    expected_field = affine_displacement_field(matrix, translation, domain, moving)
+    fixed = warp_image(moving, expected_field, domain, padding_mode="border")
+    result = registration(
+        fixed,
+        moving,
+        domain,
+        initial_affine=(matrix, translation),
+        iterations=0,
+        mesh_size=1,
+        padding_mode="border",
+    )
+    torch.testing.assert_close(result["fwdtransforms"], expected_field, rtol=0, atol=1e-10)
+    torch.testing.assert_close(
+        result["warpedmovout"],
+        warp_image(moving, expected_field, domain, padding_mode="border"),
+        rtol=0,
+        atol=1e-10,
+    )
+    assert result["loss"].item() == pytest.approx(0.0, abs=1e-10)
+
+
+def test_forward_inverse_composition_with_initial_affine_is_near_identity():
+    torch.manual_seed(7)
+    domain = BSplineDomain((24, 22))
+    coefficients = torch.randn(1, 2, 5, 5) * 0.02
+    matrix = torch.tensor([[1.05, 0.03], [-0.02, 0.97]])
+    translation = torch.tensor([0.4, -0.3])
+    result = registration(
+        _blob(domain),
+        _blob(domain),
+        domain,
+        initial_coefficients=coefficients,
+        initial_affine=(matrix, translation),
+        iterations=0,
+        squaring_steps=5,
+    )
+    composition = compose_displacements(result["fwdtransforms"], result["invtransforms"], domain)
+    # A non-trivial affine maps points near the domain boundary outside the
+    # domain; compose_displacements then samples with padding_mode="border",
+    # which is an approximation there by construction (not specific to this
+    # feature — the same clamping applies to any dense field composition).
+    # Check the interior, away from that boundary effect.
+    interior = composition[..., 2:-2, 2:-2]
+    assert interior.abs().max() < 2e-3
+
+
+def test_registration_initial_affine_accepts_unbatched_and_batched_forms():
+    domain = BSplineDomain((8, 7))
+    fixed = torch.zeros(2, 1, *domain.torch_size)
+    moving = torch.zeros(2, 1, *domain.torch_size)
+    unbatched = registration(
+        fixed, moving, domain, initial_affine=(torch.eye(2), torch.zeros(2)), iterations=0
+    )
+    batched = registration(
+        fixed,
+        moving,
+        domain,
+        initial_affine=(torch.eye(2).unsqueeze(0).repeat(2, 1, 1), torch.zeros(2, 2)),
+        iterations=0,
+    )
+    torch.testing.assert_close(unbatched["fwdtransforms"], batched["fwdtransforms"])
+
+
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"initial_affine": (torch.zeros(3, 3), torch.zeros(2))}, "initial_affine matrix"),
+        ({"initial_affine": (torch.zeros(2, 2), torch.zeros(3))}, "initial_affine translation"),
+        ({"initial_affine": (torch.zeros(2, 2, dtype=torch.double), torch.zeros(2))}, "initial_affine"),
+    ],
+)
+def test_registration_initial_affine_validation(kwargs, match):
+    domain = BSplineDomain((8, 7))
+    image = _blob(domain)
+    with pytest.raises(ValueError, match=match):
+        registration(image, image, domain, **kwargs)
+
+
+def test_registration_rejects_non_tuple_initial_affine():
+    domain = BSplineDomain((8, 7))
+    image = _blob(domain)
+    with pytest.raises(TypeError, match="initial_affine"):
+        registration(image, image, domain, initial_affine=[torch.eye(2), torch.zeros(2)])
 
 
 def test_distinct_moving_domain_and_batch_are_supported():

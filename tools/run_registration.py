@@ -16,6 +16,13 @@ Use the local ANTs neighborhood-correlation metric::
 
     PYTHONPATH=. python tools/run_registration.py \
         --similarity ants_ncc --neighborhood-radius 2 --verbose
+
+Run an affine pre-registration before the B-spline SVF (bspline_flows has no
+affine/rigid initialization of its own; see
+``antstorch.bspline_flows.affine_registration``)::
+
+    PYTHONPATH=. python tools/run_registration.py \
+        --affine --affine-transform-type Rigid --verbose
 """
 
 import argparse
@@ -27,7 +34,12 @@ import ants
 import numpy as np
 import torch
 
-from antstorch.bspline_flows import BSplineDomain, PhysicalGradientDescent, registration
+from antstorch.bspline_flows import (
+    BSplineDomain,
+    PhysicalGradientDescent,
+    affine_registration,
+    registration,
+)
 
 
 def ants_to_torch(image: ants.ANTsImage, device: torch.device) -> torch.Tensor:
@@ -105,6 +117,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--coefficient-weight", type=float, default=0.0)
     parser.add_argument("--velocity-weight", type=float, default=0.0)
     parser.add_argument("--bending-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--affine",
+        action="store_true",
+        help="Run an affine pre-registration (antstorch.bspline_flows.affine_registration) "
+        "before the B-spline SVF, and pass its result as registration()'s initial_affine",
+    )
+    parser.add_argument(
+        "--affine-transform-type",
+        choices=("Translation", "Rigid", "Similarity", "Affine"),
+        default="Affine",
+        help="Linear-transform hierarchy for the affine pre-registration (default: Affine)",
+    )
+    parser.add_argument("--affine-similarity", choices=("mse", "ncc", "ants_ncc"), default="mse")
+    parser.add_argument("--affine-neighborhood-radius", type=int, default=4)
+    parser.add_argument("--affine-shrink-factors", type=int, nargs="+", default=(4, 2, 1))
+    parser.add_argument("--affine-smoothing-sigmas", type=float, nargs="+", default=(2.0, 1.0, 0.0))
+    parser.add_argument("--affine-iterations", type=int, nargs="+", default=(100, 75, 50))
+    parser.add_argument("--affine-learning-rate", type=float, nargs="+", default=(0.05, 0.03, 0.02))
+    parser.add_argument(
+        "--affine-single-start",
+        action="store_true",
+        help="Disable the multi-start seed-rotation search (start from identity only)",
+    )
+    parser.add_argument(
+        "--affine-no-center-of-mass-init",
+        action="store_true",
+        help="Disable center-of-mass translation initialization for the affine fit",
+    )
     parser.add_argument("--verbose", action="store_true", help="Print per-level optimization progress")
     return parser.parse_args()
 
@@ -124,13 +164,47 @@ def main() -> None:
     ):
         if len(values) != level_count:
             raise ValueError(f"{name} must have one value per shrink factor")
+    if args.affine:
+        affine_level_count = len(args.affine_shrink_factors)
+        for name, values in (
+            ("--affine-smoothing-sigmas", args.affine_smoothing_sigmas),
+            ("--affine-iterations", args.affine_iterations),
+            ("--affine-learning-rate", args.affine_learning_rate),
+        ):
+            if len(values) != affine_level_count:
+                raise ValueError(f"{name} must have one value per affine shrink factor")
 
-    fixed_ants = ants.image_read(ants.get_ants_data("r30")).clone("float")
-    moving_ants = ants.image_read(ants.get_ants_data("r27")).clone("float")
+    fixed_ants = ants.image_read(ants.get_ants_data("r16")).clone("float")
+    moving_ants = ants.image_read(ants.get_ants_data("r64")).clone("float")
     fixed = ants_to_torch(fixed_ants, device)
     moving = ants_to_torch(moving_ants, device)
     fixed_domain = image_domain(fixed_ants)
     moving_domain = image_domain(moving_ants)
+
+    affine_result = None
+    initial_affine = None
+    affine_elapsed = 0.0
+    if args.affine:
+        affine_start = time.perf_counter()
+        affine_result = affine_registration(
+            fixed=fixed,
+            moving=moving,
+            fixed_domain=fixed_domain,
+            moving_domain=moving_domain,
+            transform_type=args.affine_transform_type,
+            similarity=args.affine_similarity,
+            neighborhood_radius=args.affine_neighborhood_radius,
+            shrink_factors=tuple(args.affine_shrink_factors),
+            smoothing_sigmas=tuple(args.affine_smoothing_sigmas),
+            iterations=tuple(args.affine_iterations),
+            learning_rate=tuple(args.affine_learning_rate),
+            multi_start=not args.affine_single_start,
+            center_of_mass_init=not args.affine_no_center_of_mass_init,
+            padding_mode="border",
+            verbose=args.verbose,
+        )
+        affine_elapsed = time.perf_counter() - affine_start
+        initial_affine = (affine_result["matrix"], affine_result["translation"])
 
     start = time.perf_counter()
     optimizer = (
@@ -159,6 +233,7 @@ def main() -> None:
         coefficient_weight=args.coefficient_weight,
         velocity_weight=args.velocity_weight,
         bending_weight=args.bending_weight,
+        initial_affine=initial_affine,
         padding_mode="border",
         stationary_boundary=True,
         verbose=args.verbose,
@@ -166,11 +241,11 @@ def main() -> None:
     elapsed = time.perf_counter() - start
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    ants.image_write(fixed_ants, str(args.output_dir / "fixed_r30.nii.gz"))
-    ants.image_write(moving_ants, str(args.output_dir / "moving_r27.nii.gz"))
+    ants.image_write(fixed_ants, str(args.output_dir / "fixed_r16.nii.gz"))
+    ants.image_write(moving_ants, str(args.output_dir / "moving_r64.nii.gz"))
     ants.image_write(
         torch_image_to_ants(result["warpedmovout"], fixed_ants),
-        str(args.output_dir / "warped_r27.nii.gz"),
+        str(args.output_dir / "warped_r64.nii.gz"),
     )
     for name, filename in (
         ("velocity", "velocity"),
@@ -185,7 +260,32 @@ def main() -> None:
     with (args.output_dir / "loss_history.json").open("w", encoding="utf-8") as stream:
         json.dump(result["level_loss_history"], stream, indent=2)
 
+    if affine_result is not None:
+        ants.image_write(
+            torch_image_to_ants(affine_result["warpedmovout"], fixed_ants),
+            str(args.output_dir / "affine_warped_r64.nii.gz"),
+        )
+        for name, filename in (
+            ("fwdtransforms", "affine_forward_displacement"),
+            ("invtransforms", "affine_inverse_displacement"),
+        ):
+            ants.image_write(
+                torch_field_to_ants(affine_result[name], fixed_ants),
+                str(args.output_dir / f"{filename}.nii.gz"),
+            )
+        torch.save(
+            {"matrix": affine_result["matrix"].cpu(), "translation": affine_result["translation"].cpu()},
+            args.output_dir / "affine_transform.pt",
+        )
+        with (args.output_dir / "affine_loss_history.json").open("w", encoding="utf-8") as stream:
+            json.dump(affine_result["level_loss_history"], stream, indent=2)
+
     print(f"Registration completed in {elapsed:.2f} seconds on {device}.")
+    if affine_result is not None:
+        print(
+            f"  (preceded by an affine pre-registration: {affine_elapsed:.2f} seconds, "
+            f"transform_type={args.affine_transform_type})"
+        )
     print(f"Final loss: {result['loss'].item():.6g}")
     print(f"Outputs written to: {args.output_dir.resolve()}")
 

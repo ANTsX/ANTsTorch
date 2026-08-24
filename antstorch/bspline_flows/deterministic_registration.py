@@ -14,7 +14,7 @@ from .similarity import (
     normalized_cross_correlation_loss,
     squared_l2_energy,
 )
-from .spatial_transform import jacobian_determinant, warp_image
+from .spatial_transform import compose_displacements, jacobian_determinant, warp_image
 
 
 class DeterministicBSplineRegistration(nn.Module):
@@ -55,9 +55,23 @@ class DeterministicBSplineRegistration(nn.Module):
         self.velocity_weight = float(velocity_weight)
         self.bending_weight = float(bending_weight)
 
-    def transform(self, coefficients: Tensor, moving: Tensor) -> Dict[str, Tensor]:
+    def transform(
+        self,
+        coefficients: Tensor,
+        moving: Tensor,
+        initial_affine_displacement: Optional[Tensor] = None,
+    ) -> Dict[str, Tensor]:
         velocity = self.synthesis(coefficients)
-        displacement = self.exponential(velocity)
+        svf_displacement = self.exponential(velocity)
+        if initial_affine_displacement is None:
+            displacement = svf_displacement
+        else:
+            # Total forward map applies the affine first, then the SVF flow:
+            # F(p) = S(A(p)), so as displacements this is
+            # compose_displacements(affine, svf)(p) = affine(p) + svf(p + affine(p)).
+            displacement = compose_displacements(
+                initial_affine_displacement, svf_displacement, self.fixed_domain
+            )
         warped = warp_image(
             moving,
             displacement,
@@ -65,10 +79,21 @@ class DeterministicBSplineRegistration(nn.Module):
             self.moving_domain,
             padding_mode=self.padding_mode,
         )
-        return {"velocity": velocity, "displacement": displacement, "warped_moving": warped}
+        return {
+            "velocity": velocity,
+            "svf_displacement": svf_displacement,
+            "displacement": displacement,
+            "warped_moving": warped,
+        }
 
-    def forward(self, coefficients: Tensor, moving: Tensor, fixed: Tensor) -> Dict[str, Tensor]:
-        result = self.transform(coefficients, moving)
+    def forward(
+        self,
+        coefficients: Tensor,
+        moving: Tensor,
+        fixed: Tensor,
+        initial_affine_displacement: Optional[Tensor] = None,
+    ) -> Dict[str, Tensor]:
+        result = self.transform(coefficients, moving, initial_affine_displacement)
         if self.similarity == "mse":
             similarity = mean_squared_error(fixed, result["warped_moving"])
         elif self.similarity == "ncc":

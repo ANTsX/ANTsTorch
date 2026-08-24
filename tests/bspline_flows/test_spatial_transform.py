@@ -3,6 +3,7 @@ import torch
 
 from antstorch.bspline_flows import (
     BSplineDomain,
+    affine_displacement_field,
     compose_displacements,
     jacobian_determinant,
     physical_grid,
@@ -74,3 +75,86 @@ def test_jacobian_determinant_and_folding(dimension):
     folding = -2.0 * points
     folding_det = jacobian_determinant(folding, domain)
     assert torch.count_nonzero(folding_det <= 0) == (0 if dimension == 2 else folding_det.numel())
+
+
+def test_affine_displacement_field_identity_is_zero():
+    domain = BSplineDomain((6, 5))
+    reference = torch.zeros(1, 1, 5, 6, dtype=torch.double)
+    matrix = torch.eye(2, dtype=torch.double)
+    translation = torch.zeros(2, dtype=torch.double)
+    field = affine_displacement_field(matrix, translation, domain, reference)
+    assert field.shape == (1, 2, 5, 6)
+    torch.testing.assert_close(field, torch.zeros_like(field), rtol=0, atol=1e-14)
+
+
+def test_affine_displacement_field_constant_translation_matches_manual():
+    domain = BSplineDomain((6, 5), spacing=(1.5, 2.0))
+    reference = torch.zeros(1, 1, 5, 6, dtype=torch.double)
+    matrix = torch.eye(2, dtype=torch.double)
+    translation = torch.tensor([3.0, -1.0], dtype=torch.double)
+    field = affine_displacement_field(matrix, translation, domain, reference)
+    expected = translation.reshape(1, 2, 1, 1).expand(1, 2, 5, 6)
+    torch.testing.assert_close(field, expected, rtol=0, atol=1e-13)
+
+
+def test_affine_displacement_field_matches_physical_grid_formula():
+    domain = BSplineDomain((5, 4), spacing=(1.0, 0.5), origin=(2.0, -3.0))
+    reference = torch.zeros(1, 1, 4, 5, dtype=torch.double)
+    matrix = torch.tensor([[1.2, 0.1], [-0.2, 0.9]], dtype=torch.double)
+    translation = torch.tensor([0.5, -0.25], dtype=torch.double)
+    field = affine_displacement_field(matrix, translation, domain, reference)
+    points = physical_grid(domain, reference).squeeze(0)
+    expected = torch.einsum("ij,j...->i...", matrix, points) + translation.reshape(2, 1, 1) - points
+    torch.testing.assert_close(field, expected.unsqueeze(0), rtol=0, atol=1e-12)
+
+
+def test_affine_displacement_field_broadcasts_unbatched_to_batch():
+    domain = BSplineDomain((5, 4))
+    reference = torch.zeros(3, 1, 4, 5, dtype=torch.double)
+    matrix = torch.eye(2, dtype=torch.double)
+    translation = torch.tensor([1.0, 2.0], dtype=torch.double)
+    field = affine_displacement_field(matrix, translation, domain, reference)
+    assert field.shape == (3, 2, 4, 5)
+    for i in range(3):
+        torch.testing.assert_close(field[i], field[0])
+
+
+def test_affine_displacement_field_matches_batched_matrix_and_translation():
+    domain = BSplineDomain((5, 4))
+    reference = torch.zeros(2, 1, 4, 5, dtype=torch.double)
+    matrix = torch.eye(2, dtype=torch.double).unsqueeze(0).repeat(2, 1, 1)
+    matrix[1] *= 2.0
+    translation = torch.zeros(2, 2, dtype=torch.double)
+    translation[1] = torch.tensor([1.0, -1.0], dtype=torch.double)
+    field = affine_displacement_field(matrix, translation, domain, reference)
+    torch.testing.assert_close(field[0], torch.zeros(2, 4, 5, dtype=torch.double), rtol=0, atol=1e-14)
+    assert not torch.allclose(field[1], torch.zeros_like(field[1]))
+
+
+def test_affine_displacement_field_composes_correctly_with_warp_image():
+    # An affine displacement field, used through warp_image, must reproduce a
+    # direct affine resample: p_moving = matrix @ p_fixed + translation.
+    domain = BSplineDomain((10, 9), spacing=(1.0, 1.0))
+    moving = torch.arange(90, dtype=torch.double).reshape(1, 1, 9, 10)
+    translation = torch.tensor([2.0, 0.0], dtype=torch.double)
+    field = affine_displacement_field(torch.eye(2, dtype=torch.double), translation, domain, moving)
+    warped = warp_image(moving, field, domain, padding_mode="border")
+    index = (torch.arange(10) + 2).clamp(max=9)
+    expected = moving[..., index]
+    torch.testing.assert_close(warped, expected, rtol=0, atol=2e-13)
+
+
+@pytest.mark.parametrize(
+    "matrix_shape,translation_shape",
+    [((2, 3), (2,)), ((3, 3), (2,)), ((2, 2), (3,)), ((2, 2, 2), (3, 2))],
+)
+def test_affine_displacement_field_rejects_bad_shapes(matrix_shape, translation_shape):
+    domain = BSplineDomain((5, 4))
+    reference = torch.zeros(1, 1, 4, 5, dtype=torch.double)
+    with pytest.raises(ValueError):
+        affine_displacement_field(
+            torch.zeros(matrix_shape, dtype=torch.double),
+            torch.zeros(translation_shape, dtype=torch.double),
+            domain,
+            reference,
+        )
