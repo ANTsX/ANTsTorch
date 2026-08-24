@@ -175,7 +175,7 @@ result = registration(
     verbose=True,
 )
 
-warped_r64 = torch_to_ants(result["warped_moving"], r16)
+warped_r64 = torch_to_ants(result["warpedmovout"], r16)
 jacobian = torch_to_ants(result["jacobian_determinant"].unsqueeze(1), r16)
 
 ants.plot(r16, title="Fixed r16")
@@ -198,7 +198,7 @@ transform, and pass that file to `ants.apply_transforms`.
 
 ```python
 r64_seg = ants.threshold_image(r64, "Kmeans", 3)
-forward_warp = torch_field_to_ants(result["forward_displacement"], r16)
+forward_warp = torch_field_to_ants(result["fwdtransforms"], r16)
 forward_warp_filename = "r64_to_r16_forward_warp.nii.gz"
 ants.image_write(forward_warp, forward_warp_filename)
 
@@ -229,13 +229,15 @@ ants.image_write(r16_bias, "r16_antstorch_bias.nii.gz")
 ants.image_write(warped_r64, "r64_to_r16_antstorch.nii.gz")
 ants.image_write(jacobian, "r64_to_r16_jacobian.nii.gz")
 ants.image_write(
-    torch_field_to_ants(result["inverse_displacement"], r16),
+    torch_field_to_ants(result["invtransforms"], r16),
     "r64_to_r16_inverse_warp.nii.gz",
 )
 torch.save(result["coefficients"].cpu(), "r64_to_r16_coefficients.pt")
 ```
 
-The registration result also includes `velocity`, `forward_displacement`,
-`inverse_displacement`, `loss_history`, and `level_loss_history`. Vector fields
-use physical x-y-(z) components even though tensor spatial axes are stored in
-PyTorch-reversed order.
+`warpedmovout`, `fwdtransforms`, and `invtransforms` follow the naming
+convention of `ants.registration` (though here they are in-memory tensors,
+not paths to files on disk). The registration result also includes
+`velocity`, `coefficients`, `loss_history`, and `level_loss_history`. Vector
+fields use physical x-y-(z) components even though tensor spatial axes are
+stored in PyTorch-reversed order.
