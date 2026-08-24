@@ -23,10 +23,10 @@ def test_registration_identity_shapes_and_finite_results(size):
     result = registration(image, image, domain, iterations=0, mesh_size=1, squaring_steps=2)
 
     expected_field = (1, len(size)) + domain.torch_size
-    assert result["warped_moving"].shape == image.shape
+    assert result["warpedmovout"].shape == image.shape
     assert result["velocity"].shape == expected_field
-    assert result["forward_displacement"].shape == expected_field
-    assert result["inverse_displacement"].shape == expected_field
+    assert result["fwdtransforms"].shape == expected_field
+    assert result["invtransforms"].shape == expected_field
     assert result["jacobian_determinant"].shape == (1,) + domain.torch_size
     assert result["loss"].item() == pytest.approx(0.0)
     assert torch.isfinite(result["jacobian_determinant"]).all()
@@ -90,7 +90,7 @@ def test_forward_inverse_composition_is_near_identity():
         squaring_steps=5,
     )
     composition = compose_displacements(
-        result["forward_displacement"], result["inverse_displacement"], domain
+        result["fwdtransforms"], result["invtransforms"], domain
     )
     assert composition.abs().max() < 2e-3
 
@@ -101,7 +101,7 @@ def test_distinct_moving_domain_and_batch_are_supported():
     fixed = torch.zeros(2, 1, *fixed_domain.torch_size)
     moving = torch.zeros(2, 1, *moving_domain.torch_size)
     result = registration(fixed, moving, fixed_domain, moving_domain, iterations=0)
-    assert result["warped_moving"].shape == fixed.shape
+    assert result["warpedmovout"].shape == fixed.shape
     assert result["coefficients"].shape[:2] == (2, 2)
 
 
@@ -120,7 +120,7 @@ def test_multiresolution_refines_lattice_and_reports_each_level():
     # Open cubic lattice refinement: 4 -> 5 -> 7 control points.
     assert result["coefficients"].shape == (1, 2, 7, 7)
     assert result["level_loss_history"] == [[], [], []]
-    assert result["warped_moving"].shape == image.shape
+    assert result["warpedmovout"].shape == image.shape
     assert result["loss"].item() == pytest.approx(0.0)
 
 

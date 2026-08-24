@@ -210,7 +210,23 @@ def registration(
     By default result tensors are detached, and iteration losses are stored as
     Python floats so optimization graphs are not retained. Set
     ``detach_outputs=False`` to retain the graph for the final evaluation only.
-    The inverse displacement is independently computed as ``exp(-velocity)``.
+    The inverse transform is independently computed as ``exp(-velocity)``.
+
+    Returns
+    -------
+    dict
+        ``warpedmovout``, ``fwdtransforms``, and ``invtransforms`` follow the
+        naming convention of ``ants.registration``: the moving image warped
+        onto the fixed grid, the fixed-to-moving displacement field, and the
+        moving-to-fixed displacement field, respectively. Unlike
+        ``ants.registration``, these are in-memory tensors rather than paths
+        to files on disk. The dictionary also carries fields with no
+        ``ants.registration`` equivalent: ``velocity`` (the stationary
+        velocity field), ``coefficients`` (the optimized B-spline control
+        points), ``loss``, ``similarity``, ``coefficient_regularization``,
+        ``velocity_regularization``, ``bending_regularization``,
+        ``jacobian_determinant``, ``loss_history``, and
+        ``level_loss_history``.
     """
     if not isinstance(fixed_domain, BSplineDomain):
         raise TypeError("fixed_domain must be a BSplineDomain")
@@ -424,8 +440,9 @@ def registration(
 
     # The final pyramid level is full resolution by construction.
     result = model(coefficients, moving, fixed)
-    result["forward_displacement"] = result.pop("displacement")
-    result["inverse_displacement"] = model.exponential(-result["velocity"])
+    result["warpedmovout"] = result.pop("warped_moving")
+    result["fwdtransforms"] = result.pop("displacement")
+    result["invtransforms"] = model.exponential(-result["velocity"])
     result["coefficients"] = coefficients
     result["loss_history"] = history if return_loss_history else None
     result["level_loss_history"] = level_history if return_loss_history else None

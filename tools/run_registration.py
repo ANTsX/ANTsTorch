@@ -169,13 +169,17 @@ def main() -> None:
     ants.image_write(fixed_ants, str(args.output_dir / "fixed_r30.nii.gz"))
     ants.image_write(moving_ants, str(args.output_dir / "moving_r27.nii.gz"))
     ants.image_write(
-        torch_image_to_ants(result["warped_moving"], fixed_ants),
+        torch_image_to_ants(result["warpedmovout"], fixed_ants),
         str(args.output_dir / "warped_r27.nii.gz"),
     )
-    for name in ("velocity", "forward_displacement", "inverse_displacement"):
+    for name, filename in (
+        ("velocity", "velocity"),
+        ("fwdtransforms", "forward_displacement"),
+        ("invtransforms", "inverse_displacement"),
+    ):
         ants.image_write(
             torch_field_to_ants(result[name], fixed_ants),
-            str(args.output_dir / f"{name}.nii.gz"),
+            str(args.output_dir / f"{filename}.nii.gz"),
         )
     torch.save(result["coefficients"].cpu(), args.output_dir / "coefficients.pt")
     with (args.output_dir / "loss_history.json").open("w", encoding="utf-8") as stream:
