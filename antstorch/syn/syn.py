@@ -1,11 +1,18 @@
 """Greedy symmetric SyN diffeomorphic registration, ported from ``syntx``'s ``syn.py``.
 
 :func:`syn_registration` mirrors ``ants.registration()``'s calling
-convention (``ants.ANTsImage`` in, ``ants.ANTsImage``/displacement-field out,
-a ``warpedmovout``/``fwdtransforms``/``invtransforms`` result dictionary) but
-every computation stays in memory as PyTorch tensors — no transform is ever
-written to a temporary file, consistent with the in-memory-tensor scope
-already established by :func:`antstorch.bspline_flows.registration.registration`.
+convention (``ants.ANTsImage`` in, a ``warpedmovout``/``fwdtransforms``/
+``invtransforms`` result dictionary out) and, as of Etape 3, its *file*
+convention as well: the affine and dense-SyN components are written
+separately to disk as classic ANTs transform files (``0GenericAffine.mat``,
+``1Warp.nii.gz``, ``1InverseWarp.nii.gz``, under ``outprefix``) and
+``fwdtransforms``/``invtransforms`` are path lists built exactly like
+``ants.registration()``'s own — so the result of this function is a
+drop-in replacement anywhere ``ants.apply_transforms(transformlist=...)`` or
+another ANTsX tool expects file-based transforms. See
+:mod:`antstorch.ants_transform_io` for the exact file-naming and
+list-ordering conventions being matched, and why they matter (the shared
+affine file's automatic ``whichtoinvert`` inference in particular).
 
 Per the project's Etape 2 scope ("Coherent avec l'existant"), the affine
 initialization stage does *not* port ``syntx``'s separate ``robust_affine``
@@ -40,14 +47,15 @@ regularization are relied on for stability instead.
 import math
 from typing import Dict, Optional, Sequence, Tuple, Union
 
+import ants
 import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from ..ants_transform_io import build_transform_lists, default_outprefix, write_affine_transform
 from .bridge import (
     ants_image_metadata,
     ants_image_to_tensor,
-    displacement_xyz_to_ants_image,
     displacement_zyx_to_ants_image,
     flip_affine_xyz_to_zyx,
     metadata_tensors_from_dict,
@@ -394,6 +402,7 @@ def syn_registration(
     in_loop_inverse_steps: int = 6,
     antisymmetric: bool = True,
     padding_mode: str = "zeros",
+    outprefix: str = "",
     device: Optional[Union[str, torch.device]] = None,
     dtype: torch.dtype = torch.float32,
     verbose: bool = False,
@@ -402,14 +411,20 @@ def syn_registration(
 
     Mirrors ``ants.registration()``'s calling convention: ``fixed``/``moving``
     are ``ants.ANTsImage`` objects, and the result dictionary uses the same
-    ``warpedmovout``/``fwdtransforms``/``invtransforms`` naming. Unlike
-    ``ants.registration()``, no transform is ever written to disk:
-    ``fwdtransforms``/``invtransforms`` are single, already-composed
-    in-memory physical displacement fields (``ants.ANTsImage`` vector
-    images), each folding in both the affine initialization and the dense
-    SyN warp — the same "one composed field" convention already used by
-    :func:`antstorch.bspline_flows.registration.registration`, rather than
-    ``ants``'s own separate warp-file-plus-affine-file transform list.
+    ``warpedmovout``/``fwdtransforms``/``invtransforms`` naming. As in
+    ``ants.registration()``, the affine and dense-SyN components are always
+    kept and written separately: ``fwdtransforms``/``invtransforms`` are
+    lists of file paths under ``outprefix`` (default: a fresh temp-file
+    prefix, exactly like ``ants.registration()``'s own default), not a
+    single composed in-memory field. ``outprefix + "0GenericAffine.mat"``
+    holds the fitted/supplied affine (omitted when none applies, e.g.
+    ``'SyNOnly'`` with no ``initial_affine``), and
+    ``outprefix + "1Warp.nii.gz"`` / ``"1InverseWarp.nii.gz"`` hold the pure
+    dense-SyN deformation (omitted for the linear-only transform types).
+    This makes the result directly usable with
+    ``ants.apply_transforms(transformlist=...)`` or any other ANTsX tool
+    that expects file-based transforms — see
+    :mod:`antstorch.ants_transform_io` for the exact conventions matched.
 
     ``type_of_transform`` selects the transform model:
 
@@ -457,15 +472,19 @@ def syn_registration(
     -------
     dict
         ``warpedmovout`` (``ants.ANTsImage``, ``moving`` warped onto the
-        fixed grid), ``fwdtransforms``/``invtransforms`` (``ants.ANTsImage``
-        vector fields, physical mm, ITK component order), ``jacobian``
-        (``ants.ANTsImage``, the physical Jacobian determinant of
-        ``fwdtransforms``), ``loss_history``/``level_loss_history`` (the SyN
-        stage's per-iteration losses), ``affine_matrix``/``affine_translation``
-        (ITK order, ``None`` for ``'SyNOnly'`` with no ``initial_affine``),
-        ``affine_loss_history``/``affine_level_loss_history`` (``None`` if no
-        internal affine fit ran), and ``provenance`` (a dict recording the
-        configuration actually used).
+        fixed grid), ``fwdtransforms``/``invtransforms`` (list of file
+        paths, matching ``ants.registration()``'s own convention exactly —
+        see above), ``jacobian`` (``ants.ANTsImage``, the physical Jacobian
+        determinant of the total forward deformation, still computed
+        in-memory since it has no ``ants.registration()`` equivalent),
+        ``loss_history``/``level_loss_history`` (the SyN stage's
+        per-iteration losses), ``affine_matrix``/``affine_translation`` (the
+        same affine as ``0GenericAffine.mat``, also kept in-memory in ITK
+        order for convenience; ``None`` for ``'SyNOnly'`` with no
+        ``initial_affine``), ``affine_loss_history``/``affine_level_loss_history``
+        (``None`` if no internal affine fit ran), and ``provenance`` (a dict
+        recording the configuration actually used, including the resolved
+        ``outprefix``).
     """
     if fixed.dimension != moving.dimension:
         raise ValueError("fixed and moving must have the same dimension")
@@ -500,6 +519,7 @@ def syn_registration(
         resolved_device = torch.device(auto_device)
     else:
         resolved_device = torch.device(device)
+    resolved_outprefix = outprefix if outprefix else default_outprefix()
     dimension = fixed.dimension
 
     # --- Affine stage -----------------------------------------------------
@@ -544,10 +564,11 @@ def syn_registration(
         )
         fixed_tensor = ants_image_to_tensor(fixed, resolved_device, dtype, normalize=False)
         moving_tensor = ants_image_to_tensor(moving, resolved_device, dtype, normalize=False)
-        inverse_matrix_xyz = torch.linalg.inv(matrix_xyz)
-        inverse_translation_xyz = -torch.matmul(inverse_matrix_xyz, translation_xyz)
+        # Only the forward field is needed here: fwdtransforms/invtransforms
+        # are now the written 0GenericAffine.mat path (both directions, via
+        # ants.apply_transforms()'s whichtoinvert), not an in-memory inverse
+        # field -- so no separate inverse displacement is computed.
         fwd_field_xyz = affine_displacement_field(matrix_xyz, translation_xyz, fixed_domain, fixed_tensor)
-        inv_field_xyz = affine_displacement_field(inverse_matrix_xyz, inverse_translation_xyz, fixed_domain, fixed_tensor)
         warpedmovout_tensor = warp_image(
             moving_tensor, fwd_field_xyz, fixed_domain, moving_domain, padding_mode=padding_mode
         )
@@ -555,8 +576,12 @@ def syn_registration(
         matrix_out = matrix_xyz.detach().cpu()
         translation_out = translation_xyz.detach().cpu()
         warpedmovout = tensor_to_ants_image(warpedmovout_tensor, fixed)
-        fwdtransforms = displacement_xyz_to_ants_image(fwd_field_xyz, fixed)
-        invtransforms = displacement_xyz_to_ants_image(inv_field_xyz, fixed)
+
+        affine_path = f"{resolved_outprefix}0GenericAffine.mat"
+        write_affine_transform(matrix_out, translation_out, dimension, affine_path)
+        fwdtransforms, invtransforms = build_transform_lists(
+            affine_path=affine_path, warp_path=None, inverse_warp_path=None
+        )
         return {
             "warpedmovout": warpedmovout,
             "fwdtransforms": fwdtransforms,
@@ -572,6 +597,7 @@ def syn_registration(
                 "type_of_transform": type_of_transform,
                 "affine_transform_type": type_of_transform,
                 "device": str(resolved_device),
+                "outprefix": resolved_outprefix,
             },
         }
 
@@ -685,11 +711,32 @@ def syn_registration(
         total_forward, physical_spacing=fixed_meta_t_full["spacing_t"]
     ).unsqueeze(0)
 
+    # --- Write the affine and pure-SyN pieces separately (Etape 3) ----------
+    # syn_forward/syn_inverse (built above via the half-warp swap) are the
+    # *pure* dense deformation, computed before the fixed affine was folded
+    # in to build total_forward/total_inverse -- exactly the piece
+    # ants.registration() itself would write as "1Warp.nii.gz"/
+    # "1InverseWarp.nii.gz", with no recomputation or decomposition needed.
+    warp_path = f"{resolved_outprefix}1Warp.nii.gz"
+    inverse_warp_path = f"{resolved_outprefix}1InverseWarp.nii.gz"
+    ants.image_write(displacement_zyx_to_ants_image(syn_forward, fixed), warp_path)
+    ants.image_write(displacement_zyx_to_ants_image(syn_inverse, fixed), inverse_warp_path)
+
+    has_affine = initial_affine is not None or affine_result is not None
+    affine_path = None
+    if has_affine:
+        affine_path = f"{resolved_outprefix}0GenericAffine.mat"
+        write_affine_transform(matrix_xyz.detach().cpu(), translation_xyz.detach().cpu(), dimension, affine_path)
+
+    fwdtransforms, invtransforms = build_transform_lists(
+        affine_path=affine_path, warp_path=warp_path, inverse_warp_path=inverse_warp_path
+    )
+
     result = {
         "warpedmovout": tensor_to_ants_image(warpedmovout, fixed),
         "warpedfixout": tensor_to_ants_image(warpedfixout, fixed),
-        "fwdtransforms": displacement_zyx_to_ants_image(total_forward, fixed),
-        "invtransforms": displacement_zyx_to_ants_image(total_inverse, fixed),
+        "fwdtransforms": fwdtransforms,
+        "invtransforms": invtransforms,
         "jacobian": tensor_to_ants_image(jacobian, fixed),
         "loss_history": loss_history,
         "level_loss_history": level_loss_history,
@@ -710,6 +757,7 @@ def syn_registration(
             "inverse_method": inverse_method,
             "affine_fit": affine_result is not None,
             "device": str(resolved_device),
+            "outprefix": resolved_outprefix,
         },
     }
     return result

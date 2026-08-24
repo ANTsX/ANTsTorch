@@ -98,7 +98,11 @@ def test_forward_inverse_composition_is_near_identity():
 
 def test_registration_initial_affine_with_zero_svf_matches_affine_alone():
     # With mesh_size=1, iterations=0 the coefficients (and hence the SVF)
-    # are exactly zero, so the total transform must reduce to initial_affine.
+    # are exactly zero, so fwdtransforms (the *pure* SVF piece, now always
+    # separate from the affine) must itself be exactly zero, the affine
+    # must come back verbatim as affine_matrix/affine_translation, and the
+    # composed warpedmovout (still computed internally) must still equal
+    # the affine-alone warp.
     domain = BSplineDomain((10, 9), spacing=(1.0, 1.0))
     moving = _blob(domain, dtype=torch.double)
     matrix = torch.eye(2, dtype=torch.double)
@@ -114,7 +118,11 @@ def test_registration_initial_affine_with_zero_svf_matches_affine_alone():
         mesh_size=1,
         padding_mode="border",
     )
-    torch.testing.assert_close(result["fwdtransforms"], expected_field, rtol=0, atol=1e-10)
+    torch.testing.assert_close(
+        result["fwdtransforms"], torch.zeros_like(expected_field), rtol=0, atol=1e-10
+    )
+    torch.testing.assert_close(result["affine_matrix"], matrix.unsqueeze(0))
+    torch.testing.assert_close(result["affine_translation"], translation.unsqueeze(0))
     torch.testing.assert_close(
         result["warpedmovout"],
         warp_image(moving, expected_field, domain, padding_mode="border"),
