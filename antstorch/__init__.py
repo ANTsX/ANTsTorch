@@ -8,3 +8,4 @@ from .architectures import *
 from .lamnr_flows import *
 from .utilities import *
 from .bspline_flows import *
+from . import syn

@@ -41,6 +41,56 @@ def physical_grid(domain: BSplineDomain, reference: Tensor) -> Tensor:
     return (origin + torch.einsum("ij,j...->i...", direction, scaled_index)).unsqueeze(0)
 
 
+def affine_displacement_field(matrix: Tensor, translation: Tensor, domain: BSplineDomain, reference: Tensor) -> Tensor:
+    """Physical displacement field for the affine map ``p -> matrix @ p + translation``.
+
+    Returns ``u`` with ``u(p) = matrix @ p + translation - p`` evaluated at
+    every physical point of ``domain``, in the same ``(N, dim, *torch_size)``
+    displacement convention used throughout this module — directly usable
+    with :func:`warp_image` and :func:`compose_displacements`, and as the
+    ``initial_affine`` argument of
+    :func:`antstorch.bspline_flows.registration.registration`.
+
+    Parameters
+    ----------
+    matrix : Tensor
+        Physical-space affine linear part, shape ``(dim, dim)`` (applied to
+        every batch item) or ``(N, dim, dim)`` (one matrix per batch item).
+    translation : Tensor
+        Physical-space affine translation, shape ``(dim,)`` or ``(N, dim)``,
+        matching ``matrix``'s batching.
+    domain : BSplineDomain
+        Domain the field is evaluated on.
+    reference : Tensor
+        Supplies the output dtype/device (and, when ``matrix``/``translation``
+        are unbatched, the batch size ``N`` to broadcast to via its leading
+        dimension).
+
+    Returns
+    -------
+    Tensor
+        Displacement field of shape ``(N, dim, *domain.torch_size)``.
+    """
+    dimension = domain.dimension
+    matrix_t = _geometry_tensor(matrix, reference)
+    translation_t = _geometry_tensor(translation, reference)
+    if matrix_t.ndim == 2:
+        matrix_t = matrix_t.unsqueeze(0).expand(reference.shape[0], -1, -1)
+    if translation_t.ndim == 1:
+        translation_t = translation_t.unsqueeze(0).expand(reference.shape[0], -1)
+    if matrix_t.ndim != 3 or tuple(matrix_t.shape[-2:]) != (dimension, dimension):
+        raise ValueError(f"matrix must have shape ({dimension}, {dimension}) or (N, {dimension}, {dimension})")
+    if translation_t.ndim != 2 or translation_t.shape[-1] != dimension:
+        raise ValueError(f"translation must have shape ({dimension},) or (N, {dimension})")
+    if matrix_t.shape[0] != translation_t.shape[0]:
+        raise ValueError("matrix and translation must have matching batch sizes")
+
+    points = physical_grid(domain, reference).squeeze(0)  # (dim, *torch_size)
+    mapped = torch.einsum("nij,j...->ni...", matrix_t, points)
+    mapped = mapped + translation_t.reshape(translation_t.shape + (1,) * dimension)
+    return mapped - points.unsqueeze(0)
+
+
 def displacement_to_sampling_grid(
     displacement: Tensor,
     fixed_domain: BSplineDomain,

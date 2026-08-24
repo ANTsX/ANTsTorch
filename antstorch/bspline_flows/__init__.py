@@ -1,5 +1,6 @@
 """Differentiable ITK-compatible cubic B-spline field synthesis."""
 
+from .affine_registration import affine_registration
 from .bspline_domain import BSplineDomain
 from .bspline_scattered_data import fit_bspline_displacement_field, fit_bspline_object_to_scattered_data
 from .bspline_synthesis import (
@@ -23,6 +24,7 @@ from .similarity import (
 )
 from .spatial_transform import (
     ALIGN_CORNERS,
+    affine_displacement_field,
     compose_displacements,
     displacement_to_sampling_grid,
     folding_count,
@@ -32,6 +34,7 @@ from .spatial_transform import (
 )
 
 __all__ = [
+    "affine_registration",
     "BSplineDomain",
     "CubicBSplineSynthesis",
     "cubic_bspline_basis",
@@ -53,6 +56,7 @@ __all__ = [
     "normalized_cross_correlation_loss",
     "squared_l2_energy",
     "ALIGN_CORNERS",
+    "affine_displacement_field",
     "compose_displacements",
     "displacement_to_sampling_grid",
     "folding_count",

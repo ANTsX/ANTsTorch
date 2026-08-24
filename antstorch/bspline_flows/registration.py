@@ -1,7 +1,7 @@
 """High-level optimization interface for B-spline SVF registration."""
 
 from math import isfinite, prod
-from typing import Dict, Optional, Sequence, Union
+from typing import Dict, Optional, Sequence, Tuple, Union
 
 import torch
 from torch import Tensor
@@ -11,6 +11,7 @@ from .bspline_domain import BSplineDomain
 from .bspline_synthesis import refine_bspline_coefficients
 from .deterministic_registration import DeterministicBSplineRegistration
 from .physical_gradient_descent import PhysicalGradientDescent
+from .spatial_transform import affine_displacement_field, compose_displacements
 
 
 def _axis_values(value, dimension: int, name: str, *, minimum: int) -> tuple:
@@ -128,6 +129,40 @@ def _smooth_image(image: Tensor, domain: BSplineDomain, sigma: float) -> Tensor:
     return convolution(padded, kernel, groups=image.shape[1])
 
 
+def _validate_initial_affine(initial_affine, fixed: Tensor, dimension: int) -> Optional[Tuple[Tensor, Tensor]]:
+    if initial_affine is None:
+        return None
+    if not isinstance(initial_affine, tuple) or len(initial_affine) != 2:
+        raise TypeError("initial_affine must be a (matrix, translation) tuple")
+    matrix, translation = initial_affine
+    if not isinstance(matrix, Tensor) or not isinstance(translation, Tensor):
+        raise TypeError("initial_affine matrix and translation must be torch tensors")
+    if matrix.dtype != fixed.dtype or matrix.device != fixed.device:
+        raise ValueError("initial_affine must match the fixed image dtype and device")
+    if translation.dtype != fixed.dtype or translation.device != fixed.device:
+        raise ValueError("initial_affine must match the fixed image dtype and device")
+    batch_size = fixed.shape[0]
+    if matrix.ndim == 2:
+        if tuple(matrix.shape) != (dimension, dimension):
+            raise ValueError(f"initial_affine matrix must have shape ({dimension}, {dimension}) or (N, {dimension}, {dimension})")
+        matrix = matrix.unsqueeze(0).expand(batch_size, -1, -1)
+    elif matrix.ndim == 3:
+        if tuple(matrix.shape) != (batch_size, dimension, dimension):
+            raise ValueError(f"initial_affine matrix must have shape ({dimension}, {dimension}) or ({batch_size}, {dimension}, {dimension})")
+    else:
+        raise ValueError("initial_affine matrix must be 2-D or 3-D")
+    if translation.ndim == 1:
+        if tuple(translation.shape) != (dimension,):
+            raise ValueError(f"initial_affine translation must have shape ({dimension},) or ({batch_size}, {dimension})")
+        translation = translation.unsqueeze(0).expand(batch_size, -1)
+    elif translation.ndim == 2:
+        if tuple(translation.shape) != (batch_size, dimension):
+            raise ValueError(f"initial_affine translation must have shape ({dimension},) or ({batch_size}, {dimension})")
+    else:
+        raise ValueError("initial_affine translation must be 1-D or 2-D")
+    return matrix, translation
+
+
 def _downsample(image: Tensor, domain: BSplineDomain, factor: int):
     if factor == 1:
         return image, domain
@@ -165,6 +200,7 @@ def registration(
     convergence_tolerance: Optional[float] = None,
     return_loss_history: bool = True,
     initial_coefficients: Optional[Tensor] = None,
+    initial_affine: Optional[Tuple[Tensor, Tensor]] = None,
     shrink_factors: Sequence[int] = (1,),
     smoothing_sigmas: Optional[Union[float, Sequence[float]]] = None,
     verbose: bool = False,
@@ -197,6 +233,18 @@ def registration(
     mesh size. ``coefficient_grid_size`` can instead specify the control-point
     count directly. Supplying ``initial_coefficients`` makes its spatial shape
     authoritative and cannot be combined with ``coefficient_grid_size``.
+
+    ``initial_affine`` optionally supplies a fixed, non-optimized physical-space
+    affine initialization as a ``(matrix, translation)`` pair — ``matrix`` of
+    shape ``(dim, dim)`` or ``(N, dim, dim)`` and ``translation`` of shape
+    ``(dim,)`` or ``(N, dim)``, exactly the ``(matrix, translation)`` returned
+    by :func:`antstorch.bspline_flows.affine_registration.affine_registration`.
+    The B-spline SVF is then optimized on top of this fixed affine: the total
+    forward map applies the affine first, then the SVF flow. The affine
+    displacement field is recomputed exactly at each pyramid level's own
+    resolution (not interpolated), and ``invtransforms`` is computed as the
+    exact analytic inverse of the composed transform rather than a numerical
+    approximation.
 
     ``shrink_factors`` defines a dyadic coarse-to-fine pyramid ending in 1,
     for example ``(4, 2, 1)``. ``smoothing_sigmas`` are Gaussian sigmas in
@@ -270,6 +318,7 @@ def registration(
     closed_axes = _closed_axes(closed, dimension)
     if len(factors) > 1 and any(closed_axes):
         raise ValueError("multi-resolution registration does not yet support closed axes")
+    initial_affine = _validate_initial_affine(initial_affine, fixed, dimension)
     if initial_coefficients is not None:
         if coefficient_grid_size is not None:
             raise ValueError("coefficient_grid_size cannot be used with initial_coefficients")
@@ -352,6 +401,14 @@ def registration(
         moving_level, moving_level_domain = _downsample(
             _smooth_image(moving, moving_domain, sigma), moving_domain, factor
         )
+        # Exact per-level affine displacement, recomputed at this level's own
+        # resolution/domain via physical_grid rather than interpolated from a
+        # fixed-resolution field.
+        initial_affine_displacement_level = (
+            affine_displacement_field(initial_affine[0], initial_affine[1], fixed_level_domain, fixed_level)
+            if initial_affine is not None
+            else None
+        )
         if verbose:
             voxel_diagonal = sum(spacing**2 for spacing in fixed_level_domain.spacing) ** 0.5
             control_points = tuple(reversed(coefficients.shape[2:]))
@@ -398,7 +455,12 @@ def registration(
                     coefficients.grad = None
                 else:
                     optimizer_impl.zero_grad()
-                loss = model(coefficients, moving_level, fixed_level)["loss"]
+                loss = model(
+                    coefficients,
+                    moving_level,
+                    fixed_level,
+                    initial_affine_displacement=initial_affine_displacement_level,
+                )["loss"]
                 if not torch.isfinite(loss):
                     raise FloatingPointError(
                         f"non-finite registration loss at resolution level {level + 1}"
@@ -421,7 +483,14 @@ def registration(
                 closure()
                 optimizer_impl.step()
             with torch.no_grad():
-                current = float(model(coefficients, moving_level, fixed_level)["loss"].item())
+                current = float(
+                    model(
+                        coefficients,
+                        moving_level,
+                        fixed_level,
+                        initial_affine_displacement=initial_affine_displacement_level,
+                    )["loss"].item()
+                )
             current_level_history.append(current)
             if verbose:
                 print(f"  iteration {len(current_level_history):04d}: loss={current:.8g}")
@@ -439,10 +508,32 @@ def registration(
         history.extend(current_level_history)
 
     # The final pyramid level is full resolution by construction.
-    result = model(coefficients, moving, fixed)
+    initial_affine_displacement_full = (
+        affine_displacement_field(initial_affine[0], initial_affine[1], fixed_domain, fixed)
+        if initial_affine is not None
+        else None
+    )
+    result = model(coefficients, moving, fixed, initial_affine_displacement=initial_affine_displacement_full)
     result["warpedmovout"] = result.pop("warped_moving")
     result["fwdtransforms"] = result.pop("displacement")
-    result["invtransforms"] = model.exponential(-result["velocity"])
+    result.pop("svf_displacement", None)
+    if initial_affine is None:
+        result["invtransforms"] = model.exponential(-result["velocity"])
+    else:
+        # F = S o A (apply the affine A, then the SVF flow S), so the exact
+        # inverse is F^-1 = A^-1 o S^-1: apply the SVF inverse first, then
+        # the affine inverse. S^-1 is exact for a stationary velocity field
+        # via exp(-velocity); A^-1 is exact via matrix inversion.
+        affine_matrix, affine_translation = initial_affine
+        inverse_matrix = torch.linalg.inv(affine_matrix)
+        inverse_translation = -torch.einsum("nij,nj->ni", inverse_matrix, affine_translation)
+        affine_inverse_displacement = affine_displacement_field(
+            inverse_matrix, inverse_translation, fixed_domain, fixed
+        )
+        svf_inverse_displacement = model.exponential(-result["velocity"])
+        result["invtransforms"] = compose_displacements(
+            svf_inverse_displacement, affine_inverse_displacement, fixed_domain
+        )
     result["coefficients"] = coefficients
     result["loss_history"] = history if return_loss_history else None
     result["level_loss_history"] = level_history if return_loss_history else None
