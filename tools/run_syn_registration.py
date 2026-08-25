@@ -46,6 +46,17 @@ Fit only an affine transform, no dense stage::
 
     PYTHONPATH=. python tools/run_syn_registration.py \
         --type-of-transform Rigid --verbose
+
+Use the ANTs/ITK ``BSplineSyN`` regularizer (single-level cubic B-spline
+smoothing of the update field, via ``antstorch.bspline_flows``, in place of
+Gaussian/Sobolev/DST-I) instead of the default Gaussian fluid regularizer --
+mesh sizes are given at the pyramid's coarsest level and double at each
+finer one, mirroring ``antsRegistration``'s
+``BSplineSyN[gradientStep,updateFieldMeshSizeAtBaseLevel,totalFieldMeshSizeAtBaseLevel,splineOrder]``::
+
+    PYTHONPATH=. python tools/run_syn_registration.py \
+        --type-of-transform SyNOnly --regularizer bspline \
+        --update-field-mesh-size-at-base-level 2 --verbose
 """
 
 import argparse
@@ -75,7 +86,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grad-step", type=float, default=0.5, help="CFL-bounded per-voxel step, in voxel units")
     parser.add_argument("--flow-sigma", type=float, default=3.0, help="Fluid regularization sigma applied to each raw update")
     parser.add_argument("--total-sigma", type=float, default=0.0, help="Optional elastic (Gaussian) regularization of the composed field")
-    parser.add_argument("--regularizer", choices=("gaussian", "sobolev", "dsti"), default="gaussian")
+    parser.add_argument("--regularizer", choices=("gaussian", "sobolev", "dsti", "bspline"), default="gaussian")
+    parser.add_argument(
+        "--update-field-mesh-size-at-base-level",
+        type=int,
+        default=1,
+        help="regularizer='bspline' only: B-spline mesh size (control points = mesh_size + 3) "
+        "for the per-iteration update field, at the coarsest --levels entry; doubled at each "
+        "finer level. ITK's own BSplineSmoothingOnUpdateDisplacementFieldTransform class "
+        "default is 1 (4 control points), but antsRegistrationSyN.sh-style presets typically "
+        "use a much larger value (e.g. 26) -- the class default can be too coarse/aggressive "
+        "on small images.",
+    )
+    parser.add_argument(
+        "--total-field-mesh-size-at-base-level",
+        type=int,
+        default=0,
+        help="regularizer='bspline' only: B-spline mesh size for the composed (total) field, "
+        "same doubling-per-level convention; 0 (default) disables total-field smoothing, "
+        "matching antsRegistration's own default",
+    )
+    parser.add_argument(
+        "--bspline-no-enforce-stationary-boundary",
+        action="store_false",
+        dest="bspline_enforce_stationary_boundary",
+        help="regularizer='bspline' only: disable fitting a zero-displacement boundary "
+        "constraint (ITK's own default keeps this enabled)",
+    )
     parser.add_argument("--inverse-method", choices=("fixed_point", "anderson", "hybrid_lm"), default="anderson")
     parser.add_argument("--in-loop-inverse-steps", type=int, default=6)
     parser.add_argument(
@@ -105,7 +142,7 @@ def parse_args() -> argparse.Namespace:
         help="Disable center-of-mass translation initialization for the affine fit",
     )
     parser.add_argument("--verbose", action="store_true", help="Print per-level optimization progress")
-    parser.set_defaults(antisymmetric=True)
+    parser.set_defaults(antisymmetric=True, bspline_enforce_stationary_boundary=True)
     return parser.parse_args()
 
 
@@ -157,6 +194,9 @@ def main() -> None:
         flow_sigma=args.flow_sigma,
         total_sigma=args.total_sigma,
         regularizer=args.regularizer,
+        update_field_mesh_size_at_base_level=args.update_field_mesh_size_at_base_level,
+        total_field_mesh_size_at_base_level=args.total_field_mesh_size_at_base_level,
+        bspline_enforce_stationary_boundary=args.bspline_enforce_stationary_boundary,
         inverse_method=args.inverse_method,
         in_loop_inverse_steps=args.in_loop_inverse_steps,
         antisymmetric=args.antisymmetric,
@@ -197,6 +237,7 @@ def main() -> None:
 
     print(f"Registration completed in {elapsed:.2f} seconds on {result['provenance']['device']}.")
     print(f"Type of transform: {args.type_of_transform}")
+    print(f"Regularizer: {args.regularizer}")
     if result["loss_history"]:
         print(f"Final SyN loss: {result['loss_history'][-1]:.6g}")
     if result["affine_loss_history"] is not None:

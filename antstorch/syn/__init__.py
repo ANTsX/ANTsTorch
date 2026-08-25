@@ -24,9 +24,11 @@ from . import core
 from .bridge import (
     ants_image_metadata,
     ants_image_to_tensor,
+    apply_bspline_smoothing_operator,
     displacement_xyz_to_ants_image,
     displacement_zyx_to_ants_image,
     flip_affine_xyz_to_zyx,
+    image_domain_from_metadata,
     metadata_tensors,
     metadata_tensors_from_dict,
     tensor_to_ants_image,
@@ -44,4 +46,6 @@ __all__ = [
     'metadata_tensors',
     'metadata_tensors_from_dict',
     'flip_affine_xyz_to_zyx',
+    'apply_bspline_smoothing_operator',
+    'image_domain_from_metadata',
 ]

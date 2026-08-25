@@ -267,3 +267,97 @@ def flip_affine_xyz_to_zyx(matrix: Tensor, translation: Tensor) -> Tuple[Tensor,
     matrix_zyx = torch.einsum("ij,...jk,kl->...il", permutation, matrix, permutation)
     translation_zyx = torch.einsum("ij,...j->...i", permutation, translation)
     return matrix_zyx, translation_zyx
+
+
+def image_domain_from_metadata(meta: Dict[str, tuple]):
+    """Build an :class:`antstorch.bspline_flows.ImageDomain` from an
+    :func:`ants_image_metadata`/:func:`~.syn._downsample_metadata` dict.
+
+    Deferred import (matches the pattern already used throughout
+    :mod:`antstorch.syn.syn`) to avoid a module-level circular import
+    between ``antstorch.syn`` and ``antstorch.bspline_flows``.
+    """
+    from antstorch.bspline_flows import ImageDomain
+
+    return ImageDomain(meta["shape"], meta["spacing"], meta["origin"], meta["direction"])
+
+
+def apply_bspline_smoothing_operator(
+    field: Tensor,
+    domain,
+    mesh_size: int,
+    *,
+    spline_order: int = 3,
+    enforce_stationary_boundary: bool = True,
+) -> Tensor:
+    """Smooth a displacement field with a single-level cubic B-spline fit —
+    the ANTs/ITK ``BSplineSyN`` regularizer, ported via
+    :func:`antstorch.bspline_flows.bspline_scattered_data.fit_bspline_displacement_field`.
+
+    This is the direct analogue of ITK's
+    ``itkBSplineSmoothingOnUpdateDisplacementFieldTransform``: at each call,
+    the *current* field is fit exactly once (``number_of_fitting_levels=1``)
+    to a cubic B-spline with a control-point grid of
+    ``mesh_size + spline_order`` points per axis, then re-evaluated on the
+    full dense grid — a smoothing (low-pass) operator, not the multi-level
+    coarse-to-fine accumulation :func:`fit_bspline_displacement_field` does
+    by default (``number_of_fitting_levels=4``), which would neither match
+    ITK's per-iteration behavior nor its cost. ``mesh_size`` plays the role
+    ITK's ``updateFieldMeshSizeAtBaseLevel``/``totalFieldMeshSizeAtBaseLevel``
+    play in ``antsRegistration``'s ``BSplineSyN[gradientStep,
+    updateFieldMeshSizeAtBaseLevel, totalFieldMeshSizeAtBaseLevel,
+    splineOrder]`` transform spec: a coarser mesh (smaller ``mesh_size``,
+    minimum ``1``) is a stronger/smoother regularizer, in place of a
+    Gaussian/Sobolev/DST-I ``sigma``.
+
+    Parameters
+    ----------
+    field : Tensor
+        Channel-last field, shape ``(1, *torch_shape, dim)``, physical mm
+        units, ``antstorch.syn.core``'s reversed ``(z, y, x)``-style vector
+        component order.
+    domain : antstorch.bspline_flows.ImageDomain
+        Must match ``field``'s spatial grid (``domain.torch_size ==
+        field.shape[1:-1]``).
+    mesh_size : int
+        Number of B-spline mesh intervals per axis (ITK convention:
+        ``number_of_control_points = mesh_size + spline_order``). Must be
+        ``>= 1``.
+    spline_order : int
+        Only ``3`` (cubic) is currently supported, matching
+        :mod:`antstorch.bspline_flows` throughout.
+    enforce_stationary_boundary : bool
+        Passed through to :func:`fit_bspline_displacement_field` — ITK's
+        default (``True``): the domain's outermost voxel layer is fit
+        toward zero with a very large weight, keeping the field stationary
+        at the boundary.
+
+    Returns
+    -------
+    Tensor
+        Smoothed field, same shape/order/dtype/device as ``field``.
+    """
+    from antstorch.bspline_flows.bspline_scattered_data import fit_bspline_displacement_field
+
+    if mesh_size < 1:
+        raise ValueError(f"mesh_size must be >= 1, got {mesh_size}")
+    dim = field.shape[-1]
+    if field.ndim != dim + 2 or field.shape[0] != 1:
+        raise ValueError(f"field must have shape (1, *torch_shape, {dim})")
+
+    # (1, *torch_shape, dim) zyx-order -> (1, dim, *torch_shape) xyz-order.
+    # Both packages already share the same *spatial* torch-axis order (the
+    # architectural convergence noted throughout this project), so only the
+    # component axis needs reversing (an exact index flip, no resampling)
+    # -- unlike the ants.ANTsImage bridges above, which also need a spatial
+    # transpose because ants arrays are ITK-direct-order, not torch-order.
+    field_xyz_first = field.movedim(-1, 1).flip(1)
+    smoothed = fit_bspline_displacement_field(
+        displacement_field=field_xyz_first,
+        domain=domain,
+        number_of_fitting_levels=1,
+        mesh_size=mesh_size,
+        spline_order=spline_order,
+        enforce_stationary_boundary=enforce_stationary_boundary,
+    )
+    return smoothed.flip(1).movedim(1, -1).contiguous()

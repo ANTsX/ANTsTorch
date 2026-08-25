@@ -220,6 +220,56 @@ def test_syn_default_type_of_transform_fits_an_internal_affine_first():
     assert after < before
 
 
+def test_syn_only_reduces_loss_with_bspline_regularizer():
+    # mesh_size=2 rather than the ITK class default of 1 (4 control points):
+    # on a tiny synthetic image, a 4-control-point lattice is so coarse that
+    # most of its few degrees of freedom go to satisfying the zero
+    # (enforce_stationary_boundary) boundary constraint, which can transiently
+    # *raise* the loss for the first iteration or two before it settles into a
+    # monotonic decrease (verified interactively; not a bug -- ANTs' own
+    # scripts, e.g. antsRegistrationSyN.sh, likewise never use the raw ITK
+    # class-default mesh size in practice, always specifying a much finer one).
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    result = syn_registration(
+        fixed, moving, type_of_transform="SyNOnly",
+        levels=(2, 1), reg_iterations=(15, 10), syn_metric="mse", grad_step=0.4,
+        regularizer="bspline", update_field_mesh_size_at_base_level=2,
+    )
+    assert result["loss_history"][-1] < result["loss_history"][0]
+    assert result["provenance"]["regularizer"] == "bspline"
+    assert result["provenance"]["update_field_mesh_size_at_base_level"] == 2
+    assert result["provenance"]["total_field_mesh_size_at_base_level"] == 0
+
+
+def test_syn_registration_bspline_regularizer_supports_total_field_smoothing_too():
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    result = syn_registration(
+        fixed, moving, type_of_transform="SyNOnly",
+        levels=(1,), reg_iterations=(10,), syn_metric="mse", grad_step=0.4,
+        regularizer="bspline", update_field_mesh_size_at_base_level=1,
+        total_field_mesh_size_at_base_level=1,
+    )
+    assert np.isfinite(result["loss_history"]).all()
+    assert result["provenance"]["total_field_mesh_size_at_base_level"] == 1
+
+
+def test_syn_registration_bspline_regularizer_requires_a_positive_mesh_size():
+    fixed, moving = _ants_pair_2d()
+    with pytest.raises(ValueError, match="mesh_size"):
+        syn_registration(
+            fixed, moving, type_of_transform="SyNOnly", regularizer="bspline",
+            update_field_mesh_size_at_base_level=0, total_field_mesh_size_at_base_level=0,
+        )
+
+
+def test_syn_registration_rejects_negative_bspline_mesh_sizes():
+    fixed, moving = _ants_pair_2d()
+    with pytest.raises(ValueError, match="update_field_mesh_size_at_base_level"):
+        syn_registration(fixed, moving, type_of_transform="SyNOnly", update_field_mesh_size_at_base_level=-1)
+    with pytest.raises(ValueError, match="total_field_mesh_size_at_base_level"):
+        syn_registration(fixed, moving, type_of_transform="SyNOnly", total_field_mesh_size_at_base_level=-1)
+
+
 def test_syn_registration_reduces_intensity_mismatch_versus_unregistered():
     fixed, moving = _ants_pair_2d(ramp=0.3)
     result = syn_registration(
