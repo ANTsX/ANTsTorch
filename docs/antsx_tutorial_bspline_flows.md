@@ -136,10 +136,13 @@ print(torch.isfinite(differentiable_input.grad).all())
 
 ## Diffeomorphic B-spline registration
 
-This example registers `r64` to `r16`. Unlike the full ANTs SyN pipeline,
-this initial ANTsTorch interface estimates only a B-spline stationary velocity
-field—there is no rigid or affine initialization. Forward and inverse
-displacements are computed as `exp(v)` and `exp(-v)`.
+This example registers `r64` to `r16`. The B-spline stage itself estimates
+only a stationary velocity field (SVF) — forward and inverse displacements
+are computed as `exp(v)` and `exp(-v)` — with rigid/affine initialization
+available as an optional, separate `initial_affine` argument (see below).
+For rigid/affine-only or a combined affine+SyN pipeline, see
+`antstorch.bspline_flows.affine_registration` and
+`docs/antsx_tutorial_syn.md`.
 
 ```python
 from antstorch.bspline_flows import PhysicalGradientDescent, registration
@@ -188,24 +191,95 @@ print("Minimum Jacobian:", result["jacobian_determinant"].min().item())
 print("Maximum Jacobian:", result["jacobian_determinant"].max().item())
 ```
 
+`warpedmovout` and `jacobian_determinant` above already account for
+`initial_affine` when one is supplied (`registration()` composes the
+affine and the SVF internally before computing them) — it is only
+`fwdtransforms`/`invtransforms` that stay affine-free; see the next section.
+
+### Affine initialization
+
+`registration()` accepts an optional `initial_affine=(matrix, translation)`
+pair — the same ITK `(x, y[, z])`-order convention returned by
+`affine_registration()` — as a **fixed**, non-optimized initialization: the
+B-spline SVF is then fit on top of it, with the total forward map applying
+the affine first and the SVF flow second.
+
+```python
+from antstorch.bspline_flows import affine_registration
+
+affine_result = affine_registration(
+    fixed,
+    moving,
+    fixed_domain,
+    moving_domain,
+    transform_type="Affine",
+    similarity="ants_ncc",
+    shrink_factors=(4, 2, 1),
+    smoothing_sigmas=(2.0, 1.0, 0.0),
+    iterations=(100, 75, 50),
+    learning_rate=(0.05, 0.03, 0.02),
+)
+
+result = registration(
+    fixed=fixed,
+    moving=moving,
+    fixed_domain=fixed_domain,
+    moving_domain=moving_domain,
+    mesh_size=(5, 5),
+    shrink_factors=(8, 4, 2, 1),
+    smoothing_sigmas=(3.0, 2.0, 1.0, 0.0),
+    iterations=(100, 70, 40, 20),
+    similarity="ants_ncc",
+    initial_affine=(affine_result["matrix"], affine_result["translation"]),
+)
+```
+
+**Since this convention, `fwdtransforms`/`invtransforms` are always the
+*pure* SVF displacement field alone — never composed with `initial_affine`
+into a single field**, whether or not an `initial_affine` was supplied. The
+affine itself is returned separately:
+
+- `affine_matrix`, `affine_translation` — verbatim `initial_affine` (or
+  `None` if none was given).
+- `affine_matrix_inverse`, `affine_translation_inverse` — the precomputed
+  exact matrix inverse (or `None`).
+
+`warpedmovout` and `jacobian_determinant` are unaffected by this change —
+both are still computed from the *total*, affine-composed map internally,
+since neither has an `ants.registration()` file-based equivalent that would
+require decomposing them.
+
 ### Warp a label image
 
 The forward displacement is defined on the fixed grid and maps a fixed
-physical point to its moving-image sampling location. It can therefore pull a
-moving segmentation onto the fixed grid. To reuse the standard ANTsPy
-interface, convert the PyTorch field to an ANTs vector image, save it as a warp
-transform, and pass that file to `ants.apply_transforms`.
+physical point to its moving-image sampling location. It can therefore pull
+a moving segmentation onto the fixed grid. `result["fwdtransforms"]` is the
+pure SVF piece; when no `initial_affine` was used it is the *entire*
+transform and can be saved directly. When an `initial_affine` was supplied,
+apply both pieces together — either by writing separate ANTs transform
+files and stacking them in `ants.apply_transforms`'s `transformlist`, or by
+composing them in-memory before saving.
 
 ```python
 r64_seg = ants.threshold_image(r64, "Kmeans", 3)
 forward_warp = torch_field_to_ants(result["fwdtransforms"], r16)
-forward_warp_filename = "r64_to_r16_forward_warp.nii.gz"
+forward_warp_filename = "r64_to_r16_svf_forward_warp.nii.gz"
 ants.image_write(forward_warp, forward_warp_filename)
+
+transformlist = [forward_warp_filename]
+if result["affine_matrix"] is not None:
+    from antstorch.ants_transform_io import write_affine_transform
+
+    affine_filename = "r64_to_r16_0GenericAffine.mat"
+    write_affine_transform(
+        result["affine_matrix"], result["affine_translation"], dim=2, filename=affine_filename
+    )
+    transformlist.append(affine_filename)  # deformation first, affine last
 
 warped_r64_seg = ants.apply_transforms(
     fixed=r16,
     moving=r64_seg,
-    transformlist=[forward_warp_filename],
+    transformlist=transformlist,
     interpolator="genericLabel",
 )
 
@@ -216,6 +290,11 @@ ants.plot(
     title="r64 segmentation warped to r16",
 )
 ```
+
+`transformlist` order matches `ants.registration()`'s own convention (see
+`antstorch.ants_transform_io` and `docs/antsx_tutorial_syn.md`): the
+deformation field first, the affine last, for the moving-to-fixed forward
+direction.
 
 This ANTsPy bridge is convenient for downstream ANTs tooling, but it detaches
 the displacement and is not differentiable. Use the tensor-native
@@ -230,14 +309,24 @@ ants.image_write(warped_r64, "r64_to_r16_antstorch.nii.gz")
 ants.image_write(jacobian, "r64_to_r16_jacobian.nii.gz")
 ants.image_write(
     torch_field_to_ants(result["invtransforms"], r16),
-    "r64_to_r16_inverse_warp.nii.gz",
+    "r64_to_r16_svf_inverse_warp.nii.gz",
 )
 torch.save(result["coefficients"].cpu(), "r64_to_r16_coefficients.pt")
 ```
 
 `warpedmovout`, `fwdtransforms`, and `invtransforms` follow the naming
 convention of `ants.registration` (though here they are in-memory tensors,
-not paths to files on disk). The registration result also includes
-`velocity`, `coefficients`, `loss_history`, and `level_loss_history`. Vector
-fields use physical x-y-(z) components even though tensor spatial axes are
-stored in PyTorch-reversed order.
+not paths to files on disk), but `fwdtransforms`/`invtransforms` are always
+the *pure* B-spline SVF piece — see "Affine initialization" above for why,
+and for `affine_matrix`/`affine_translation`. The registration result also
+includes `velocity`, `coefficients`, `loss_history`, and
+`level_loss_history`. Vector fields use physical x-y-(z) components even
+though tensor spatial axes are stored in PyTorch-reversed order.
+
+`registration()` stays tensor-native and batched, with no `ants` dependency
+in its core, so unlike `antstorch.syn.syn_registration` (see
+`docs/antsx_tutorial_syn.md`) it never writes ANTs transform files itself.
+For real ANTsX file export per batch item, use
+`antstorch.ants_transform_io.write_affine_transform` for the affine piece
+(as above) and `ants.image_write` on a `torch_field_to_ants`-converted
+`fwdtransforms`/`invtransforms` slice for the SVF piece.
