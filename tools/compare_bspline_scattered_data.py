@@ -234,7 +234,7 @@ def compare_displacement_field_from_points(args, rng: np.random.Generator, devic
     ants_array = ants_result.numpy().astype(np.float64)
 
     torch_device = torch.device(args.device)
-    domain = antstorch.BSplineDomain(size=size, spacing=(1.0,) * dimension, origin=(0.0,) * dimension)
+    domain = antstorch.ImageDomain(size=size, spacing=(1.0,) * dimension, origin=(0.0,) * dimension)
     synchronize(torch_device)
     start = time.perf_counter()
     torch_dense = antstorch.fit_bspline_displacement_field(
@@ -303,7 +303,7 @@ def compare_displacement_field_from_dense_field(args, rng: np.random.Generator, 
     field_torch = torch.as_tensor(
         np.ascontiguousarray(component_first_reversed), device=torch_device
     ).unsqueeze(0)
-    domain = antstorch.BSplineDomain(size=size, spacing=(1.0,) * dimension, origin=(0.0,) * dimension)
+    domain = antstorch.ImageDomain(size=size, spacing=(1.0,) * dimension, origin=(0.0,) * dimension)
     synchronize(torch_device)
     start = time.perf_counter()
     torch_dense = antstorch.fit_bspline_displacement_field(displacement_field=field_torch, domain=domain, **kwargs)

@@ -11,7 +11,7 @@ import torch
 from torch import Tensor
 from torch.nn import functional as F
 
-from .bspline_domain import BSplineDomain
+from .bspline_domain import ImageDomain
 
 
 ALIGN_CORNERS = True
@@ -21,7 +21,7 @@ def _geometry_tensor(values, reference: Tensor) -> Tensor:
     return torch.as_tensor(values, dtype=reference.dtype, device=reference.device)
 
 
-def _validate_field(field: Tensor, domain: BSplineDomain, name: str = "field") -> None:
+def _validate_field(field: Tensor, domain: ImageDomain, name: str = "field") -> None:
     expected = (field.shape[0], domain.dimension) + domain.torch_size
     if tuple(field.shape) != expected:
         raise ValueError(f"{name} must have shape (N, {domain.dimension}, {', '.join(map(str, domain.torch_size))})")
@@ -29,7 +29,7 @@ def _validate_field(field: Tensor, domain: BSplineDomain, name: str = "field") -
         raise TypeError(f"{name} must have a floating-point dtype")
 
 
-def physical_grid(domain: BSplineDomain, reference: Tensor) -> Tensor:
+def physical_grid(domain: ImageDomain, reference: Tensor) -> Tensor:
     """Return a singleton-batch grid of physical points, channels x-y-(z)."""
     axes = [torch.arange(n, dtype=reference.dtype, device=reference.device) for n in domain.torch_size]
     torch_coordinates = torch.meshgrid(*axes, indexing="ij")
@@ -41,7 +41,7 @@ def physical_grid(domain: BSplineDomain, reference: Tensor) -> Tensor:
     return (origin + torch.einsum("ij,j...->i...", direction, scaled_index)).unsqueeze(0)
 
 
-def affine_displacement_field(matrix: Tensor, translation: Tensor, domain: BSplineDomain, reference: Tensor) -> Tensor:
+def affine_displacement_field(matrix: Tensor, translation: Tensor, domain: ImageDomain, reference: Tensor) -> Tensor:
     """Physical displacement field for the affine map ``p -> matrix @ p + translation``.
 
     Returns ``u`` with ``u(p) = matrix @ p + translation - p`` evaluated at
@@ -49,7 +49,7 @@ def affine_displacement_field(matrix: Tensor, translation: Tensor, domain: BSpli
     displacement convention used throughout this module — directly usable
     with :func:`warp_image` and :func:`compose_displacements`, and as the
     ``initial_affine`` argument of
-    :func:`antstorch.bspline_flows.registration.registration`.
+    :func:`antstorch.bspline_flows.registration.bspline_svf_registration`.
 
     Parameters
     ----------
@@ -59,7 +59,7 @@ def affine_displacement_field(matrix: Tensor, translation: Tensor, domain: BSpli
     translation : Tensor
         Physical-space affine translation, shape ``(dim,)`` or ``(N, dim)``,
         matching ``matrix``'s batching.
-    domain : BSplineDomain
+    domain : ImageDomain
         Domain the field is evaluated on.
     reference : Tensor
         Supplies the output dtype/device (and, when ``matrix``/``translation``
@@ -93,8 +93,8 @@ def affine_displacement_field(matrix: Tensor, translation: Tensor, domain: BSpli
 
 def displacement_to_sampling_grid(
     displacement: Tensor,
-    fixed_domain: BSplineDomain,
-    moving_domain: BSplineDomain,
+    fixed_domain: ImageDomain,
+    moving_domain: ImageDomain,
 ) -> Tensor:
     """Convert a physical fixed-to-moving displacement to a grid_sample grid."""
     if fixed_domain.dimension != moving_domain.dimension:
@@ -121,8 +121,8 @@ def displacement_to_sampling_grid(
 def warp_image(
     moving: Tensor,
     displacement: Tensor,
-    fixed_domain: BSplineDomain,
-    moving_domain: BSplineDomain = None,
+    fixed_domain: ImageDomain,
+    moving_domain: ImageDomain = None,
     *,
     mode: str = "bilinear",
     padding_mode: str = "zeros",
@@ -139,7 +139,7 @@ def warp_image(
     )
 
 
-def compose_displacements(first: Tensor, second: Tensor, domain: BSplineDomain) -> Tensor:
+def compose_displacements(first: Tensor, second: Tensor, domain: ImageDomain) -> Tensor:
     """Return ``T_second o T_first``: ``first(x) + second(x + first(x))``."""
     _validate_field(first, domain, "first")
     _validate_field(second, domain, "second")
@@ -151,7 +151,7 @@ def compose_displacements(first: Tensor, second: Tensor, domain: BSplineDomain) 
     return first + sampled_second
 
 
-def jacobian_determinant(displacement: Tensor, domain: BSplineDomain) -> Tensor:
+def jacobian_determinant(displacement: Tensor, domain: ImageDomain) -> Tensor:
     """Compute ``det(I + du/dp)`` in physical coordinates."""
     _validate_field(displacement, domain, "displacement")
     derivatives = []
@@ -168,7 +168,7 @@ def jacobian_determinant(displacement: Tensor, domain: BSplineDomain) -> Tensor:
     return torch.linalg.det(jacobian.permute(permutation))
 
 
-def folding_count(displacement: Tensor, domain: BSplineDomain) -> Tensor:
+def folding_count(displacement: Tensor, domain: ImageDomain) -> Tensor:
     """Number of non-positive Jacobian determinants in each batch item."""
     determinant = jacobian_determinant(displacement, domain)
     return (determinant <= 0).flatten(start_dim=1).sum(dim=1)

@@ -4,7 +4,7 @@ from typing import Dict, Optional
 
 from torch import Tensor, nn
 
-from .bspline_domain import BSplineDomain
+from .bspline_domain import ImageDomain
 from .bspline_synthesis import CubicBSplineSynthesis
 from .scaling_and_squaring import ScalingAndSquaring
 from .similarity import (
@@ -22,8 +22,8 @@ class DeterministicBSplineRegistration(nn.Module):
 
     def __init__(
         self,
-        fixed_domain: BSplineDomain,
-        moving_domain: Optional[BSplineDomain] = None,
+        fixed_domain: ImageDomain,
+        moving_domain: Optional[ImageDomain] = None,
         *,
         squaring_steps: int = 7,
         similarity: str = "ants_ncc",

@@ -19,7 +19,7 @@ def _tuple(values: Sequence, name: str, dimension: int, cast):
 
 
 @dataclass(frozen=True)
-class BSplineDomain:
+class ImageDomain:
     """Regular dense image domain, with all metadata expressed in ITK order."""
 
     size: Tuple[int, ...]
@@ -30,7 +30,7 @@ class BSplineDomain:
     def __post_init__(self):
         dimension = len(self.size)
         if dimension not in (2, 3):
-            raise ValueError("BSplineDomain supports exactly 2-D or 3-D")
+            raise ValueError("ImageDomain supports exactly 2-D or 3-D")
         size = _tuple(self.size, "size", dimension, int)
         if any(value < 2 for value in size):
             raise ValueError("each size must be at least 2 for the ITK image domain")

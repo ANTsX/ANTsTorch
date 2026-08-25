@@ -12,7 +12,7 @@ from typing import Optional, Union
 import torch
 from torch import Tensor, nn
 
-from .bspline_domain import BSplineDomain
+from .bspline_domain import ImageDomain
 from .bspline_synthesis import (
     _bspline_fit_context,
     _bspline_fit_geometry,
@@ -139,7 +139,7 @@ def _shrink_slices(spatial_shape, shrink_factor: int):
     return tuple(spatial_slices)
 
 
-def _shrunk_domain(domain: BSplineDomain, shrink_factor: int) -> BSplineDomain:
+def _shrunk_domain(domain: ImageDomain, shrink_factor: int) -> ImageDomain:
     """Geometry of the once-shrunk image, mirroring ``itk::ShrinkImageFilter``.
 
     Spacing scales by ``shrink_factor``, size floors to fit, and the shrunk
@@ -194,10 +194,10 @@ def _shrunk_domain(domain: BSplineDomain, shrink_factor: int) -> BSplineDomain:
         domain.origin[i] + sum(domain.direction[i][j] * local_offset[j] for j in range(domain.dimension))
         for i in range(domain.dimension)
     )
-    return BSplineDomain(size=shrunk_size, spacing=shrunk_spacing, origin=origin, direction=domain.direction)
+    return ImageDomain(size=shrunk_size, spacing=shrunk_spacing, origin=origin, direction=domain.direction)
 
 
-def _initial_lattice_size(domain: BSplineDomain, spline_param) -> tuple:
+def _initial_lattice_size(domain: ImageDomain, spline_param) -> tuple:
     if spline_param is None:
         return (4,) * domain.dimension
     if isinstance(spline_param, (int, float)):
@@ -214,7 +214,7 @@ def _initial_lattice_size(domain: BSplineDomain, spline_param) -> tuple:
 
 def n4_bias_field_correction(
     image: Tensor,
-    domain: Optional[BSplineDomain] = None,
+    domain: Optional[ImageDomain] = None,
     mask: Optional[Tensor] = None,
     *,
     rescale_intensities: bool = False,
@@ -239,7 +239,7 @@ def n4_bias_field_correction(
     if image.ndim not in (4, 5) or not image.is_floating_point():
         raise ValueError("image must be a floating (N,C,H,W) or (N,C,D,H,W) tensor")
     dimension = image.ndim - 2
-    domain = domain or BSplineDomain(tuple(reversed(image.shape[2:])))
+    domain = domain or ImageDomain(tuple(reversed(image.shape[2:])))
     if domain.dimension != dimension or tuple(image.shape[2:]) != domain.torch_size:
         raise ValueError("image shape does not match domain")
     if not isinstance(shrink_factor, int) or shrink_factor < 1:
@@ -374,5 +374,5 @@ class N4BiasFieldCorrection(nn.Module):
         super().__init__()
         self.kwargs = kwargs
 
-    def forward(self, image: Tensor, domain: Optional[BSplineDomain] = None, mask: Optional[Tensor] = None, weight_mask: Optional[Tensor] = None) -> Tensor:
+    def forward(self, image: Tensor, domain: Optional[ImageDomain] = None, mask: Optional[Tensor] = None, weight_mask: Optional[Tensor] = None) -> Tensor:
         return n4_bias_field_correction(image, domain, mask, weight_mask=weight_mask, **self.kwargs)

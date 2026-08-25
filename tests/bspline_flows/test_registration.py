@@ -2,11 +2,11 @@ import pytest
 import torch
 
 from antstorch.bspline_flows import (
-    BSplineDomain,
+    ImageDomain,
     PhysicalGradientDescent,
     affine_displacement_field,
     compose_displacements,
-    registration,
+    bspline_svf_registration,
     warp_image,
 )
 
@@ -19,9 +19,9 @@ def _blob(domain, dtype=torch.float32):
 
 @pytest.mark.parametrize("size", [(9, 8), (7, 6, 5)])
 def test_registration_identity_shapes_and_finite_results(size):
-    domain = BSplineDomain(size)
+    domain = ImageDomain(size)
     image = _blob(domain)
-    result = registration(image, image, domain, iterations=0, mesh_size=1, squaring_steps=2)
+    result = bspline_svf_registration(image, image, domain, iterations=0, mesh_size=1, squaring_steps=2)
 
     expected_field = (1, len(size)) + domain.torch_size
     assert result["warpedmovout"].shape == image.shape
@@ -36,13 +36,13 @@ def test_registration_identity_shapes_and_finite_results(size):
 
 def test_registration_reduces_loss_for_synthetic_translation():
     torch.manual_seed(4)
-    domain = BSplineDomain((16, 14))
+    domain = ImageDomain((16, 14))
     moving = _blob(domain)
     displacement = torch.zeros((1, 2) + domain.torch_size)
     displacement[:, 0] = 0.7
     fixed = warp_image(moving, displacement, domain, padding_mode="border")
-    initial = registration(fixed, moving, domain, iterations=0, mesh_size=1, padding_mode="border")["loss"]
-    result = registration(
+    initial = bspline_svf_registration(fixed, moving, domain, iterations=0, mesh_size=1, padding_mode="border")["loss"]
+    result = bspline_svf_registration(
         fixed,
         moving,
         domain,
@@ -58,10 +58,10 @@ def test_registration_reduces_loss_for_synthetic_translation():
 
 @pytest.mark.parametrize("similarity", ["mse", "ncc", "ants_ncc"])
 def test_registration_similarity_modes_and_final_graph(similarity):
-    domain = BSplineDomain((8, 7))
+    domain = ImageDomain((8, 7))
     moving = _blob(domain).requires_grad_()
     fixed = torch.roll(moving.detach(), 1, -1)
-    result = registration(
+    result = bspline_svf_registration(
         fixed,
         moving,
         domain,
@@ -80,9 +80,9 @@ def test_registration_similarity_modes_and_final_graph(similarity):
 
 
 def test_forward_inverse_composition_is_near_identity():
-    domain = BSplineDomain((12, 11))
+    domain = ImageDomain((12, 11))
     coefficients = torch.randn(1, 2, 5, 5) * 0.02
-    result = registration(
+    result = bspline_svf_registration(
         _blob(domain),
         _blob(domain),
         domain,
@@ -103,13 +103,13 @@ def test_registration_initial_affine_with_zero_svf_matches_affine_alone():
     # must come back verbatim as affine_matrix/affine_translation, and the
     # composed warpedmovout (still computed internally) must still equal
     # the affine-alone warp.
-    domain = BSplineDomain((10, 9), spacing=(1.0, 1.0))
+    domain = ImageDomain((10, 9), spacing=(1.0, 1.0))
     moving = _blob(domain, dtype=torch.double)
     matrix = torch.eye(2, dtype=torch.double)
     translation = torch.tensor([1.5, -0.5], dtype=torch.double)
     expected_field = affine_displacement_field(matrix, translation, domain, moving)
     fixed = warp_image(moving, expected_field, domain, padding_mode="border")
-    result = registration(
+    result = bspline_svf_registration(
         fixed,
         moving,
         domain,
@@ -134,11 +134,11 @@ def test_registration_initial_affine_with_zero_svf_matches_affine_alone():
 
 def test_forward_inverse_composition_with_initial_affine_is_near_identity():
     torch.manual_seed(7)
-    domain = BSplineDomain((24, 22))
+    domain = ImageDomain((24, 22))
     coefficients = torch.randn(1, 2, 5, 5) * 0.02
     matrix = torch.tensor([[1.05, 0.03], [-0.02, 0.97]])
     translation = torch.tensor([0.4, -0.3])
-    result = registration(
+    result = bspline_svf_registration(
         _blob(domain),
         _blob(domain),
         domain,
@@ -158,13 +158,13 @@ def test_forward_inverse_composition_with_initial_affine_is_near_identity():
 
 
 def test_registration_initial_affine_accepts_unbatched_and_batched_forms():
-    domain = BSplineDomain((8, 7))
+    domain = ImageDomain((8, 7))
     fixed = torch.zeros(2, 1, *domain.torch_size)
     moving = torch.zeros(2, 1, *domain.torch_size)
-    unbatched = registration(
+    unbatched = bspline_svf_registration(
         fixed, moving, domain, initial_affine=(torch.eye(2), torch.zeros(2)), iterations=0
     )
-    batched = registration(
+    batched = bspline_svf_registration(
         fixed,
         moving,
         domain,
@@ -183,33 +183,33 @@ def test_registration_initial_affine_accepts_unbatched_and_batched_forms():
     ],
 )
 def test_registration_initial_affine_validation(kwargs, match):
-    domain = BSplineDomain((8, 7))
+    domain = ImageDomain((8, 7))
     image = _blob(domain)
     with pytest.raises(ValueError, match=match):
-        registration(image, image, domain, **kwargs)
+        bspline_svf_registration(image, image, domain, **kwargs)
 
 
 def test_registration_rejects_non_tuple_initial_affine():
-    domain = BSplineDomain((8, 7))
+    domain = ImageDomain((8, 7))
     image = _blob(domain)
     with pytest.raises(TypeError, match="initial_affine"):
-        registration(image, image, domain, initial_affine=[torch.eye(2), torch.zeros(2)])
+        bspline_svf_registration(image, image, domain, initial_affine=[torch.eye(2), torch.zeros(2)])
 
 
 def test_distinct_moving_domain_and_batch_are_supported():
-    fixed_domain = BSplineDomain((8, 7), spacing=(1.0, 1.0))
-    moving_domain = BSplineDomain((10, 9), spacing=(0.8, 0.75))
+    fixed_domain = ImageDomain((8, 7), spacing=(1.0, 1.0))
+    moving_domain = ImageDomain((10, 9), spacing=(0.8, 0.75))
     fixed = torch.zeros(2, 1, *fixed_domain.torch_size)
     moving = torch.zeros(2, 1, *moving_domain.torch_size)
-    result = registration(fixed, moving, fixed_domain, moving_domain, iterations=0)
+    result = bspline_svf_registration(fixed, moving, fixed_domain, moving_domain, iterations=0)
     assert result["warpedmovout"].shape == fixed.shape
     assert result["coefficients"].shape[:2] == (2, 2)
 
 
 def test_multiresolution_refines_lattice_and_reports_each_level():
-    domain = BSplineDomain((17, 15), spacing=(0.8, 1.2), origin=(2.0, -3.0))
+    domain = ImageDomain((17, 15), spacing=(0.8, 1.2), origin=(2.0, -3.0))
     image = _blob(domain)
-    result = registration(
+    result = bspline_svf_registration(
         image,
         image,
         domain,
@@ -226,10 +226,10 @@ def test_multiresolution_refines_lattice_and_reports_each_level():
 
 
 def test_multiresolution_optimization_runs_coarse_to_fine():
-    domain = BSplineDomain((17, 15))
+    domain = ImageDomain((17, 15))
     moving = _blob(domain)
     fixed = torch.roll(moving, 1, -1)
-    result = registration(
+    result = bspline_svf_registration(
         fixed,
         moving,
         domain,
@@ -246,9 +246,9 @@ def test_multiresolution_optimization_runs_coarse_to_fine():
 
 
 def test_multiresolution_3d_smoothing_and_refinement():
-    domain = BSplineDomain((9, 8, 7), spacing=(0.7, 1.1, 1.4))
+    domain = ImageDomain((9, 8, 7), spacing=(0.7, 1.1, 1.4))
     image = _blob(domain)
-    result = registration(
+    result = bspline_svf_registration(
         image,
         image,
         domain,
@@ -263,9 +263,9 @@ def test_multiresolution_3d_smoothing_and_refinement():
 
 
 def test_verbose_reports_levels_and_iterations(capsys):
-    domain = BSplineDomain((8, 7))
+    domain = ImageDomain((8, 7))
     image = _blob(domain)
-    registration(
+    bspline_svf_registration(
         image,
         image,
         domain,
@@ -290,11 +290,11 @@ def test_verbose_reports_levels_and_iterations(capsys):
 
 def test_physical_gradient_descent_controls_dense_update_magnitude():
     torch.manual_seed(12)
-    domain = BSplineDomain((9, 8), spacing=(2.0, 3.0))
+    domain = ImageDomain((9, 8), spacing=(2.0, 3.0))
     moving = torch.randn(1, 1, *domain.torch_size)
     fixed = torch.roll(moving, 1, -1)
     gradient_step = 0.1
-    result = registration(
+    result = bspline_svf_registration(
         fixed,
         moving,
         domain,
@@ -311,7 +311,7 @@ def test_physical_gradient_descent_controls_dense_update_magnitude():
 
 def test_physical_gradient_descent_instance_supports_momentum_and_smoothing():
     torch.manual_seed(13)
-    domain = BSplineDomain((9, 8), spacing=(1.5, 2.0))
+    domain = ImageDomain((9, 8), spacing=(1.5, 2.0))
     moving = torch.randn(1, 1, *domain.torch_size)
     fixed = torch.roll(moving, 1, -2)
     optimizer = PhysicalGradientDescent(
@@ -319,7 +319,7 @@ def test_physical_gradient_descent_instance_supports_momentum_and_smoothing():
         momentum=0.9,
         smoothing_sigma=1.0,
     )
-    result = registration(
+    result = bspline_svf_registration(
         fixed,
         moving,
         domain,
@@ -351,13 +351,13 @@ def test_physical_gradient_descent_instance_supports_momentum_and_smoothing():
     ],
 )
 def test_registration_parameter_validation(kwargs, match):
-    domain = BSplineDomain((8, 7))
+    domain = ImageDomain((8, 7))
     image = _blob(domain)
     with pytest.raises(ValueError, match=match):
-        registration(image, image, domain, **kwargs)
+        bspline_svf_registration(image, image, domain, **kwargs)
 
 
 def test_registration_rejects_incompatible_image_domain():
-    domain = BSplineDomain((8, 7))
+    domain = ImageDomain((8, 7))
     with pytest.raises(ValueError, match="fixed tensor shape"):
-        registration(torch.zeros(1, 1, 6, 8), torch.zeros(1, 1, 7, 8), domain)
+        bspline_svf_registration(torch.zeros(1, 1, 6, 8), torch.zeros(1, 1, 7, 8), domain)

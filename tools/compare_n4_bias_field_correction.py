@@ -122,7 +122,7 @@ def main() -> None:
     )
     ants_seconds = time.perf_counter() - start
 
-    domain = antstorch.BSplineDomain(
+    domain = antstorch.ImageDomain(
         size=tuple(int(value) for value in t1.shape),
         spacing=tuple(float(value) for value in t1.spacing),
         origin=tuple(float(value) for value in t1.origin),

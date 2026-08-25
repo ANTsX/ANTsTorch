@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from antstorch.bspline_flows import (
-    BSplineDomain,
+    ImageDomain,
     DeterministicBSplineRegistration,
     affine_displacement_field,
     compose_displacements,
@@ -17,7 +17,7 @@ from antstorch.bspline_flows import (
 )
 def test_synthetic_constant_translation_registration(size, lattice):
     dimension = len(size)
-    domain = BSplineDomain(size)
+    domain = ImageDomain(size)
     moving = torch.randn((1, 1) + domain.torch_size, dtype=torch.double)
     coefficients = torch.zeros((1, dimension) + lattice, dtype=torch.double)
     coefficients[:, 0] = 0.4
@@ -41,7 +41,7 @@ def test_synthetic_constant_translation_registration(size, lattice):
 
 def test_image_loss_gradient_reaches_bspline_coefficients():
     torch.manual_seed(10)
-    domain = BSplineDomain((9, 8))
+    domain = ImageDomain((9, 8))
     moving = torch.randn(1, 1, 8, 9, dtype=torch.double)
     fixed = torch.roll(moving, shifts=1, dims=-1)
     coefficients = (torch.randn(1, 2, 6, 7, dtype=torch.double) * 0.01).requires_grad_()
@@ -56,7 +56,7 @@ def test_image_loss_gradient_reaches_bspline_coefficients():
 
 
 def test_regularization_terms_are_optional_and_reported():
-    domain = BSplineDomain((7, 6))
+    domain = ImageDomain((7, 6))
     coefficients = torch.randn(1, 2, 5, 6) * 0.01
     image = torch.randn(1, 1, 6, 7)
     model = DeterministicBSplineRegistration(
@@ -75,7 +75,7 @@ def test_regularization_terms_are_optional_and_reported():
 def test_zero_coefficients_with_initial_affine_displacement_reduces_to_the_affine():
     # With zero coefficients the SVF is exactly zero everywhere, so the total
     # transform must reduce to the supplied affine displacement alone.
-    domain = BSplineDomain((10, 9))
+    domain = ImageDomain((10, 9))
     moving = torch.randn(1, 1, 9, 10, dtype=torch.double)
     coefficients = torch.zeros(1, 2, 6, 5, dtype=torch.double)
     affine_field = affine_displacement_field(
@@ -94,7 +94,7 @@ def test_zero_coefficients_with_initial_affine_displacement_reduces_to_the_affin
 
 
 def test_initial_affine_displacement_matches_explicit_composition():
-    domain = BSplineDomain((9, 8))
+    domain = ImageDomain((9, 8))
     moving = torch.randn(1, 1, 8, 9, dtype=torch.double)
     coefficients = (torch.randn(1, 2, 5, 6, dtype=torch.double) * 0.05).requires_grad_(False)
     affine_field = affine_displacement_field(
@@ -109,7 +109,7 @@ def test_initial_affine_displacement_matches_explicit_composition():
 
 
 def test_forward_reports_jacobian_of_the_composed_transform():
-    domain = BSplineDomain((8, 7))
+    domain = ImageDomain((8, 7))
     moving = torch.randn(1, 1, 7, 8, dtype=torch.double)
     fixed = torch.randn(1, 1, 7, 8, dtype=torch.double)
     coefficients = (torch.randn(1, 2, 5, 6, dtype=torch.double) * 0.05).requires_grad_(False)

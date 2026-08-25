@@ -1,7 +1,7 @@
 """Differentiable ITK-compatible cubic B-spline field synthesis."""
 
 from .affine_registration import affine_registration
-from .bspline_domain import BSplineDomain
+from .bspline_domain import ImageDomain
 from .bspline_scattered_data import fit_bspline_displacement_field, fit_bspline_object_to_scattered_data
 from .bspline_synthesis import (
     CubicBSplineSynthesis,
@@ -13,7 +13,7 @@ from .bspline_synthesis import (
 from .deterministic_registration import DeterministicBSplineRegistration
 from .n4_bias_field_correction import N4BiasFieldCorrection, n4_bias_field_correction
 from .physical_gradient_descent import PhysicalGradientDescent
-from .registration import registration
+from .registration import bspline_svf_registration
 from .scaling_and_squaring import ScalingAndSquaring, scaling_and_squaring
 from .similarity import (
     ants_neighborhood_correlation_loss,
@@ -35,7 +35,7 @@ from .spatial_transform import (
 
 __all__ = [
     "affine_registration",
-    "BSplineDomain",
+    "ImageDomain",
     "CubicBSplineSynthesis",
     "cubic_bspline_basis",
     "fit_bspline_coefficients",
@@ -47,7 +47,7 @@ __all__ = [
     "N4BiasFieldCorrection",
     "n4_bias_field_correction",
     "PhysicalGradientDescent",
-    "registration",
+    "bspline_svf_registration",
     "ScalingAndSquaring",
     "scaling_and_squaring",
     "bending_energy",

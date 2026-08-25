@@ -7,7 +7,7 @@ import torch
 from torch import Tensor
 from torch.nn import functional as F
 
-from .bspline_domain import BSplineDomain
+from .bspline_domain import ImageDomain
 
 
 class PhysicalGradientDescent:
@@ -73,7 +73,7 @@ class PhysicalGradientDescent:
         """Clear the coefficient gradient without allocating a zero tensor."""
         coefficients.grad = None
 
-    def _smooth(self, gradient: Tensor, domain: BSplineDomain, closed=False) -> Tensor:
+    def _smooth(self, gradient: Tensor, domain: ImageDomain, closed=False) -> Tensor:
         if self.smoothing_sigma == 0.0:
             return gradient
         dimension = domain.dimension
@@ -105,7 +105,7 @@ class PhysicalGradientDescent:
         self,
         coefficients: Tensor,
         synthesis: Callable[[Tensor], Tensor],
-        domain: BSplineDomain,
+        domain: ImageDomain,
         *,
         closed: Union[bool, tuple] = False,
     ) -> Dict[str, Tensor]:

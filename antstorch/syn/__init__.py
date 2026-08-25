@@ -15,7 +15,7 @@ rather than porting ``syntx``'s separate ``robust_affine`` module.
 
 Exports are explicit and non-wildcard: ``antstorch/__init__.py`` does
 ``from .bspline_flows import *``, and this package must never silently
-shadow names already exposed that way (``registration``, ``warp_image``,
+shadow names already exposed that way (``bspline_svf_registration``, ``warp_image``,
 ``jacobian_determinant``, ``compose_displacements``, ``folding_count``,
 ``physical_grid``, ``displacement_to_sampling_grid``).
 """
