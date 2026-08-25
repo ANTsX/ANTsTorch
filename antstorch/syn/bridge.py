@@ -178,7 +178,7 @@ def displacement_xyz_to_ants_image(field: Tensor, reference):
 
     Bridges :mod:`antstorch.bspline_flows`'s own displacement-field
     convention (channel-first, ITK component order, e.g. the fields
-    returned by ``affine_registration()``/``registration()``) directly to
+    returned by ``affine_registration()``/``bspline_svf_registration()``) directly to
     ``ants``, without going through the ``(z, y, x)``-order convention used
     by :func:`displacement_zyx_to_ants_image`.
 

@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import torch
 
-from antstorch.bspline_flows import BSplineDomain, fit_bspline_coefficients
+from antstorch.bspline_flows import ImageDomain, fit_bspline_coefficients
 from antstorch.bspline_flows.bspline_scattered_data import (
     fit_bspline_displacement_field,
     fit_bspline_object_to_scattered_data,
@@ -16,7 +16,7 @@ def test_single_level_scattered_fit_matches_dense_grid_fit():
     # dense-grid least-squares fit (`fit_bspline_coefficients`).
     torch.manual_seed(0)
     H, W = 11, 14
-    domain = BSplineDomain((W, H))
+    domain = ImageDomain((W, H))
     values = torch.rand(1, 1, H, W, dtype=torch.double)
     lattice = (5, 6)
 
@@ -141,7 +141,7 @@ def test_fit_bspline_displacement_field_from_points_agrees_with_antspy():
         enforce_stationary_boundary=False,
     ).numpy()
 
-    domain = BSplineDomain(size=size, spacing=(1.0, 1.0), origin=(0.0, 0.0))
+    domain = ImageDomain(size=size, spacing=(1.0, 1.0), origin=(0.0, 0.0))
     torch_arr = fit_bspline_displacement_field(
         displacement_origins=points,
         displacements=deltas,
@@ -157,7 +157,7 @@ def test_fit_bspline_displacement_field_from_points_agrees_with_antspy():
 
 def test_fit_bspline_displacement_field_enforces_stationary_boundary():
     torch.manual_seed(5)
-    domain = BSplineDomain((20, 16))
+    domain = ImageDomain((20, 16))
     field = torch.randn(1, 2, *domain.torch_size, dtype=torch.double) * 0.1
     fitted = fit_bspline_displacement_field(
         displacement_field=field,
@@ -177,7 +177,7 @@ def test_fit_bspline_displacement_field_enforces_stationary_boundary():
 
 def test_fit_bspline_displacement_field_combines_grid_and_points():
     torch.manual_seed(9)
-    domain = BSplineDomain((18, 15))
+    domain = ImageDomain((18, 15))
     field = torch.randn(1, 2, *domain.torch_size, dtype=torch.double) * 0.05
     points = torch.rand(10, 2, dtype=torch.double) * torch.tensor([17.0, 14.0])
     deltas = torch.randn(10, 2, dtype=torch.double) * 0.2
@@ -203,13 +203,13 @@ def test_fit_bspline_displacement_field_combines_grid_and_points():
 
 
 def test_fit_bspline_displacement_field_requires_field_or_points():
-    domain = BSplineDomain((10, 10))
+    domain = ImageDomain((10, 10))
     with pytest.raises(ValueError):
         fit_bspline_displacement_field(domain=domain)
 
 
 def test_fit_functions_reject_non_cubic_spline_order():
-    domain = BSplineDomain((10, 10))
+    domain = ImageDomain((10, 10))
     field = torch.zeros(1, 2, *domain.torch_size)
     with pytest.raises(NotImplementedError):
         fit_bspline_displacement_field(displacement_field=field, domain=domain, spline_order=2)

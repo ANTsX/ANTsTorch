@@ -1,12 +1,12 @@
 import pytest
 import torch
 
-from antstorch.bspline_flows import BSplineDomain, CubicBSplineSynthesis
+from antstorch.bspline_flows import ImageDomain, CubicBSplineSynthesis
 
 
 @pytest.mark.parametrize(
     "domain,shape",
-    [(BSplineDomain((5, 4)), (1, 2, 4, 5)), (BSplineDomain((4, 3, 3)), (1, 3, 4, 4, 4))],
+    [(ImageDomain((5, 4)), (1, 2, 4, 5)), (ImageDomain((4, 3, 3)), (1, 3, 4, 4, 4))],
 )
 def test_gradcheck(domain, shape):
     coefficients = torch.randn(shape, dtype=torch.double, requires_grad=True)
@@ -16,7 +16,7 @@ def test_gradcheck(domain, shape):
 
 def test_gradient_reaches_coefficients():
     coefficients = torch.randn(2, 2, 5, 6, dtype=torch.double, requires_grad=True)
-    CubicBSplineSynthesis(BSplineDomain((7, 6)))(coefficients).square().mean().backward()
+    CubicBSplineSynthesis(ImageDomain((7, 6)))(coefficients).square().mean().backward()
     assert coefficients.grad is not None
     assert torch.isfinite(coefficients.grad).all()
     assert torch.count_nonzero(coefficients.grad) > 0

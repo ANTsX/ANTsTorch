@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from antstorch.bspline_flows import (
-    BSplineDomain,
+    ImageDomain,
     affine_displacement_field,
     affine_registration,
     warp_image,
@@ -26,7 +26,7 @@ def _asymmetric_blob_3d(domain, dtype=torch.float32):
 
 @pytest.mark.parametrize("size", [(9, 8), (7, 6, 5)])
 def test_affine_registration_shapes_and_finiteness(size):
-    domain = BSplineDomain(size)
+    domain = ImageDomain(size)
     dimension = len(size)
     image = _blob(domain) if dimension == 2 else _asymmetric_blob_3d(domain)
     result = affine_registration(
@@ -50,7 +50,7 @@ def test_affine_registration_shapes_and_finiteness(size):
 
 def test_affine_registration_recovers_a_known_translation():
     torch.manual_seed(0)
-    domain = BSplineDomain((24, 22), spacing=(1.0, 1.0))
+    domain = ImageDomain((24, 22), spacing=(1.0, 1.0))
     moving = _blob(domain)
     known_translation = torch.tensor([1.6, -1.1])
     field = affine_displacement_field(torch.eye(2), known_translation, domain, moving)
@@ -74,7 +74,7 @@ def test_affine_registration_recovers_a_known_translation():
 
 def test_affine_registration_reduces_loss_for_a_known_affine():
     torch.manual_seed(1)
-    domain = BSplineDomain((26, 24), spacing=(1.0, 1.0))
+    domain = ImageDomain((26, 24), spacing=(1.0, 1.0))
     moving = _blob(domain)
     matrix = torch.tensor([[1.08, 0.05], [-0.04, 0.94]])
     translation = torch.tensor([0.8, -0.6])
@@ -100,7 +100,7 @@ def test_multi_start_helps_recover_from_a_flip_ambiguous_configuration():
     # single-start gradient-based affine solver: the seed-rotation search is
     # exactly the mechanism meant to avoid it.
     torch.manual_seed(2)
-    domain = BSplineDomain((20, 20), spacing=(1.0, 1.0))
+    domain = ImageDomain((20, 20), spacing=(1.0, 1.0))
     moving = torch.zeros(1, 1, *domain.torch_size)
     axes = [torch.linspace(-1, 1, s) for s in domain.torch_size]
     yy, xx = torch.meshgrid(*axes, indexing="ij")
@@ -127,7 +127,7 @@ def test_multi_start_helps_recover_from_a_flip_ambiguous_configuration():
 
 def test_affine_registration_matrix_and_translation_invert_consistently():
     torch.manual_seed(3)
-    domain = BSplineDomain((16, 14))
+    domain = ImageDomain((16, 14))
     moving = _blob(domain)
     matrix = torch.tensor([[1.1, 0.02], [0.03, 0.9]])
     translation = torch.tensor([0.5, 0.2])
@@ -161,14 +161,14 @@ def test_affine_registration_matrix_and_translation_invert_consistently():
     ],
 )
 def test_affine_registration_parameter_validation(kwargs, exception, match):
-    domain = BSplineDomain((8, 7))
+    domain = ImageDomain((8, 7))
     image = _blob(domain)
     with pytest.raises(exception, match=match):
         affine_registration(image, image, domain, iterations=(0,), shrink_factors=(1,), **kwargs)
 
 
 def test_affine_registration_rejects_incompatible_image_domain():
-    domain = BSplineDomain((8, 7))
+    domain = ImageDomain((8, 7))
     with pytest.raises(ValueError, match="fixed tensor shape"):
         affine_registration(
             torch.zeros(1, 1, 6, 8), torch.zeros(1, 1, 7, 8), domain, iterations=(0,), shrink_factors=(1,)
@@ -176,7 +176,7 @@ def test_affine_registration_rejects_incompatible_image_domain():
 
 
 def test_affine_registration_batch_is_fit_independently():
-    domain = BSplineDomain((16, 14))
+    domain = ImageDomain((16, 14))
     moving = torch.cat([_blob(domain, center=(0.0, 0.0)), _blob(domain, center=(0.3, -0.2))], dim=0)
     translations = torch.tensor([[0.8, 0.0], [-0.5, 0.6]])
     fixed_items = []

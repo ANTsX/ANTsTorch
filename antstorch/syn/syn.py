@@ -36,7 +36,7 @@ raw speed), this port lets PyTorch autograd differentiate the similarity
 loss directly with respect to the two half-warps as leaf tensors each
 iteration. This is mathematically equivalent for the metrics implemented
 here (the same midpoint images, the same loss), simpler to verify, and
-consistent with how :func:`antstorch.bspline_flows.registration.registration`
+consistent with how :func:`antstorch.bspline_flows.registration.bspline_svf_registration`
 itself already differentiates through its objective by full backpropagation
 rather than a hand-derived gradient. A second, explicitly out-of-scope
 simplification: the per-level divergence-retry-with-halved-CFL step described
@@ -341,13 +341,13 @@ def _fit_affine_from_ants(
     # `import antstorch.bspline_flows` runs before `antstorch.syn.syn` has
     # finished loading (e.g. `from antstorch.bspline_flows import ...` as
     # the very first antstorch import in a test module).
-    from antstorch.bspline_flows import BSplineDomain
+    from antstorch.bspline_flows import ImageDomain
     from antstorch.bspline_flows import affine_registration as _bspline_affine_registration
 
     fixed_meta = ants_image_metadata(fixed)
     moving_meta = ants_image_metadata(moving)
-    fixed_domain = BSplineDomain(fixed_meta["shape"], fixed_meta["spacing"], fixed_meta["origin"], fixed_meta["direction"])
-    moving_domain = BSplineDomain(moving_meta["shape"], moving_meta["spacing"], moving_meta["origin"], moving_meta["direction"])
+    fixed_domain = ImageDomain(fixed_meta["shape"], fixed_meta["spacing"], fixed_meta["origin"], fixed_meta["direction"])
+    moving_domain = ImageDomain(moving_meta["shape"], moving_meta["spacing"], moving_meta["origin"], moving_meta["direction"])
     fixed_tensor = ants_image_to_tensor(fixed, device, dtype)
     moving_tensor = ants_image_to_tensor(moving, device, dtype)
     result = _bspline_affine_registration(
@@ -465,7 +465,7 @@ def syn_registration(
 
     ``levels``/``reg_iterations`` define the multi-resolution pyramid
     (coarse to fine, e.g. ``levels=(4, 2, 1)``); unlike
-    :func:`antstorch.bspline_flows.registration.registration`'s
+    :func:`antstorch.bspline_flows.registration.bspline_svf_registration`'s
     ``shrink_factors``, this pyramid need not be a strict dyadic halving.
 
     Returns
@@ -554,12 +554,12 @@ def syn_registration(
         # directly via initial_affine, (re)compute its dense field and
         # warped output directly from (matrix_xyz, translation_xyz) so both
         # paths return the same shape of result.
-        from antstorch.bspline_flows import BSplineDomain, affine_displacement_field, warp_image
+        from antstorch.bspline_flows import ImageDomain, affine_displacement_field, warp_image
 
         fixed_meta = ants_image_metadata(fixed)
         moving_meta = ants_image_metadata(moving)
-        fixed_domain = BSplineDomain(fixed_meta["shape"], fixed_meta["spacing"], fixed_meta["origin"], fixed_meta["direction"])
-        moving_domain = BSplineDomain(
+        fixed_domain = ImageDomain(fixed_meta["shape"], fixed_meta["spacing"], fixed_meta["origin"], fixed_meta["direction"])
+        moving_domain = ImageDomain(
             moving_meta["shape"], moving_meta["spacing"], moving_meta["origin"], moving_meta["direction"]
         )
         fixed_tensor = ants_image_to_tensor(fixed, resolved_device, dtype, normalize=False)

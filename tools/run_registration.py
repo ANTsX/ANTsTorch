@@ -36,10 +36,10 @@ import torch
 
 from antstorch.ants_transform_io import write_affine_transform
 from antstorch.bspline_flows import (
-    BSplineDomain,
+    ImageDomain,
     PhysicalGradientDescent,
     affine_registration,
-    registration,
+    bspline_svf_registration,
 )
 
 
@@ -51,9 +51,9 @@ def ants_to_torch(image: ants.ANTsImage, device: torch.device) -> torch.Tensor:
     return torch.from_numpy(array).unsqueeze(0).unsqueeze(0).to(device)
 
 
-def image_domain(image: ants.ANTsImage) -> BSplineDomain:
+def image_domain(image: ants.ANTsImage) -> ImageDomain:
     """Copy all physical-space metadata from an ANTs image."""
-    return BSplineDomain(
+    return ImageDomain(
         size=tuple(int(value) for value in image.shape),
         spacing=tuple(float(value) for value in image.spacing),
         origin=tuple(float(value) for value in image.origin),
@@ -122,7 +122,7 @@ def parse_args() -> argparse.Namespace:
         "--affine",
         action="store_true",
         help="Run an affine pre-registration (antstorch.bspline_flows.affine_registration) "
-        "before the B-spline SVF, and pass its result as registration()'s initial_affine",
+        "before the B-spline SVF, and pass its result as bspline_svf_registration()'s initial_affine",
     )
     parser.add_argument(
         "--affine-transform-type",
@@ -217,7 +217,7 @@ def main() -> None:
         if args.optimizer == "physical_gradient_descent"
         else args.optimizer
     )
-    result = registration(
+    result = bspline_svf_registration(
         fixed=fixed,
         moving=moving,
         fixed_domain=fixed_domain,

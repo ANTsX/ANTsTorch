@@ -1,6 +1,6 @@
 """Affine pre-registration for antstorch.bspline_flows.
 
-``antstorch.bspline_flows.registration`` estimates only a B-spline
+``antstorch.bspline_flows.bspline_svf_registration`` estimates only a B-spline
 stationary velocity field — by design it has no rigid or affine
 initialization (see ``docs/antsx_tutorial_bspline_flows.md``). This module
 fills that gap with a lightweight, native-PyTorch affine solver built from
@@ -13,7 +13,7 @@ convention anywhere (unlike syntx's own affine machinery, which is built
 around that convention). The estimated affine is returned as a plain
 ``(matrix, translation)`` physical-space pair, directly usable both
 standalone and as the ``initial_affine`` argument of
-:func:`antstorch.bspline_flows.registration.registration`.
+:func:`antstorch.bspline_flows.registration.bspline_svf_registration`.
 
 Robustness against 180-degree "flip" local minima — the main practical
 failure mode of a naive single-start affine fit, and the core value
@@ -35,7 +35,7 @@ from torch import Tensor
 
 from antstorch.syn.core.affine import HierarchicalAffine, get_rotation_matrix
 
-from .bspline_domain import BSplineDomain
+from .bspline_domain import ImageDomain
 from .registration import _downsample, _pyramid_configuration, _smooth_image
 from .similarity import (
     ants_neighborhood_correlation_loss,
@@ -53,7 +53,7 @@ def _similarity_loss(name: str, fixed: Tensor, warped: Tensor, neighborhood_radi
     return ants_neighborhood_correlation_loss(fixed, warped, neighborhood_radius)
 
 
-def _center_of_mass(image: Tensor, domain: BSplineDomain) -> Tensor:
+def _center_of_mass(image: Tensor, domain: ImageDomain) -> Tensor:
     """Intensity-weighted physical center of mass of a single-item image, shape ``(dim,)``."""
     points = physical_grid(domain, image).squeeze(0)  # (dim, *spatial)
     weights = image[0].clamp_min(0).mean(dim=0)  # (*spatial), averaged over channels
@@ -79,8 +79,8 @@ def _seed_rotations(dimension: int, device, dtype) -> Sequence[Tensor]:
 def _fit_single_affine(
     fixed_item: Tensor,
     moving_item: Tensor,
-    fixed_domain: BSplineDomain,
-    moving_domain: BSplineDomain,
+    fixed_domain: ImageDomain,
+    moving_domain: ImageDomain,
     *,
     transform_type: str,
     similarity: str,
@@ -172,8 +172,8 @@ def _fit_single_affine(
 def affine_registration(
     fixed: Tensor,
     moving: Tensor,
-    fixed_domain: BSplineDomain,
-    moving_domain: Optional[BSplineDomain] = None,
+    fixed_domain: ImageDomain,
+    moving_domain: Optional[ImageDomain] = None,
     *,
     transform_type: str = "Affine",
     similarity: str = "mse",
@@ -193,7 +193,7 @@ def affine_registration(
     """Estimate a physical-space affine transform aligning ``moving`` onto ``fixed``.
 
     Images have shape ``(N, C, Y, X)`` or ``(N, C, Z, Y, X)``, exactly as in
-    :func:`antstorch.bspline_flows.registration.registration`; each batch
+    :func:`antstorch.bspline_flows.registration.bspline_svf_registration`; each batch
     item is fit an independent affine transform (mirroring that function's
     per-batch-item coefficient lattices).
 
@@ -205,19 +205,19 @@ def affine_registration(
     ----------
     fixed, moving : Tensor
         Images to register, matching ``fixed_domain``/``moving_domain``.
-    fixed_domain, moving_domain : BSplineDomain
+    fixed_domain, moving_domain : ImageDomain
         Physical metadata for ``fixed``/``moving``; ``moving_domain``
         defaults to ``fixed_domain``.
     transform_type : str
         Linear-transform hierarchy, see above.
     similarity : {'mse', 'ncc', 'ants_ncc'}
-        Similarity metric, matching ``registration()``'s options.
+        Similarity metric, matching ``bspline_svf_registration()``'s options.
     neighborhood_radius : int or sequence of int
         Passed through to ``ants_neighborhood_correlation_loss`` when
         ``similarity='ants_ncc'``.
     iterations, learning_rate, shrink_factors, smoothing_sigmas :
         Multi-resolution pyramid configuration, matching
-        ``registration()``'s parameters of the same name.
+        ``bspline_svf_registration()``'s parameters of the same name.
     multi_start : bool
         If ``True``, seed the optimization from whichever of a small set of
         candidate rotations (identity plus a 180-degree rotation about each
@@ -231,7 +231,7 @@ def affine_registration(
     padding_mode : {'border', 'zeros', 'reflection'}
         Out-of-bounds handling for the affine warp.
     convergence_tolerance : float, optional
-        Per-level early-stopping tolerance, matching ``registration()``.
+        Per-level early-stopping tolerance, matching ``bspline_svf_registration()``.
     return_loss_history : bool
         If ``True``, include ``loss_history``/``level_loss_history`` in the
         result.
@@ -247,19 +247,19 @@ def affine_registration(
         give the fitted physical-space affine map
         ``p_moving = matrix @ p_fixed + translation`` per batch item — the
         pair to pass as ``initial_affine=(matrix, translation)`` to
-        :func:`antstorch.bspline_flows.registration.registration`.
+        :func:`antstorch.bspline_flows.registration.bspline_svf_registration`.
         ``warpedmovout`` is ``moving`` warped onto the fixed grid by this
         affine alone. ``fwdtransforms``/``invtransforms`` are the
         corresponding dense physical displacement fields (same convention as
-        ``registration()``'s output), included for direct inspection.
+        ``bspline_svf_registration()``'s output), included for direct inspection.
         ``loss_history``/``level_loss_history`` are lists of per-batch-item
         histories.
     """
-    if not isinstance(fixed_domain, BSplineDomain):
-        raise TypeError("fixed_domain must be a BSplineDomain")
+    if not isinstance(fixed_domain, ImageDomain):
+        raise TypeError("fixed_domain must be a ImageDomain")
     moving_domain = fixed_domain if moving_domain is None else moving_domain
-    if not isinstance(moving_domain, BSplineDomain):
-        raise TypeError("moving_domain must be a BSplineDomain")
+    if not isinstance(moving_domain, ImageDomain):
+        raise TypeError("moving_domain must be a ImageDomain")
     if fixed_domain.dimension != moving_domain.dimension:
         raise ValueError("fixed_domain and moving_domain must have the same dimension")
     if not isinstance(fixed, Tensor) or not isinstance(moving, Tensor):

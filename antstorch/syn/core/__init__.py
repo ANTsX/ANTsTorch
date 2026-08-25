@@ -10,7 +10,7 @@ similarity losses) but different *conventions* (this module follows
 greedy diffeomorphic registration, while ``bspline_flows`` follows its own
 B-spline SVF parameterization). Exports here are explicit and non-wildcard
 so importing this module can never silently shadow names already exposed
-by ``antstorch.bspline_flows`` (e.g. ``registration``, ``warp_image``,
+by ``antstorch.bspline_flows`` (e.g. ``bspline_svf_registration``, ``warp_image``,
 ``jacobian_determinant``, ``physical_grid``).
 """
 

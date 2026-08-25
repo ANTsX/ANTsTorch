@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import torch
 
-from antstorch.bspline_flows import BSplineDomain, N4BiasFieldCorrection, n4_bias_field_correction
+from antstorch.bspline_flows import ImageDomain, N4BiasFieldCorrection, n4_bias_field_correction
 
 
 def _options(dimension, iterations=3):
@@ -16,14 +16,14 @@ def _options(dimension, iterations=3):
 
 @pytest.mark.parametrize("size", [(14, 12), (9, 8, 7)])
 def test_constant_image_is_preserved(size):
-    domain = BSplineDomain(size, spacing=(1.3,) * len(size))
+    domain = ImageDomain(size, spacing=(1.3,) * len(size))
     image = torch.full((2, 1) + domain.torch_size, 7.0, dtype=torch.double)
     corrected = n4_bias_field_correction(image, domain, **_options(len(size), iterations=1))
     torch.testing.assert_close(corrected, image, rtol=2e-5, atol=2e-5)
 
 
 def test_synthetic_smooth_bias_reduces_nonuniformity():
-    domain = BSplineDomain((24, 20))
+    domain = ImageDomain((24, 20))
     y = torch.linspace(-1, 1, 20)[:, None]
     x = torch.linspace(-1, 1, 24)[None, :]
     image = torch.exp(0.4 * x + 0.2 * y)[None, None]
@@ -32,7 +32,7 @@ def test_synthetic_smooth_bias_reduces_nonuniformity():
 
 
 def test_mask_preserves_values_outside_and_weight_mask_is_supported():
-    domain = BSplineDomain((16, 14))
+    domain = ImageDomain((16, 14))
     image = torch.rand(1, 1, 14, 16) + 1.0
     mask = torch.zeros_like(image)
     mask[..., 2:-2, 3:-3] = 1
@@ -45,7 +45,7 @@ def test_mask_preserves_values_outside_and_weight_mask_is_supported():
 
 
 def test_returned_bias_is_positive_and_reconstructs_correction():
-    domain = BSplineDomain((15, 13))
+    domain = ImageDomain((15, 13))
     image = torch.rand(1, 2, 13, 15, dtype=torch.double) + 0.5
     options = _options(2, iterations=2)
     bias = n4_bias_field_correction(image, domain, return_bias_field=True, **options)
@@ -55,7 +55,7 @@ def test_returned_bias_is_positive_and_reconstructs_correction():
 
 
 def test_module_and_function_match():
-    domain = BSplineDomain((12, 10))
+    domain = ImageDomain((12, 10))
     image = torch.rand(1, 1, 10, 12) + 1
     options = _options(2, iterations=1)
     module = N4BiasFieldCorrection(**options)
@@ -64,7 +64,7 @@ def test_module_and_function_match():
 
 def test_gradient_propagates_to_input():
     torch.manual_seed(42)
-    domain = BSplineDomain((8, 7))
+    domain = ImageDomain((8, 7))
     image = (torch.rand(1, 1, 7, 8, dtype=torch.double) + 1.0).requires_grad_()
     corrected = n4_bias_field_correction(
         image,
@@ -82,7 +82,7 @@ def test_gradient_propagates_to_input():
 
 def test_n4_gradcheck_at_generic_intensities():
     torch.manual_seed(4)
-    domain = BSplineDomain((4, 4))
+    domain = ImageDomain((4, 4))
     image = (torch.rand(1, 1, 4, 4, dtype=torch.double) + 1.0).requires_grad_()
 
     def correction(value):
@@ -103,7 +103,7 @@ def test_n4_gradcheck_at_generic_intensities():
 def test_stable_and_vectorized_atomic_accumulation_agree(size):
     torch.manual_seed(1)
     dimension = len(size)
-    domain = BSplineDomain(size)
+    domain = ImageDomain(size)
     image = torch.rand((1, 1) + domain.torch_size, dtype=torch.double) + 1.0
     options = dict(
         shrink_factor=2,
@@ -118,7 +118,7 @@ def test_stable_and_vectorized_atomic_accumulation_agree(size):
 
 
 def test_rescale_restores_masked_intensity_range():
-    domain = BSplineDomain((14, 12))
+    domain = ImageDomain((14, 12))
     image = torch.linspace(1, 5, 14 * 12).reshape(1, 1, 12, 14)
     corrected = n4_bias_field_correction(
         image, domain, rescale_intensities=True, **_options(2, iterations=2)
@@ -149,7 +149,7 @@ def test_agrees_with_antspy_n4_on_smooth_2d_phantom():
     image_torch = torch.from_numpy(image_itk.T)[None, None]
     torch_bias = n4_bias_field_correction(
         image_torch,
-        BSplineDomain((size_x, size_y), spacing=spacing),
+        ImageDomain((size_x, size_y), spacing=spacing),
         torch.ones_like(image_torch),
         shrink_factor=1,
         convergence={"iters": [5], "tol": 0.0},
@@ -179,7 +179,7 @@ def test_agrees_with_antspy_n4_multiresolution():
 
     image_torch = torch.from_numpy(r16.numpy().T)[None, None]
     mask_torch = torch.from_numpy(mask.numpy().T)[None, None]
-    domain = BSplineDomain(
+    domain = ImageDomain(
         size=r16.shape,
         spacing=r16.spacing,
         origin=r16.origin,
@@ -207,7 +207,7 @@ def test_agrees_with_antspy_n4_multiresolution():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
 def test_cpu_cuda_agreement():
-    domain = BSplineDomain((14, 12))
+    domain = ImageDomain((14, 12))
     image = torch.rand(1, 1, 12, 14) + 1.0
     options = _options(2, iterations=2)
     cpu = n4_bias_field_correction(image, domain, **options)
@@ -218,7 +218,7 @@ def test_cpu_cuda_agreement():
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS is not available")
 def test_mps_is_repeatable_and_agrees_with_cpu():
     torch.manual_seed(91)
-    domain = BSplineDomain((24, 20))
+    domain = ImageDomain((24, 20))
     y = torch.linspace(-1, 1, 20)[:, None]
     x = torch.linspace(-1, 1, 24)[None, :]
     image = (1.0 + 0.3 * torch.exp(-3.0 * (x.square() + y.square()))) * torch.exp(0.2 * x - 0.1 * y)

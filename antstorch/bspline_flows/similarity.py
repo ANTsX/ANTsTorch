@@ -4,7 +4,7 @@ import torch
 from torch import Tensor
 from torch.nn import functional as F
 
-from .bspline_domain import BSplineDomain
+from .bspline_domain import ImageDomain
 
 
 def mean_squared_error(fixed: Tensor, warped_moving: Tensor) -> Tensor:
@@ -110,7 +110,7 @@ def squared_l2_energy(value: Tensor) -> Tensor:
     return value.square().mean()
 
 
-def bending_energy(field: Tensor, domain: BSplineDomain) -> Tensor:
+def bending_energy(field: Tensor, domain: ImageDomain) -> Tensor:
     """Mean squared physical second derivatives (mixed terms counted twice).
 
     ITK direction matrices are orthonormal, so this Hessian Frobenius norm is

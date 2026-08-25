@@ -7,7 +7,7 @@ import torch
 from torch import Tensor
 from torch.nn import functional as F
 
-from .bspline_domain import BSplineDomain
+from .bspline_domain import ImageDomain
 from .bspline_synthesis import refine_bspline_coefficients
 from .deterministic_registration import DeterministicBSplineRegistration
 from .physical_gradient_descent import PhysicalGradientDescent
@@ -45,8 +45,8 @@ def _closed_axes(closed, dimension: int) -> tuple:
 def _validate_images(
     fixed: Tensor,
     moving: Tensor,
-    fixed_domain: BSplineDomain,
-    moving_domain: BSplineDomain,
+    fixed_domain: ImageDomain,
+    moving_domain: ImageDomain,
 ) -> None:
     if not isinstance(fixed, Tensor) or not isinstance(moving, Tensor):
         raise TypeError("fixed and moving must be torch tensors")
@@ -106,7 +106,7 @@ def _pyramid_configuration(shrink_factors, smoothing_sigmas, iterations, learnin
     return factors, sigmas, level_iterations, level_rates
 
 
-def _smooth_image(image: Tensor, domain: BSplineDomain, sigma: float) -> Tensor:
+def _smooth_image(image: Tensor, domain: ImageDomain, sigma: float) -> Tensor:
     """Gaussian smoothing with ``sigma`` in physical domain units."""
     if sigma == 0:
         return image
@@ -163,22 +163,22 @@ def _validate_initial_affine(initial_affine, fixed: Tensor, dimension: int) -> O
     return matrix, translation
 
 
-def _downsample(image: Tensor, domain: BSplineDomain, factor: int):
+def _downsample(image: Tensor, domain: ImageDomain, factor: int):
     if factor == 1:
         return image, domain
     size_itk = tuple(max(2, (size - 1) // factor + 1) for size in domain.size)
     spacing = tuple(extent / (size - 1) for extent, size in zip(domain.physical_extent, size_itk))
-    reduced_domain = BSplineDomain(size_itk, spacing, domain.origin, domain.direction)
+    reduced_domain = ImageDomain(size_itk, spacing, domain.origin, domain.direction)
     mode = "bilinear" if domain.dimension == 2 else "trilinear"
     reduced = F.interpolate(image, size=reduced_domain.torch_size, mode=mode, align_corners=True)
     return reduced, reduced_domain
 
 
-def registration(
+def bspline_svf_registration(
     fixed: Tensor,
     moving: Tensor,
-    fixed_domain: BSplineDomain,
-    moving_domain: Optional[BSplineDomain] = None,
+    fixed_domain: ImageDomain,
+    moving_domain: Optional[ImageDomain] = None,
     *,
     mesh_size: Union[int, Sequence[int]] = 1,
     coefficient_grid_size: Optional[Union[int, Sequence[int]]] = None,
@@ -293,11 +293,11 @@ def registration(
         internally even though that composed field is no longer itself
         returned), ``loss_history``, and ``level_loss_history``.
     """
-    if not isinstance(fixed_domain, BSplineDomain):
-        raise TypeError("fixed_domain must be a BSplineDomain")
+    if not isinstance(fixed_domain, ImageDomain):
+        raise TypeError("fixed_domain must be a ImageDomain")
     moving_domain = fixed_domain if moving_domain is None else moving_domain
-    if not isinstance(moving_domain, BSplineDomain):
-        raise TypeError("moving_domain must be a BSplineDomain")
+    if not isinstance(moving_domain, ImageDomain):
+        raise TypeError("moving_domain must be a ImageDomain")
     if fixed_domain.dimension != moving_domain.dimension:
         raise ValueError("fixed_domain and moving_domain must have the same dimension")
     _validate_images(fixed, moving, fixed_domain, moving_domain)

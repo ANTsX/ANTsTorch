@@ -9,14 +9,14 @@ used only to load, display, and save the tutorial images.
 
 ANTs/ITK arrays use spatial axis order `(X, Y[, Z])`. PyTorch image tensors
 use `(N, C, Y, X)` or `(N, C, Z, Y, X)`, so the spatial axes must be reversed.
-The `BSplineDomain` retains the physical spacing, origin, and direction.
+The `ImageDomain` retains the physical spacing, origin, and direction.
 
 ```python
 import ants
 import numpy as np
 import torch
 
-from antstorch.bspline_flows import BSplineDomain
+from antstorch.bspline_flows import ImageDomain
 
 
 def ants_to_torch(image, device="cpu"):
@@ -55,7 +55,7 @@ def torch_field_to_ants(tensor, reference):
 
 
 def ants_domain(image):
-    return BSplineDomain(
+    return ImageDomain(
         size=tuple(int(value) for value in image.shape),
         spacing=tuple(float(value) for value in image.spacing),
         origin=tuple(float(value) for value in image.origin),
@@ -145,7 +145,7 @@ For rigid/affine-only or a combined affine+SyN pipeline, see
 `docs/antsx_tutorial_syn.md`.
 
 ```python
-from antstorch.bspline_flows import PhysicalGradientDescent, registration
+from antstorch.bspline_flows import PhysicalGradientDescent, bspline_svf_registration
 
 r16 = ants.image_read(ants.get_ants_data("r16")).clone("float")
 r64 = ants.image_read(ants.get_ants_data("r64")).clone("float")
@@ -161,7 +161,7 @@ optimizer = PhysicalGradientDescent(
     smoothing_sigma=1.0,
 )
 
-result = registration(
+result = bspline_svf_registration(
     fixed=fixed,
     moving=moving,
     fixed_domain=fixed_domain,
@@ -192,13 +192,13 @@ print("Maximum Jacobian:", result["jacobian_determinant"].max().item())
 ```
 
 `warpedmovout` and `jacobian_determinant` above already account for
-`initial_affine` when one is supplied (`registration()` composes the
+`initial_affine` when one is supplied (`bspline_svf_registration()` composes the
 affine and the SVF internally before computing them) — it is only
 `fwdtransforms`/`invtransforms` that stay affine-free; see the next section.
 
 ### Affine initialization
 
-`registration()` accepts an optional `initial_affine=(matrix, translation)`
+`bspline_svf_registration()` accepts an optional `initial_affine=(matrix, translation)`
 pair — the same ITK `(x, y[, z])`-order convention returned by
 `affine_registration()` — as a **fixed**, non-optimized initialization: the
 B-spline SVF is then fit on top of it, with the total forward map applying
@@ -220,7 +220,7 @@ affine_result = affine_registration(
     learning_rate=(0.05, 0.03, 0.02),
 )
 
-result = registration(
+result = bspline_svf_registration(
     fixed=fixed,
     moving=moving,
     fixed_domain=fixed_domain,
@@ -323,7 +323,7 @@ includes `velocity`, `coefficients`, `loss_history`, and
 `level_loss_history`. Vector fields use physical x-y-(z) components even
 though tensor spatial axes are stored in PyTorch-reversed order.
 
-`registration()` stays tensor-native and batched, with no `ants` dependency
+`bspline_svf_registration()` stays tensor-native and batched, with no `ants` dependency
 in its core, so unlike `antstorch.syn.syn_registration` (see
 `docs/antsx_tutorial_syn.md`) it never writes ANTs transform files itself.
 For real ANTsX file export per batch item, use

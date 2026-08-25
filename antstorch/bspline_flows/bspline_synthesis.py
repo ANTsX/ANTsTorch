@@ -7,7 +7,7 @@ from typing import Optional, Sequence, Tuple, Union
 import torch
 from torch import Tensor, nn
 
-from .bspline_domain import BSplineDomain
+from .bspline_domain import ImageDomain
 
 
 def cubic_bspline_basis(value: Tensor) -> Tensor:
@@ -27,7 +27,7 @@ def _as_bools(value: Union[bool, Sequence[bool]], dimension: int) -> Tuple[bool,
 
 def synthesize_bspline_velocity(
     coefficients: Tensor,
-    domain: BSplineDomain,
+    domain: ImageDomain,
     *,
     closed: Union[bool, Sequence[bool]] = False,
     stationary_boundary: bool = False,
@@ -46,8 +46,8 @@ def synthesize_bspline_velocity(
     exact synthesis mask is the meaningful analogue when coefficients are the
     input and no fitting is performed.
     """
-    if not isinstance(domain, BSplineDomain):
-        raise TypeError("domain must be a BSplineDomain")
+    if not isinstance(domain, ImageDomain):
+        raise TypeError("domain must be a ImageDomain")
     if coefficients.ndim != domain.dimension + 2:
         raise ValueError(f"expected {domain.dimension + 2}-D coefficients")
     if not (coefficients.is_floating_point() or coefficients.is_complex()):
@@ -423,7 +423,7 @@ def refine_bspline_coefficients(coefficients: Tensor) -> Tensor:
 
 def fit_bspline_coefficients(
     values: Tensor,
-    domain: BSplineDomain,
+    domain: ImageDomain,
     lattice_size: Sequence[int],
     weights: Optional[Tensor] = None,
     *,
@@ -466,8 +466,8 @@ def fit_bspline_coefficients(
     per-call recomputation this convenience wrapper is unsuitable for in a
     tight loop.
     """
-    if not isinstance(domain, BSplineDomain):
-        raise TypeError("domain must be a BSplineDomain")
+    if not isinstance(domain, ImageDomain):
+        raise TypeError("domain must be a ImageDomain")
     if values.ndim != domain.dimension + 2:
         raise ValueError(f"expected {domain.dimension + 2}-D values")
     if not values.is_floating_point():
@@ -500,7 +500,7 @@ def fit_bspline_coefficients(
 class CubicBSplineSynthesis(nn.Module):
     """``nn.Module`` wrapper around :func:`synthesize_bspline_velocity`."""
 
-    def __init__(self, domain: BSplineDomain, *, closed=False, stationary_boundary=False, chunk_size=262144):
+    def __init__(self, domain: ImageDomain, *, closed=False, stationary_boundary=False, chunk_size=262144):
         super().__init__()
         self.domain = domain
         self.closed = _as_bools(closed, domain.dimension)

@@ -24,7 +24,7 @@ from typing import Optional, Sequence, Tuple, Union
 import torch
 from torch import Tensor
 
-from .bspline_domain import BSplineDomain
+from .bspline_domain import ImageDomain
 from .bspline_synthesis import (
     _bspline_fit_context,
     _bspline_fit_geometry,
@@ -65,7 +65,7 @@ def _parametric_to_u(
     return u.clamp(0.0, upper)
 
 
-def _domain_boundary_mask(domain: BSplineDomain, device) -> Tensor:
+def _domain_boundary_mask(domain: ImageDomain, device) -> Tensor:
     """Flattened torch-order mask for the outermost voxel layer."""
     mask = torch.zeros(domain.torch_size, dtype=torch.bool, device=device)
     for axis in range(domain.dimension):
@@ -148,7 +148,7 @@ def fit_bspline_object_to_scattered_data(
     Differences from ANTsPy, by design:
 
     * Only 2-D or 3-D parametric domains are supported (this package's
-      ``BSplineDomain``/``synthesize_bspline_velocity`` do not represent
+      ``ImageDomain``/``synthesize_bspline_velocity`` do not represent
       1-D curves or 4-D fields), and only ``spline_order=3`` (cubic,
       matching the rest of this package).
     * The return value is always a dense tensor sampling the fitted object
@@ -250,7 +250,7 @@ def fit_bspline_object_to_scattered_data(
             accumulated_coefficients = refine_bspline_coefficients(accumulated_coefficients)
             current_lattice = tuple(2 * v - 3 for v in current_lattice)
 
-    domain = BSplineDomain(size=domain_size, spacing=spacing, origin=origin)
+    domain = ImageDomain(size=domain_size, spacing=spacing, origin=origin)
     dense = synthesize_bspline_velocity(accumulated_coefficients, domain, closed=closed_axes)
     if return_coefficients:
         return dense, accumulated_coefficients
@@ -263,7 +263,7 @@ def fit_bspline_displacement_field(
     displacement_origins=None,
     displacements=None,
     displacement_weights=None,
-    domain: Optional[BSplineDomain] = None,
+    domain: Optional[ImageDomain] = None,
     number_of_fitting_levels: int = 4,
     mesh_size: Union[int, Sequence[int]] = 1,
     spline_order: int = 3,
@@ -293,7 +293,7 @@ def fit_bspline_displacement_field(
 
     Differences from ANTsPy, by design:
 
-    * ``domain`` (this package's ``BSplineDomain``) replaces ANTsPy's
+    * ``domain`` (this package's ``ImageDomain``) replaces ANTsPy's
       separate ``origin``/``spacing``/``size``/``direction`` arguments.
     * ``estimate_inverse`` is not implemented: ITK's inverse-field
       estimation is a materially different, iterative algorithm, out of
@@ -328,7 +328,7 @@ def fit_bspline_displacement_field(
         dimension = displacement_field.ndim - 2
         if displacement_field.shape[1] != dimension:
             raise ValueError("displacement_field must have one channel per spatial dimension")
-        domain = domain or BSplineDomain(tuple(reversed(displacement_field.shape[2:])))
+        domain = domain or ImageDomain(tuple(reversed(displacement_field.shape[2:])))
         if domain.torch_size != tuple(displacement_field.shape[2:]):
             raise ValueError("displacement_field shape does not match domain")
         device, dtype = displacement_field.device, displacement_field.dtype

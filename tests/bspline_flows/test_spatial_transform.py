@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from antstorch.bspline_flows import (
-    BSplineDomain,
+    ImageDomain,
     affine_displacement_field,
     compose_displacements,
     jacobian_determinant,
@@ -13,14 +13,14 @@ from antstorch.bspline_flows import (
 
 @pytest.mark.parametrize("size", [(9, 7), (7, 6, 5)])
 def test_zero_displacement_is_identity(size):
-    domain = BSplineDomain(size)
+    domain = ImageDomain(size)
     image = torch.randn((2, 2) + domain.torch_size, dtype=torch.double)
     zero = torch.zeros((2, len(size)) + domain.torch_size, dtype=torch.double)
     torch.testing.assert_close(warp_image(image, zero, domain), image, rtol=0, atol=2e-15)
 
 
 def test_image_impulse_translation_sign():
-    domain = BSplineDomain((9, 7))
+    domain = ImageDomain((9, 7))
     moving = torch.zeros(1, 1, 7, 9, dtype=torch.double)
     moving[0, 0, 3, 5] = 1
     displacement = torch.zeros(1, 2, 7, 9, dtype=torch.double)
@@ -31,7 +31,7 @@ def test_image_impulse_translation_sign():
 
 
 def test_spacing_and_nonidentity_direction_are_physical():
-    domain = BSplineDomain(
+    domain = ImageDomain(
         (8, 7), spacing=(2.0, 3.0), origin=(11.0, -4.0), direction=((0.0, -1.0), (1.0, 0.0))
     )
     moving = torch.arange(8, dtype=torch.double)[None, None, None, :].expand(1, 1, 7, 8)
@@ -43,7 +43,7 @@ def test_spacing_and_nonidentity_direction_are_physical():
 
 
 def test_displacement_composition_constant_translations():
-    domain = BSplineDomain((8, 7), spacing=(0.5, 2.0))
+    domain = ImageDomain((8, 7), spacing=(0.5, 2.0))
     first = torch.zeros(2, 2, 7, 8, dtype=torch.double)
     second = torch.zeros_like(first)
     first[:, 0] = 1.25
@@ -53,7 +53,7 @@ def test_displacement_composition_constant_translations():
 
 
 def test_warp_gradcheck():
-    domain = BSplineDomain((4, 4))
+    domain = ImageDomain((4, 4))
     image = torch.randn(1, 1, 4, 4, dtype=torch.double)
     # Bilinear interpolation is not differentiable exactly at integer sample
     # locations; check at a generic sub-voxel location instead.
@@ -67,7 +67,7 @@ def test_warp_gradcheck():
 @pytest.mark.parametrize("dimension", [2, 3])
 def test_jacobian_determinant_and_folding(dimension):
     size = (7,) * dimension
-    domain = BSplineDomain(size, spacing=(1.5,) * dimension)
+    domain = ImageDomain(size, spacing=(1.5,) * dimension)
     points = physical_grid(domain, torch.empty((), dtype=torch.double))
     displacement = 0.1 * points
     determinant = jacobian_determinant(displacement, domain)
@@ -78,7 +78,7 @@ def test_jacobian_determinant_and_folding(dimension):
 
 
 def test_affine_displacement_field_identity_is_zero():
-    domain = BSplineDomain((6, 5))
+    domain = ImageDomain((6, 5))
     reference = torch.zeros(1, 1, 5, 6, dtype=torch.double)
     matrix = torch.eye(2, dtype=torch.double)
     translation = torch.zeros(2, dtype=torch.double)
@@ -88,7 +88,7 @@ def test_affine_displacement_field_identity_is_zero():
 
 
 def test_affine_displacement_field_constant_translation_matches_manual():
-    domain = BSplineDomain((6, 5), spacing=(1.5, 2.0))
+    domain = ImageDomain((6, 5), spacing=(1.5, 2.0))
     reference = torch.zeros(1, 1, 5, 6, dtype=torch.double)
     matrix = torch.eye(2, dtype=torch.double)
     translation = torch.tensor([3.0, -1.0], dtype=torch.double)
@@ -98,7 +98,7 @@ def test_affine_displacement_field_constant_translation_matches_manual():
 
 
 def test_affine_displacement_field_matches_physical_grid_formula():
-    domain = BSplineDomain((5, 4), spacing=(1.0, 0.5), origin=(2.0, -3.0))
+    domain = ImageDomain((5, 4), spacing=(1.0, 0.5), origin=(2.0, -3.0))
     reference = torch.zeros(1, 1, 4, 5, dtype=torch.double)
     matrix = torch.tensor([[1.2, 0.1], [-0.2, 0.9]], dtype=torch.double)
     translation = torch.tensor([0.5, -0.25], dtype=torch.double)
@@ -109,7 +109,7 @@ def test_affine_displacement_field_matches_physical_grid_formula():
 
 
 def test_affine_displacement_field_broadcasts_unbatched_to_batch():
-    domain = BSplineDomain((5, 4))
+    domain = ImageDomain((5, 4))
     reference = torch.zeros(3, 1, 4, 5, dtype=torch.double)
     matrix = torch.eye(2, dtype=torch.double)
     translation = torch.tensor([1.0, 2.0], dtype=torch.double)
@@ -120,7 +120,7 @@ def test_affine_displacement_field_broadcasts_unbatched_to_batch():
 
 
 def test_affine_displacement_field_matches_batched_matrix_and_translation():
-    domain = BSplineDomain((5, 4))
+    domain = ImageDomain((5, 4))
     reference = torch.zeros(2, 1, 4, 5, dtype=torch.double)
     matrix = torch.eye(2, dtype=torch.double).unsqueeze(0).repeat(2, 1, 1)
     matrix[1] *= 2.0
@@ -134,7 +134,7 @@ def test_affine_displacement_field_matches_batched_matrix_and_translation():
 def test_affine_displacement_field_composes_correctly_with_warp_image():
     # An affine displacement field, used through warp_image, must reproduce a
     # direct affine resample: p_moving = matrix @ p_fixed + translation.
-    domain = BSplineDomain((10, 9), spacing=(1.0, 1.0))
+    domain = ImageDomain((10, 9), spacing=(1.0, 1.0))
     moving = torch.arange(90, dtype=torch.double).reshape(1, 1, 9, 10)
     translation = torch.tensor([2.0, 0.0], dtype=torch.double)
     field = affine_displacement_field(torch.eye(2, dtype=torch.double), translation, domain, moving)
@@ -149,7 +149,7 @@ def test_affine_displacement_field_composes_correctly_with_warp_image():
     [((2, 3), (2,)), ((3, 3), (2,)), ((2, 2), (3,)), ((2, 2, 2), (3, 2))],
 )
 def test_affine_displacement_field_rejects_bad_shapes(matrix_shape, translation_shape):
-    domain = BSplineDomain((5, 4))
+    domain = ImageDomain((5, 4))
     reference = torch.zeros(1, 1, 4, 5, dtype=torch.double)
     with pytest.raises(ValueError):
         affine_displacement_field(

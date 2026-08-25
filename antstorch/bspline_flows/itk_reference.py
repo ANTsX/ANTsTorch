@@ -11,7 +11,7 @@ from typing import Sequence
 
 import numpy as np
 
-from .bspline_domain import BSplineDomain
+from .bspline_domain import ImageDomain
 
 
 def _kernel(value):
@@ -50,7 +50,7 @@ def numpy_itk_reconstruction(coefficients: np.ndarray, output_size: Sequence[int
     return result
 
 
-def coefficient_lattice_metadata(domain: BSplineDomain, lattice_size: Sequence[int], closed=False):
+def coefficient_lattice_metadata(domain: ImageDomain, lattice_size: Sequence[int], closed=False):
     """Return ITK-order coefficient-lattice size, spacing, origin, direction."""
     closed = (closed,) * domain.dimension if isinstance(closed, bool) else tuple(closed)
     spans = tuple(k if periodic else k - 3 for k, periodic in zip(lattice_size, closed))
