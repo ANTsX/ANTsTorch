@@ -1,13 +1,16 @@
 import ants
 import numpy as np
+import pytest
 import torch
 
 from antstorch.syn.bridge import (
     ants_image_metadata,
     ants_image_to_tensor,
+    apply_bspline_smoothing_operator,
     displacement_xyz_to_ants_image,
     displacement_zyx_to_ants_image,
     flip_affine_xyz_to_zyx,
+    image_domain_from_metadata,
     metadata_tensors,
     metadata_tensors_from_dict,
     tensor_to_ants_image,
@@ -112,3 +115,64 @@ def test_flip_affine_xyz_to_zyx_reverses_components_for_diagonal_case():
     flipped_m, flipped_t = flip_affine_xyz_to_zyx(matrix, translation)
     torch.testing.assert_close(flipped_m, torch.diag(torch.tensor([4.0, 3.0, 2.0])))
     torch.testing.assert_close(flipped_t, torch.tensor([3.0, 2.0, 1.0]))
+
+
+# --- B-spline smoothing operator (ANTs/ITK BSplineSyN regularizer) ---------
+
+
+def test_image_domain_from_metadata_matches_ants_image_metadata():
+    image = _ramp_image_2d((9, 7))
+    meta = ants_image_metadata(image)
+    domain = image_domain_from_metadata(meta)
+    assert domain.size == meta["shape"]
+    assert domain.spacing == meta["spacing"]
+    assert domain.origin == meta["origin"]
+    assert domain.torch_size == meta["torch_shape"]
+
+
+def test_apply_bspline_smoothing_operator_preserves_shape_and_is_finite():
+    image = _ramp_image_2d((17, 15))
+    domain = image_domain_from_metadata(ants_image_metadata(image))
+    torch.manual_seed(0)
+    field = torch.randn(1, *domain.torch_size, 2)
+    smoothed = apply_bspline_smoothing_operator(field, domain, mesh_size=2)
+    assert smoothed.shape == field.shape
+    assert torch.isfinite(smoothed).all()
+
+
+def test_apply_bspline_smoothing_operator_reduces_high_frequency_roughness():
+    # A coarse control-point mesh (mesh_size=1) fit to pure per-voxel noise
+    # should behave as a strong low-pass filter: the smoothed field's
+    # voxel-to-voxel differences should be much smaller than the raw noisy
+    # field's, the same qualitative check a Gaussian/Sobolev/DST-I
+    # regularizer would be expected to pass.
+    image = _ramp_image_2d((25, 23))
+    domain = image_domain_from_metadata(ants_image_metadata(image))
+    torch.manual_seed(0)
+    field = torch.randn(1, *domain.torch_size, 2)
+    smoothed = apply_bspline_smoothing_operator(field, domain, mesh_size=1)
+
+    def roughness(f):
+        return (f[:, 1:, :, :] - f[:, :-1, :, :]).abs().mean() + (f[:, :, 1:, :] - f[:, :, :-1, :]).abs().mean()
+
+    assert roughness(smoothed) < 0.25 * roughness(field)
+
+
+def test_apply_bspline_smoothing_operator_enforces_stationary_boundary_by_default():
+    image = _ramp_image_2d((17, 15))
+    domain = image_domain_from_metadata(ants_image_metadata(image))
+    field = torch.full((1, *domain.torch_size, 2), 5.0)
+    smoothed = apply_bspline_smoothing_operator(field, domain, mesh_size=2, enforce_stationary_boundary=True)
+    boundary = torch.cat(
+        [smoothed[:, 0, :, :].reshape(-1), smoothed[:, -1, :, :].reshape(-1),
+         smoothed[:, :, 0, :].reshape(-1), smoothed[:, :, -1, :].reshape(-1)]
+    )
+    assert boundary.abs().max() < 0.5  # far below the constant 5.0 field value
+
+
+def test_apply_bspline_smoothing_operator_rejects_non_positive_mesh_size():
+    image = _ramp_image_2d((9, 7))
+    domain = image_domain_from_metadata(ants_image_metadata(image))
+    field = torch.zeros(1, *domain.torch_size, 2)
+    with pytest.raises(ValueError, match="mesh_size"):
+        apply_bspline_smoothing_operator(field, domain, mesh_size=0)

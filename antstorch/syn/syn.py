@@ -56,8 +56,10 @@ from ..ants_transform_io import build_transform_lists, default_outprefix, write_
 from .bridge import (
     ants_image_metadata,
     ants_image_to_tensor,
+    apply_bspline_smoothing_operator,
     displacement_zyx_to_ants_image,
     flip_affine_xyz_to_zyx,
+    image_domain_from_metadata,
     metadata_tensors_from_dict,
     tensor_to_ants_image,
 )
@@ -80,7 +82,7 @@ from .core.smoothing import (
 _LINEAR_TRANSFORM_TYPES = ("Translation", "Rigid", "Similarity", "Affine")
 _SYN_TRANSFORM_TYPES = ("SyN", "SyNOnly")
 _SIMILARITY_METRICS = ("mse", "lncc", "cc", "lncc2", "cc2", "mattes", "mi")
-_REGULARIZERS = ("gaussian", "sobolev", "dsti")
+_REGULARIZERS = ("gaussian", "sobolev", "dsti", "bspline")
 
 
 def _level_values(value, levels: int, name: str) -> tuple:
@@ -170,7 +172,29 @@ def _similarity_loss(name: str, I: Tensor, J: Tensor, mask: Optional[Tensor], wi
     raise ValueError(f"Unknown similarity metric: {name!r}")
 
 
-def _apply_regularizer(field: Tensor, regularizer: str, sigma: float, spacing_itk) -> Tensor:
+def _apply_regularizer(
+    field: Tensor,
+    regularizer: str,
+    sigma: float,
+    spacing_itk,
+    *,
+    mesh_size: int = 0,
+    domain=None,
+    spline_order: int = 3,
+    enforce_stationary_boundary: bool = True,
+) -> Tensor:
+    if regularizer == "bspline":
+        # Its own strength knob (mesh_size, ITK control-point count minus
+        # spline_order) rather than sigma -- see apply_bspline_smoothing_operator.
+        if mesh_size <= 0:
+            return field
+        if domain is None:
+            raise ValueError("regularizer='bspline' requires domain")
+        return apply_bspline_smoothing_operator(
+            field, domain, mesh_size,
+            spline_order=spline_order,
+            enforce_stationary_boundary=enforce_stationary_boundary,
+        )
     if sigma <= 0:
         return field
     if regularizer == "gaussian":
@@ -228,6 +252,9 @@ def _fit_syn_level(
     flow_sigma: float,
     total_sigma: float,
     regularizer: str,
+    update_field_mesh_size_at_base_level: int,
+    total_field_mesh_size_at_base_level: int,
+    bspline_enforce_stationary_boundary: bool,
     grad_step: float,
     shrink_factor: int,
     antisymmetric: bool,
@@ -243,6 +270,23 @@ def _fit_syn_level(
     X_phys = _physical_grid(fixed_meta, device, dtype)
     boundary_mask = get_boundary_mask(fixed_meta["torch_shape"], device, dtype)
     level_cfl_voxels = grad_step * math.sqrt(float(shrink_factor))
+
+    # ITK's BSplineSyN doubles the update/total-field control-point mesh
+    # (like any TransformParametersAdaptor) from the coarsest pyramid level
+    # (level_index=0) to each successively finer one -- the B-spline analogue
+    # of a fixed sigma being meaningful at every resolution. mesh_size=0
+    # always means "off" (matches ANTs' totalFieldMeshSizeAtBaseLevel=0
+    # default disabling total-field smoothing).
+    bspline_domain = None
+    update_mesh_size_level = 0
+    total_mesh_size_level = 0
+    if regularizer == "bspline":
+        bspline_domain = image_domain_from_metadata(fixed_meta)
+        level_scale = 2 ** level_index
+        if update_field_mesh_size_at_base_level > 0:
+            update_mesh_size_level = update_field_mesh_size_at_base_level * level_scale
+        if total_field_mesh_size_at_base_level > 0:
+            total_mesh_size_level = total_field_mesh_size_at_base_level * level_scale
 
     history = []
     for iteration in range(iterations):
@@ -280,8 +324,16 @@ def _fit_syn_level(
         if grad_l is None or grad_r is None or not torch.isfinite(grad_l).all() or not torch.isfinite(grad_r).all():
             raise FloatingPointError(f"non-finite SyN half-warp gradient at resolution level {level_index + 1}")
 
-        grad_l = _apply_regularizer(grad_l * boundary_mask, regularizer, flow_sigma, fixed_meta["spacing"])
-        grad_r = _apply_regularizer(grad_r * boundary_mask, regularizer, flow_sigma, fixed_meta["spacing"])
+        grad_l = _apply_regularizer(
+            grad_l * boundary_mask, regularizer, flow_sigma, fixed_meta["spacing"],
+            mesh_size=update_mesh_size_level, domain=bspline_domain,
+            enforce_stationary_boundary=bspline_enforce_stationary_boundary,
+        )
+        grad_r = _apply_regularizer(
+            grad_r * boundary_mask, regularizer, flow_sigma, fixed_meta["spacing"],
+            mesh_size=update_mesh_size_level, domain=bspline_domain,
+            enforce_stationary_boundary=bspline_enforce_stationary_boundary,
+        )
 
         delta_l = _cfl_normalize(grad_l, fixed_meta_t["spacing_t"], level_cfl_voxels)
         delta_r = _cfl_normalize(grad_r, fixed_meta_t["spacing_t"], level_cfl_voxels)
@@ -293,7 +345,17 @@ def _fit_syn_level(
         warp_l2r = _eulerian_update(warp_l2r_leaf.detach(), delta_l, X_phys, fixed_meta_t)
         warp_r2l = _eulerian_update(warp_r2l_leaf.detach(), delta_r, X_phys, fixed_meta_t)
 
-        if total_sigma > 0:
+        if regularizer == "bspline":
+            if total_mesh_size_level > 0:
+                warp_l2r = apply_bspline_smoothing_operator(
+                    warp_l2r, bspline_domain, total_mesh_size_level,
+                    enforce_stationary_boundary=bspline_enforce_stationary_boundary,
+                )
+                warp_r2l = apply_bspline_smoothing_operator(
+                    warp_r2l, bspline_domain, total_mesh_size_level,
+                    enforce_stationary_boundary=bspline_enforce_stationary_boundary,
+                )
+        elif total_sigma > 0:
             warp_l2r = separable_gaussian_filter(warp_l2r, total_sigma, spacing=fixed_meta["spacing"], sigma_mode="physical")
             warp_r2l = separable_gaussian_filter(warp_r2l, total_sigma, spacing=fixed_meta["spacing"], sigma_mode="physical")
 
@@ -398,6 +460,9 @@ def syn_registration(
     flow_sigma: float = 3.0,
     total_sigma: float = 0.0,
     regularizer: str = "gaussian",
+    update_field_mesh_size_at_base_level: int = 1,
+    total_field_mesh_size_at_base_level: int = 0,
+    bspline_enforce_stationary_boundary: bool = True,
     inverse_method: str = "anderson",
     in_loop_inverse_steps: int = 6,
     antisymmetric: bool = True,
@@ -455,9 +520,36 @@ def syn_registration(
     removing common-mode drift between the two half-warps (set
     ``antisymmetric=False`` to disable), fluid regularization of the raw
     per-iteration update (``flow_sigma``, via ``regularizer`` -
-    ``'gaussian'``, ``'sobolev'``, or ``'dsti'``) and optional elastic
-    regularization of the composed field (``total_sigma``, plain Gaussian,
-    disabled by default). Both half-warp inverses are numerically maintained
+    ``'gaussian'``, ``'sobolev'``, ``'dsti'``, or ``'bspline'``) and optional
+    elastic regularization of the composed field (``total_sigma`` for
+    ``'gaussian'``/``'sobolev'``/``'dsti'``, plain Gaussian, disabled by
+    default).
+
+    ``regularizer='bspline'`` is the ANTs/ITK ``BSplineSyN`` regularizer: a
+    single-level cubic B-spline fit (via
+    :func:`antstorch.bspline_flows.bspline_scattered_data.fit_bspline_displacement_field`,
+    the port of ``itkDisplacementFieldToBSplineImageFilter``) smooths the
+    update field each iteration and, if enabled, the composed field
+    periodically -- the direct analogue of ITK's
+    ``itkBSplineSmoothingOnUpdateDisplacementFieldTransform``, as used by
+    ``itk::BSplineSyNImageRegistrationMethod`` and ``antsRegistration``'s
+    ``BSplineSyN[gradientStep, updateFieldMeshSizeAtBaseLevel,
+    totalFieldMeshSizeAtBaseLevel, splineOrder]`` transform spec. In this
+    mode, ``flow_sigma``/``total_sigma`` are ignored in favor of
+    ``update_field_mesh_size_at_base_level`` (default ``1``, ITK's own
+    class default of 4 control points minus ``spline_order=3``; cubic is
+    the only spline order :mod:`antstorch.bspline_flows` supports) and
+    ``total_field_mesh_size_at_base_level`` (default ``0`` = off, matching
+    ANTs' own default). Both mesh sizes are given *at the base
+    (coarsest) pyramid level* and doubled at each successively finer level
+    -- the same doubling ``itk::TransformParametersAdaptor`` applies to the
+    B-spline transform's control-point grid across ``ImageRegistrationMethodv4``
+    resolution levels -- so a single base value stays a comparably strong
+    regularizer at every ``levels`` entry, the way one ``flow_sigma``/
+    ``total_sigma`` does for the other three regularizers.
+    ``bspline_enforce_stationary_boundary`` (default ``True``, ITK's own
+    default) keeps the field at zero on the domain's outermost voxel layer.
+    Both half-warp inverses are numerically maintained
     in-loop (``inverse_method``, ``in_loop_inverse_steps``, warm-started
     across iterations and pyramid levels) and are what the final
     ``fwdtransforms``/``invtransforms`` are built from algebraically (a
@@ -496,6 +588,15 @@ def syn_registration(
         raise ValueError(f"syn_metric must be one of {_SIMILARITY_METRICS}")
     if regularizer not in _REGULARIZERS:
         raise ValueError(f"regularizer must be one of {_REGULARIZERS}")
+    if update_field_mesh_size_at_base_level < 0:
+        raise ValueError("update_field_mesh_size_at_base_level must be >= 0")
+    if total_field_mesh_size_at_base_level < 0:
+        raise ValueError("total_field_mesh_size_at_base_level must be >= 0")
+    if regularizer == "bspline" and update_field_mesh_size_at_base_level == 0 and total_field_mesh_size_at_base_level == 0:
+        raise ValueError(
+            "regularizer='bspline' requires update_field_mesh_size_at_base_level > 0 "
+            "and/or total_field_mesh_size_at_base_level > 0"
+        )
     if padding_mode not in ("zeros", "border", "reflection"):
         raise ValueError("padding_mode must be 'zeros', 'border', or 'reflection'")
     if len(levels) != len(reg_iterations):
@@ -648,6 +749,9 @@ def syn_registration(
             flow_sigma=flow_sigma,
             total_sigma=total_sigma,
             regularizer=regularizer,
+            update_field_mesh_size_at_base_level=update_field_mesh_size_at_base_level,
+            total_field_mesh_size_at_base_level=total_field_mesh_size_at_base_level,
+            bspline_enforce_stationary_boundary=bspline_enforce_stationary_boundary,
             grad_step=grad_step,
             shrink_factor=factor,
             antisymmetric=antisymmetric,
@@ -753,6 +857,9 @@ def syn_registration(
             "flow_sigma": flow_sigma,
             "total_sigma": total_sigma,
             "regularizer": regularizer,
+            "update_field_mesh_size_at_base_level": update_field_mesh_size_at_base_level,
+            "total_field_mesh_size_at_base_level": total_field_mesh_size_at_base_level,
+            "bspline_enforce_stationary_boundary": bspline_enforce_stationary_boundary,
             "antisymmetric": antisymmetric,
             "inverse_method": inverse_method,
             "affine_fit": affine_result is not None,
