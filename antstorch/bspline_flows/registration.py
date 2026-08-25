@@ -11,7 +11,7 @@ from .bspline_domain import BSplineDomain
 from .bspline_synthesis import refine_bspline_coefficients
 from .deterministic_registration import DeterministicBSplineRegistration
 from .physical_gradient_descent import PhysicalGradientDescent
-from .spatial_transform import affine_displacement_field, compose_displacements
+from .spatial_transform import affine_displacement_field
 
 
 def _axis_values(value, dimension: int, name: str, *, minimum: int) -> tuple:
@@ -264,17 +264,34 @@ def registration(
     -------
     dict
         ``warpedmovout``, ``fwdtransforms``, and ``invtransforms`` follow the
-        naming convention of ``ants.registration``: the moving image warped
-        onto the fixed grid, the fixed-to-moving displacement field, and the
-        moving-to-fixed displacement field, respectively. Unlike
-        ``ants.registration``, these are in-memory tensors rather than paths
-        to files on disk. The dictionary also carries fields with no
+        naming convention of ``ants.registration``, but ``fwdtransforms``/
+        ``invtransforms`` are always the *pure* B-spline SVF displacement
+        field alone (``exp(velocity)`` / ``exp(-velocity)``) -- never
+        composed with ``initial_affine`` into one field, matching the
+        separated-transform convention also used by
+        :func:`antstorch.syn.syn_registration`. The affine (when
+        ``initial_affine`` was given) is returned separately as
+        ``affine_matrix``/``affine_translation`` (verbatim ``initial_affine``)
+        and ``affine_matrix_inverse``/``affine_translation_inverse``
+        (precomputed exact inverse); all four are ``None`` when no
+        ``initial_affine`` was supplied. This function stays tensor-native
+        and batched (no ``ants`` dependency, one coefficient lattice per
+        batch item), so unlike :func:`antstorch.syn.syn_registration` it
+        does not write ANTs transform files itself; use
+        :mod:`antstorch.ants_transform_io` directly, per batch item, for
+        that (``write_affine_transform`` for ``affine_matrix``/
+        ``affine_translation``, plus ``ants.image_write`` on a
+        ``fwdtransforms``/``invtransforms`` slice converted through
+        :mod:`antstorch.syn.bridge`). Unlike ``ants.registration``, all
+        returned transforms are in-memory tensors rather than paths to files
+        on disk. The dictionary also carries fields with no
         ``ants.registration`` equivalent: ``velocity`` (the stationary
         velocity field), ``coefficients`` (the optimized B-spline control
         points), ``loss``, ``similarity``, ``coefficient_regularization``,
         ``velocity_regularization``, ``bending_regularization``,
-        ``jacobian_determinant``, ``loss_history``, and
-        ``level_loss_history``.
+        ``jacobian_determinant`` (of the *total* affine+SVF map, computed
+        internally even though that composed field is no longer itself
+        returned), ``loss_history``, and ``level_loss_history``.
     """
     if not isinstance(fixed_domain, BSplineDomain):
         raise TypeError("fixed_domain must be a BSplineDomain")
@@ -515,25 +532,33 @@ def registration(
     )
     result = model(coefficients, moving, fixed, initial_affine_displacement=initial_affine_displacement_full)
     result["warpedmovout"] = result.pop("warped_moving")
-    result["fwdtransforms"] = result.pop("displacement")
-    result.pop("svf_displacement", None)
+    # fwdtransforms/invtransforms are now always the *pure* SVF piece alone
+    # -- never composed with the affine into one field -- matching the
+    # separated-transform convention also used by antstorch.syn.syn_registration()
+    # (see antstorch.ants_transform_io for the file-based equivalent used
+    # there; this function stays tensor-native and batched, so there is no
+    # per-item file to write here, only the in-memory pieces below).
+    # `displacement` (the composed field) already did its one job -- feeding
+    # `jacobian_determinant` above, inside model.forward() -- and is dropped
+    # here rather than also being returned.
+    result.pop("displacement", None)
+    result["fwdtransforms"] = result.pop("svf_displacement")
+    result["invtransforms"] = model.exponential(-result["velocity"])
     if initial_affine is None:
-        result["invtransforms"] = model.exponential(-result["velocity"])
+        result["affine_matrix"] = None
+        result["affine_translation"] = None
+        result["affine_matrix_inverse"] = None
+        result["affine_translation_inverse"] = None
     else:
-        # F = S o A (apply the affine A, then the SVF flow S), so the exact
-        # inverse is F^-1 = A^-1 o S^-1: apply the SVF inverse first, then
-        # the affine inverse. S^-1 is exact for a stationary velocity field
-        # via exp(-velocity); A^-1 is exact via matrix inversion.
         affine_matrix, affine_translation = initial_affine
         inverse_matrix = torch.linalg.inv(affine_matrix)
         inverse_translation = -torch.einsum("nij,nj->ni", inverse_matrix, affine_translation)
-        affine_inverse_displacement = affine_displacement_field(
-            inverse_matrix, inverse_translation, fixed_domain, fixed
-        )
-        svf_inverse_displacement = model.exponential(-result["velocity"])
-        result["invtransforms"] = compose_displacements(
-            svf_inverse_displacement, affine_inverse_displacement, fixed_domain
-        )
+        result["affine_matrix"] = affine_matrix
+        result["affine_translation"] = affine_translation
+        # Precomputed for convenience -- exact via matrix inversion, same
+        # computation the composed invtransforms used to require inline.
+        result["affine_matrix_inverse"] = inverse_matrix
+        result["affine_translation_inverse"] = inverse_translation
     result["coefficients"] = coefficients
     result["loss_history"] = history if return_loss_history else None
     result["level_loss_history"] = level_history if return_loss_history else None

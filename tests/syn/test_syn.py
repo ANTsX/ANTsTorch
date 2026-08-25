@@ -151,8 +151,12 @@ def test_syn_registration_linear_only_reduces_loss_and_has_no_syn_fields(transfo
     assert result["loss_history"] is None
     assert result["jacobian"] is None
     assert result["warpedmovout"].shape == fixed.shape
-    assert result["fwdtransforms"].components == 2
-    assert result["invtransforms"].components == 2
+    # Linear-only: a single shared 0GenericAffine.mat file, reused (per
+    # ants.registration()'s own convention) in both directions.
+    assert result["fwdtransforms"] == [result["provenance"]["outprefix"] + "0GenericAffine.mat"]
+    assert result["invtransforms"] == result["fwdtransforms"]
+    affine_tx = ants.read_transform(result["fwdtransforms"][0])
+    assert affine_tx.dimension == 2
     history = result["affine_loss_history"][0]
     before = float(np.mean((fixed.numpy() - moving.numpy()) ** 2))
     after = float(np.mean((fixed.numpy() - result["warpedmovout"].numpy()) ** 2))
@@ -252,8 +256,13 @@ def test_syn_registration_forward_inverse_are_approximate_half_warp_swaps():
         axes = tuple(range(dim - 1, -1, -1)) + (dim,)
         return torch.from_numpy(np.ascontiguousarray(np.transpose(array, axes))).unsqueeze(0).float()
 
-    forward = _field_to_tensor_zyx(result["fwdtransforms"])
-    inverse = _field_to_tensor_zyx(result["invtransforms"])
+    # SyNOnly with no initial_affine: no affine ran, so each list holds only
+    # the (inverse) warp path -- read it back from disk, proving the written
+    # file round-trips exactly like the field would have in-memory before.
+    assert result["fwdtransforms"] == [result["provenance"]["outprefix"] + "1Warp.nii.gz"]
+    assert result["invtransforms"] == [result["provenance"]["outprefix"] + "1InverseWarp.nii.gz"]
+    forward = _field_to_tensor_zyx(ants.image_read(result["fwdtransforms"][0]))
+    inverse = _field_to_tensor_zyx(ants.image_read(result["invtransforms"][0]))
     composed = _compose_fixed_grid(forward, inverse, X_phys, meta_t)
     # Exclude a boundary margin, matching the analogous affine+SVF composition test.
     interior = composed[:, 2:-2, 2:-2]
@@ -271,5 +280,56 @@ def test_syn_registration_supports_3d():
         in_loop_inverse_steps=2,
     )
     assert result["warpedmovout"].dimension == 3
-    assert result["fwdtransforms"].components == 3
+    assert result["fwdtransforms"] == [result["provenance"]["outprefix"] + "1Warp.nii.gz"]
+    warp_image = ants.image_read(result["fwdtransforms"][0])
+    assert warp_image.components == 3
     assert torch.isfinite(torch.tensor(result["loss_history"])).all()
+
+
+# --- Genuine ANTsX interop (Etape 3) -----------------------------------------
+
+
+def test_syn_registration_fwdtransforms_are_usable_with_ants_apply_transforms():
+    # The actual point of writing separate files: transformlist= should be
+    # directly usable by ants.apply_transforms(), exactly as if it had come
+    # from ants.registration() itself -- including the shared-affine-file
+    # whichtoinvert default heuristic for invtransforms (matrix-then-warp).
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    result = syn_registration(
+        fixed, moving, type_of_transform="SyN",
+        affine_iterations=(15, 10), affine_shrink_factors=(2, 1), affine_smoothing_sigmas=(0.5, 0.0),
+        affine_learning_rate=(0.05, 0.02),
+        levels=(1,), reg_iterations=(10,), syn_metric="mse",
+    )
+    assert len(result["fwdtransforms"]) == 2
+    assert len(result["invtransforms"]) == 2
+
+    # ants.apply_transforms() uses ITK's own resampler, independent of our
+    # F.grid_sample-based warp_image() -- the two bilinear implementations
+    # agree almost everywhere but differ by float32 interpolation noise at a
+    # scattered handful of pixels (verified: mean abs diff ~2e-4, max
+    # ~0.02, on a [0, 1]-ish intensity scale), so this checks agreement in
+    # aggregate rather than requiring bit-identical output.
+    applied_fwd = ants.apply_transforms(fixed=fixed, moving=moving, transformlist=result["fwdtransforms"])
+    diff = np.abs(applied_fwd.numpy() - result["warpedmovout"].numpy())
+    assert diff.mean() < 1e-3
+    assert diff.max() < 0.05
+
+    # Round trip: fixed -> (fwd) -> moving space -> (inv) -> back to fixed
+    # space should approximately recover the fixed image's own domain
+    # (loose check -- this is a lossy resample round-trip, not an identity).
+    applied_inv = ants.apply_transforms(fixed=moving, moving=fixed, transformlist=result["invtransforms"])
+    assert applied_inv.shape == moving.shape
+
+
+def test_syn_registration_linear_only_fwdtransforms_usable_with_ants_apply_transforms():
+    fixed, moving = _ants_pair_2d()
+    result = syn_registration(
+        fixed, moving, type_of_transform="Affine",
+        affine_iterations=(15, 10), affine_shrink_factors=(2, 1), affine_smoothing_sigmas=(0.5, 0.0),
+        affine_learning_rate=(0.05, 0.02),
+    )
+    applied = ants.apply_transforms(fixed=fixed, moving=moving, transformlist=result["fwdtransforms"])
+    diff = np.abs(applied.numpy() - result["warpedmovout"].numpy())
+    assert diff.mean() < 1e-3
+    assert diff.max() < 0.05

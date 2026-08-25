@@ -34,6 +34,7 @@ import ants
 import numpy as np
 import torch
 
+from antstorch.ants_transform_io import write_affine_transform
 from antstorch.bspline_flows import (
     BSplineDomain,
     PhysicalGradientDescent,
@@ -174,8 +175,8 @@ def main() -> None:
             if len(values) != affine_level_count:
                 raise ValueError(f"{name} must have one value per affine shrink factor")
 
-    fixed_ants = ants.image_read(ants.get_ants_data("r16")).clone("float")
-    moving_ants = ants.image_read(ants.get_ants_data("r64")).clone("float")
+    fixed_ants = ants.image_read(ants.get_ants_data("r30")).clone("float")
+    moving_ants = ants.image_read(ants.get_ants_data("r27")).clone("float")
     fixed = ants_to_torch(fixed_ants, device)
     moving = ants_to_torch(moving_ants, device)
     fixed_domain = image_domain(fixed_ants)
@@ -241,16 +242,22 @@ def main() -> None:
     elapsed = time.perf_counter() - start
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    ants.image_write(fixed_ants, str(args.output_dir / "fixed_r16.nii.gz"))
-    ants.image_write(moving_ants, str(args.output_dir / "moving_r64.nii.gz"))
+    ants.image_write(fixed_ants, str(args.output_dir / "fixed_r30.nii.gz"))
+    ants.image_write(moving_ants, str(args.output_dir / "moving_r27.nii.gz"))
     ants.image_write(
         torch_image_to_ants(result["warpedmovout"], fixed_ants),
-        str(args.output_dir / "warped_r64.nii.gz"),
+        str(args.output_dir / "warped_r27.nii.gz"),
     )
+    # fwdtransforms/invtransforms are now always the *pure* B-spline SVF
+    # piece alone -- never composed with the affine below -- matching the
+    # separated-transform convention also used by antstorch.syn.syn_registration().
+    # The total forward map is affine-then-SVF; compose svf_*_displacement.nii.gz
+    # with affine_*_displacement.nii.gz (antstorch.bspline_flows.spatial_transform
+    # .compose_displacements) if the composed field is needed.
     for name, filename in (
         ("velocity", "velocity"),
-        ("fwdtransforms", "forward_displacement"),
-        ("invtransforms", "inverse_displacement"),
+        ("fwdtransforms", "svf_forward_displacement"),
+        ("invtransforms", "svf_inverse_displacement"),
     ):
         ants.image_write(
             torch_field_to_ants(result[name], fixed_ants),
@@ -259,11 +266,22 @@ def main() -> None:
     torch.save(result["coefficients"].cpu(), args.output_dir / "coefficients.pt")
     with (args.output_dir / "loss_history.json").open("w", encoding="utf-8") as stream:
         json.dump(result["level_loss_history"], stream, indent=2)
+    if result["affine_matrix"] is not None:
+        # A real, ANTsX-compatible affine transform file (usable with
+        # antsApplyTransforms / ants.apply_transforms), in addition to the
+        # affine_transform.pt raw tensor save below -- see
+        # antstorch.ants_transform_io for the exact file convention matched.
+        write_affine_transform(
+            result["affine_matrix"][0],
+            result["affine_translation"][0],
+            dim=2,
+            filename=str(args.output_dir / "total_affine_0GenericAffine.mat"),
+        )
 
     if affine_result is not None:
         ants.image_write(
             torch_image_to_ants(affine_result["warpedmovout"], fixed_ants),
-            str(args.output_dir / "affine_warped_r64.nii.gz"),
+            str(args.output_dir / "affine_warped_r27.nii.gz"),
         )
         for name, filename in (
             ("fwdtransforms", "affine_forward_displacement"),
