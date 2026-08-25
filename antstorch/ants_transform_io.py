@@ -102,6 +102,52 @@ def write_affine_transform(
     return transform
 
 
+def read_affine_transform(filename: str, dim: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Read an ITK ``...GenericAffine.mat`` file back into a physical-space ``(matrix, translation)`` pair.
+
+    The exact inverse of :func:`write_affine_transform`: an ``AffineTransform``'s
+    parameters are the row-major-raveled linear matrix followed by the
+    translation vector, ITK ``(x, y[, z])`` physical order — the fixed
+    parameters (rotation center) are ignored, matching
+    :func:`write_affine_transform` always leaving them at the origin.
+
+    This is the format any consumer that shares the canonical affine as a
+    file (rather than in-memory tensors) needs to bridge back into
+    ``antstorch``'s own ``(matrix, translation)`` convention — e.g. handing
+    a pre-computed ``.mat`` affine (such as ``syntx.robust_affine``'s
+    output) to :func:`antstorch.syn.syn_registration`'s or
+    :func:`antstorch.bspline_flows.registration.bspline_svf_registration`'s
+    ``initial_affine`` parameter, both of which expect this exact
+    ``(matrix, translation)`` ITK-order pair.
+
+    Parameters
+    ----------
+    filename : str
+        Path to an ITK ``AffineTransform`` ``.mat`` file (2-D or 3-D).
+    dim : int
+        Spatial dimensionality (2 or 3); validated against the file's own
+        transform dimension.
+
+    Returns
+    -------
+    matrix : ndarray, shape ``(dim, dim)``, float64
+    translation : ndarray, shape ``(dim,)``, float64
+    """
+    transform = ants.read_transform(filename)
+    if transform.dimension != dim:
+        raise ValueError(
+            f"transform at '{filename}' has dimension {transform.dimension}, expected {dim}"
+        )
+    if transform.transform_type != "AffineTransform":
+        raise ValueError(
+            f"transform at '{filename}' has type '{transform.transform_type}', expected 'AffineTransform'"
+        )
+    params = np.asarray(transform.parameters, dtype=np.float64)
+    matrix = np.ascontiguousarray(params[: dim * dim].reshape(dim, dim))
+    translation = np.ascontiguousarray(params[dim * dim: dim * dim + dim])
+    return matrix, translation
+
+
 def default_outprefix() -> str:
     """A fresh temporary-file prefix, matching ``ants.registration()``'s own default.
 
