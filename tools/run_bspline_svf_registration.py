@@ -5,23 +5,23 @@ Example
 -------
 Run the default three-level registration on CPU::
 
-    PYTHONPATH=. python tools/run_registration.py
+    PYTHONPATH=. python tools/run_bspline_svf_registration.py
 
 Use an accelerator and fewer iterations::
 
-    PYTHONPATH=. python tools/run_registration.py \
+    PYTHONPATH=. python tools/run_bspline_svf_registration.py \
         --device mps --iterations 40 30 20 --output-dir registration_output
 
 Use the local ANTs neighborhood-correlation metric::
 
-    PYTHONPATH=. python tools/run_registration.py \
+    PYTHONPATH=. python tools/run_bspline_svf_registration.py \
         --similarity ants_ncc --neighborhood-radius 2 --verbose
 
 Run an affine pre-registration before the B-spline SVF (bspline_flows has no
 affine/rigid initialization of its own; see
 ``antstorch.bspline_flows.affine_registration``)::
 
-    PYTHONPATH=. python tools/run_registration.py \
+    PYTHONPATH=. python tools/run_bspline_svf_registration.py \
         --affine --affine-transform-type Rigid --verbose
 """
 
