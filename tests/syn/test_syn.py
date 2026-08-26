@@ -270,6 +270,58 @@ def test_syn_registration_rejects_negative_bspline_mesh_sizes():
         syn_registration(fixed, moving, type_of_transform="SyNOnly", total_field_mesh_size_at_base_level=-1)
 
 
+def test_syn_registration_verbose_bspline_regularizer_reports_control_points(capsys):
+    # Mirrors bspline_svf_registration()'s own verbose control-point reporting
+    # (antstorch/bspline_flows/registration.py): same mesh_size -> control_points
+    # = mesh_size + 3 relationship (cubic spline order), doubled from the base
+    # level at each finer pyramid level exactly as _fit_syn_level itself doubles
+    # it before regularizing. update_field_mesh_size_at_base_level=2 with
+    # levels=(2, 1) should report control_points=(5, 5) at the coarsest level
+    # (scale=1) and control_points=(7, 7) at the finest (scale=2). No aggregate
+    # "total_control_points" count is reported -- it is just the product of the
+    # per-axis tuple already shown, redundant information the user asked to drop.
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    syn_registration(
+        fixed, moving, type_of_transform="SyNOnly",
+        levels=(2, 1), reg_iterations=(5, 5), syn_metric="mse", grad_step=0.4,
+        regularizer="bspline", update_field_mesh_size_at_base_level=2,
+        verbose=True,
+    )
+    out = capsys.readouterr().out
+    assert "control_points=(5, 5)" in out
+    assert "control_points=(7, 7)" in out
+    assert "total_control_points" not in out
+    assert "total_field_control_points=" not in out
+
+
+def test_syn_registration_verbose_bspline_regularizer_reports_total_field_control_points_too(capsys):
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    syn_registration(
+        fixed, moving, type_of_transform="SyNOnly",
+        levels=(1,), reg_iterations=(5,), syn_metric="mse", grad_step=0.4,
+        regularizer="bspline", update_field_mesh_size_at_base_level=1,
+        total_field_mesh_size_at_base_level=1,
+        verbose=True,
+    )
+    out = capsys.readouterr().out
+    assert "control_points=(4, 4)" in out
+    assert "total_field_control_points=(4, 4)" in out
+    assert "total_control_points" not in out
+
+
+def test_syn_registration_verbose_non_bspline_regularizer_omits_control_points(capsys):
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    syn_registration(
+        fixed, moving, type_of_transform="SyNOnly",
+        levels=(2, 1), reg_iterations=(5, 5), syn_metric="mse", grad_step=0.4,
+        regularizer="gaussian",
+        verbose=True,
+    )
+    out = capsys.readouterr().out
+    assert "control_points=" not in out
+    assert "iterations=5" in out
+
+
 def test_syn_registration_reduces_intensity_mismatch_versus_unregistered():
     fixed, moving = _ants_pair_2d(ramp=0.3)
     result = syn_registration(

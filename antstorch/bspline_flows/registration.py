@@ -1,6 +1,6 @@
 """High-level optimization interface for B-spline SVF registration."""
 
-from math import isfinite, prod
+from math import isfinite
 from typing import Dict, Optional, Sequence, Tuple, Union
 
 import torch
@@ -435,7 +435,6 @@ def bspline_svf_registration(
                 f"fixed_size={fixed_level_domain.size}, "
                 f"moving_size={moving_level_domain.size}, "
                 f"control_points={control_points}, "
-                f"total_control_points={prod(control_points)}, "
                 f"iterations={iteration_count}"
             )
             if optimizer_name == "physical_gradient_descent":

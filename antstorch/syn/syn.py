@@ -733,11 +733,29 @@ def syn_registration(
             warp_r2l_inv = _upsample_field(warp_r2l_inv, fixed_meta_level["torch_shape"])
 
         if verbose:
-            print(
+            message = (
                 f"SyN resolution level {level_index + 1}/{num_levels}: shrink_factor={factor}, "
                 f"fixed_size={fixed_meta_level['torch_shape']}, moving_size={moving_meta_level['torch_shape']}, "
-                f"iterations={iteration_count}"
             )
+            if regularizer == "bspline":
+                # Mirrors bspline_svf_registration()'s own verbose control-point
+                # reporting (antstorch/bspline_flows/registration.py) -- same
+                # mesh_size -> control_points = mesh_size + 3 relationship
+                # (cubic spline order, this package's only supported order),
+                # doubled from the base level exactly as _fit_syn_level itself
+                # doubles it before regularizing (see the comment there).
+                level_scale = 2**level_index
+                dim = len(fixed_meta_level["torch_shape"])
+                if update_field_mesh_size_at_base_level > 0:
+                    update_mesh_size_level = update_field_mesh_size_at_base_level * level_scale
+                    update_control_points = (update_mesh_size_level + 3,) * dim
+                    message += f"control_points={update_control_points}, "
+                if total_field_mesh_size_at_base_level > 0:
+                    total_mesh_size_level = total_field_mesh_size_at_base_level * level_scale
+                    total_field_control_points = (total_mesh_size_level + 3,) * dim
+                    message += f"total_field_control_points={total_field_control_points}, "
+            message += f"iterations={iteration_count}"
+            print(message)
 
         warp_l2r, warp_r2l, warp_l2r_inv, warp_r2l_inv, history = _fit_syn_level(
             I_level, J_level, fixed_meta_level, moving_meta_level,

@@ -282,8 +282,9 @@ def test_verbose_reports_levels_and_iterations(capsys):
     assert "iterations: (1, 1)" in output
     assert "Resolution level 1/2" in output
     assert "Resolution level 2/2" in output
-    assert "control_points=(4, 4), total_control_points=16" in output
-    assert "control_points=(5, 5), total_control_points=25" in output
+    assert "control_points=(4, 4)" in output
+    assert "control_points=(5, 5)" in output
+    assert "total_control_points" not in output
     assert output.count("iteration 0001") == 2
     assert "loss=" in output
 
