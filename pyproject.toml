@@ -36,6 +36,11 @@ dependencies = [
 [tool.setuptools.packages.find]
 include = ["antstorch*"]
 
+[tool.setuptools.package-data]
+# Bundles the 90-pair Mindboggle-101 definition antstorch.benchmark ships
+# with, so it is present in installed (not just editable/checkout) installs.
+antstorch = ["benchmark/pairs.csv"]
+
 [project.urls]
 "Homepage" = "https://github.com/ANTsX/ANTsTorch"
 

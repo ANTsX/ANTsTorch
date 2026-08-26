@@ -1,0 +1,359 @@
+"""antstorch.benchmark.evaluate — Standardized Single-Pair Registration & Metric Evaluation
+=============================================================================================
+
+The ANTsTorch-native core of the Mindboggle-101 registration benchmark,
+ported from ``syntx.benchmark.evaluate`` (see the project doc, "Portage de
+l'évaluation Mindboggle-101 dans ANTsTorch") and restricted, by explicit
+decision, to registration arms that come from ANTsTorch itself:
+
+- ``antstorch.syn.syn_registration(..., regularizer=...)`` — ``'gaussian'``,
+  ``'sobolev'``, ``'dsti'``, and ``'bspline'`` (the ANTs/ITK ``BSplineSyN``
+  regularizer).
+- ``antstorch.bspline_flows.bspline_svf_registration()`` — the cubic
+  B-spline stationary-velocity-field model.
+
+This intentionally omits the ``syntx``-only capabilities the earlier
+extension of ``syntx.benchmark`` (see ``syntx.benchmark.antstorch_arms``)
+left in ``syntx`` itself and did not attempt to reproduce here: the
+Time-Varying Velocity Field (TVF) and geodesic-shooting (SyNGS) transform
+families, the JAX backend, and the deep-feature similarity losses have no
+ANTsTorch equivalent and are not planned for one — see the project doc for
+the explicit list of capabilities left out of this port, by choice.
+
+Every model variant for a given pair shares the exact same canonical affine
+initialization (fit once via ``syn_registration(type_of_transform="Affine")``
+and cached to disk), so results across models stay apples-to-apples —
+mirroring the fairness invariant the ``syntx`` harness already established
+and that this port preserves.
+"""
+
+import os
+import sys
+import time
+import json
+from typing import Any, Dict, Optional
+
+import numpy as np
+import torch
+import ants
+
+from antstorch.benchmark.data import load_mindboggle_pair
+from antstorch.benchmark.metrics import compute_bidirectional_dice, compute_jacobian_metrics
+from antstorch.ants_transform_io import read_affine_transform
+from antstorch.syn import syn_registration
+
+_SYN_REGULARIZERS = {
+    "gaussian": "gaussian", "syn_gaussian": "gaussian",
+    "sobolev": "sobolev", "syn_sobolev": "sobolev",
+    "dsti": "dsti", "syn_dsti": "dsti",
+    "bspline": "bspline", "syn_bspline": "bspline",
+}
+_BSPLINE_SVF_MODELS = ("bspline_svf", "svf")
+
+
+def clean_device_cache():
+    """Clears PyTorch GPU/Apple Silicon MPS memory allocator cache and runs garbage collection."""
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif torch.backends.mps.is_available():
+        try:
+            torch.mps.empty_cache()
+        except Exception:
+            pass
+
+
+def _fit_or_load_canonical_affine(fi, mi, pair_idx, canonical_affine_dir, device, verbose):
+    """Fits (once, cached to disk) the affine every model variant for this
+    pair will share, via ``syn_registration(type_of_transform="Affine")``.
+
+    Returns
+    -------
+    matrix, translation : torch.Tensor
+        ITK ``(x, y[, z])``-order affine parameters, ready to pass as
+        ``initial_affine`` to either ``syn_registration()`` or
+        ``bspline_svf_registration()``.
+    runtime_seconds : float
+        Time spent fitting (0.0 when loaded from cache).
+    affine_path : str
+        Path to the written/cached ``...0GenericAffine.mat`` file.
+    """
+    os.makedirs(canonical_affine_dir, exist_ok=True)
+    outprefix = os.path.join(canonical_affine_dir, f"pair_{pair_idx:03d}_")
+    affine_path = f"{outprefix}0GenericAffine.mat"
+    dimension = fi.dimension
+
+    if os.path.exists(affine_path):
+        matrix_np, translation_np = read_affine_transform(affine_path, dimension)
+        matrix = torch.from_numpy(matrix_np).to(dtype=torch.float32)
+        translation = torch.from_numpy(translation_np).to(dtype=torch.float32)
+        return matrix, translation, 0.0, affine_path
+
+    t0 = time.time()
+    aff_res = syn_registration(
+        fixed=fi, moving=mi,
+        type_of_transform="Affine",
+        outprefix=outprefix,
+        device=device,
+        verbose=verbose,
+    )
+    runtime_seconds = time.time() - t0
+    matrix = aff_res["affine_matrix"].to(dtype=torch.float32)
+    translation = aff_res["affine_translation"].to(dtype=torch.float32)
+    return matrix, translation, runtime_seconds, affine_path
+
+
+def _run_bspline_svf(fi, mi, matrix, translation, *, device, reg_iterations=None,
+                      shrink_factors=(4, 2, 1), smoothing_sigmas=(2.0, 1.0, 0.0),
+                      mesh_size=6, learning_rate=0.01, optimizer="physical_gradient_descent",
+                      gradient_step=0.2, similarity="ants_ncc", neighborhood_radius=4,
+                      verbose=False) -> Dict[str, Any]:
+    """Adapts ``bspline_flows.bspline_svf_registration()``'s in-memory tensor
+    output into the file-based ``fwdtransforms``/``invtransforms``/
+    ``warpedmovout`` contract the rest of this module expects — the same
+    adapter pattern used in ``syntx.benchmark.antstorch_arms.
+    run_antstorch_bspline_svf``, simplified here since ``matrix``/
+    ``translation`` are already in-memory tensors (no round trip through a
+    ``.mat`` file needed, unlike the cross-package version)."""
+    from antstorch.ants_transform_io import build_transform_lists, default_outprefix, write_affine_transform
+    from antstorch.bspline_flows import ImageDomain, bspline_svf_registration
+    from antstorch.syn.bridge import (
+        ants_image_metadata,
+        ants_image_to_tensor,
+        displacement_xyz_to_ants_image,
+        tensor_to_ants_image,
+    )
+
+    resolved_device = torch.device(device)
+    dtype = torch.float32
+    dimension = fi.dimension
+
+    matrix = matrix.to(device=resolved_device, dtype=dtype)
+    translation = translation.to(device=resolved_device, dtype=dtype)
+
+    fixed_meta = ants_image_metadata(fi)
+    moving_meta = ants_image_metadata(mi)
+    fixed_domain = ImageDomain(fixed_meta["shape"], fixed_meta["spacing"], fixed_meta["origin"], fixed_meta["direction"])
+    moving_domain = ImageDomain(moving_meta["shape"], moving_meta["spacing"], moving_meta["origin"], moving_meta["direction"])
+
+    # normalize=True (the default): unlike the syntx-side arm, nothing has
+    # pre-normalized fi/mi before this point, and bspline_svf_registration()
+    # itself does no normalization internally (its documented tensor-native
+    # scope leaves that to the caller) -- so this adapter must do it,
+    # matching the percentile-clip normalization every other path in this
+    # module gets for free from syn_registration()'s own internal
+    # ants_image_to_tensor() calls.
+    fixed_tensor = ants_image_to_tensor(fi, resolved_device, dtype, normalize=True)
+    moving_tensor = ants_image_to_tensor(mi, resolved_device, dtype, normalize=True)
+
+    iterations = list(reg_iterations) if reg_iterations is not None else [100, 100, 20]
+    if len(iterations) != len(shrink_factors):
+        raise ValueError("reg_iterations must have one value per shrink factor")
+
+    result = bspline_svf_registration(
+        fixed=fixed_tensor,
+        moving=moving_tensor,
+        fixed_domain=fixed_domain,
+        moving_domain=moving_domain,
+        mesh_size=mesh_size,
+        shrink_factors=tuple(shrink_factors),
+        smoothing_sigmas=tuple(smoothing_sigmas),
+        iterations=iterations,
+        learning_rate=learning_rate,
+        optimizer=optimizer,
+        gradient_step=gradient_step,
+        similarity=similarity,
+        neighborhood_radius=neighborhood_radius,
+        initial_affine=(matrix, translation),
+        padding_mode="border",
+        stationary_boundary=True,
+        verbose=verbose,
+    )
+
+    outprefix = default_outprefix()
+    warp_path = f"{outprefix}1Warp.nii.gz"
+    inverse_warp_path = f"{outprefix}1InverseWarp.nii.gz"
+    affine_path = f"{outprefix}0GenericAffine.mat"
+
+    ants.image_write(displacement_xyz_to_ants_image(result["fwdtransforms"], fi), warp_path)
+    ants.image_write(displacement_xyz_to_ants_image(result["invtransforms"], fi), inverse_warp_path)
+    write_affine_transform(matrix.detach().cpu(), translation.detach().cpu(), dimension, affine_path)
+
+    fwdtransforms, invtransforms = build_transform_lists(
+        affine_path=affine_path, warp_path=warp_path, inverse_warp_path=inverse_warp_path
+    )
+
+    return {
+        "warpedmovout": tensor_to_ants_image(result["warpedmovout"], fi),
+        "fwdtransforms": fwdtransforms,
+        "invtransforms": invtransforms,
+        "whichtoinvert_inv": [True, False],
+    }
+
+
+def evaluate_mindboggle_pair(
+    pair_idx: int = 0,
+    model: str = "sobolev",
+    device: Optional[str] = None,
+    pairs_csv: Optional[str] = None,
+    data_dir: Optional[str] = None,
+    canonical_affine_dir: str = "results/canonical_affines",
+    verbose: bool = False,
+    seed: int = 42,
+    use_n4: bool = True,
+    **kwargs,
+) -> Dict[str, Any]:
+    """Evaluates a single Mindboggle registration pair under the specified ANTsTorch model variant.
+
+    Parameters
+    ----------
+    pair_idx : int
+        Index of the pair (0 to 89 for the bundled default pairs.csv).
+    model : str
+        Registration model: ``'gaussian'``, ``'sobolev'``, ``'dsti'``, or
+        ``'bspline'`` (all four dispatch to ``antstorch.syn.syn_registration
+        (..., regularizer=...)``), or ``'bspline_svf'`` (dispatches to
+        ``antstorch.bspline_flows.bspline_svf_registration()``).
+    device : str, optional
+        Compute device ('mps', 'cuda', 'cpu'). If None, automatically detected.
+    pairs_csv : str, optional
+        Path to pairs CSV configuration file. Defaults to the 90-pair
+        definition bundled with this module (``antstorch/benchmark/pairs.csv``).
+    data_dir : str, optional
+        Mindboggle data root directory; resolved via
+        ``antstorch.benchmark.data.resolve_data_dir`` if omitted (env var
+        ``ANTSTORCH_MINDBOGGLE_DATA_DIR``, falling back to ``SYNTX_DATA_DIR``,
+        falling back to ``~/data/mindboggle/volumes``).
+    canonical_affine_dir : str
+        Directory for the per-pair canonical affine ``.mat`` cache, shared
+        across every model variant evaluated for that pair.
+    verbose : bool
+        If True, prints intermediate progress details.
+    seed : int
+        Random seed for reproducibility.
+    use_n4 : bool, default=True
+        If True, preprocesses input images with ANTsTorch's own N4 bias
+        field correction (cached to disk under ``data_dir/.n4_cache``).
+    **kwargs
+        Model-specific overrides, forwarded to the underlying registration
+        call. Common ones: ``reg_iterations``, ``grad_step``, ``levels``
+        (all four ``syn_registration`` variants); ``flow_sigma``/
+        ``total_sigma`` (gaussian/sobolev/dsti); ``update_field_mesh_size_at_base_level``/
+        ``total_field_mesh_size_at_base_level`` (bspline); ``shrink_factors``/
+        ``smoothing_sigmas``/``mesh_size`` (bspline_svf).
+
+    Returns
+    -------
+    Dict[str, Any]
+        Structured benchmark metrics dictionary.
+    """
+    clean_device_cache()
+
+    if device is None:
+        device = "mps" if torch.backends.mps.is_available() else "cpu"
+
+    torch.manual_seed(seed + pair_idx)
+    np.random.seed(seed + pair_idx)
+
+    from antstorch.benchmark.data import DEFAULT_PAIRS_CSV
+    resolved_pairs_csv = pairs_csv if pairs_csv is not None else DEFAULT_PAIRS_CSV
+
+    # 1. Load Pair Data
+    pair_data = load_mindboggle_pair(pair_idx=pair_idx, pairs_csv=resolved_pairs_csv, data_dir=data_dir, use_n4=use_n4, verbose=verbose)
+    fi, mi = pair_data["fixed"], pair_data["moving"]
+    fl, ml = pair_data["fixed_label"], pair_data["moving_label"]
+    fixed_id, moving_id = pair_data["fixed_id"], pair_data["moving_id"]
+    cohort_type = pair_data["pair_type"]
+
+    # 2. Canonical Affine Alignment (Shared Across Every Model Variant)
+    matrix, translation, t_aff, affine_path = _fit_or_load_canonical_affine(
+        fi, mi, pair_idx, canonical_affine_dir, device, verbose
+    )
+    clean_device_cache()
+    _, _, aff_dice_sym = compute_bidirectional_dice(fl, ml, fi, mi, [affine_path], [affine_path], [True])
+
+    # 3. Deformable Registration
+    t0_reg = time.time()
+    model_lower = str(model).lower()
+
+    reg_iters = kwargs.get("reg_iterations")
+
+    if model_lower in _SYN_REGULARIZERS:
+        regularizer = _SYN_REGULARIZERS[model_lower]
+        syn_kwargs = dict(
+            fixed=fi, moving=mi,
+            type_of_transform="SyNOnly",
+            initial_affine=(matrix, translation),
+            regularizer=regularizer,
+            device=device,
+            verbose=verbose,
+        )
+        if reg_iters is not None:
+            syn_kwargs["reg_iterations"] = reg_iters
+        for key in (
+            "levels", "grad_step", "flow_sigma", "total_sigma",
+            "update_field_mesh_size_at_base_level", "total_field_mesh_size_at_base_level",
+            "bspline_enforce_stationary_boundary", "syn_metric", "neighborhood_radius",
+            "antisymmetric", "inverse_method", "in_loop_inverse_steps", "padding_mode",
+        ):
+            if key in kwargs:
+                syn_kwargs[key] = kwargs[key]
+        if regularizer == "bspline" and "update_field_mesh_size_at_base_level" not in syn_kwargs:
+            # See antstorch.syn.syn_registration()'s own docstring / this
+            # project's earlier calibration finding: real antsRegistrationSyN.sh
+            # usage never runs BSplineSyN at the raw ITK class default of 1.
+            syn_kwargs["update_field_mesh_size_at_base_level"] = 26
+        res_reg = syn_registration(**syn_kwargs)
+    elif model_lower in _BSPLINE_SVF_MODELS:
+        svf_kwargs = {k: v for k, v in kwargs.items() if k in (
+            "reg_iterations", "shrink_factors", "smoothing_sigmas", "mesh_size",
+            "learning_rate", "optimizer", "gradient_step", "similarity", "neighborhood_radius",
+        )}
+        res_reg = _run_bspline_svf(fi, mi, matrix, translation, device=device, verbose=verbose, **svf_kwargs)
+    else:
+        raise ValueError(
+            f"Unknown registration model: '{model}'. Supported: "
+            f"{sorted(set(_SYN_REGULARIZERS) | set(_BSPLINE_SVF_MODELS))}"
+        )
+
+    t_reg = time.time() - t0_reg + t_aff
+
+    # 4. Evaluate Structural and Topological Metrics
+    fwd_tx = res_reg["fwdtransforms"]
+    inv_tx = res_reg["invtransforms"]
+    which_inv = res_reg.get("whichtoinvert_inv", [True, False])
+
+    df_fixed, df_moving, dice_sym = compute_bidirectional_dice(fl, ml, fi, mi, fwd_tx, inv_tx, which_inv)
+
+    fwd_warp_file = next(x for x in fwd_tx if isinstance(x, str) and x.endswith(".nii.gz"))
+    jac = compute_jacobian_metrics(fi, fwd_warp_file)
+
+    record = {
+        "pair_idx": int(pair_idx),
+        "model_type": model_lower,
+        "cohort_type": cohort_type,
+        "fixed_id": fixed_id,
+        "moving_id": moving_id,
+        "use_n4": use_n4,
+        "status": "SUCCESS",
+        "affine_dice_sym": float(aff_dice_sym),
+        "dice_sym": float(dice_sym),
+        "dice_fixed": float(df_fixed),
+        "dice_moving": float(df_moving),
+        "folding_pct": float(jac["folding_pct"]),
+        "min_jacobian": float(jac["min"]),
+        "runtime_seconds": float(t_reg),
+        "transforms": {
+            "fwdtransforms": [str(x) for x in fwd_tx],
+            "invtransforms": [str(x) for x in inv_tx],
+            "whichtoinvert_inv": which_inv,
+        },
+    }
+
+    clean_device_cache()
+    return record
+
+
+# Backward-compatibility alias, matching syntx.benchmark's own naming.
+evaluate_pair = evaluate_mindboggle_pair
