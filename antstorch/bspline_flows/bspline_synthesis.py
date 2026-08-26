@@ -104,11 +104,28 @@ def synthesize_bspline_velocity(
             spans = lattice_size if periodic else lattice_size - 3
             # The last ITK image sample is the left-limit at the half-open endpoint.
             coordinate = dense_index.to(coefficients.dtype) * (float(spans) / float(dense_size - 1))
-            coordinate = torch.where(
-                dense_index == dense_size - 1,
-                torch.nextafter(coordinate, coordinate.new_full((), float("-inf"))),
-                coordinate,
-            )
+            if not periodic:
+                # Clamp against the *exact* mathematical upper bound (not
+                # against a one-ULP nudge of whatever the multiplication
+                # above actually computed). dense_index * spans / (dense_size
+                # - 1) is only exactly `spans` in exact arithmetic; in
+                # float32 it can land a few ULPs *above* `spans` -- not just
+                # at the last sample, occasionally at interior samples too,
+                # depending on spans/dense_size -- and a single nextafter()
+                # step off of an already-overshot value isn't guaranteed to
+                # bring it back under `spans`. That silently pushes
+                # base = floor(coordinate) to `spans`, and the neighbor
+                # index base+3 to `spans + 3 == lattice_size`, one past the
+                # last valid coefficient index -- surfacing as an unrelated-
+                # looking "index out of range in self" from index_select
+                # deep in the vectorized gather path below. Clamping to the
+                # exact value's nextafter (matching the already-correct
+                # technique in _bspline_fit_geometry) is robust regardless
+                # of how the raw coordinate was rounded.
+                safe_max = torch.nextafter(
+                    coordinate.new_full((), float(spans)), coordinate.new_full((), float("-inf"))
+                )
+                coordinate = coordinate.clamp_max(safe_max)
             base = torch.floor(coordinate).to(torch.long)
             local = torch.arange(4, device=coefficients.device)
             index = base[:, None] + local
