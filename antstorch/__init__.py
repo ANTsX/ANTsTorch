@@ -1,4 +1,3 @@
-
 try:
     from .version import __version__
 except:
@@ -9,3 +8,4 @@ from .lamnr_flows import *
 from .utilities import *
 from .bspline_flows import *
 from . import syn
+from . import benchmark
