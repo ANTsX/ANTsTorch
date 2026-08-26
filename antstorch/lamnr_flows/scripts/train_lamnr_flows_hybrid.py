@@ -965,6 +965,11 @@ class HybridLAMNrTrainer:
                 if view.kind == "image2d"
                 else create_glow_normalizing_flow_model_3d
             )
+            if view.kind == "image3d":
+                kwargs.update(
+                    shift_cap=self._cfg(view, "shift_cap", None),
+                    gen_clamp=float(self._cfg(view, "gen_clamp", 1.0e4)),
+                )
             model = factory(**kwargs)
         model = model.to(device=self.dev, dtype=torch.float32).train()
         if self.rank == 0:
@@ -1425,6 +1430,20 @@ class HybridLAMNrTrainer:
             for field_name in ("kind", "shape", "channels", "columns", "model"):
                 current_value = getattr(current, field_name)
                 ckpt_value = raw.get(field_name)
+                # Export-only diagnostics may deliberately tighten these
+                # parameter-free numerical guards on an existing checkpoint.
+                # Keep strict matching for resumed training, where changing
+                # the transform semantics mid-run would be unsafe.
+                if field_name == "model" and self.args.export_only:
+                    diagnostic_keys = {"shift_cap", "gen_clamp"}
+                    current_value = {
+                        k: v for k, v in current_value.items()
+                        if k not in diagnostic_keys
+                    }
+                    ckpt_value = {
+                        k: v for k, v in (ckpt_value or {}).items()
+                        if k not in diagnostic_keys
+                    }
                 if current_value != ckpt_value:
                     view_mismatches.append((name, field_name, current_value, ckpt_value))
 
@@ -1480,8 +1499,13 @@ class HybridLAMNrTrainer:
             self.warm.load_state_dict(blob["warmup"])
         if blob.get("plateau") is not None:
             self.plateau.load_state_dict(blob["plateau"])
-        if blob.get("scaler") is not None:
-            self.scaler.load_state_dict(blob["scaler"])
+        # A disabled GradScaler serializes to an empty dict.  Passing that
+        # empty state back to load_state_dict raises, even though there is no
+        # scaling state to restore (for example, a float32 checkpoint loaded
+        # by an export-only diagnostic run).
+        scaler_state = blob.get("scaler")
+        if scaler_state:
+            self.scaler.load_state_dict(scaler_state)
         if self.args.ema and blob.get("ema_models") is not None:
             self.ema_models = nn.ModuleList([
                 copy.deepcopy(self._unwrap(m)).eval().requires_grad_(False)
@@ -1576,7 +1600,26 @@ class HybridLAMNrTrainer:
             if not present.any():
                 continue
             x = x[present][: self.args.preview_samples]
-            _, recon = self._reconstruct(model, x, view)
+            z, recon = self._reconstruct(model, x, view)
+            finite = torch.isfinite(recon)
+            safe_recon = torch.nan_to_num(recon.float())
+            error = (safe_recon - x.float()).abs()
+            latent_levels = z if isinstance(z, (list, tuple)) else [z]
+            latent_abs_max = max(
+                float(torch.nan_to_num(level.detach().float()).abs().max().cpu())
+                for level in latent_levels
+            )
+            tqdm.write(
+                f"[recon] iter={iteration} view={view.name} "
+                f"mae={float(error.mean().cpu()):.6g} "
+                f"rmse={float(error.square().mean().sqrt().cpu()):.6g} "
+                f"max={float(error.max().cpu()):.6g} "
+                f"finite={float(finite.float().mean().cpu()):.6f} "
+                f"x_range=[{float(x.min().cpu()):.6g},{float(x.max().cpu()):.6g}] "
+                f"recon_range=[{float(safe_recon.min().cpu()):.6g},"
+                f"{float(safe_recon.max().cpu()):.6g}] "
+                f"latent_abs_max={latent_abs_max:.6g}"
+            )
             panels = []
             for original, restored in zip(x, recon):
                 panels.extend([self._display_slice(original), self._display_slice(restored)])
@@ -1844,6 +1887,9 @@ def _build_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--export-max-samples", type=int, default=100)
     parser.add_argument("--export-only", action="store_true",
         help="Load --resume/--auto-resume and run reconstruction/latent export only.")
+    parser.add_argument("--diagnose-invertibility", action="store_true",
+        help="Build/load the configured models, print image round-trip metrics, "
+             "write reconstruction previews at iteration 0, and exit without training.")
     args = parser.parse_args(argv)
     if args.accum_steps < 1:
         parser.error("--accum-steps must be >= 1")
@@ -1856,7 +1902,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     trainer = HybridLAMNrTrainer()
     args = _build_args(argv)
     trainer.setup(args)
-    if args.export_only:
+    if args.diagnose_invertibility:
+        trainer._save_previews(0)
+        if trainer.is_ddp:
+            dist.barrier()
+            dist.destroy_process_group()
+    elif args.export_only:
         if not (args.resume or args.auto_resume):
             raise ValueError("--export-only requires --resume or --auto-resume.")
         trainer.export()
