@@ -322,6 +322,87 @@ def test_syn_registration_verbose_non_bspline_regularizer_omits_control_points(c
     assert "iterations=5" in out
 
 
+def test_syn_registration_update_field_spline_distance_resolves_per_axis_mesh():
+    # fixed/moving from _ants_pair_2d() have ITK shape (28, 30), spacing
+    # (1, 1) -> physical extent (27, 29) -> ANTs' own un-padded
+    # ceil(extent / spline_distance) formula (mesh_size_for_spline_distance)
+    # gives a genuinely *anisotropic* mesh from a single scalar distance --
+    # ceil(27/14)=2, ceil(29/14)=3 -- exactly like real ANTs'
+    # CalculateMeshSizeForSpecifiedKnotSpacing, whose SizeType output differs
+    # per axis even for one scalar knot spacing whenever the domain isn't
+    # square/cubic.
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    result = syn_registration(
+        fixed, moving, type_of_transform="SyNOnly",
+        levels=(1,), reg_iterations=(5,), syn_metric="mse", grad_step=0.4,
+        regularizer="bspline", update_field_spline_distance=14.0,
+    )
+    assert result["provenance"]["update_field_mesh_size_at_base_level"] == (2, 3)
+    assert result["provenance"]["update_field_spline_distance"] == 14.0
+    assert result["provenance"]["total_field_spline_distance"] is None
+    assert np.isfinite(result["loss_history"]).all()
+
+
+def test_syn_registration_total_field_spline_distance_resolves_per_axis_mesh():
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    result = syn_registration(
+        fixed, moving, type_of_transform="SyNOnly",
+        levels=(1,), reg_iterations=(5,), syn_metric="mse", grad_step=0.4,
+        regularizer="bspline", update_field_mesh_size_at_base_level=1,
+        total_field_spline_distance=(9.0, 15.0),
+    )
+    assert result["provenance"]["total_field_mesh_size_at_base_level"] == (3, 2)
+    assert result["provenance"]["total_field_spline_distance"] == (9.0, 15.0)
+    assert np.isfinite(result["loss_history"]).all()
+
+
+def test_syn_registration_spline_distance_mutually_exclusive_with_mesh_size():
+    fixed, moving = _ants_pair_2d()
+    with pytest.raises(ValueError, match="update_field_spline_distance"):
+        syn_registration(
+            fixed, moving, type_of_transform="SyNOnly", regularizer="bspline",
+            update_field_mesh_size_at_base_level=2, update_field_spline_distance=14.0,
+        )
+    with pytest.raises(ValueError, match="total_field_spline_distance"):
+        syn_registration(
+            fixed, moving, type_of_transform="SyNOnly", regularizer="bspline",
+            total_field_mesh_size_at_base_level=1, total_field_spline_distance=14.0,
+        )
+
+
+def test_syn_registration_spline_distance_alone_satisfies_positive_mesh_requirement():
+    # update_field_mesh_size_at_base_level=0 (off) with only
+    # total_field_spline_distance given must not trip the "regularizer=
+    # 'bspline' requires an active mesh" validation -- it counts as active.
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    result = syn_registration(
+        fixed, moving, type_of_transform="SyNOnly",
+        levels=(1,), reg_iterations=(3,), syn_metric="mse", grad_step=0.4,
+        regularizer="bspline", update_field_mesh_size_at_base_level=0,
+        total_field_spline_distance=14.0,
+    )
+    assert result["provenance"]["update_field_mesh_size_at_base_level"] == 0
+    assert result["provenance"]["total_field_mesh_size_at_base_level"] == (2, 3)
+
+
+def test_syn_registration_verbose_spline_distance_reports_doubled_per_axis_control_points(capsys):
+    # Base mesh from update_field_spline_distance=14.0 is (2, 3) (see the
+    # per-axis test above); doubled per finer pyramid level exactly like an
+    # explicit integer mesh size -- level 0 (coarsest, scale=1):
+    # control_points=(5, 6); level 1 (finest, scale=2): mesh (4, 6) ->
+    # control_points=(7, 9).
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    syn_registration(
+        fixed, moving, type_of_transform="SyNOnly",
+        levels=(2, 1), reg_iterations=(5, 5), syn_metric="mse", grad_step=0.4,
+        regularizer="bspline", update_field_spline_distance=14.0,
+        verbose=True,
+    )
+    out = capsys.readouterr().out
+    assert "control_points=(5, 6)" in out
+    assert "control_points=(7, 9)" in out
+
+
 def test_syn_registration_reduces_intensity_mismatch_versus_unregistered():
     fixed, moving = _ants_pair_2d(ramp=0.3)
     result = syn_registration(

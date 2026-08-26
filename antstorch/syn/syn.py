@@ -172,13 +172,48 @@ def _similarity_loss(name: str, I: Tensor, J: Tensor, mask: Optional[Tensor], wi
     raise ValueError(f"Unknown similarity metric: {name!r}")
 
 
+def _mesh_size_active(mesh_size: Union[int, Sequence[int]]) -> bool:
+    """Whether a (possibly per-axis) base-level/level mesh size is "on".
+
+    ``int`` values follow the existing convention throughout this module:
+    ``<= 0`` means off (matches ``*_mesh_size_at_base_level=0`` disabling a
+    B-spline regularizer term). A sequence is always the resolved, per-axis
+    output of :func:`antstorch.bspline_flows.mesh_size_for_spline_distance`
+    (or a caller-supplied per-axis mesh), which is never used to represent
+    "off" -- an int (typically the untouched default ``0``) is used for that
+    instead, so a sequence here is always active.
+    """
+    if isinstance(mesh_size, int):
+        return mesh_size > 0
+    return True
+
+
+def _scale_mesh_size(mesh_size: Union[int, Sequence[int]], scale: int) -> Union[int, Tuple[int, ...]]:
+    """Apply the per-pyramid-level base-mesh-size doubling to either an
+    isotropic int or a per-axis sequence, preserving whichever shape was
+    given (mirrors ``itk::TransformParametersAdaptor``'s own per-level
+    control-point-grid doubling, applied per axis when the mesh is
+    anisotropic)."""
+    if isinstance(mesh_size, int):
+        return mesh_size * scale
+    return tuple(int(value) * scale for value in mesh_size)
+
+
+def _mesh_size_control_points(mesh_size: Union[int, Sequence[int]], dim: int, spline_order: int = 3) -> Tuple[int, ...]:
+    """``mesh_size -> number_of_control_points`` (``mesh_size + spline_order``
+    per axis), broadcasting an isotropic int across ``dim`` axes."""
+    if isinstance(mesh_size, int):
+        return (mesh_size + spline_order,) * dim
+    return tuple(int(value) + spline_order for value in mesh_size)
+
+
 def _apply_regularizer(
     field: Tensor,
     regularizer: str,
     sigma: float,
     spacing_itk,
     *,
-    mesh_size: int = 0,
+    mesh_size: Union[int, Sequence[int]] = 0,
     domain=None,
     spline_order: int = 3,
     enforce_stationary_boundary: bool = True,
@@ -186,7 +221,9 @@ def _apply_regularizer(
     if regularizer == "bspline":
         # Its own strength knob (mesh_size, ITK control-point count minus
         # spline_order) rather than sigma -- see apply_bspline_smoothing_operator.
-        if mesh_size <= 0:
+        # mesh_size may be an isotropic int or a resolved per-axis sequence
+        # (see _mesh_size_active); only the int form can mean "off".
+        if not _mesh_size_active(mesh_size):
             return field
         if domain is None:
             raise ValueError("regularizer='bspline' requires domain")
@@ -252,8 +289,8 @@ def _fit_syn_level(
     flow_sigma: float,
     total_sigma: float,
     regularizer: str,
-    update_field_mesh_size_at_base_level: int,
-    total_field_mesh_size_at_base_level: int,
+    update_field_mesh_size_at_base_level: Union[int, Sequence[int]],
+    total_field_mesh_size_at_base_level: Union[int, Sequence[int]],
     bspline_enforce_stationary_boundary: bool,
     grad_step: float,
     shrink_factor: int,
@@ -283,10 +320,10 @@ def _fit_syn_level(
     if regularizer == "bspline":
         bspline_domain = image_domain_from_metadata(fixed_meta)
         level_scale = 2 ** level_index
-        if update_field_mesh_size_at_base_level > 0:
-            update_mesh_size_level = update_field_mesh_size_at_base_level * level_scale
-        if total_field_mesh_size_at_base_level > 0:
-            total_mesh_size_level = total_field_mesh_size_at_base_level * level_scale
+        if _mesh_size_active(update_field_mesh_size_at_base_level):
+            update_mesh_size_level = _scale_mesh_size(update_field_mesh_size_at_base_level, level_scale)
+        if _mesh_size_active(total_field_mesh_size_at_base_level):
+            total_mesh_size_level = _scale_mesh_size(total_field_mesh_size_at_base_level, level_scale)
 
     history = []
     for iteration in range(iterations):
@@ -346,7 +383,7 @@ def _fit_syn_level(
         warp_r2l = _eulerian_update(warp_r2l_leaf.detach(), delta_r, X_phys, fixed_meta_t)
 
         if regularizer == "bspline":
-            if total_mesh_size_level > 0:
+            if _mesh_size_active(total_mesh_size_level):
                 warp_l2r = apply_bspline_smoothing_operator(
                     warp_l2r, bspline_domain, total_mesh_size_level,
                     enforce_stationary_boundary=bspline_enforce_stationary_boundary,
@@ -462,6 +499,8 @@ def syn_registration(
     regularizer: str = "gaussian",
     update_field_mesh_size_at_base_level: int = 1,
     total_field_mesh_size_at_base_level: int = 0,
+    update_field_spline_distance: Optional[Union[float, Sequence[float]]] = None,
+    total_field_spline_distance: Optional[Union[float, Sequence[float]]] = None,
     bspline_enforce_stationary_boundary: bool = True,
     inverse_method: str = "anderson",
     in_loop_inverse_steps: int = 6,
@@ -547,6 +586,29 @@ def syn_registration(
     resolution levels -- so a single base value stays a comparably strong
     regularizer at every ``levels`` entry, the way one ``flow_sigma``/
     ``total_sigma`` does for the other three regularizers.
+
+    ``update_field_spline_distance``/``total_field_spline_distance``, when
+    given, compute the corresponding ``*_mesh_size_at_base_level`` from a
+    physical knot spacing against ``fixed``'s full native-resolution domain
+    instead of an explicit integer -- ANTs' own "spline distance" convention
+    (see :func:`antstorch.bspline_flows.mesh_size_for_spline_distance`), the
+    exact un-padded formula ``itk::ants::RegistrationHelper::
+    CalculateMeshSizeForSpecifiedKnotSpacing`` uses (``Examples/
+    itkantsRegistrationHelper.cxx``, used by ``antsRegistration`` whenever a
+    single scalar is given for ``BSplineSyN``'s ``updateFieldMeshSizeAtBaseLevel``/
+    ``totalFieldMeshSizeAtBaseLevel``), and the same un-padded formula
+    ``n4_bias_field_correction``'s scalar ``spline_param`` already uses.
+    Real ANTs' own conversion is per-axis even for a single scalar distance
+    (the physical field of view need not be isotropic), so the resolved
+    mesh size -- and every subsequent per-level doubling -- can be
+    anisotropic when a spline distance is used, unlike the plain-integer
+    ``*_mesh_size_at_base_level`` parameters, which stay isotropic. Each is
+    mutually exclusive with a non-default value of its corresponding
+    ``*_mesh_size_at_base_level`` integer. As with ``bspline_svf_registration``,
+    no image padding is performed -- the mesh size is an approximation of
+    the requested spacing, exactly matching real ``antsRegistration``'s own
+    (non-padding) registration-side behavior; this deliberately differs from
+    real ANTs' ``N4BiasFieldCorrection``, which does pad.
     ``bspline_enforce_stationary_boundary`` (default ``True``, ITK's own
     default) keeps the field at zero on the domain's outermost voxel layer.
     Both half-warp inverses are numerically maintained
@@ -592,10 +654,27 @@ def syn_registration(
         raise ValueError("update_field_mesh_size_at_base_level must be >= 0")
     if total_field_mesh_size_at_base_level < 0:
         raise ValueError("total_field_mesh_size_at_base_level must be >= 0")
-    if regularizer == "bspline" and update_field_mesh_size_at_base_level == 0 and total_field_mesh_size_at_base_level == 0:
+    if update_field_spline_distance is not None and update_field_mesh_size_at_base_level != 1:
         raise ValueError(
-            "regularizer='bspline' requires update_field_mesh_size_at_base_level > 0 "
-            "and/or total_field_mesh_size_at_base_level > 0"
+            "update_field_spline_distance cannot be combined with a non-default "
+            "update_field_mesh_size_at_base_level"
+        )
+    if total_field_spline_distance is not None and total_field_mesh_size_at_base_level != 0:
+        raise ValueError(
+            "total_field_spline_distance cannot be combined with a non-default "
+            "total_field_mesh_size_at_base_level"
+        )
+    if (
+        regularizer == "bspline"
+        and update_field_mesh_size_at_base_level == 0
+        and total_field_mesh_size_at_base_level == 0
+        and update_field_spline_distance is None
+        and total_field_spline_distance is None
+    ):
+        raise ValueError(
+            "regularizer='bspline' requires update_field_mesh_size_at_base_level > 0, "
+            "total_field_mesh_size_at_base_level > 0, update_field_spline_distance, "
+            "and/or total_field_spline_distance"
         )
     if padding_mode not in ("zeros", "border", "reflection"):
         raise ValueError("padding_mode must be 'zeros', 'border', or 'reflection'")
@@ -712,6 +791,29 @@ def syn_registration(
     I_full = ants_image_to_tensor(fixed, resolved_device, dtype)
     J_full = ants_image_to_tensor(moving, resolved_device, dtype)
 
+    # Resolve any spline-distance parameter into the base-level mesh size it
+    # replaces, once, against fixed's FULL native-resolution domain -- matching
+    # real ANTs' own CalculateMeshSizeForSpecifiedKnotSpacing, which is always
+    # computed against the un-shrunk fixedImage before any pyramid downsampling
+    # (see update_field_spline_distance's docstring above). The existing
+    # per-level doubling (_fit_syn_level, and the verbose print below) then
+    # applies to this resolved value exactly as it would to an explicit
+    # update_field_mesh_size_at_base_level/total_field_mesh_size_at_base_level.
+    resolved_update_field_mesh_size_at_base_level = update_field_mesh_size_at_base_level
+    resolved_total_field_mesh_size_at_base_level = total_field_mesh_size_at_base_level
+    if regularizer == "bspline" and (update_field_spline_distance is not None or total_field_spline_distance is not None):
+        from antstorch.bspline_flows import mesh_size_for_spline_distance
+
+        fixed_domain_full = image_domain_from_metadata(fixed_meta_full)
+        if update_field_spline_distance is not None:
+            resolved_update_field_mesh_size_at_base_level = mesh_size_for_spline_distance(
+                fixed_domain_full, update_field_spline_distance
+            )
+        if total_field_spline_distance is not None:
+            resolved_total_field_mesh_size_at_base_level = mesh_size_for_spline_distance(
+                fixed_domain_full, total_field_spline_distance
+            )
+
     window_size = 2 * int(neighborhood_radius) + 1
     num_levels = len(levels)
 
@@ -740,19 +842,23 @@ def syn_registration(
             if regularizer == "bspline":
                 # Mirrors bspline_svf_registration()'s own verbose control-point
                 # reporting (antstorch/bspline_flows/registration.py) -- same
-                # mesh_size -> control_points = mesh_size + 3 relationship
-                # (cubic spline order, this package's only supported order),
-                # doubled from the base level exactly as _fit_syn_level itself
-                # doubles it before regularizing (see the comment there).
+                # mesh_size -> control_points = mesh_size + spline_order
+                # relationship (cubic spline order, this package's only
+                # supported order), doubled from the base level exactly as
+                # _fit_syn_level itself doubles it before regularizing (see
+                # the comment there). Uses the *resolved* base mesh size --
+                # the raw *_mesh_size_at_base_level int, or the per-axis
+                # mesh size when a *_spline_distance was given instead (see
+                # its resolution above, before this loop).
                 level_scale = 2**level_index
                 dim = len(fixed_meta_level["torch_shape"])
-                if update_field_mesh_size_at_base_level > 0:
-                    update_mesh_size_level = update_field_mesh_size_at_base_level * level_scale
-                    update_control_points = (update_mesh_size_level + 3,) * dim
+                if _mesh_size_active(resolved_update_field_mesh_size_at_base_level):
+                    update_mesh_size_level = _scale_mesh_size(resolved_update_field_mesh_size_at_base_level, level_scale)
+                    update_control_points = _mesh_size_control_points(update_mesh_size_level, dim)
                     message += f"control_points={update_control_points}, "
-                if total_field_mesh_size_at_base_level > 0:
-                    total_mesh_size_level = total_field_mesh_size_at_base_level * level_scale
-                    total_field_control_points = (total_mesh_size_level + 3,) * dim
+                if _mesh_size_active(resolved_total_field_mesh_size_at_base_level):
+                    total_mesh_size_level = _scale_mesh_size(resolved_total_field_mesh_size_at_base_level, level_scale)
+                    total_field_control_points = _mesh_size_control_points(total_mesh_size_level, dim)
                     message += f"total_field_control_points={total_field_control_points}, "
             message += f"iterations={iteration_count}"
             print(message)
@@ -767,8 +873,8 @@ def syn_registration(
             flow_sigma=flow_sigma,
             total_sigma=total_sigma,
             regularizer=regularizer,
-            update_field_mesh_size_at_base_level=update_field_mesh_size_at_base_level,
-            total_field_mesh_size_at_base_level=total_field_mesh_size_at_base_level,
+            update_field_mesh_size_at_base_level=resolved_update_field_mesh_size_at_base_level,
+            total_field_mesh_size_at_base_level=resolved_total_field_mesh_size_at_base_level,
             bspline_enforce_stationary_boundary=bspline_enforce_stationary_boundary,
             grad_step=grad_step,
             shrink_factor=factor,
@@ -875,8 +981,10 @@ def syn_registration(
             "flow_sigma": flow_sigma,
             "total_sigma": total_sigma,
             "regularizer": regularizer,
-            "update_field_mesh_size_at_base_level": update_field_mesh_size_at_base_level,
-            "total_field_mesh_size_at_base_level": total_field_mesh_size_at_base_level,
+            "update_field_mesh_size_at_base_level": resolved_update_field_mesh_size_at_base_level,
+            "total_field_mesh_size_at_base_level": resolved_total_field_mesh_size_at_base_level,
+            "update_field_spline_distance": update_field_spline_distance,
+            "total_field_spline_distance": total_field_spline_distance,
             "bspline_enforce_stationary_boundary": bspline_enforce_stationary_boundary,
             "antisymmetric": antisymmetric,
             "inverse_method": inverse_method,
