@@ -19,6 +19,7 @@ generalized here from N4's regular shrunk-image grid to arbitrary scattered
 points with independent parametric locations.
 """
 
+from itertools import product
 from typing import Optional, Sequence, Tuple, Union
 
 import torch
@@ -33,6 +34,7 @@ from .bspline_synthesis import (
     _as_bools,
     _concat_bspline_fit_geometries,
     _select_bspline_fit_geometry,
+    cubic_bspline_basis,
     refine_bspline_coefficients,
     synthesize_bspline_velocity,
 )
@@ -257,6 +259,115 @@ def fit_bspline_object_to_scattered_data(
     return dense
 
 
+def _bspline_fit_dense_grid_chunked(
+    values_flat: Tensor,
+    weight_flat: Tensor,
+    domain: ImageDomain,
+    lattice_itk: Sequence[int],
+    eps: float,
+    chunk_size: int,
+) -> Tensor:
+    """Memory-bounded equivalent of ``_bspline_fit_geometry`` +
+    ``_bspline_fit_context`` (vectorized mode) + ``_bspline_fit_solve``, for
+    fitting a REGULAR DENSE GRID in one shot (no cross-call geometry reuse).
+
+    ``_bspline_fit_geometry`` materializes one ``(4**D, N)`` index tensor and
+    one same-shape basis-weight tensor for the *whole* dense grid (``N`` =
+    every voxel) before any accumulation happens -- fine for the modest grids
+    ``n4_bias_field_correction``'s iterative loop fits (which deliberately
+    keeps that geometry resident across many fits at the same resolution, see
+    ``_bspline_fit_context``'s docstring -- a real win there), but at a full
+    native-resolution 3-D volume (e.g. 256x256x160 = ~10.5M voxels) with
+    ``4**3 = 64`` local support points per sample, those two tensors alone
+    are >8 GB, and ``_bspline_fit_context``'s vectorized path adds a further
+    same-size ``cubed_over_squared_sum`` intermediate on top -- comfortably
+    enough to exhaust a shared GPU's free memory (reported by a user running
+    ``antstorch.syn.syn_registration(regularizer="bspline")`` -- the
+    ``BSplineSyN`` regularizer, via :func:`fit_bspline_displacement_field`
+    called through ``apply_bspline_smoothing_operator`` -- at full resolution
+    with a fine update-field mesh: ``CUDA out of memory. Tried to allocate
+    7.50 GiB``).
+
+    This function is used ONLY for the one-shot, single-level, dense-grid
+    case (see ``fit_bspline_displacement_field``'s call site below), which
+    never benefits from geometry reuse in the first place (there is exactly
+    one fit per call) -- so fusing geometry construction, the normal-equation
+    accumulation, and the solve into one pass, processing ``chunk_size``
+    samples at a time and immediately reducing each chunk into the
+    ``coefficient_count``-sized ``omega``/``delta`` accumulators, never
+    materializes anything larger than ``(4**D, chunk_size)``. Peak memory is
+    then governed by ``chunk_size`` instead of the sample count -- the same
+    principle :func:`~.bspline_synthesis.synthesize_bspline_velocity`
+    already applies on the forward (coefficients -> dense field) path.
+    Produces bit-for-bit (up to floating-point summation order) the same
+    result as the unchunked path for any ``chunk_size`` -- verified directly
+    against it before this was wired in.
+
+    ``values_flat``/``weight_flat`` : ``(batch_channels, N)``, ``N`` =
+    ``prod(domain.size)``, already in the dense grid's flattened (row-major,
+    ITK x fastest) sample order -- exactly what ``fit_bspline_displacement_field``
+    already builds for its unchunked path.
+    """
+    dtype, device = values_flat.dtype, values_flat.device
+    dimension = len(lattice_itk)
+    batch_channels = values_flat.shape[0]
+    point_count = 1
+    for size in domain.size:
+        point_count *= size
+    strides, stride = [], 1
+    for size in lattice_itk:
+        strides.append(stride)
+        stride *= size
+    coefficient_count = stride
+
+    omega = values_flat.new_zeros((batch_channels, coefficient_count))
+    delta = values_flat.new_zeros((batch_channels, coefficient_count))
+
+    for begin in range(0, point_count, chunk_size):
+        end = min(begin + chunk_size, point_count)
+        remaining = torch.arange(begin, end, device=device)
+        dense_indices = []
+        for size in domain.size:  # ITK x fastest, matching _bspline_fit_geometry's flatten order
+            dense_indices.append(remaining.remainder(size))
+            remaining = torch.div(remaining, size, rounding_mode="floor")
+
+        neighbors, basis = [], []
+        for coordinate, dense_size, lattice_size in zip(dense_indices, domain.size, lattice_itk):
+            spans = lattice_size - 3
+            u = coordinate.to(dtype) * (float(spans) / float(dense_size - 1))
+            # Same exact-bound clamp as _bspline_fit_geometry/synthesize_bspline_velocity.
+            u = u.clamp_max(torch.nextafter(u.new_tensor(float(spans)), u.new_tensor(float("-inf"))))
+            base = torch.floor(u).to(torch.long)
+            local = torch.arange(4, device=device)
+            index = base[..., None] + local
+            neighbors.append(index)
+            basis.append(cubic_bspline_basis(u[..., None] - index.to(u.dtype) + 1.0))
+
+        chunk_len = end - begin
+        squared_sum = values_flat.new_zeros((chunk_len,))
+        support_indices, support_basis = [], []
+        for support in product(range(4), repeat=dimension):
+            index = sum(neighbors[d][..., support[d]] * strides[d] for d in range(dimension))
+            value = torch.ones(chunk_len, dtype=dtype, device=device)
+            for d in range(dimension):
+                value = value * basis[d][..., support[d]]
+            support_indices.append(index)
+            support_basis.append(value)
+            squared_sum = squared_sum + value.square()
+        squared_sum = squared_sum.clamp_min(eps)
+
+        values_chunk = values_flat[:, begin:end]
+        weight_chunk = weight_flat[:, begin:end]
+        for index, value in zip(support_indices, support_basis):
+            expanded_index = index[None].expand(batch_channels, -1)
+            omega.scatter_add_(1, expanded_index, weight_chunk * value[None].square())
+            delta.scatter_add_(
+                1, expanded_index, values_chunk * weight_chunk * (value.pow(3) / squared_sum)[None]
+            )
+
+    return torch.where(omega > eps, delta / omega.clamp_min(eps), torch.zeros_like(delta))
+
+
 def fit_bspline_displacement_field(
     displacement_field: Optional[Tensor] = None,
     displacement_weight_image: Optional[Tensor] = None,
@@ -272,6 +383,7 @@ def fit_bspline_displacement_field(
     eps: float = 1e-6,
     stable_accumulation: Optional[bool] = None,
     return_coefficients: bool = False,
+    chunk_size: int = 262_144,
 ) -> Union[Tensor, Tuple[Tensor, Tensor]]:
     """Fit and smooth a displacement field with cubic B-splines, from a
     dense field, scattered displacement points, or both together -- a
@@ -279,6 +391,16 @@ def fit_bspline_displacement_field(
     wrapper for ``itkDisplacementFieldToBSplineImageFilter``, itself built
     on the same scattered-data filter as
     :func:`fit_bspline_object_to_scattered_data`).
+
+    ``chunk_size`` only affects the common one-shot case -- a dense
+    ``displacement_field``, no scattered points, ``number_of_fitting_levels
+    == 1`` (exactly what ``apply_bspline_smoothing_operator``'s ``BSplineSyN``
+    regularizer uses, once per iteration) -- where it bounds peak memory via
+    :func:`_bspline_fit_dense_grid_chunked` instead of materializing a
+    ``(4**D, N)`` geometry tensor for the whole dense grid at once; see that
+    function's docstring. It is ignored for multi-level fits and fits
+    involving scattered points, which still use the original unchunked
+    geometry/context/solve path (unchanged).
 
     ``displacement_field`` (if given) is dense, shape ``(1, D, *spatial)``
     matching ``domain`` (``D`` = spatial dimension); every voxel becomes one
@@ -345,6 +467,37 @@ def fit_bspline_displacement_field(
     lattice_itk = _mesh_size_to_lattice(mesh_size, dimension, spline_order, closed_axes)
     if stable_accumulation is None:
         stable_accumulation = device.type == "mps"
+
+    if displacement_field is not None and displacement_origins is None and number_of_fitting_levels == 1:
+        # The common one-shot case (see this function's docstring and
+        # _bspline_fit_dense_grid_chunked's): a dense field, no scattered
+        # points, a single fitting level -- exactly what
+        # apply_bspline_smoothing_operator's BSplineSyN regularizer calls,
+        # once per SyN iteration. Bypasses _bspline_fit_geometry entirely
+        # (never materializes a (4**D, N) tensor for the whole grid) rather
+        # than reusing it the way the multi-level/scattered-point path below
+        # does, since there is exactly one fit here -- geometry reuse across
+        # calls, the thing that path is built around, buys nothing.
+        if displacement_weight_image is None:
+            weight_field = displacement_field.new_ones((1, 1) + displacement_field.shape[2:])
+        else:
+            if tuple(displacement_weight_image.shape[2:]) != tuple(displacement_field.shape[2:]):
+                raise ValueError("displacement_weight_image shape does not match displacement_field")
+            weight_field = displacement_weight_image.to(dtype=dtype, device=device)
+        field_values = displacement_field.reshape(dimension, -1)
+        field_weights = weight_field.reshape(1, -1).expand(dimension, field_values.shape[1])
+        if enforce_stationary_boundary:
+            boundary_mask = _domain_boundary_mask(domain, device)
+            field_values = field_values.masked_fill(boundary_mask.unsqueeze(0), 0.0)
+            field_weights = field_weights.masked_fill(boundary_mask.unsqueeze(0), 1.0e10)
+        coefficients_flat = _bspline_fit_dense_grid_chunked(
+            field_values, field_weights, domain, lattice_itk, eps, chunk_size
+        )
+        accumulated_coefficients = coefficients_flat.reshape((1, dimension) + tuple(reversed(lattice_itk)))
+        dense = synthesize_bspline_velocity(accumulated_coefficients, domain, chunk_size=chunk_size)
+        if return_coefficients:
+            return dense, accumulated_coefficients
+        return dense
 
     geometries = []
     values_parts = []

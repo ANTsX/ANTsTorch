@@ -289,6 +289,7 @@ def apply_bspline_smoothing_operator(
     *,
     spline_order: int = 3,
     enforce_stationary_boundary: bool = True,
+    chunk_size: int = 262_144,
 ) -> Tensor:
     """Smooth a displacement field with a single-level cubic B-spline fit —
     the ANTs/ITK ``BSplineSyN`` regularizer, ported via
@@ -331,6 +332,16 @@ def apply_bspline_smoothing_operator(
         default (``True``): the domain's outermost voxel layer is fit
         toward zero with a very large weight, keeping the field stationary
         at the boundary.
+    chunk_size : int
+        Passed through to :func:`fit_bspline_displacement_field` — bounds
+        peak memory for the fit at the cost of more, smaller kernel
+        launches; the default matches
+        :func:`~antstorch.bspline_flows.synthesize_bspline_velocity`'s. See
+        that function's ``chunk_size`` and
+        :func:`~antstorch.bspline_flows.bspline_scattered_data._bspline_fit_dense_grid_chunked`
+        for why this matters here in particular: at a full native-resolution
+        volume and a fine update-field mesh, the unchunked fit can require
+        many GB for a single call.
 
     Returns
     -------
@@ -359,5 +370,6 @@ def apply_bspline_smoothing_operator(
         mesh_size=mesh_size,
         spline_order=spline_order,
         enforce_stationary_boundary=enforce_stationary_boundary,
+        chunk_size=chunk_size,
     )
     return smoothed.flip(1).movedim(1, -1).contiguous()

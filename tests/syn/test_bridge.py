@@ -176,3 +176,27 @@ def test_apply_bspline_smoothing_operator_rejects_non_positive_mesh_size():
     field = torch.zeros(1, *domain.torch_size, 2)
     with pytest.raises(ValueError, match="mesh_size"):
         apply_bspline_smoothing_operator(field, domain, mesh_size=0)
+
+
+def test_apply_bspline_smoothing_operator_is_invariant_to_chunk_size():
+    # Regression test for a real CUDA OOM: at full native resolution with a
+    # fine update-field mesh, antstorch.syn.syn_registration(regularizer=
+    # "bspline") ("bspline_syn" in antstorch.benchmark) crashed with "CUDA
+    # out of memory. Tried to allocate 7.50 GiB." at the finest pyramid
+    # level -- traced to fit_bspline_displacement_field (called from here)
+    # materializing one (4**D, N) index/weight tensor for the whole dense
+    # grid at once. The fix chunks that fit over samples (see
+    # _bspline_fit_dense_grid_chunked); this only bounds peak memory, so the
+    # result must be identical (up to floating-point summation order)
+    # regardless of chunk_size -- verified here across a wide range,
+    # including a chunk_size far larger than the grid (effectively the old
+    # unchunked behavior) down to one much smaller than a single dense-image
+    # row.
+    image = _ramp_image_2d((23, 19))
+    domain = image_domain_from_metadata(ants_image_metadata(image))
+    torch.manual_seed(0)
+    field = torch.randn(1, *domain.torch_size, 2, dtype=torch.double)
+    reference = apply_bspline_smoothing_operator(field, domain, mesh_size=3, chunk_size=1_000_000)
+    for chunk_size in (17, 97, 4096):
+        smoothed = apply_bspline_smoothing_operator(field, domain, mesh_size=3, chunk_size=chunk_size)
+        torch.testing.assert_close(smoothed, reference, rtol=1e-10, atol=1e-10)

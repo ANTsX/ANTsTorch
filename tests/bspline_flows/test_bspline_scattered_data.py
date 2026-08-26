@@ -4,6 +4,12 @@ import torch
 
 from antstorch.bspline_flows import ImageDomain, fit_bspline_coefficients
 from antstorch.bspline_flows.bspline_scattered_data import (
+    _as_bools,
+    _bspline_fit_context,
+    _bspline_fit_geometry,
+    _bspline_fit_solve,
+    _domain_boundary_mask,
+    _mesh_size_to_lattice,
     fit_bspline_displacement_field,
     fit_bspline_object_to_scattered_data,
 )
@@ -222,6 +228,99 @@ def test_fit_functions_reject_non_cubic_spline_order():
             parametric_domain_size=[10, 10],
             spline_order=2,
         )
+
+
+# --- Chunked single-level dense-grid fit path (memory fix) -----------------
+#
+# fit_bspline_displacement_field(displacement_field=..., number_of_fitting_
+# levels=1, no scattered points) -- exactly what
+# antstorch.syn.bridge.apply_bspline_smoothing_operator calls, once per SyN
+# iteration, for the BSplineSyN regularizer ("bspline_syn" in
+# antstorch.benchmark) -- now takes a fast path that fuses geometry
+# construction, normal-equation accumulation, and the solve into one chunked
+# pass (_bspline_fit_dense_grid_chunked), instead of materializing a
+# (4**D, N) index/weight tensor for the whole dense grid up front. Reported
+# by a user as a real CUDA OOM ("Tried to allocate 7.50 GiB") running
+# syn_registration(regularizer="bspline") at full native resolution
+# (256, 256, 160) with a fine update-field mesh (107 control points/axis) on
+# a GPU with limited free memory. These tests exercise the new fast path
+# directly, at a much smaller scale for speed, since the bug is about the
+# unchunked construction being O(4**D * N) regardless of absolute size.
+
+
+def _old_unchunked_single_level_fit(field, domain, mesh_size, enforce_stationary_boundary, eps=1e-6):
+    """Reference: the exact pre-fix computation (still available via the
+    lower-level primitives, which are untouched -- only
+    fit_bspline_displacement_field's own single-level/no-scattered-points
+    call path was changed), used to confirm the new fast path is numerically
+    equivalent rather than just plausible-looking.
+    """
+    dim = field.shape[1]
+    dtype, device = field.dtype, field.device
+    closed_axes = _as_bools(False, dim)
+    lattice_itk = _mesh_size_to_lattice(mesh_size, dim, 3, closed_axes)
+    geometry = _bspline_fit_geometry(domain.torch_size, lattice_itk, dtype, device, eps)
+    grid_point_count = geometry[0].shape[1]
+    weight_field = field.new_ones((1, 1) + field.shape[2:])
+    field_values = field.reshape(dim, -1)
+    field_weights = weight_field.reshape(1, -1).expand(dim, grid_point_count)
+    if enforce_stationary_boundary:
+        mask = _domain_boundary_mask(domain, device)
+        field_values = field_values.masked_fill(mask.unsqueeze(0), 0.0)
+        field_weights = field_weights.masked_fill(mask.unsqueeze(0), 1.0e10)
+    context = _bspline_fit_context(field_weights, geometry, device.type == "mps")
+    coefficients_flat = _bspline_fit_solve(field_values, field_weights, context, eps)
+    accumulated = coefficients_flat.reshape((1, dim) + tuple(reversed(lattice_itk)))
+    return synthesize_bspline_velocity(accumulated, domain)
+
+
+@pytest.mark.parametrize("dim,size,mesh_size", [(2, (23, 19), 3), (2, (17, 13), 1), (3, (14, 11, 9), 2)])
+@pytest.mark.parametrize("enforce_stationary_boundary", [True, False])
+def test_single_level_dense_fit_matches_old_unchunked_path(dim, size, mesh_size, enforce_stationary_boundary):
+    torch.manual_seed(1)
+    domain = ImageDomain(size)
+    field = torch.randn(1, dim, *domain.torch_size, dtype=torch.double)
+    reference = _old_unchunked_single_level_fit(field, domain, mesh_size, enforce_stationary_boundary)
+    fast = fit_bspline_displacement_field(
+        displacement_field=field,
+        domain=domain,
+        number_of_fitting_levels=1,
+        mesh_size=mesh_size,
+        enforce_stationary_boundary=enforce_stationary_boundary,
+        chunk_size=97,
+    )
+    torch.testing.assert_close(fast, reference, rtol=1e-9, atol=1e-9)
+
+
+def test_single_level_dense_fit_is_invariant_to_chunk_size():
+    torch.manual_seed(2)
+    domain = ImageDomain((26, 18, 12))
+    field = torch.randn(1, 3, *domain.torch_size, dtype=torch.double)
+    reference = fit_bspline_displacement_field(
+        displacement_field=field, domain=domain, number_of_fitting_levels=1, mesh_size=4, chunk_size=10_000_000,
+    )
+    for chunk_size in (37, 4096):
+        result = fit_bspline_displacement_field(
+            displacement_field=field, domain=domain, number_of_fitting_levels=1, mesh_size=4, chunk_size=chunk_size,
+        )
+        torch.testing.assert_close(result, reference, rtol=1e-9, atol=1e-9)
+
+
+def test_single_level_dense_fit_gradients_match_old_unchunked_path():
+    torch.manual_seed(3)
+    domain = ImageDomain((15, 13))
+    base_field = torch.randn(1, 2, *domain.torch_size, dtype=torch.double)
+
+    field_ref = base_field.clone().requires_grad_(True)
+    _old_unchunked_single_level_fit(field_ref, domain, mesh_size=2, enforce_stationary_boundary=True).pow(2).sum().backward()
+
+    field_fast = base_field.clone().requires_grad_(True)
+    fit_bspline_displacement_field(
+        displacement_field=field_fast, domain=domain, number_of_fitting_levels=1,
+        mesh_size=2, enforce_stationary_boundary=True, chunk_size=53,
+    ).pow(2).sum().backward()
+
+    torch.testing.assert_close(field_fast.grad, field_ref.grad, rtol=1e-9, atol=1e-9)
 
 
 def test_gradients_flow_through_scattered_fit():
