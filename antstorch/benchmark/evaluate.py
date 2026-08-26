@@ -6,11 +6,15 @@ ported from ``syntx.benchmark.evaluate`` (see the project doc, "Portage de
 l'évaluation Mindboggle-101 dans ANTsTorch") and restricted, by explicit
 decision, to registration arms that come from ANTsTorch itself:
 
-- ``antstorch.syn.syn_registration(..., regularizer=...)`` — ``'gaussian'``,
-  ``'sobolev'``, ``'dsti'``, and ``'bspline'`` (the ANTs/ITK ``BSplineSyN``
-  regularizer).
+- ``antstorch.syn.syn_registration(..., regularizer=...)`` — model strings
+  ``'gaussian_syn'``, ``'sobolev_syn'``, ``'dsti_syn'``, and ``'bspline_syn'``
+  (the ANTs/ITK ``BSplineSyN`` regularizer). The ``_syn`` suffix is
+  deliberate: it distinguishes these four dense-SyN-stage variants from
+  ``'bspline_svf'`` below, which is a different transformation family
+  entirely (a stationary velocity field) despite the two sharing the word
+  "bspline".
 - ``antstorch.bspline_flows.bspline_svf_registration()`` — the cubic
-  B-spline stationary-velocity-field model.
+  B-spline stationary-velocity-field model (``'bspline_svf'``/``'svf'``).
 
 This intentionally omits the ``syntx``-only capabilities the earlier
 extension of ``syntx.benchmark`` (see ``syntx.benchmark.antstorch_arms``)
@@ -42,11 +46,16 @@ from antstorch.benchmark.metrics import compute_bidirectional_dice, compute_jaco
 from antstorch.ants_transform_io import read_affine_transform
 from antstorch.syn import syn_registration
 
+# The '_syn' suffix on every key here is deliberate, not decorative: it
+# disambiguates these dense-SyN-stage model names from _BSPLINE_SVF_MODELS
+# below, which is a different transformation family (a stationary velocity
+# field, not SyN) -- 'bspline_syn' and 'bspline_svf' would otherwise be easy
+# to confuse for the same thing.
 _SYN_REGULARIZERS = {
-    "gaussian": "gaussian", "syn_gaussian": "gaussian",
-    "sobolev": "sobolev", "syn_sobolev": "sobolev",
-    "dsti": "dsti", "syn_dsti": "dsti",
-    "bspline": "bspline", "syn_bspline": "bspline",
+    "gaussian_syn": "gaussian",
+    "sobolev_syn": "sobolev",
+    "dsti_syn": "dsti",
+    "bspline_syn": "bspline",
 }
 _BSPLINE_SVF_MODELS = ("bspline_svf", "svf")
 
@@ -211,10 +220,17 @@ def evaluate_mindboggle_pair(
     pair_idx : int
         Index of the pair (0 to 89 for the bundled default pairs.csv).
     model : str
-        Registration model: ``'gaussian'``, ``'sobolev'``, ``'dsti'``, or
-        ``'bspline'`` (all four dispatch to ``antstorch.syn.syn_registration
-        (..., regularizer=...)``), or ``'bspline_svf'`` (dispatches to
-        ``antstorch.bspline_flows.bspline_svf_registration()``).
+        Registration model: ``'gaussian_syn'``, ``'sobolev_syn'``,
+        ``'dsti_syn'``, or ``'bspline_syn'`` (all four dispatch to the same
+        dense symmetric SyN stage, ``antstorch.syn.syn_registration(...,
+        type_of_transform="SyNOnly", regularizer=..., initial_affine=...)``
+        -- the canonical affine already fit for this pair is supplied
+        directly, so only the fluid/B-spline regularizer differs between
+        them), or ``'bspline_svf'``/``'svf'`` (dispatches to
+        ``antstorch.bspline_flows.bspline_svf_registration()`` -- a
+        different transformation family, a stationary velocity field, not a
+        SyN variant despite ``'bspline_syn'``/``'bspline_svf'`` sharing the
+        word "bspline").
     device : str, optional
         Compute device ('mps', 'cuda', 'cpu'). If None, automatically detected.
     pairs_csv : str, optional
@@ -238,9 +254,9 @@ def evaluate_mindboggle_pair(
     **kwargs
         Model-specific overrides, forwarded to the underlying registration
         call. Common ones: ``reg_iterations``, ``grad_step``, ``levels``
-        (all four ``syn_registration`` variants); ``flow_sigma``/
-        ``total_sigma`` (gaussian/sobolev/dsti); ``update_field_mesh_size_at_base_level``/
-        ``total_field_mesh_size_at_base_level`` (bspline); ``shrink_factors``/
+        (all four ``_syn`` variants); ``flow_sigma``/
+        ``total_sigma`` (gaussian_syn/sobolev_syn/dsti_syn); ``update_field_mesh_size_at_base_level``/
+        ``total_field_mesh_size_at_base_level`` (bspline_syn); ``shrink_factors``/
         ``smoothing_sigmas``/``mesh_size`` (bspline_svf).
 
     Returns

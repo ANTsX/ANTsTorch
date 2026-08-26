@@ -1,8 +1,10 @@
 """End-to-end tests for antstorch.benchmark.evaluate.evaluate_mindboggle_pair()
 against a tiny synthetic Mindboggle-style pair, covering all 5 ANTsTorch-native
-model variants (the four antstorch.syn.syn_registration() regularizers plus
-bspline_svf). Runs the real registration/metric pipeline (no mocking) on a
-small volume so wall-clock time stays low."""
+model variants (gaussian_syn/sobolev_syn/dsti_syn/bspline_syn -- the four
+antstorch.syn.syn_registration() regularizers, dense-SyN-stage only -- plus
+bspline_svf, a different transformation family). Runs the real
+registration/metric pipeline (no mocking) on a small volume so wall-clock
+time stays low."""
 import os
 
 import numpy as np
@@ -29,7 +31,7 @@ def _assert_valid_success_record(rec, model):
     assert len(rec["transforms"]["invtransforms"]) >= 1
 
 
-@pytest.mark.parametrize("model", ["gaussian", "sobolev", "dsti", "bspline"])
+@pytest.mark.parametrize("model", ["gaussian_syn", "sobolev_syn", "dsti_syn", "bspline_syn"])
 def test_evaluate_mindboggle_pair_syn_regularizers(mock_mindboggle_dataset, tmp_path, model):
     pairs_csv, data_dir = mock_mindboggle_dataset
     rec = evaluate_mindboggle_pair(
@@ -96,7 +98,7 @@ def test_evaluate_mindboggle_pair_shares_canonical_affine_across_models(mock_min
     canonical_affine_dir = str(tmp_path / "canonical_affines")
 
     rec1 = evaluate_mindboggle_pair(
-        pair_idx=0, model="gaussian", device="cpu",
+        pair_idx=0, model="gaussian_syn", device="cpu",
         pairs_csv=pairs_csv, data_dir=data_dir,
         canonical_affine_dir=canonical_affine_dir, use_n4=False,
         reg_iterations=[4, 4, 2],
@@ -106,7 +108,7 @@ def test_evaluate_mindboggle_pair_shares_canonical_affine_across_models(mock_min
     mtime_after_first = os.path.getmtime(affine_path)
 
     rec2 = evaluate_mindboggle_pair(
-        pair_idx=0, model="sobolev", device="cpu",
+        pair_idx=0, model="sobolev_syn", device="cpu",
         pairs_csv=pairs_csv, data_dir=data_dir,
         canonical_affine_dir=canonical_affine_dir, use_n4=False,
         reg_iterations=[4, 4, 2],
