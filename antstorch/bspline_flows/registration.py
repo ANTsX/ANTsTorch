@@ -13,6 +13,17 @@ from .deterministic_registration import DeterministicBSplineRegistration
 from .physical_gradient_descent import PhysicalGradientDescent
 from .spatial_transform import affine_displacement_field
 
+# Default physical B-spline knot spacing (ANTs' "spline distance") applied
+# when neither ``mesh_size`` nor ``spline_distance`` is given, per the
+# user's explicit instruction (2026-08-26): 26 mm for every B-spline
+# registration in this package, matching the value real ANTs scripts
+# (``antsRegistrationSyN.sh``) use in practice for ``BSplineSyN`` (see
+# ``mesh_size_for_spline_distance``'s docstring and project doc §17/§22/§23)
+# -- promoted here from a benchmark-harness-only default to the library's
+# own default, replacing the previous literal ``mesh_size=1`` (ITK's own,
+# too coarse to be useful in practice, per §16/§22).
+DEFAULT_BSPLINE_SPLINE_DISTANCE_MM = 26.0
+
 
 def _axis_values(value, dimension: int, name: str, *, minimum: int) -> tuple:
     if isinstance(value, bool):
@@ -180,7 +191,7 @@ def bspline_svf_registration(
     fixed_domain: ImageDomain,
     moving_domain: Optional[ImageDomain] = None,
     *,
-    mesh_size: Union[int, Sequence[int]] = 1,
+    mesh_size: Optional[Union[int, Sequence[int]]] = None,
     spline_distance: Optional[Union[float, Sequence[float]]] = None,
     coefficient_grid_size: Optional[Union[int, Sequence[int]]] = None,
     iterations: Union[int, Sequence[int]] = 100,
@@ -240,7 +251,17 @@ def bspline_svf_registration(
     "spline distance" convention (see
     :func:`antstorch.bspline_flows.mesh_size_for_spline_distance`), the same
     un-padded formula ``n4_bias_field_correction``'s scalar ``spline_param``
-    already uses. Mutually exclusive with a non-default ``mesh_size``.
+    already uses. Mutually exclusive with ``mesh_size``.
+
+    **Default (neither ``mesh_size`` nor ``spline_distance`` given):** a
+    physical spline distance of ``DEFAULT_BSPLINE_SPLINE_DISTANCE_MM`` (26
+    mm) is used, exactly as if ``spline_distance=26.0`` had been passed —
+    *not* the literal ``mesh_size=1`` this function used before 2026-08-26.
+    26 mm matches the value real ANTs scripts (``antsRegistrationSyN.sh``)
+    use in practice for ``BSplineSyN``, and the same default now used by
+    :func:`antstorch.syn.syn_registration`'s ``update_field_*`` mesh (see
+    its own docstring) — so the two registration frameworks' B-spline
+    density defaults agree without either caller specifying anything.
 
     ``initial_affine`` optionally supplies a fixed, non-optimized physical-space
     affine initialization as a ``(matrix, translation)`` pair — ``matrix`` of
@@ -344,6 +365,8 @@ def bspline_svf_registration(
     if len(factors) > 1 and any(closed_axes):
         raise ValueError("multi-resolution registration does not yet support closed axes")
     initial_affine = _validate_initial_affine(initial_affine, fixed, dimension)
+    if mesh_size is not None and spline_distance is not None:
+        raise ValueError("spline_distance cannot be combined with mesh_size")
     if spline_distance is not None:
         if initial_coefficients is not None:
             raise ValueError("spline_distance cannot be used with initial_coefficients")
@@ -363,17 +386,23 @@ def bspline_svf_registration(
             raise ValueError("initial_coefficients must match the fixed image dtype and device")
         coefficients = initial_coefficients.detach().clone().requires_grad_(True)
     else:
+        resolved_spline_distance = None
         if coefficient_grid_size is None:
-            if spline_distance is not None:
-                if mesh_size != 1:
-                    raise ValueError("spline_distance cannot be combined with a non-default mesh_size")
-                mesh = mesh_size_for_spline_distance(fixed_domain, spline_distance)
-            else:
+            if mesh_size is not None:
                 mesh = _axis_values(mesh_size, dimension, "mesh_size", minimum=1)
+            else:
+                # Neither mesh_size nor spline_distance given: default to a
+                # physical spline distance (see DEFAULT_BSPLINE_SPLINE_DISTANCE_MM
+                # and the docstring above), not the old literal mesh_size=1.
+                resolved_spline_distance = (
+                    spline_distance if spline_distance is not None else DEFAULT_BSPLINE_SPLINE_DISTANCE_MM
+                )
+                mesh = mesh_size_for_spline_distance(fixed_domain, resolved_spline_distance)
             lattice_itk = tuple(m if periodic else m + 3 for m, periodic in zip(mesh, closed_axes))
             if any(periodic and size < 4 for periodic, size in zip(closed_axes, lattice_itk)):
                 raise ValueError("closed axes require mesh_size of at least 4")
         else:
+            mesh = None
             lattice_itk = _axis_values(coefficient_grid_size, dimension, "coefficient_grid_size", minimum=4)
         coefficients = torch.zeros(
             (fixed.shape[0], dimension) + tuple(reversed(lattice_itk)),
@@ -392,8 +421,8 @@ def bspline_svf_registration(
             ("dtype", fixed.dtype),
             ("device", fixed.device),
             ("initial_coefficient_shape", tuple(coefficients.shape)),
-            ("mesh_size", mesh_size if spline_distance is None else mesh),
-            ("spline_distance", spline_distance),
+            ("mesh_size", mesh_size if mesh_size is not None else mesh),
+            ("spline_distance", resolved_spline_distance),
             ("coefficient_grid_size", coefficient_grid_size),
             ("initial_coefficients_provided", initial_coefficients is not None),
             ("shrink_factors", factors),

@@ -394,3 +394,55 @@ def test_registration_spline_distance_matches_shared_utility(capsys):
     out = capsys.readouterr().out
     assert f"mesh_size: {expected_mesh}" in out
     assert "spline_distance: 3.0" in out
+
+
+def test_registration_default_mesh_size_is_none_sentinel():
+    import inspect
+
+    from antstorch.bspline_flows.registration import bspline_svf_registration as _fn
+
+    assert inspect.signature(_fn).parameters["mesh_size"].default is None
+
+
+def test_registration_default_resolves_to_26mm_spline_distance(capsys):
+    # No mesh_size and no spline_distance given -> per the user's explicit
+    # 2026-08-26 instruction ("le defaut pour tous les recalages de bspline
+    # soit 26 mm"), this now resolves exactly as if spline_distance=26.0 had
+    # been passed, replacing the old literal mesh_size=1 default.
+    from antstorch.bspline_flows import mesh_size_for_spline_distance
+    from antstorch.bspline_flows.registration import DEFAULT_BSPLINE_SPLINE_DISTANCE_MM
+
+    assert DEFAULT_BSPLINE_SPLINE_DISTANCE_MM == 26.0
+
+    domain = ImageDomain((8, 7))
+    image = _blob(domain)
+    expected_mesh = mesh_size_for_spline_distance(domain, DEFAULT_BSPLINE_SPLINE_DISTANCE_MM)
+    assert expected_mesh == (1, 1)
+
+    result = bspline_svf_registration(image, image, domain, iterations=0, squaring_steps=2, verbose=True)
+    out = capsys.readouterr().out
+    assert f"mesh_size: {expected_mesh}" in out
+    assert f"spline_distance: {DEFAULT_BSPLINE_SPLINE_DISTANCE_MM}" in out
+    assert result["fwdtransforms"].shape == (1, 2) + domain.torch_size
+
+
+def test_registration_explicit_mesh_size_still_overrides_default(capsys):
+    # Backward compatibility: an explicit mesh_size continues to bypass the
+    # new 26mm default entirely, and is reported with spline_distance: None.
+    domain = ImageDomain((8, 7))
+    image = _blob(domain)
+    bspline_svf_registration(image, image, domain, iterations=0, mesh_size=1, squaring_steps=2, verbose=True)
+    out = capsys.readouterr().out
+    assert "mesh_size: 1" in out
+    assert "spline_distance: None" in out
+
+
+def test_registration_explicit_mesh_size_one_with_spline_distance_still_raises():
+    # Prior to the None-sentinel change, the mutual-exclusivity check
+    # compared mesh_size against the old literal default (`!= 1`), so
+    # explicitly passing mesh_size=1 alongside spline_distance would NOT
+    # raise. The None-sentinel check (`is not None`) catches this case too.
+    domain = ImageDomain((8, 7))
+    image = _blob(domain)
+    with pytest.raises(ValueError, match="spline_distance"):
+        bspline_svf_registration(image, image, domain, iterations=0, mesh_size=1, spline_distance=4.0)

@@ -497,7 +497,7 @@ def syn_registration(
     flow_sigma: float = 3.0,
     total_sigma: float = 0.0,
     regularizer: str = "gaussian",
-    update_field_mesh_size_at_base_level: int = 1,
+    update_field_mesh_size_at_base_level: Optional[int] = None,
     total_field_mesh_size_at_base_level: int = 0,
     update_field_spline_distance: Optional[Union[float, Sequence[float]]] = None,
     total_field_spline_distance: Optional[Union[float, Sequence[float]]] = None,
@@ -575,11 +575,9 @@ def syn_registration(
     ``BSplineSyN[gradientStep, updateFieldMeshSizeAtBaseLevel,
     totalFieldMeshSizeAtBaseLevel, splineOrder]`` transform spec. In this
     mode, ``flow_sigma``/``total_sigma`` are ignored in favor of
-    ``update_field_mesh_size_at_base_level`` (default ``1``, ITK's own
-    class default of 4 control points minus ``spline_order=3``; cubic is
-    the only spline order :mod:`antstorch.bspline_flows` supports) and
-    ``total_field_mesh_size_at_base_level`` (default ``0`` = off, matching
-    ANTs' own default). Both mesh sizes are given *at the base
+    ``update_field_mesh_size_at_base_level``/``update_field_spline_distance``
+    and ``total_field_mesh_size_at_base_level``/``total_field_spline_distance``
+    (below). Both resolved mesh sizes are applied *at the base
     (coarsest) pyramid level* and doubled at each successively finer level
     -- the same doubling ``itk::TransformParametersAdaptor`` applies to the
     B-spline transform's control-point grid across ``ImageRegistrationMethodv4``
@@ -603,12 +601,28 @@ def syn_registration(
     mesh size -- and every subsequent per-level doubling -- can be
     anisotropic when a spline distance is used, unlike the plain-integer
     ``*_mesh_size_at_base_level`` parameters, which stay isotropic. Each is
-    mutually exclusive with a non-default value of its corresponding
-    ``*_mesh_size_at_base_level`` integer. As with ``bspline_svf_registration``,
+    mutually exclusive with its corresponding ``*_mesh_size_at_base_level``
+    integer (explicitly giving both raises). As with ``bspline_svf_registration``,
     no image padding is performed -- the mesh size is an approximation of
     the requested spacing, exactly matching real ``antsRegistration``'s own
     (non-padding) registration-side behavior; this deliberately differs from
     real ANTs' ``N4BiasFieldCorrection``, which does pad.
+
+    **Defaults:** ``update_field_mesh_size_at_base_level`` defaults to
+    ``None``, which (when neither it nor ``update_field_spline_distance``
+    is given) resolves to a physical spline distance of
+    :data:`antstorch.bspline_flows.registration.DEFAULT_BSPLINE_SPLINE_DISTANCE_MM`
+    (26 mm) -- exactly as if ``update_field_spline_distance=26.0`` had been
+    passed -- *not* ITK's own literal class default of ``1`` (4 control
+    points), which this function used before 2026-08-26. This is the same
+    default :func:`antstorch.bspline_flows.registration.bspline_svf_registration`
+    now uses for its own ``mesh_size``/``spline_distance``, so the two
+    registration frameworks' B-spline density defaults agree without either
+    caller specifying anything. ``total_field_mesh_size_at_base_level``
+    keeps its own default of ``0`` (off, matching ``antsRegistration``'s own
+    default) -- unaffected by this change; pass
+    ``total_field_mesh_size_at_base_level`` or ``total_field_spline_distance``
+    explicitly to enable it.
     ``bspline_enforce_stationary_boundary`` (default ``True``, ITK's own
     default) keeps the field at zero on the domain's outermost voxel layer.
     Both half-warp inverses are numerically maintained
@@ -650,13 +664,13 @@ def syn_registration(
         raise ValueError(f"syn_metric must be one of {_SIMILARITY_METRICS}")
     if regularizer not in _REGULARIZERS:
         raise ValueError(f"regularizer must be one of {_REGULARIZERS}")
-    if update_field_mesh_size_at_base_level < 0:
+    if update_field_mesh_size_at_base_level is not None and update_field_mesh_size_at_base_level < 0:
         raise ValueError("update_field_mesh_size_at_base_level must be >= 0")
     if total_field_mesh_size_at_base_level < 0:
         raise ValueError("total_field_mesh_size_at_base_level must be >= 0")
-    if update_field_spline_distance is not None and update_field_mesh_size_at_base_level != 1:
+    if update_field_spline_distance is not None and update_field_mesh_size_at_base_level is not None:
         raise ValueError(
-            "update_field_spline_distance cannot be combined with a non-default "
+            "update_field_spline_distance cannot be combined with "
             "update_field_mesh_size_at_base_level"
         )
     if total_field_spline_distance is not None and total_field_mesh_size_at_base_level != 0:
@@ -664,6 +678,10 @@ def syn_registration(
             "total_field_spline_distance cannot be combined with a non-default "
             "total_field_mesh_size_at_base_level"
         )
+    # update_field_mesh_size_at_base_level == 0 only when explicitly set to 0
+    # (None, the default, resolves to an active 26mm spline distance below --
+    # see the docstring's "Defaults" paragraph -- so it is never "off" unless
+    # the caller explicitly asks for that).
     if (
         regularizer == "bspline"
         and update_field_mesh_size_at_base_level == 0
@@ -672,9 +690,9 @@ def syn_registration(
         and total_field_spline_distance is None
     ):
         raise ValueError(
-            "regularizer='bspline' requires update_field_mesh_size_at_base_level > 0, "
-            "total_field_mesh_size_at_base_level > 0, update_field_spline_distance, "
-            "and/or total_field_spline_distance"
+            "regularizer='bspline' requires an active update field (the default, or "
+            "update_field_mesh_size_at_base_level > 0, or update_field_spline_distance) "
+            "and/or total_field_mesh_size_at_base_level > 0 / total_field_spline_distance"
         )
     if padding_mode not in ("zeros", "border", "reflection"):
         raise ValueError("padding_mode must be 'zeros', 'border', or 'reflection'")
@@ -801,18 +819,39 @@ def syn_registration(
     # update_field_mesh_size_at_base_level/total_field_mesh_size_at_base_level.
     resolved_update_field_mesh_size_at_base_level = update_field_mesh_size_at_base_level
     resolved_total_field_mesh_size_at_base_level = total_field_mesh_size_at_base_level
-    if regularizer == "bspline" and (update_field_spline_distance is not None or total_field_spline_distance is not None):
-        from antstorch.bspline_flows import mesh_size_for_spline_distance
+    if regularizer == "bspline":
+        need_domain = (
+            update_field_spline_distance is not None
+            or total_field_spline_distance is not None
+            or update_field_mesh_size_at_base_level is None
+        )
+        if need_domain:
+            from antstorch.bspline_flows import mesh_size_for_spline_distance
+            from antstorch.bspline_flows.registration import DEFAULT_BSPLINE_SPLINE_DISTANCE_MM
 
-        fixed_domain_full = image_domain_from_metadata(fixed_meta_full)
-        if update_field_spline_distance is not None:
-            resolved_update_field_mesh_size_at_base_level = mesh_size_for_spline_distance(
-                fixed_domain_full, update_field_spline_distance
-            )
-        if total_field_spline_distance is not None:
-            resolved_total_field_mesh_size_at_base_level = mesh_size_for_spline_distance(
-                fixed_domain_full, total_field_spline_distance
-            )
+            fixed_domain_full = image_domain_from_metadata(fixed_meta_full)
+            if update_field_spline_distance is not None:
+                resolved_update_field_mesh_size_at_base_level = mesh_size_for_spline_distance(
+                    fixed_domain_full, update_field_spline_distance
+                )
+            elif update_field_mesh_size_at_base_level is None:
+                # Neither update_field_mesh_size_at_base_level nor
+                # update_field_spline_distance given: default to a physical
+                # spline distance (see the docstring's "Defaults" paragraph),
+                # not ITK's literal mesh_size=1 this used before 2026-08-26.
+                resolved_update_field_mesh_size_at_base_level = mesh_size_for_spline_distance(
+                    fixed_domain_full, DEFAULT_BSPLINE_SPLINE_DISTANCE_MM
+                )
+            if total_field_spline_distance is not None:
+                resolved_total_field_mesh_size_at_base_level = mesh_size_for_spline_distance(
+                    fixed_domain_full, total_field_spline_distance
+                )
+    elif update_field_mesh_size_at_base_level is None:
+        # Non-bspline regularizer: this parameter is never consumed, but
+        # normalize None to the harmless literal 0 rather than leaving None,
+        # so downstream code (provenance in particular) always sees a plain
+        # int/tuple, never a bare None, for this field.
+        resolved_update_field_mesh_size_at_base_level = 0
 
     window_size = 2 * int(neighborhood_radius) + 1
     num_levels = len(levels)

@@ -115,7 +115,8 @@ def _fit_or_load_canonical_affine(fi, mi, pair_idx, canonical_affine_dir, device
 
 def _run_bspline_svf(fi, mi, matrix, translation, *, device, reg_iterations=None,
                       shrink_factors=(4, 2, 1), smoothing_sigmas=(2.0, 1.0, 0.0),
-                      mesh_size=6, learning_rate=0.01, optimizer="physical_gradient_descent",
+                      mesh_size=None, spline_distance=None, learning_rate=0.01,
+                      optimizer="physical_gradient_descent",
                       gradient_step=0.2, similarity="ants_ncc", neighborhood_radius=4,
                       verbose=False) -> Dict[str, Any]:
     """Adapts ``bspline_flows.bspline_svf_registration()``'s in-memory tensor
@@ -166,6 +167,7 @@ def _run_bspline_svf(fi, mi, matrix, translation, *, device, reg_iterations=None
         fixed_domain=fixed_domain,
         moving_domain=moving_domain,
         mesh_size=mesh_size,
+        spline_distance=spline_distance,
         shrink_factors=tuple(shrink_factors),
         smoothing_sigmas=tuple(smoothing_sigmas),
         iterations=iterations,
@@ -256,8 +258,14 @@ def evaluate_mindboggle_pair(
         call. Common ones: ``reg_iterations``, ``grad_step``, ``levels``
         (all four ``_syn`` variants); ``flow_sigma``/
         ``total_sigma`` (gaussian_syn/sobolev_syn/dsti_syn); ``update_field_mesh_size_at_base_level``/
-        ``total_field_mesh_size_at_base_level`` (bspline_syn); ``shrink_factors``/
-        ``smoothing_sigmas``/``mesh_size`` (bspline_svf).
+        ``total_field_mesh_size_at_base_level``/``update_field_spline_distance``/
+        ``total_field_spline_distance`` (bspline_syn); ``shrink_factors``/
+        ``smoothing_sigmas``/``mesh_size``/``spline_distance`` (bspline_svf).
+        When neither a mesh-size nor a spline-distance override is given for
+        either bspline variant, both now default to the same 26 mm physical
+        spline distance (:data:`antstorch.bspline_flows.registration.
+        DEFAULT_BSPLINE_SPLINE_DISTANCE_MM`) at the library level -- this
+        harness no longer applies its own override on top.
 
     Returns
     -------
@@ -310,20 +318,24 @@ def evaluate_mindboggle_pair(
         for key in (
             "levels", "grad_step", "flow_sigma", "total_sigma",
             "update_field_mesh_size_at_base_level", "total_field_mesh_size_at_base_level",
+            "update_field_spline_distance", "total_field_spline_distance",
             "bspline_enforce_stationary_boundary", "syn_metric", "neighborhood_radius",
             "antisymmetric", "inverse_method", "in_loop_inverse_steps", "padding_mode",
         ):
             if key in kwargs:
                 syn_kwargs[key] = kwargs[key]
-        if regularizer == "bspline" and "update_field_mesh_size_at_base_level" not in syn_kwargs:
-            # See antstorch.syn.syn_registration()'s own docstring / this
-            # project's earlier calibration finding: real antsRegistrationSyN.sh
-            # usage never runs BSplineSyN at the raw ITK class default of 1.
-            syn_kwargs["update_field_mesh_size_at_base_level"] = 26
+        # No harness-level override needed here anymore: when neither
+        # update_field_mesh_size_at_base_level nor update_field_spline_distance
+        # is present in syn_kwargs, syn_registration() itself now defaults
+        # regularizer='bspline' to a 26 mm physical spline distance (see
+        # antstorch.bspline_flows.registration.DEFAULT_BSPLINE_SPLINE_DISTANCE_MM),
+        # so bspline_syn and bspline_svf share the same default density
+        # without any special-casing here (project doc, "default spline
+        # distance" update).
         res_reg = syn_registration(**syn_kwargs)
     elif model_lower in _BSPLINE_SVF_MODELS:
         svf_kwargs = {k: v for k, v in kwargs.items() if k in (
-            "reg_iterations", "shrink_factors", "smoothing_sigmas", "mesh_size",
+            "reg_iterations", "shrink_factors", "smoothing_sigmas", "mesh_size", "spline_distance",
             "learning_rate", "optimizer", "gradient_step", "similarity", "neighborhood_radius",
         )}
         res_reg = _run_bspline_svf(fi, mi, matrix, translation, device=device, verbose=verbose, **svf_kwargs)
