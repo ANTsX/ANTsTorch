@@ -22,7 +22,7 @@ Two axis-order conventions are bridged here:
   between the two.
 """
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -285,7 +285,7 @@ def image_domain_from_metadata(meta: Dict[str, tuple]):
 def apply_bspline_smoothing_operator(
     field: Tensor,
     domain,
-    mesh_size: int,
+    mesh_size: Union[int, Sequence[int]],
     *,
     spline_order: int = 3,
     enforce_stationary_boundary: bool = True,
@@ -320,10 +320,17 @@ def apply_bspline_smoothing_operator(
     domain : antstorch.bspline_flows.ImageDomain
         Must match ``field``'s spatial grid (``domain.torch_size ==
         field.shape[1:-1]``).
-    mesh_size : int
+    mesh_size : int or sequence of int
         Number of B-spline mesh intervals per axis (ITK convention:
-        ``number_of_control_points = mesh_size + spline_order``). Must be
-        ``>= 1``.
+        ``number_of_control_points = mesh_size + spline_order``). A single
+        int applies isotropically to every axis; a per-axis sequence (ITK
+        ``x, y[, z]`` order, matching ``domain.size``) allows an anisotropic
+        mesh -- e.g. the per-axis result of
+        :func:`antstorch.bspline_flows.mesh_size_for_spline_distance`, which
+        in general differs by axis even for a single physical knot spacing,
+        exactly as real ANTs' own
+        ``CalculateMeshSizeForSpecifiedKnotSpacing`` does. Must be ``>= 1``
+        per axis.
     spline_order : int
         Only ``3`` (cubic) is currently supported, matching
         :mod:`antstorch.bspline_flows` throughout.
@@ -350,8 +357,11 @@ def apply_bspline_smoothing_operator(
     """
     from antstorch.bspline_flows.bspline_scattered_data import fit_bspline_displacement_field
 
-    if mesh_size < 1:
-        raise ValueError(f"mesh_size must be >= 1, got {mesh_size}")
+    if isinstance(mesh_size, int):
+        if mesh_size < 1:
+            raise ValueError(f"mesh_size must be >= 1, got {mesh_size}")
+    elif any(int(value) < 1 for value in mesh_size):
+        raise ValueError(f"mesh_size must be >= 1 per axis, got {tuple(mesh_size)}")
     dim = field.shape[-1]
     if field.ndim != dim + 2 or field.shape[0] != 1:
         raise ValueError(f"field must have shape (1, *torch_shape, {dim})")

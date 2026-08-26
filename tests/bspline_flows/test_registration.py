@@ -344,6 +344,10 @@ def test_physical_gradient_descent_instance_supports_momentum_and_smoothing():
         ({"iterations": -1}, "iterations"),
         ({"mesh_size": (1, 2, 3)}, "mesh_size"),
         ({"coefficient_grid_size": 3}, "coefficient_grid_size"),
+        ({"mesh_size": 3, "spline_distance": 4.0}, "spline_distance"),
+        ({"coefficient_grid_size": 4, "spline_distance": 4.0}, "spline_distance"),
+        ({"spline_distance": 0.0}, "spline_distance"),
+        ({"spline_distance": (1.0, 2.0, 3.0)}, "spline_distance"),
         ({"convergence_tolerance": -1.0}, "convergence_tolerance"),
         ({"shrink_factors": (3, 1)}, "shrink_factors"),
         ({"shrink_factors": (2, 1), "iterations": (1,)}, "iterations"),
@@ -362,3 +366,31 @@ def test_registration_rejects_incompatible_image_domain():
     domain = ImageDomain((8, 7))
     with pytest.raises(ValueError, match="fixed tensor shape"):
         bspline_svf_registration(torch.zeros(1, 1, 6, 8), torch.zeros(1, 1, 7, 8), domain)
+
+
+def test_registration_spline_distance_resolves_anisotropic_mesh_size():
+    # ImageDomain((8, 7)), default spacing 1 -> physical extent (7, 6) ->
+    # ANTs' own un-padded ceil(extent / spline_distance) formula
+    # (mesh_size_for_spline_distance) gives an anisotropic mesh from a
+    # single scalar distance: ceil(7/3)=3, ceil(6/3)=2.
+    domain = ImageDomain((8, 7))
+    image = _blob(domain)
+    result = bspline_svf_registration(
+        image, image, domain, iterations=0, spline_distance=3.0, squaring_steps=2
+    )
+    assert result["fwdtransforms"].shape == (1, 2) + domain.torch_size
+
+
+def test_registration_spline_distance_matches_shared_utility(capsys):
+    from antstorch.bspline_flows import mesh_size_for_spline_distance
+
+    domain = ImageDomain((8, 7))
+    image = _blob(domain)
+    expected_mesh = mesh_size_for_spline_distance(domain, 3.0)
+    assert expected_mesh == (3, 2)
+    bspline_svf_registration(
+        image, image, domain, iterations=0, spline_distance=3.0, squaring_steps=2, verbose=True
+    )
+    out = capsys.readouterr().out
+    assert f"mesh_size: {expected_mesh}" in out
+    assert "spline_distance: 3.0" in out

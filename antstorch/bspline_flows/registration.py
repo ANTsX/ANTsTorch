@@ -7,7 +7,7 @@ import torch
 from torch import Tensor
 from torch.nn import functional as F
 
-from .bspline_domain import ImageDomain
+from .bspline_domain import ImageDomain, mesh_size_for_spline_distance
 from .bspline_synthesis import refine_bspline_coefficients
 from .deterministic_registration import DeterministicBSplineRegistration
 from .physical_gradient_descent import PhysicalGradientDescent
@@ -181,6 +181,7 @@ def bspline_svf_registration(
     moving_domain: Optional[ImageDomain] = None,
     *,
     mesh_size: Union[int, Sequence[int]] = 1,
+    spline_distance: Optional[Union[float, Sequence[float]]] = None,
     coefficient_grid_size: Optional[Union[int, Sequence[int]]] = None,
     iterations: Union[int, Sequence[int]] = 100,
     learning_rate: Union[float, Sequence[float]] = 1e-2,
@@ -233,6 +234,13 @@ def bspline_svf_registration(
     mesh size. ``coefficient_grid_size`` can instead specify the control-point
     count directly. Supplying ``initial_coefficients`` makes its spatial shape
     authoritative and cannot be combined with ``coefficient_grid_size``.
+
+    ``spline_distance``, when given, computes ``mesh_size`` from a physical
+    knot spacing against ``fixed_domain``'s full extent instead — ANTs' own
+    "spline distance" convention (see
+    :func:`antstorch.bspline_flows.mesh_size_for_spline_distance`), the same
+    un-padded formula ``n4_bias_field_correction``'s scalar ``spline_param``
+    already uses. Mutually exclusive with a non-default ``mesh_size``.
 
     ``initial_affine`` optionally supplies a fixed, non-optimized physical-space
     affine initialization as a ``(matrix, translation)`` pair — ``matrix`` of
@@ -336,6 +344,11 @@ def bspline_svf_registration(
     if len(factors) > 1 and any(closed_axes):
         raise ValueError("multi-resolution registration does not yet support closed axes")
     initial_affine = _validate_initial_affine(initial_affine, fixed, dimension)
+    if spline_distance is not None:
+        if initial_coefficients is not None:
+            raise ValueError("spline_distance cannot be used with initial_coefficients")
+        if coefficient_grid_size is not None:
+            raise ValueError("spline_distance cannot be used with coefficient_grid_size")
     if initial_coefficients is not None:
         if coefficient_grid_size is not None:
             raise ValueError("coefficient_grid_size cannot be used with initial_coefficients")
@@ -351,7 +364,12 @@ def bspline_svf_registration(
         coefficients = initial_coefficients.detach().clone().requires_grad_(True)
     else:
         if coefficient_grid_size is None:
-            mesh = _axis_values(mesh_size, dimension, "mesh_size", minimum=1)
+            if spline_distance is not None:
+                if mesh_size != 1:
+                    raise ValueError("spline_distance cannot be combined with a non-default mesh_size")
+                mesh = mesh_size_for_spline_distance(fixed_domain, spline_distance)
+            else:
+                mesh = _axis_values(mesh_size, dimension, "mesh_size", minimum=1)
             lattice_itk = tuple(m if periodic else m + 3 for m, periodic in zip(mesh, closed_axes))
             if any(periodic and size < 4 for periodic, size in zip(closed_axes, lattice_itk)):
                 raise ValueError("closed axes require mesh_size of at least 4")
@@ -374,7 +392,8 @@ def bspline_svf_registration(
             ("dtype", fixed.dtype),
             ("device", fixed.device),
             ("initial_coefficient_shape", tuple(coefficients.shape)),
-            ("mesh_size", mesh_size),
+            ("mesh_size", mesh_size if spline_distance is None else mesh),
+            ("spline_distance", spline_distance),
             ("coefficient_grid_size", coefficient_grid_size),
             ("initial_coefficients_provided", initial_coefficients is not None),
             ("shrink_factors", factors),

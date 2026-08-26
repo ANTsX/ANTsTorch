@@ -1,7 +1,7 @@
 """Differentiable ITK-compatible cubic B-spline field synthesis."""
 
 from .affine_registration import affine_registration
-from .bspline_domain import ImageDomain
+from .bspline_domain import ImageDomain, mesh_size_for_spline_distance
 from .bspline_scattered_data import fit_bspline_displacement_field, fit_bspline_object_to_scattered_data
 from .bspline_synthesis import (
     CubicBSplineSynthesis,
@@ -36,6 +36,7 @@ from .spatial_transform import (
 __all__ = [
     "affine_registration",
     "ImageDomain",
+    "mesh_size_for_spline_distance",
     "CubicBSplineSynthesis",
     "cubic_bspline_basis",
     "fit_bspline_coefficients",

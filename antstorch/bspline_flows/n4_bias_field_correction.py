@@ -12,7 +12,7 @@ from typing import Optional, Union
 import torch
 from torch import Tensor, nn
 
-from .bspline_domain import ImageDomain
+from .bspline_domain import ImageDomain, mesh_size_for_spline_distance
 from .bspline_synthesis import (
     _bspline_fit_context,
     _bspline_fit_geometry,
@@ -201,9 +201,13 @@ def _initial_lattice_size(domain: ImageDomain, spline_param) -> tuple:
     if spline_param is None:
         return (4,) * domain.dimension
     if isinstance(spline_param, (int, float)):
-        if spline_param <= 0:
-            raise ValueError("scalar spline_param must be positive")
-        return tuple(max(1, ceil(extent / float(spline_param))) + 3 for extent in domain.physical_extent)
+        # A scalar is a physical spline distance (knot spacing), matching
+        # ANTs' own dispatch (a single value -> CalculateMeshSizeForSpecified
+        # KnotSpacing / N4's array.size()==1 branch) -- see
+        # mesh_size_for_spline_distance's docstring for the exact formula
+        # and its provenance. mesh_size_for_spline_distance itself raises for
+        # a non-positive value.
+        return tuple(size + 3 for size in mesh_size_for_spline_distance(domain, float(spline_param)))
     values = tuple(spline_param)
     if len(values) == 1:
         return _initial_lattice_size(domain, float(values[0]))
