@@ -21,6 +21,14 @@ from .bspline_synthesis import (
     synthesize_bspline_velocity,
 )
 
+# Default physical B-spline knot spacing (ANTs' "spline distance") applied
+# when ``spline_param`` is not given, per the user's explicit instruction
+# (2026-08-26): 200 mm, matching real ANTs' own N4BiasFieldCorrection
+# default. Replaces the previous literal 4-control-point mesh
+# (``(4,) * dimension``, this package's own prior placeholder default, not
+# an ANTs value) -- see project doc §23.
+DEFAULT_N4_SPLINE_DISTANCE_MM = 200.0
+
 
 def _expand_like_image(value: Optional[Tensor], image: Tensor, name: str, default: float) -> Tensor:
     if value is None:
@@ -199,7 +207,10 @@ def _shrunk_domain(domain: ImageDomain, shrink_factor: int) -> ImageDomain:
 
 def _initial_lattice_size(domain: ImageDomain, spline_param) -> tuple:
     if spline_param is None:
-        return (4,) * domain.dimension
+        # Default: a physical spline distance of DEFAULT_N4_SPLINE_DISTANCE_MM
+        # (200 mm, real ANTs' own N4BiasFieldCorrection default), not a
+        # literal small mesh -- see the module-level constant's docstring.
+        return tuple(size + 3 for size in mesh_size_for_spline_distance(domain, DEFAULT_N4_SPLINE_DISTANCE_MM))
     if isinstance(spline_param, (int, float)):
         # A scalar is a physical spline distance (knot spacing), matching
         # ANTs' own dispatch (a single value -> CalculateMeshSizeForSpecified
@@ -238,7 +249,10 @@ def n4_bias_field_correction(
     The call mirrors the principal ANTsPy options. Each channel is corrected
     independently. ``spline_param`` follows ANTs: a scalar is physical spline
     distance; a vector is the mesh size in ITK x-y-z order. Unlike the ANTs
-    executable, scalar spacing does not pad the image domain.
+    executable, scalar spacing does not pad the image domain. When
+    ``spline_param`` is left as ``None`` (the default), a physical spline
+    distance of ``DEFAULT_N4_SPLINE_DISTANCE_MM`` (200 mm) is used,
+    matching real ANTs' own ``N4BiasFieldCorrection`` default.
     """
     if image.ndim not in (4, 5) or not image.is_floating_point():
         raise ValueError("image must be a floating (N,C,H,W) or (N,C,D,H,W) tensor")

@@ -236,3 +236,43 @@ def test_mps_is_repeatable_and_agrees_with_cpu():
     assert torch.isfinite(first).all()
     torch.testing.assert_close(second, first, rtol=2e-5, atol=2e-5)
     torch.testing.assert_close(first, cpu, rtol=2e-3, atol=2e-3)
+
+
+def test_default_spline_param_is_none_sentinel():
+    import inspect
+
+    from antstorch.bspline_flows.n4_bias_field_correction import n4_bias_field_correction as _fn
+
+    assert inspect.signature(_fn).parameters["spline_param"].default is None
+
+
+def test_default_spline_param_resolves_to_200mm_spline_distance():
+    # Per the user's explicit 2026-08-26 instruction ("pour N4 --- 200 mm
+    # comme dans ANTs"), leaving spline_param unset now resolves to a
+    # physical spline distance of DEFAULT_N4_SPLINE_DISTANCE_MM (200 mm,
+    # real ANTs' own N4BiasFieldCorrection default), replacing the old
+    # literal 4-control-point placeholder mesh.
+    from antstorch.bspline_flows import mesh_size_for_spline_distance
+    from antstorch.bspline_flows.n4_bias_field_correction import (
+        DEFAULT_N4_SPLINE_DISTANCE_MM,
+        _initial_lattice_size,
+    )
+
+    assert DEFAULT_N4_SPLINE_DISTANCE_MM == 200.0
+
+    domain = ImageDomain((256, 256, 160))
+    expected_mesh = mesh_size_for_spline_distance(domain, DEFAULT_N4_SPLINE_DISTANCE_MM)
+    expected_lattice = tuple(size + 3 for size in expected_mesh)
+    assert _initial_lattice_size(domain, None) == expected_lattice
+
+
+def test_default_spline_param_runs_and_is_finite():
+    domain = ImageDomain((24, 20))
+    y = torch.linspace(-1, 1, 20)[:, None]
+    x = torch.linspace(-1, 1, 24)[None, :]
+    image = torch.exp(0.4 * x + 0.2 * y)[None, None]
+    corrected = n4_bias_field_correction(
+        image, domain, shrink_factor=1, convergence={"iters": [2], "tol": 0.0}
+    )
+    assert corrected.shape == image.shape
+    assert torch.isfinite(corrected).all()

@@ -262,6 +262,69 @@ def test_syn_registration_bspline_regularizer_requires_a_positive_mesh_size():
         )
 
 
+def test_syn_registration_default_update_field_mesh_size_is_none_sentinel():
+    import inspect
+
+    from antstorch.syn.syn import syn_registration as _fn
+
+    assert inspect.signature(_fn).parameters["update_field_mesh_size_at_base_level"].default is None
+
+
+def test_syn_registration_bspline_default_resolves_to_26mm_spline_distance():
+    # Per the user's explicit 2026-08-26 instruction ("le defaut pour tous
+    # les recalages de bspline soit 26 mm"), leaving
+    # update_field_mesh_size_at_base_level unset (regularizer='bspline') now
+    # resolves exactly as if update_field_spline_distance=26.0 had been
+    # passed, replacing the old literal update_field_mesh_size_at_base_level=1
+    # default -- and matches bspline_svf_registration()'s own new default
+    # (same DEFAULT_BSPLINE_SPLINE_DISTANCE_MM constant).
+    from antstorch.bspline_flows import mesh_size_for_spline_distance
+    from antstorch.bspline_flows.registration import DEFAULT_BSPLINE_SPLINE_DISTANCE_MM
+    from antstorch.syn.bridge import ants_image_metadata, image_domain_from_metadata
+
+    assert DEFAULT_BSPLINE_SPLINE_DISTANCE_MM == 26.0
+
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    fixed_domain = image_domain_from_metadata(ants_image_metadata(fixed))
+    expected_mesh = mesh_size_for_spline_distance(fixed_domain, DEFAULT_BSPLINE_SPLINE_DISTANCE_MM)
+
+    result = syn_registration(
+        fixed, moving, type_of_transform="SyNOnly",
+        levels=(1,), reg_iterations=(5,), syn_metric="mse", grad_step=0.4,
+        regularizer="bspline",
+    )
+    assert result["provenance"]["update_field_mesh_size_at_base_level"] == expected_mesh
+    assert result["provenance"]["update_field_spline_distance"] is None
+    assert result["provenance"]["total_field_mesh_size_at_base_level"] == 0
+    assert np.isfinite(result["loss_history"]).all()
+
+
+def test_syn_registration_explicit_update_field_mesh_size_still_overrides_default():
+    # Backward compatibility: an explicit update_field_mesh_size_at_base_level
+    # continues to bypass the new 26mm default entirely (unchanged behavior).
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    result = syn_registration(
+        fixed, moving, type_of_transform="SyNOnly",
+        levels=(1,), reg_iterations=(5,), syn_metric="mse", grad_step=0.4,
+        regularizer="bspline", update_field_mesh_size_at_base_level=4,
+    )
+    assert result["provenance"]["update_field_mesh_size_at_base_level"] == 4
+
+
+def test_syn_registration_non_bspline_regularizer_default_normalizes_to_zero():
+    # regularizer != 'bspline': the None sentinel must never leak into
+    # provenance -- it normalizes to 0 (matching the pre-existing
+    # total_field_mesh_size_at_base_level=0 "off" convention), not the 26mm
+    # default (which only applies when regularizer='bspline').
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    result = syn_registration(
+        fixed, moving, type_of_transform="SyNOnly",
+        levels=(1,), reg_iterations=(5,), syn_metric="mse", grad_step=0.4,
+        regularizer="gaussian",
+    )
+    assert result["provenance"]["update_field_mesh_size_at_base_level"] == 0
+
+
 def test_syn_registration_rejects_negative_bspline_mesh_sizes():
     fixed, moving = _ants_pair_2d()
     with pytest.raises(ValueError, match="update_field_mesh_size_at_base_level"):

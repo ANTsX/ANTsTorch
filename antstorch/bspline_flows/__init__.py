@@ -11,9 +11,9 @@ from .bspline_synthesis import (
     synthesize_bspline_velocity,
 )
 from .deterministic_registration import DeterministicBSplineRegistration
-from .n4_bias_field_correction import N4BiasFieldCorrection, n4_bias_field_correction
+from .n4_bias_field_correction import DEFAULT_N4_SPLINE_DISTANCE_MM, N4BiasFieldCorrection, n4_bias_field_correction
 from .physical_gradient_descent import PhysicalGradientDescent
-from .registration import bspline_svf_registration
+from .registration import DEFAULT_BSPLINE_SPLINE_DISTANCE_MM, bspline_svf_registration
 from .scaling_and_squaring import ScalingAndSquaring, scaling_and_squaring
 from .similarity import (
     ants_neighborhood_correlation_loss,
@@ -47,8 +47,10 @@ __all__ = [
     "DeterministicBSplineRegistration",
     "N4BiasFieldCorrection",
     "n4_bias_field_correction",
+    "DEFAULT_N4_SPLINE_DISTANCE_MM",
     "PhysicalGradientDescent",
     "bspline_svf_registration",
+    "DEFAULT_BSPLINE_SPLINE_DISTANCE_MM",
     "ScalingAndSquaring",
     "scaling_and_squaring",
     "bending_energy",
