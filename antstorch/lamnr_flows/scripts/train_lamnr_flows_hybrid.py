@@ -931,6 +931,7 @@ class HybridLAMNrTrainer:
         effective_global_batch = (
             int(args.batch_size) * int(args.accum_steps) * int(self.world_size)
         )
+        planned_steps = max(0, int(args.max_iter) - int(self.start_iter) + 1)
         val_mode = (
             "training subjects, clean/no augmentation"
             if float(args.val_fraction) == 0.0
@@ -947,6 +948,8 @@ class HybridLAMNrTrainer:
         add("grad_accum", args.accum_steps)
         add("effective global batch", effective_global_batch)
         add("max_iter / extra", f"{args.max_iter} / {args.extra_iters}")
+        add("start / target iteration", f"{self.start_iter} / {args.max_iter}")
+        add("planned steps this run", planned_steps)
         add("eval / preview interval", f"{args.eval_interval} / {args.preview_interval}")
         add("lr / warmup", f"{args.lr} / {args.warmup_iters}")
         add("grad_clip / weight_decay", f"{args.grad_clip} / {args.weight_decay}")
@@ -958,7 +961,11 @@ class HybridLAMNrTrainer:
             f"{args.plateau_threshold} / {args.plateau_cooldown}",
         )
         add("min_lr", args.min_lr)
-        add("resume", args.resume or None)
+        add("resume argument", args.resume or None)
+        add(
+            "resolved checkpoint",
+            str(self._resume_path) if self._resume_path is not None else None,
+        )
         add("auto_resume / ckpt config", f"{args.auto_resume} / {args.use_ckpt_config}")
         add("manifest rows", len(self.full_frame))
         add("subject column", subject_column)
@@ -1258,6 +1265,10 @@ class HybridLAMNrTrainer:
         pbar = tqdm(
             range(self.start_iter, self.args.max_iter + 1), desc="train-hybrid",
             disable=self.rank != 0,
+            # Show the absolute/global iteration after resuming rather than
+            # numbering only the work remaining in this invocation.
+            initial=max(0, self.start_iter - 1),
+            total=self.args.max_iter,
         )
         for iteration in pbar:
             self.opt.zero_grad(set_to_none=True)

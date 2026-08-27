@@ -236,6 +236,9 @@ def test_hybrid_trainer_real_flow_smoke(tmp_path):
     assert "hybrid heterogeneous-view trainer" in summary
     assert "batch local per GPU" in summary
     assert "effective global batch" in summary
+    assert "start / target iteration" in summary
+    assert "planned steps this run" in summary
+    assert "resolved checkpoint" in summary
     assert "validation mode" in summary
     assert "view[0] name / type" in summary
     assert "view[2] columns" in summary
