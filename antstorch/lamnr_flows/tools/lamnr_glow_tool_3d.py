@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-lamnr_glow_tool_3d_new.py — LAM-Flow (Glow 3D) Inference & Analysis Toolkit
+lamnr_glow_tool_3d.py — LAM-Flow (Glow 3D) Inference & Analysis Toolkit
 
 Thin shim over lamnr_glow_tool_base.GlowToolBase.
 All shared logic (gauss-fit, gauss-impute, recon-template, recon-interpolate,
@@ -36,6 +36,8 @@ except ImportError:
 
 # Import the shared base class
 from antstorch.lamnr_flows.core.lamnr_glow_tool_base import GlowToolBase, to01
+
+__version__ = "0.5.5"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3D Helper Functions
@@ -142,13 +144,21 @@ def _coerce_nchwd_5d(x, target_hwd=None):
 
 class GlowTool3D(GlowToolBase):
     """3D implementation of the LAM-Flow toolkit."""
-    
-    def _add_spatial_args(self, parser: argparse.ArgumentParser):
-        """Add 3D-specific command line arguments."""
-        parser.add_argument("--spatial-dims", type=int, nargs=3, help="H W D for 3D volume")
-        parser.add_argument("--H", type=int, help="Height")
-        parser.add_argument("--W", type=int, help="Width")
-        parser.add_argument("--D", type=int, help="Depth")
+
+    def _add_size_arg(self, parser: argparse.ArgumentParser, required: bool = True):
+        """Add the 3D size overrides used by every shared subcommand.
+
+        The checkpoint configuration remains the fallback, so these arguments
+        are intentionally optional even when the shared caller passes
+        ``required=True``.
+        """
+        parser.add_argument(
+            "--spatial-dims", type=int, nargs=3, metavar=("H", "W", "D"),
+            help="Override the checkpoint spatial dimensions as H W D.",
+        )
+        parser.add_argument("--H", type=int, help="Override volume height.")
+        parser.add_argument("--W", type=int, help="Override volume width.")
+        parser.add_argument("--D", type=int, help="Override volume depth.")
         
     def _get_target_size(self, args: argparse.Namespace, cfg: dict) -> Tuple[int, int, int]:
         """Extract the (H, W, D) target size from arguments or config."""
@@ -405,21 +415,25 @@ class GlowTool3D(GlowToolBase):
 
         print(f"[save_volume] {len(written)} fichier(s) NIfTI 3D écrit(s) sous {parent}/")
 
+    @property
     def ndim(self) -> int:
-        """Retourne le nombre de dimensions spatiales."""
-        return 3
+        """Return the canonical tensor rank: (B, C, H, W, D)."""
+        return 5
 
+    @property
     def interp_mode(self) -> str:
         """Mode d'interpolation PyTorch pour le redimensionnement 3D."""
         return "trilinear"
 
+    @property
     def default_cov_rank(self) -> int:
         """Rang par défaut pour l'estimation de covariance Woodbury en 3D."""
         return 64  # Évite l'explosion de la RAM par rapport à 256
 
+    @property
     def default_cov_estimator(self) -> str:
         """Estimateur de covariance par défaut."""
-        return "empirical"
+        return "lowrank"
 
     def coerce_nd(self, x, target_size) -> torch.Tensor:
         return _coerce_nchwd_5d(x, target_hwd=target_size)

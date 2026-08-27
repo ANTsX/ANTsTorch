@@ -1318,7 +1318,7 @@ class GlowToolBase(ABC):
     @property
     @abstractmethod
     def default_cov_rank(self) -> int:
-        """Default rank for lowrank covariance (64 for 2D, 128 for 3D)."""
+        """Default rank for low-rank covariance estimation."""
         ...
 
     # ------------------------------------------------------------------ #
