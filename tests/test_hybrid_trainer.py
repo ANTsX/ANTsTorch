@@ -232,6 +232,13 @@ def test_hybrid_trainer_real_flow_smoke(tmp_path):
     ])
     trainer = HybridLAMNrTrainer()
     trainer.setup(args)
+    summary = (tmp_path / "run" / "run_config.txt").read_text()
+    assert "hybrid heterogeneous-view trainer" in summary
+    assert "batch local per GPU" in summary
+    assert "effective global batch" in summary
+    assert "validation mode" in summary
+    assert "view[0] name / type" in summary
+    assert "view[2] columns" in summary
     loss, align, bpds = trainer._batch_loss(next(iter(trainer.train_loader)), 1)
     assert torch.isfinite(loss)
     assert torch.isfinite(align)

@@ -33,6 +33,7 @@ import glob
 import json
 import math
 import os
+import platform
 import shutil
 from dataclasses import dataclass, field
 from multiprocessing import Value
@@ -893,10 +894,117 @@ class HybridLAMNrTrainer:
                 "availability": availability,
                 "projector_input_dimensions": feature_dims,
             }, indent=2, default=str))
-            print(f"[hybrid] train={len(train_frame)} val={len(val_frame)} device={self.dev}")
-            print(f"[hybrid] views={[(v.name, v.kind) for v in self.views]}")
-            print(f"[hybrid] projector input dimensions={feature_dims}")
-            print(f"[hybrid] nominal availability={availability}")
+            summary = self._format_run_summary(
+                args=args,
+                train_frame=train_frame,
+                val_frame=val_frame,
+                subject_column=subject_column,
+                feature_dims=feature_dims,
+                availability=availability,
+            )
+            print("\n" + summary)
+            (self.run_dir / "run_config.txt").write_text(summary + "\n")
+
+    def _format_run_summary(
+        self,
+        args: argparse.Namespace,
+        train_frame: pd.DataFrame,
+        val_frame: pd.DataFrame,
+        subject_column: Optional[str],
+        feature_dims: Sequence[int],
+        availability: Dict[str, int],
+    ) -> str:
+        """Return the human-readable startup dump for a hybrid run."""
+        from datetime import datetime
+
+        rows = [
+            f"[run] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | "
+            f"Py {platform.python_version()} | torch {torch.__version__} | "
+            f"cuda={str(torch.cuda.is_available()).lower()} "
+            f"(n={torch.cuda.device_count()})",
+            "[note] hybrid heterogeneous-view trainer",
+        ]
+
+        def add(label: str, value: Any) -> None:
+            rows.append(f"{label:>28}: {'None' if value is None else value}")
+
+        effective_global_batch = (
+            int(args.batch_size) * int(args.accum_steps) * int(self.world_size)
+        )
+        val_mode = (
+            "training subjects, clean/no augmentation"
+            if float(args.val_fraction) == 0.0
+            else "held-out subjects"
+        )
+
+        add("out_dir", args.out_dir)
+        add("manifest / config", f"{args.manifest} / {args.config}")
+        add("world_size / device", f"{self.world_size} / {self.dev}")
+        add("views", len(self.views))
+        add("precision / amp_dtype", f"{args.precision} / {args.amp_dtype}")
+        add("num_workers / seed", f"{args.num_workers} / {args.seed}")
+        add("batch local per GPU", args.batch_size)
+        add("grad_accum", args.accum_steps)
+        add("effective global batch", effective_global_batch)
+        add("max_iter / extra", f"{args.max_iter} / {args.extra_iters}")
+        add("eval / preview interval", f"{args.eval_interval} / {args.preview_interval}")
+        add("lr / warmup", f"{args.lr} / {args.warmup_iters}")
+        add("grad_clip / weight_decay", f"{args.grad_clip} / {args.weight_decay}")
+        add("ema / decay", f"{args.ema} / {args.ema_decay}")
+        add("lr_decay gamma / steps", f"{args.lr_decay_gamma} / {args.lr_decay_steps}")
+        add(
+            "plateau fac/pat/thr/cd",
+            f"{args.plateau_factor} / {args.plateau_patience} / "
+            f"{args.plateau_threshold} / {args.plateau_cooldown}",
+        )
+        add("min_lr", args.min_lr)
+        add("resume", args.resume or None)
+        add("auto_resume / ckpt config", f"{args.auto_resume} / {args.use_ckpt_config}")
+        add("manifest rows", len(self.full_frame))
+        add("subject column", subject_column)
+        add("train / val rows", f"{len(train_frame)} / {len(val_frame)}")
+        add("validation mode", val_mode)
+        add("train / val virtual len", f"{len(self.train_dataset)} / {len(self.val_dataset)}")
+        add("train / val samples", f"{args.train_samples} / {args.val_samples}")
+        add("augmentation disabled", args.disable_augmentation)
+        add("aug anneal disabled", args.disable_aug_anneal)
+        add("augmentation groups", sorted(self.augmentation_groups))
+        for group_name, group_config in sorted(self.augmentation_groups.items()):
+            add(f"aug[{group_name}] schedules", group_config.get("schedules"))
+
+        add("align / weighting", f"{args.align} / {args.weighting}")
+        add("align weight / warmup", f"{args.align_weight} / {args.align_warmup}")
+        add("alignment latents / pool", f"{args.alignment_latents} / {args.alignment_pool_size}")
+        add("proj dim / hidden", f"{args.proj_dim} / {args.proj_hidden}")
+        add(
+            "vicreg inv/var/cov/gamma",
+            f"{args.vicreg_inv} / {args.vicreg_var} / "
+            f"{args.vicreg_cov} / {args.vicreg_gamma}",
+        )
+        add("screen / fraction", f"{args.screen} / {args.screen_frac}")
+        add("screen warmup / refresh", f"{args.screen_warmup} / {args.screen_refresh}")
+        add("cca ridge / prefilter", f"{args.cca_ridge} / {args.prefilter_frac}")
+        add("sample mode / temp", f"{args.sample_mode} / {args.sample_temp}")
+        add("grad checkpoint", args.grad_checkpoint)
+
+        rows.append("-" * 72)
+        for index, (view, feature_dim, model) in enumerate(
+            zip(self.views, feature_dims, self.models)
+        ):
+            add(f"view[{index}] name / type", f"{view.name} / {view.kind}")
+            add(f"view[{index}] observed train", availability[view.name])
+            add(f"view[{index}] flow parameters", f"{n_params(self._unwrap(model)):,}")
+            add(f"view[{index}] projector input", feature_dim)
+            if view.kind == "tabular":
+                add(f"view[{index}] columns", view.columns)
+                add(f"view[{index}] normalization", view.normalization)
+            else:
+                add(f"view[{index}] shape / channels", f"{view.shape} / {view.channels}")
+                add(f"view[{index}] augmentation group", view.augmentation_group)
+            add(f"view[{index}] model", view.model)
+
+        rows.append("-" * 72)
+        return "\n".join(rows)
 
     def _cfg(self, view: HybridViewSpec, name: str, default: Any) -> Any:
         return view.model.get(name, default)

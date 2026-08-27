@@ -45,6 +45,7 @@ antstorch = ["benchmark/pairs.csv"]
 "Homepage" = "https://github.com/ANTsX/ANTsTorch"
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 markers = [
     "slow: marks tests as slow (deselect with -m \"not slow\")",
 ]
