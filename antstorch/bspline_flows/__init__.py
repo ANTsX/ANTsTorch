@@ -14,7 +14,7 @@ from .deterministic_registration import DeterministicBSplineRegistration
 from .n4_bias_field_correction import DEFAULT_N4_SPLINE_DISTANCE_MM, N4BiasFieldCorrection, n4_bias_field_correction
 from .physical_gradient_descent import PhysicalGradientDescent
 from .gaussian_svf_registration import gaussian_svf_registration
-from .registration import DEFAULT_BSPLINE_SPLINE_DISTANCE_MM, bspline_svf_registration
+from .bspline_svf_registration import DEFAULT_BSPLINE_SPLINE_DISTANCE_MM, bspline_svf_registration
 from .scaling_and_squaring import ScalingAndSquaring, scaling_and_squaring
 from .similarity import (
     ants_neighborhood_correlation_loss,

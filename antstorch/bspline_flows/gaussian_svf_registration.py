@@ -9,7 +9,7 @@ from torch.nn import functional as F
 
 from .bspline_domain import ImageDomain
 from .physical_gradient_descent import PhysicalGradientDescent
-from .registration import (
+from .bspline_svf_registration import (
     _downsample,
     _pyramid_configuration,
     _smooth_image,

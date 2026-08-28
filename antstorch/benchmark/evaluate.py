@@ -352,7 +352,7 @@ def evaluate_mindboggle_pair(
         (gaussian_svf).
         When neither a mesh-size nor a spline-distance override is given for
         either bspline variant, both now default to the same 26 mm physical
-        spline distance (:data:`antstorch.bspline_flows.registration.
+        spline distance (:data:`antstorch.bspline_flows.bspline_svf_registration.
         DEFAULT_BSPLINE_SPLINE_DISTANCE_MM`) at the library level -- this
         harness no longer applies its own override on top.
 
@@ -417,7 +417,7 @@ def evaluate_mindboggle_pair(
         # update_field_mesh_size_at_base_level nor update_field_spline_distance
         # is present in syn_kwargs, syn_registration() itself now defaults
         # regularizer='bspline' to a 26 mm physical spline distance (see
-        # antstorch.bspline_flows.registration.DEFAULT_BSPLINE_SPLINE_DISTANCE_MM),
+        # antstorch.bspline_flows.bspline_svf_registration.DEFAULT_BSPLINE_SPLINE_DISTANCE_MM),
         # so bspline_syn and bspline_svf share the same default density
         # without any special-casing here (project doc, "default spline
         # distance" update).
