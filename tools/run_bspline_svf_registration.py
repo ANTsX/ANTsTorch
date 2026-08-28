@@ -90,7 +90,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default="cpu", help="PyTorch device: cpu, cuda, or mps")
     parser.add_argument("--output-dir", type=Path, default=Path("registration_output"))
-    parser.add_argument("--mesh-size", type=int, nargs=2, default=(5, 5), metavar=("X", "Y"))
+    parser.add_argument("--spline-distance", type=float, nargs=1, default=26)
     parser.add_argument("--shrink-factors", type=int, nargs="+", default=(8, 4, 2, 1))
     parser.add_argument("--smoothing-sigmas", type=float, nargs="+", default=(3.0, 2.0, 1.0, 0.0))
     parser.add_argument("--iterations", type=int, nargs="+", default=(100, 70, 40, 20))
@@ -222,7 +222,7 @@ def main() -> None:
         moving=moving,
         fixed_domain=fixed_domain,
         moving_domain=moving_domain,
-        mesh_size=tuple(args.mesh_size),
+        spline_distance=args.spline_distance,
         shrink_factors=tuple(args.shrink_factors),
         smoothing_sigmas=tuple(args.smoothing_sigmas),
         iterations=tuple(args.iterations),

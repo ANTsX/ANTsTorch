@@ -2948,7 +2948,7 @@ class GlowToolBase(ABC):
     # ------------------------------------------------------------------
 
     def cmd_recon_cohort_template(self, argv=None):
-        """Encode cohort → Fréchet mean on the sphere → decode."""
+        """Encode cohort → latent cohort mean → decode."""
         ap = argparse.ArgumentParser("recon-cohort-template")
         ap.add_argument("--ckpt",        type=str, required=True)
         ap.add_argument("--manifest",    type=str, required=True)
@@ -2956,6 +2956,29 @@ class GlowToolBase(ABC):
         ap.add_argument("--view-index",  type=int, default=0)
         ap.add_argument("--devices",     type=str, default="cuda:0")
         ap.add_argument("--out",         type=str, required=True)
+        ap.add_argument(
+            "--gauss",
+            type=str,
+            default=None,
+            help=(
+                "Gaussian model from gauss-fit. Required by "
+                "--mean-method spherical-centered."
+            ),
+        )
+        ap.add_argument(
+            "--mean-method",
+            choices=["euclidean", "spherical-centered"],
+            default="euclidean",
+            help=(
+                "How to average cohort latents at each level. 'euclidean' "
+                "uses the arithmetic latent mean (default, most stable); "
+                "'spherical-centered' computes a Fréchet mean on the same "
+                "empirically centred typical-set sphere used by SLERP and "
+                "calc-distance."
+            ),
+        )
+        ap.add_argument("--spherical-max-iterations", type=int, default=100)
+        ap.add_argument("--spherical-tolerance", type=float, default=1e-7)
         ap.add_argument("--sharpen-image", action="store_true")
         ap.add_argument("--ema",         action=argparse.BooleanOptionalAction, default=True)
         self._add_size_arg(ap, required=True)
@@ -2973,6 +2996,26 @@ class GlowToolBase(ABC):
         view_names, per_view_paths = _resolve_views(cols, manifest_path.parent, args.views)
         vi = int(args.view_index)
         v_name = view_names[vi]
+
+        gauss_blob = None
+        v_idx_gauss = None
+        if args.mean_method == "spherical-centered":
+            if not args.gauss:
+                raise ValueError(
+                    "--mean-method spherical-centered requires --gauss."
+                )
+            if args.spherical_max_iterations < 1:
+                raise ValueError("--spherical-max-iterations must be positive.")
+            if args.spherical_tolerance <= 0:
+                raise ValueError("--spherical-tolerance must be positive.")
+            gauss_blob = _load_gaussian_model(Path(args.gauss))
+            gauss_views, _, _, _ = _validate_gauss_blob(gauss_blob)
+            if v_name not in gauss_views:
+                raise ValueError(
+                    f"View {v_name!r} is absent from Gaussian model views "
+                    f"{gauss_views}."
+                )
+            v_idx_gauss = gauss_views.index(v_name)
 
         model = self.build_model(cfg, device, target_size)
         ok, src = load_weights_into_model(
@@ -2995,39 +3038,136 @@ class GlowToolBase(ABC):
 
         L = len(z_stacks[0])
 
-        # Fréchet mean per level
-        def frechet_mean_spherical(z_pts, n_iters=20, tol=1e-5):
-            mu = z_pts[0].clone()
-            for _ in range(n_iters):
-                mu_norm = mu / (mu.norm() + 1e-12)
-                tangents = []
-                for z in z_pts:
-                    z_n = z / (z.norm() + 1e-12)
-                    dot = float(torch.clamp((mu_norm * z_n).sum(), -1.0, 1.0))
-                    angle = math.acos(dot)
-                    if angle < 1e-9:
-                        tangents.append(torch.zeros_like(z_n))
-                    else:
-                        tangents.append(
-                            angle / math.sin(angle) * (z_n - dot * mu_norm)
-                        )
-                mean_tan = torch.stack(tangents).mean(0)
-                if mean_tan.norm() < tol:
+        def frechet_mean_unit_sphere(unit_points):
+            """Intrinsic equal-weight Fréchet mean of unit row vectors."""
+            points = torch.as_tensor(unit_points, dtype=torch.float64)
+            resultant = points.mean(dim=0)
+            resultant_norm = resultant.norm()
+            if resultant_norm > 1e-12:
+                mean_direction = resultant / resultant_norm
+            else:
+                # A near-zero extrinsic resultant can occur for widely spread
+                # or nearly antipodal observations. Use the observed direction
+                # with the smallest total squared angular distance as a stable
+                # intrinsic initialisation.
+                dots = torch.clamp(points @ points.T, -1.0, 1.0)
+                objectives = torch.acos(dots).square().sum(dim=1)
+                mean_direction = points[int(torch.argmin(objectives))].clone()
+
+            converged = False
+            tangent_norm = float("inf")
+            for iteration in range(int(args.spherical_max_iterations)):
+                dots = torch.clamp(points @ mean_direction, -1.0, 1.0)
+                angles = torch.acos(dots)
+                sin_angles = torch.sin(angles)
+                coefficients = torch.ones_like(angles)
+                nonzero = angles > 1e-10
+                coefficients[nonzero] = (
+                    angles[nonzero] / torch.clamp(sin_angles[nonzero], min=1e-12)
+                )
+                tangents = coefficients[:, None] * (
+                    points - dots[:, None] * mean_direction[None, :]
+                )
+                mean_tangent = tangents.mean(dim=0)
+                tangent_norm = float(mean_tangent.norm())
+                if tangent_norm < float(args.spherical_tolerance):
+                    converged = True
                     break
-                mu = torch.cos(mean_tan.norm()) * mu_norm + \
-                     torch.sin(mean_tan.norm()) * mean_tan / (mean_tan.norm() + 1e-12)
-                mu = mu * (sum(z.norm() for z in z_pts) / len(z_pts))
-            return mu
+                step = min(tangent_norm, math.pi / 2.0)
+                tangent_direction = mean_tangent / max(tangent_norm, 1e-12)
+                mean_direction = (
+                    math.cos(step) * mean_direction
+                    + math.sin(step) * tangent_direction
+                )
+                mean_direction = mean_direction / mean_direction.norm()
+
+            final_dots = torch.clamp(points @ mean_direction, -1.0, 1.0)
+            objective = float(torch.acos(final_dots).square().mean())
+            return (
+                mean_direction,
+                converged,
+                iteration + 1,
+                tangent_norm,
+                objective,
+                float(resultant_norm),
+            )
 
         z_mean_list = []
         for l in range(L):
-            pts = [z_stacks[i][l].flatten() for i in range(len(z_stacks))]
-            mu_flat = frechet_mean_spherical(pts)
-            shp = z_stacks[0][l].shape
-            z_mean_list.append(mu_flat.view(shp).unsqueeze(0).to(device))
+            if args.mean_method == "euclidean":
+                # Each entry already has shape (1, C, H, W, D). Stacking
+                # subjects and averaging axis 0 therefore preserves exactly
+                # one batch dimension and keeps cross-level subject weights
+                # consistent.
+                z_mean = torch.stack(
+                    [z_stacks[i][l] for i in range(len(z_stacks))], dim=0
+                ).mean(dim=0)
+            else:
+                flat = torch.stack(
+                    [z_stacks[i][l].flatten() for i in range(len(z_stacks))],
+                    dim=0,
+                ).to(torch.float64)
+                start, stop = _level_view_slice(gauss_blob, l, v_idx_gauss)
+                centre_np = np.asarray(
+                    gauss_blob["mu"][l], dtype=np.float64
+                ).ravel()[start:stop]
+                if centre_np.size != flat.shape[1]:
+                    raise ValueError(
+                        f"Level {l}: Gaussian centre has {centre_np.size} "
+                        f"values for view {v_name!r}, but encoded latents "
+                        f"have {flat.shape[1]}."
+                    )
+                centre = torch.from_numpy(centre_np)
+                centred = flat - centre[None, :]
+                norms = centred.norm(dim=1)
+                if torch.any(~torch.isfinite(norms)) or torch.any(norms <= 1e-12):
+                    raise ValueError(
+                        f"Level {l}: at least one cohort latent cannot be "
+                        "projected onto the centred typical-set sphere."
+                    )
+                unit_points = centred / norms[:, None]
+                (
+                    mean_direction,
+                    converged,
+                    iterations,
+                    tangent_norm,
+                    objective,
+                    resultant_norm,
+                ) = frechet_mean_unit_sphere(unit_points)
+
+                Sigma_list = gauss_blob.get("Sigma", None)
+                Sigma_l = (
+                    Sigma_list[l]
+                    if isinstance(Sigma_list, (list, tuple))
+                    else Sigma_list
+                )
+                Sigma_view = _slice_covariance(Sigma_l, start, stop)
+                radius = _typical_radius(
+                    gauss_blob, l, v_idx_gauss, Sigma_view, stop - start
+                )
+                mean_flat = centre + float(radius) * mean_direction
+                sample_shape = z_stacks[0][l].shape[1:]
+                z_mean = mean_flat.to(torch.float32).view(1, *sample_shape)
+                print(
+                    f"[recon-cohort-template] level={l} centred-spherical "
+                    f"radius={radius:.6g} iterations={iterations} "
+                    f"converged={converged} tangent_norm={tangent_norm:.3e} "
+                    f"mean_squared_angle={objective:.6g} "
+                    f"resultant_norm={resultant_norm:.6g}"
+                )
+            z_mean_list.append(z_mean.to(device))
+
+        print(
+            f"[recon-cohort-template] latent mean method: {args.mean_method}"
+        )
 
         with torch.no_grad():
             x_mean = self.decode_latents(model, z_mean_list, target_size)
+        if not torch.isfinite(x_mean).all():
+            raise RuntimeError(
+                f"Decoded {args.mean_method} cohort template contains non-finite "
+                "values; output was not written."
+            )
         x_mean = to01(x_mean, winsorize=True)
 
         out_path = Path(args.out)
