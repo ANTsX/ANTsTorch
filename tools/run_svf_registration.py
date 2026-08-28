@@ -1,27 +1,33 @@
 #!/usr/bin/env python3
-"""Run ANTsTorch B-spline SVF registration on the ANTs r30/r64 images.
+"""Run ANTsTorch B-spline or Gaussian SVF registration on ANTs 2-D images.
 
 Example
 -------
-Run the default three-level registration on CPU::
+Run the default four-level registration on CPU::
 
-    PYTHONPATH=. python tools/run_bspline_svf_registration.py
+    PYTHONPATH=. python tools/run_svf_registration.py
 
 Use an accelerator and fewer iterations::
 
-    PYTHONPATH=. python tools/run_bspline_svf_registration.py \
+    PYTHONPATH=. python tools/run_svf_registration.py \
         --device mps --iterations 40 30 20 --output-dir registration_output
+
+Run the dense Gaussian-regularized SVF::
+
+    PYTHONPATH=. python tools/run_svf_registration.py \
+        --transform-type gaussian_svf --update-field-sigma 3 \
+        --total-field-sigma 0.5 --verbose
 
 Use the local ANTs neighborhood-correlation metric::
 
-    PYTHONPATH=. python tools/run_bspline_svf_registration.py \
+    PYTHONPATH=. python tools/run_svf_registration.py \
         --similarity ants_ncc --neighborhood-radius 2 --verbose
 
-Run an affine pre-registration before the B-spline SVF (bspline_flows has no
+Run an affine pre-registration before the selected SVF (bspline_flows has no
 affine/rigid initialization of its own; see
 ``antstorch.bspline_flows.affine_registration``)::
 
-    PYTHONPATH=. python tools/run_bspline_svf_registration.py \
+    PYTHONPATH=. python tools/run_svf_registration.py \
         --affine --affine-transform-type Rigid --verbose
 """
 
@@ -40,6 +46,7 @@ from antstorch.bspline_flows import (
     PhysicalGradientDescent,
     affine_registration,
     bspline_svf_registration,
+    gaussian_svf_registration,
 )
 
 
@@ -88,12 +95,18 @@ def torch_field_to_ants(tensor: torch.Tensor, reference: ants.ANTsImage) -> ants
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--transform-type",
+        choices=("bspline_svf", "gaussian_svf"),
+        default="bspline_svf",
+        help="SVF parameterization/regularizer (default: bspline_svf)",
+    )
     parser.add_argument("--device", default="cpu", help="PyTorch device: cpu, cuda, or mps")
     parser.add_argument("--output-dir", type=Path, default=Path("registration_output"))
-    parser.add_argument("--spline-distance", type=float, nargs=1, default=26)
+    parser.add_argument("--spline-distance", type=float, default=26.0)
     parser.add_argument("--shrink-factors", type=int, nargs="+", default=(8, 4, 2, 1))
     parser.add_argument("--smoothing-sigmas", type=float, nargs="+", default=(3.0, 2.0, 1.0, 0.0))
-    parser.add_argument("--iterations", type=int, nargs="+", default=(100, 70, 40, 20))
+    parser.add_argument("--iterations", type=int, nargs="+", default=(100, 100, 50, 10))
     parser.add_argument("--learning-rate", type=float, nargs="+", default=(0.03, 0.02, 0.01, 0.005))
     parser.add_argument(
         "--optimizer",
@@ -113,6 +126,18 @@ def parse_args() -> argparse.Namespace:
         default=1.0,
         help="Coefficient-gradient smoothing sigma in physical units (default: 1.0)",
     )
+    parser.add_argument(
+        "--update-field-sigma",
+        type=float,
+        default=3.0,
+        help="Gaussian SVF update-field sigma in physical units (default: 3.0)",
+    )
+    parser.add_argument(
+        "--total-field-sigma",
+        type=float,
+        default=0.5,
+        help="Gaussian SVF accumulated-velocity sigma in physical units (default: 0.5)",
+    )
     parser.add_argument("--similarity", choices=("mse", "ncc", "ants_ncc"), default="ants_ncc")
     parser.add_argument("--neighborhood-radius", type=int, default=4)
     parser.add_argument("--coefficient-weight", type=float, default=0.0)
@@ -122,7 +147,7 @@ def parse_args() -> argparse.Namespace:
         "--affine",
         action="store_true",
         help="Run an affine pre-registration (antstorch.bspline_flows.affine_registration) "
-        "before the B-spline SVF, and pass its result as bspline_svf_registration()'s initial_affine",
+        "before the selected SVF, and pass its result as the registration's initial_affine",
     )
     parser.add_argument(
         "--affine-transform-type",
@@ -157,6 +182,8 @@ def main() -> None:
         raise RuntimeError("CUDA was requested but is not available")
     if device.type == "mps" and not torch.backends.mps.is_available():
         raise RuntimeError("MPS was requested but is not available")
+    if args.transform_type == "gaussian_svf" and args.optimizer != "physical_gradient_descent":
+        raise ValueError("gaussian_svf requires --optimizer physical_gradient_descent")
     level_count = len(args.shrink_factors)
     for name, values in (
         ("--smoothing-sigmas", args.smoothing_sigmas),
@@ -212,26 +239,27 @@ def main() -> None:
         PhysicalGradientDescent(
             gradient_step=args.gradient_step,
             momentum=args.momentum,
-            smoothing_sigma=args.gradient_smoothing_sigma,
+            # B-spline SVF smooths the coefficient gradient here. Gaussian
+            # SVF instead uses its distinct --update-field-sigma below.
+            smoothing_sigma=(
+                args.gradient_smoothing_sigma if args.transform_type == "bspline_svf" else 0.0
+            ),
         )
         if args.optimizer == "physical_gradient_descent"
         else args.optimizer
     )
-    result = bspline_svf_registration(
+    common_registration_kwargs = dict(
         fixed=fixed,
         moving=moving,
         fixed_domain=fixed_domain,
         moving_domain=moving_domain,
-        spline_distance=args.spline_distance,
         shrink_factors=tuple(args.shrink_factors),
         smoothing_sigmas=tuple(args.smoothing_sigmas),
         iterations=tuple(args.iterations),
-        learning_rate=tuple(args.learning_rate),
         optimizer=optimizer,
         gradient_step=args.gradient_step,
         similarity=args.similarity,
         neighborhood_radius=args.neighborhood_radius,
-        coefficient_weight=args.coefficient_weight,
         velocity_weight=args.velocity_weight,
         bending_weight=args.bending_weight,
         initial_affine=initial_affine,
@@ -239,6 +267,19 @@ def main() -> None:
         stationary_boundary=True,
         verbose=args.verbose,
     )
+    if args.transform_type == "bspline_svf":
+        result = bspline_svf_registration(
+            **common_registration_kwargs,
+            spline_distance=args.spline_distance,
+            learning_rate=tuple(args.learning_rate),
+            coefficient_weight=args.coefficient_weight,
+        )
+    else:
+        result = gaussian_svf_registration(
+            **common_registration_kwargs,
+            update_field_sigma=args.update_field_sigma,
+            total_field_sigma=args.total_field_sigma,
+        )
     elapsed = time.perf_counter() - start
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -248,7 +289,7 @@ def main() -> None:
         torch_image_to_ants(result["warpedmovout"], fixed_ants),
         str(args.output_dir / "warped_r27.nii.gz"),
     )
-    # fwdtransforms/invtransforms are now always the *pure* B-spline SVF
+    # fwdtransforms/invtransforms are always the pure selected SVF
     # piece alone -- never composed with the affine below -- matching the
     # separated-transform convention also used by antstorch.syn.syn_registration().
     # The total forward map is affine-then-SVF; compose svf_*_displacement.nii.gz
@@ -263,7 +304,8 @@ def main() -> None:
             torch_field_to_ants(result[name], fixed_ants),
             str(args.output_dir / f"{filename}.nii.gz"),
         )
-    torch.save(result["coefficients"].cpu(), args.output_dir / "coefficients.pt")
+    if "coefficients" in result:
+        torch.save(result["coefficients"].cpu(), args.output_dir / "coefficients.pt")
     with (args.output_dir / "loss_history.json").open("w", encoding="utf-8") as stream:
         json.dump(result["level_loss_history"], stream, indent=2)
     if result["affine_matrix"] is not None:
@@ -298,7 +340,7 @@ def main() -> None:
         with (args.output_dir / "affine_loss_history.json").open("w", encoding="utf-8") as stream:
             json.dump(affine_result["level_loss_history"], stream, indent=2)
 
-    print(f"Registration completed in {elapsed:.2f} seconds on {device}.")
+    print(f"{args.transform_type} registration completed in {elapsed:.2f} seconds on {device}.")
     if affine_result is not None:
         print(
             f"  (preceded by an affine pre-registration: {affine_elapsed:.2f} seconds, "

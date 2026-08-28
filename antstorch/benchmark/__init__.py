@@ -6,7 +6,8 @@ harness's *core* into ANTsTorch itself: single-pair evaluation, dataset
 loading, and the accuracy/topology metrics, restricted to registration arms
 that come from ANTsTorch itself (``antstorch.syn.syn_registration()``'s four
 regularizers -- ``'gaussian'``, ``'sobolev'``, ``'dsti'``, ``'bspline'`` --
-plus ``antstorch.bspline_flows.bspline_svf_registration()``).
+plus ``antstorch.bspline_flows.bspline_svf_registration()`` and
+``gaussian_svf_registration()``).
 
 By explicit scope decision (see the project doc, "Portage de l'evaluation
 Mindboggle-101 dans ANTsTorch"), this port does NOT include:
@@ -35,6 +36,9 @@ from .data import (
     resolve_data_dir,
 )
 from .evaluate import (
+    DEFAULT_REG_ITERATIONS,
+    DEFAULT_REGISTRATION_LEVELS,
+    DEFAULT_REGISTRATION_SMOOTHING_SIGMAS,
     clean_device_cache,
     evaluate_mindboggle_pair,
     evaluate_pair,
@@ -50,6 +54,9 @@ __all__ = [
     "DEFAULT_DATA_DIR",
     "DEFAULT_DATA_DIR_ENV",
     "DEFAULT_PAIRS_CSV",
+    "DEFAULT_REG_ITERATIONS",
+    "DEFAULT_REGISTRATION_LEVELS",
+    "DEFAULT_REGISTRATION_SMOOTHING_SIGMAS",
     "MINDBOGGLE_SETUP_INSTRUCTIONS",
     "check_mindboggle_data",
     "get_n4_cached_subject_volume",

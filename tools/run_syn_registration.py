@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run ANTsTorch greedy symmetric SyN registration on the ANTs r30/r27 images.
 
-Sibling script to ``tools/run_bspline_svf_registration.py``, built as closely
+Sibling script to ``tools/run_svf_registration.py``, built as closely
 as possible to the same CLI shape and output-artifact conventions, but using
 :func:`antstorch.syn.syn_registration` -- the affine+SyN framework -- instead
 of :func:`antstorch.bspline_flows.bspline_svf_registration`. Two differences
@@ -10,11 +10,11 @@ here:
 
 - ``syn_registration`` accepts and returns ``ants.ANTsImage`` objects (and
   ANTs transform-file paths) directly, so none of
-  ``run_bspline_svf_registration.py``'s manual ANTsPy<->PyTorch tensor
+  ``run_svf_registration.py``'s manual ANTsPy<->PyTorch tensor
   conversion helpers are needed here.
 - The default ``--type-of-transform SyN`` already fits an affine
   initialization internally before the dense deformable stage -- unlike
-  ``run_bspline_svf_registration.py``, whose default run is SVF-only unless
+  ``run_svf_registration.py``, whose default run is SVF-only unless
   ``--affine`` is passed. This matches ``syn_registration()``'s own default
   (and ``ants.registration()``'s), so it is kept rather than special-cased
   away; pass ``--type-of-transform SyNOnly`` for the closest behavioral
@@ -37,7 +37,7 @@ Use the local ANTs neighborhood-correlation metric for the dense SyN stage::
         --syn-metric cc --neighborhood-radius 2 --verbose
 
 Run the dense SyN stage alone, with no affine initialization (closest analog
-of ``run_bspline_svf_registration.py``'s own default)::
+of ``run_svf_registration.py``'s own default)::
 
     PYTHONPATH=. python tools/run_syn_registration.py \
         --type-of-transform SyNOnly --verbose

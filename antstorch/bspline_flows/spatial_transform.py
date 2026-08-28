@@ -49,7 +49,7 @@ def affine_displacement_field(matrix: Tensor, translation: Tensor, domain: Image
     displacement convention used throughout this module — directly usable
     with :func:`warp_image` and :func:`compose_displacements`, and as the
     ``initial_affine`` argument of
-    :func:`antstorch.bspline_flows.registration.bspline_svf_registration`.
+    :func:`antstorch.bspline_flows.bspline_svf_registration.bspline_svf_registration`.
 
     Parameters
     ----------
@@ -172,4 +172,3 @@ def folding_count(displacement: Tensor, domain: ImageDomain) -> Tensor:
     """Number of non-positive Jacobian determinants in each batch item."""
     determinant = jacobian_determinant(displacement, domain)
     return (determinant <= 0).flatten(start_dim=1).sum(dim=1)
-

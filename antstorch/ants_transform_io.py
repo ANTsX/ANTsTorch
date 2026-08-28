@@ -116,7 +116,7 @@ def read_affine_transform(filename: str, dim: int) -> Tuple[np.ndarray, np.ndarr
     ``antstorch``'s own ``(matrix, translation)`` convention — e.g. handing
     a pre-computed ``.mat`` affine (such as ``syntx.robust_affine``'s
     output) to :func:`antstorch.syn.syn_registration`'s or
-    :func:`antstorch.bspline_flows.registration.bspline_svf_registration`'s
+    :func:`antstorch.bspline_flows.bspline_svf_registration.bspline_svf_registration`'s
     ``initial_affine`` parameter, both of which expect this exact
     ``(matrix, translation)`` ITK-order pair.
 

@@ -1,8 +1,8 @@
 """End-to-end tests for antstorch.benchmark.evaluate.evaluate_mindboggle_pair()
-against a tiny synthetic Mindboggle-style pair, covering all 5 ANTsTorch-native
+against a tiny synthetic Mindboggle-style pair, covering all 6 ANTsTorch-native
 model variants (gaussian_syn/sobolev_syn/dsti_syn/bspline_syn -- the four
 antstorch.syn.syn_registration() regularizers, dense-SyN-stage only -- plus
-bspline_svf, a different transformation family). Runs the real
+bspline_svf and gaussian_svf, two stationary-velocity families). Runs the real
 registration/metric pipeline (no mocking) on a small volume so wall-clock
 time stays low."""
 import os
@@ -10,7 +10,11 @@ import os
 import numpy as np
 import pytest
 
-from antstorch.benchmark.evaluate import evaluate_mindboggle_pair, evaluate_pair
+from antstorch.benchmark.evaluate import DEFAULT_REG_ITERATIONS, evaluate_mindboggle_pair, evaluate_pair
+
+
+def test_all_models_share_default_iteration_schedule():
+    assert DEFAULT_REG_ITERATIONS == (100, 100, 50, 10)
 
 
 def _assert_valid_success_record(rec, model):
@@ -42,7 +46,7 @@ def test_evaluate_mindboggle_pair_syn_regularizers(mock_mindboggle_dataset, tmp_
         data_dir=data_dir,
         canonical_affine_dir=str(tmp_path / "canonical_affines"),
         use_n4=False,
-        reg_iterations=[4, 4, 2],
+        reg_iterations=[2, 2, 1, 1],
     )
     _assert_valid_success_record(rec, model)
 
@@ -65,9 +69,27 @@ def test_evaluate_mindboggle_pair_bspline_svf(mock_mindboggle_dataset, tmp_path)
         data_dir=data_dir,
         canonical_affine_dir=str(tmp_path / "canonical_affines"),
         use_n4=False,
-        reg_iterations=[3, 3, 3],
+        reg_iterations=[1, 1, 1, 1],
     )
     _assert_valid_success_record(rec, "bspline_svf")
+
+
+def test_evaluate_mindboggle_pair_gaussian_svf(mock_mindboggle_dataset, tmp_path):
+    pairs_csv, data_dir = mock_mindboggle_dataset
+    rec = evaluate_mindboggle_pair(
+        pair_idx=0,
+        model="gaussian_svf",
+        device="cpu",
+        pairs_csv=pairs_csv,
+        data_dir=data_dir,
+        canonical_affine_dir=str(tmp_path / "canonical_affines"),
+        use_n4=False,
+        reg_iterations=[1, 1, 1, 1],
+        update_field_sigma=1.0,
+        total_field_sigma=0.25,
+        squaring_steps=2,
+    )
+    _assert_valid_success_record(rec, "gaussian_svf")
 
 
 def test_evaluate_pair_is_an_alias_for_evaluate_mindboggle_pair():
@@ -101,7 +123,7 @@ def test_evaluate_mindboggle_pair_shares_canonical_affine_across_models(mock_min
         pair_idx=0, model="gaussian_syn", device="cpu",
         pairs_csv=pairs_csv, data_dir=data_dir,
         canonical_affine_dir=canonical_affine_dir, use_n4=False,
-        reg_iterations=[4, 4, 2],
+        reg_iterations=[2, 2, 1, 1],
     )
     affine_path = os.path.join(canonical_affine_dir, "pair_000_0GenericAffine.mat")
     assert os.path.exists(affine_path)
@@ -111,7 +133,7 @@ def test_evaluate_mindboggle_pair_shares_canonical_affine_across_models(mock_min
         pair_idx=0, model="sobolev_syn", device="cpu",
         pairs_csv=pairs_csv, data_dir=data_dir,
         canonical_affine_dir=canonical_affine_dir, use_n4=False,
-        reg_iterations=[4, 4, 2],
+        reg_iterations=[2, 2, 1, 1],
     )
     assert os.path.getmtime(affine_path) == mtime_after_first
     assert rec1["affine_dice_sym"] == pytest.approx(rec2["affine_dice_sym"], abs=1e-9)

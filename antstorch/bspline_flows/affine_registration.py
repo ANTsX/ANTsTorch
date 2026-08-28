@@ -13,7 +13,7 @@ convention anywhere (unlike syntx's own affine machinery, which is built
 around that convention). The estimated affine is returned as a plain
 ``(matrix, translation)`` physical-space pair, directly usable both
 standalone and as the ``initial_affine`` argument of
-:func:`antstorch.bspline_flows.registration.bspline_svf_registration`.
+:func:`antstorch.bspline_flows.bspline_svf_registration.bspline_svf_registration`.
 
 Robustness against 180-degree "flip" local minima — the main practical
 failure mode of a naive single-start affine fit, and the core value
@@ -36,7 +36,7 @@ from torch import Tensor
 from antstorch.syn.core.affine import HierarchicalAffine, get_rotation_matrix
 
 from .bspline_domain import ImageDomain
-from .registration import _downsample, _pyramid_configuration, _smooth_image
+from .bspline_svf_registration import _downsample, _pyramid_configuration, _smooth_image
 from .similarity import (
     ants_neighborhood_correlation_loss,
     mean_squared_error,
@@ -193,7 +193,7 @@ def affine_registration(
     """Estimate a physical-space affine transform aligning ``moving`` onto ``fixed``.
 
     Images have shape ``(N, C, Y, X)`` or ``(N, C, Z, Y, X)``, exactly as in
-    :func:`antstorch.bspline_flows.registration.bspline_svf_registration`; each batch
+    :func:`antstorch.bspline_flows.bspline_svf_registration.bspline_svf_registration`; each batch
     item is fit an independent affine transform (mirroring that function's
     per-batch-item coefficient lattices).
 
@@ -247,7 +247,7 @@ def affine_registration(
         give the fitted physical-space affine map
         ``p_moving = matrix @ p_fixed + translation`` per batch item — the
         pair to pass as ``initial_affine=(matrix, translation)`` to
-        :func:`antstorch.bspline_flows.registration.bspline_svf_registration`.
+        :func:`antstorch.bspline_flows.bspline_svf_registration.bspline_svf_registration`.
         ``warpedmovout`` is ``moving`` warped onto the fixed grid by this
         affine alone. ``fwdtransforms``/``invtransforms`` are the
         corresponding dense physical displacement fields (same convention as

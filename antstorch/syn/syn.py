@@ -36,7 +36,7 @@ raw speed), this port lets PyTorch autograd differentiate the similarity
 loss directly with respect to the two half-warps as leaf tensors each
 iteration. This is mathematically equivalent for the metrics implemented
 here (the same midpoint images, the same loss), simpler to verify, and
-consistent with how :func:`antstorch.bspline_flows.registration.bspline_svf_registration`
+consistent with how :func:`antstorch.bspline_flows.bspline_svf_registration.bspline_svf_registration`
 itself already differentiates through its objective by full backpropagation
 rather than a hand-derived gradient. A second, explicitly out-of-scope
 simplification: the per-level divergence-retry-with-halved-CFL step described
@@ -611,11 +611,11 @@ def syn_registration(
     **Defaults:** ``update_field_mesh_size_at_base_level`` defaults to
     ``None``, which (when neither it nor ``update_field_spline_distance``
     is given) resolves to a physical spline distance of
-    :data:`antstorch.bspline_flows.registration.DEFAULT_BSPLINE_SPLINE_DISTANCE_MM`
+    :data:`antstorch.bspline_flows.bspline_svf_registration.DEFAULT_BSPLINE_SPLINE_DISTANCE_MM`
     (26 mm) -- exactly as if ``update_field_spline_distance=26.0`` had been
     passed -- *not* ITK's own literal class default of ``1`` (4 control
     points), which this function used before 2026-08-26. This is the same
-    default :func:`antstorch.bspline_flows.registration.bspline_svf_registration`
+    default :func:`antstorch.bspline_flows.bspline_svf_registration.bspline_svf_registration`
     now uses for its own ``mesh_size``/``spline_distance``, so the two
     registration frameworks' B-spline density defaults agree without either
     caller specifying anything. ``total_field_mesh_size_at_base_level``
@@ -633,7 +633,7 @@ def syn_registration(
 
     ``levels``/``reg_iterations`` define the multi-resolution pyramid
     (coarse to fine, e.g. ``levels=(4, 2, 1)``); unlike
-    :func:`antstorch.bspline_flows.registration.bspline_svf_registration`'s
+    :func:`antstorch.bspline_flows.bspline_svf_registration.bspline_svf_registration`'s
     ``shrink_factors``, this pyramid need not be a strict dyadic halving.
 
     Returns
@@ -827,7 +827,7 @@ def syn_registration(
         )
         if need_domain:
             from antstorch.bspline_flows import mesh_size_for_spline_distance
-            from antstorch.bspline_flows.registration import DEFAULT_BSPLINE_SPLINE_DISTANCE_MM
+            from antstorch.bspline_flows.bspline_svf_registration import DEFAULT_BSPLINE_SPLINE_DISTANCE_MM
 
             fixed_domain_full = image_domain_from_metadata(fixed_meta_full)
             if update_field_spline_distance is not None:
@@ -880,7 +880,7 @@ def syn_registration(
             )
             if regularizer == "bspline":
                 # Mirrors bspline_svf_registration()'s own verbose control-point
-                # reporting (antstorch/bspline_flows/registration.py) -- same
+                # reporting (antstorch/bspline_flows/bspline_svf_registration.py) -- same
                 # mesh_size -> control_points = mesh_size + spline_order
                 # relationship (cubic spline order, this package's only
                 # supported order), doubled from the base level exactly as

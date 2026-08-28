@@ -279,7 +279,7 @@ def test_syn_registration_bspline_default_resolves_to_26mm_spline_distance():
     # default -- and matches bspline_svf_registration()'s own new default
     # (same DEFAULT_BSPLINE_SPLINE_DISTANCE_MM constant).
     from antstorch.bspline_flows import mesh_size_for_spline_distance
-    from antstorch.bspline_flows.registration import DEFAULT_BSPLINE_SPLINE_DISTANCE_MM
+    from antstorch.bspline_flows.bspline_svf_registration import DEFAULT_BSPLINE_SPLINE_DISTANCE_MM
     from antstorch.syn.bridge import ants_image_metadata, image_domain_from_metadata
 
     assert DEFAULT_BSPLINE_SPLINE_DISTANCE_MM == 26.0
@@ -335,7 +335,7 @@ def test_syn_registration_rejects_negative_bspline_mesh_sizes():
 
 def test_syn_registration_verbose_bspline_regularizer_reports_control_points(capsys):
     # Mirrors bspline_svf_registration()'s own verbose control-point reporting
-    # (antstorch/bspline_flows/registration.py): same mesh_size -> control_points
+    # (antstorch/bspline_flows/bspline_svf_registration.py): same mesh_size -> control_points
     # = mesh_size + 3 relationship (cubic spline order), doubled from the base
     # level at each finer pyramid level exactly as _fit_syn_level itself doubles
     # it before regularizing. update_field_mesh_size_at_base_level=2 with

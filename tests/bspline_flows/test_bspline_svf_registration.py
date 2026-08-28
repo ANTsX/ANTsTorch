@@ -399,7 +399,7 @@ def test_registration_spline_distance_matches_shared_utility(capsys):
 def test_registration_default_mesh_size_is_none_sentinel():
     import inspect
 
-    from antstorch.bspline_flows.registration import bspline_svf_registration as _fn
+    from antstorch.bspline_flows.bspline_svf_registration import bspline_svf_registration as _fn
 
     assert inspect.signature(_fn).parameters["mesh_size"].default is None
 
@@ -410,7 +410,7 @@ def test_registration_default_resolves_to_26mm_spline_distance(capsys):
     # soit 26 mm"), this now resolves exactly as if spline_distance=26.0 had
     # been passed, replacing the old literal mesh_size=1 default.
     from antstorch.bspline_flows import mesh_size_for_spline_distance
-    from antstorch.bspline_flows.registration import DEFAULT_BSPLINE_SPLINE_DISTANCE_MM
+    from antstorch.bspline_flows.bspline_svf_registration import DEFAULT_BSPLINE_SPLINE_DISTANCE_MM
 
     assert DEFAULT_BSPLINE_SPLINE_DISTANCE_MM == 26.0
 

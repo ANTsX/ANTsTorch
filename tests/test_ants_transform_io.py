@@ -2,7 +2,7 @@
 read_affine_transform() -- the exact inverse of write_affine_transform(),
 needed so an on-disk canonical affine (e.g. syntx's shared per-pair
 robust_affine() .mat file) can be fed to antstorch.syn.syn_registration()'s
-and antstorch.bspline_flows.registration.bspline_svf_registration()'s
+and antstorch.bspline_flows.bspline_svf_registration.bspline_svf_registration()'s
 initial_affine parameter.
 """
 import numpy as np
