@@ -18,10 +18,12 @@ B-spline regularizer), plus gaussian_svf and bspline_svf (dense Gaussian and
 B-spline-parameterized stationary velocity fields -- the '_syn' vs. '_svf'
 suffixes are deliberate disambiguation, not decoration) -- 36 registrations
 total.
-Results are written as JSON plus a plain-text summary table; the canonical
-affine per pair is fit once and cached to disk, then reused across every
-model variant for that pair (the fairness invariant the harness preserves
-from syntx.benchmark).
+Results are written as JSON plus a plain-text summary table. Registration
+artifacts are kept under ``OUTPUT_DIR/pair_XXX/MODEL/``: the warped moving
+image, affine transform, and forward/inverse displacement fields. The
+canonical affine per pair is fit once and cached to disk, then reused across
+every model variant for that pair (the fairness invariant the harness
+preserves from syntx.benchmark).
 
 Example
 -------
@@ -84,7 +86,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--models", nargs="+", default=list(DEFAULT_MODELS), choices=list(DEFAULT_MODELS) + ["svf"], help="Model variants to run per pair")
     parser.add_argument("--device", default=None, help="PyTorch device: cpu, cuda, or mps (default: auto-detected)")
     parser.add_argument("--canonical-affine-dir", default="results/canonical_affines", help="Per-pair canonical affine cache, shared across models")
-    parser.add_argument("--output-dir", type=Path, default=Path("benchmark_probe_output"))
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("benchmark_probe_output"),
+        help="JSON and persistent pair/model registration artifacts",
+    )
     parser.add_argument("--reg-iterations", type=int, nargs="+", default=None, help="Override the default iteration schedule for every model")
     parser.add_argument("--no-n4", action="store_false", dest="use_n4", help="Skip ANTsTorch's own N4 bias-field correction/caching")
     parser.add_argument("--check-only", action="store_true", help="Only run check_mindboggle_data() and print the report, then exit")
@@ -128,6 +135,9 @@ def main() -> None:
                     canonical_affine_dir=args.canonical_affine_dir,
                     verbose=args.verbose,
                     use_n4=args.use_n4,
+                    registration_output_dir=str(
+                        args.output_dir / f"pair_{pair_idx:03d}" / model
+                    ),
                     **kwargs,
                 )
                 elapsed = time.time() - t0

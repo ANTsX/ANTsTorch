@@ -76,6 +76,7 @@ def test_evaluate_mindboggle_pair_bspline_svf(mock_mindboggle_dataset, tmp_path)
 
 def test_evaluate_mindboggle_pair_gaussian_svf(mock_mindboggle_dataset, tmp_path):
     pairs_csv, data_dir = mock_mindboggle_dataset
+    registration_output_dir = tmp_path / "pair_000" / "gaussian_svf"
     rec = evaluate_mindboggle_pair(
         pair_idx=0,
         model="gaussian_svf",
@@ -83,6 +84,7 @@ def test_evaluate_mindboggle_pair_gaussian_svf(mock_mindboggle_dataset, tmp_path
         pairs_csv=pairs_csv,
         data_dir=data_dir,
         canonical_affine_dir=str(tmp_path / "canonical_affines"),
+        registration_output_dir=str(registration_output_dir),
         use_n4=False,
         reg_iterations=[1, 1, 1, 1],
         update_field_sigma=1.0,
@@ -90,6 +92,12 @@ def test_evaluate_mindboggle_pair_gaussian_svf(mock_mindboggle_dataset, tmp_path
         squaring_steps=2,
     )
     _assert_valid_success_record(rec, "gaussian_svf")
+    assert rec["warped_moving"] == str(registration_output_dir / "warped_moving.nii.gz")
+    assert os.path.exists(rec["warped_moving"])
+    assert os.path.exists(registration_output_dir / "registration_0GenericAffine.mat")
+    assert os.path.exists(registration_output_dir / "registration_1Warp.nii.gz")
+    assert os.path.exists(registration_output_dir / "registration_1InverseWarp.nii.gz")
+    assert all(str(registration_output_dir) in path for path in rec["transforms"]["fwdtransforms"])
 
 
 def test_evaluate_pair_is_an_alias_for_evaluate_mindboggle_pair():

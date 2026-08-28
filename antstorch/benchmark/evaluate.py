@@ -126,7 +126,7 @@ def _run_bspline_svf(fi, mi, matrix, translation, *, device, reg_iterations=None
                       mesh_size=None, spline_distance=None, learning_rate=0.01,
                       optimizer="physical_gradient_descent",
                       gradient_step=0.2, similarity="ants_ncc", neighborhood_radius=4,
-                      verbose=False) -> Dict[str, Any]:
+                      outprefix=None, verbose=False) -> Dict[str, Any]:
     """Adapts ``bspline_flows.bspline_svf_registration()``'s in-memory tensor
     output into the file-based ``fwdtransforms``/``invtransforms``/
     ``warpedmovout`` contract the rest of this module expects — the same
@@ -190,7 +190,7 @@ def _run_bspline_svf(fi, mi, matrix, translation, *, device, reg_iterations=None
         verbose=verbose,
     )
 
-    outprefix = default_outprefix()
+    outprefix = outprefix or default_outprefix()
     warp_path = f"{outprefix}1Warp.nii.gz"
     inverse_warp_path = f"{outprefix}1InverseWarp.nii.gz"
     affine_path = f"{outprefix}0GenericAffine.mat"
@@ -218,7 +218,7 @@ def _run_gaussian_svf(
     gradient_step=0.2, momentum=0.0, update_field_sigma=3.0,
     total_field_sigma=0.5, similarity="ants_ncc", neighborhood_radius=4,
     velocity_weight=0.0, bending_weight=0.0, squaring_steps=7,
-    verbose=False,
+    outprefix=None, verbose=False,
 ) -> Dict[str, Any]:
     """Adapt dense Gaussian SVF output to the benchmark transform contract."""
     from antstorch.ants_transform_io import build_transform_lists, default_outprefix, write_affine_transform
@@ -271,7 +271,7 @@ def _run_gaussian_svf(
         verbose=verbose,
     )
 
-    outprefix = default_outprefix()
+    outprefix = outprefix or default_outprefix()
     warp_path = f"{outprefix}1Warp.nii.gz"
     inverse_warp_path = f"{outprefix}1InverseWarp.nii.gz"
     affine_path = f"{outprefix}0GenericAffine.mat"
@@ -299,6 +299,7 @@ def evaluate_mindboggle_pair(
     verbose: bool = False,
     seed: int = 42,
     use_n4: bool = True,
+    registration_output_dir: Optional[str] = None,
     **kwargs,
 ) -> Dict[str, Any]:
     """Evaluates a single Mindboggle registration pair under the specified ANTsTorch model variant.
@@ -340,6 +341,9 @@ def evaluate_mindboggle_pair(
     use_n4 : bool, default=True
         If True, preprocesses input images with ANTsTorch's own N4 bias
         field correction (cached to disk under ``data_dir/.n4_cache``).
+    registration_output_dir : str, optional
+        Persistent directory for the warped image and ANTs transform files.
+        If omitted, the historical temporary transform prefix is retained.
     **kwargs
         Model-specific overrides, forwarded to the underlying registration
         call. Common ones: ``reg_iterations``, ``grad_step``, ``levels``
@@ -389,6 +393,10 @@ def evaluate_mindboggle_pair(
     # 3. Deformable Registration
     t0_reg = time.time()
     model_lower = str(model).lower()
+    registration_outprefix = None
+    if registration_output_dir is not None:
+        os.makedirs(registration_output_dir, exist_ok=True)
+        registration_outprefix = os.path.join(registration_output_dir, "registration_")
 
     reg_iters = kwargs.get("reg_iterations", DEFAULT_REG_ITERATIONS)
 
@@ -403,6 +411,8 @@ def evaluate_mindboggle_pair(
             verbose=verbose,
             levels=kwargs.get("levels", DEFAULT_REGISTRATION_LEVELS),
         )
+        if registration_outprefix is not None:
+            syn_kwargs["outprefix"] = registration_outprefix
         syn_kwargs["reg_iterations"] = reg_iters
         for key in (
             "levels", "grad_step", "flow_sigma", "total_sigma",
@@ -428,7 +438,10 @@ def evaluate_mindboggle_pair(
             "learning_rate", "optimizer", "gradient_step", "similarity", "neighborhood_radius",
         )}
         svf_kwargs["reg_iterations"] = reg_iters
-        res_reg = _run_bspline_svf(fi, mi, matrix, translation, device=device, verbose=verbose, **svf_kwargs)
+        res_reg = _run_bspline_svf(
+            fi, mi, matrix, translation, device=device, outprefix=registration_outprefix,
+            verbose=verbose, **svf_kwargs
+        )
     elif model_lower in _GAUSSIAN_SVF_MODELS:
         svf_kwargs = {k: v for k, v in kwargs.items() if k in (
             "reg_iterations", "shrink_factors", "smoothing_sigmas", "gradient_step",
@@ -437,7 +450,8 @@ def evaluate_mindboggle_pair(
         )}
         svf_kwargs["reg_iterations"] = reg_iters
         res_reg = _run_gaussian_svf(
-            fi, mi, matrix, translation, device=device, verbose=verbose, **svf_kwargs
+            fi, mi, matrix, translation, device=device, outprefix=registration_outprefix,
+            verbose=verbose, **svf_kwargs
         )
     else:
         raise ValueError(
@@ -446,6 +460,11 @@ def evaluate_mindboggle_pair(
         )
 
     t_reg = time.time() - t0_reg + t_aff
+
+    warped_image_path = None
+    if registration_output_dir is not None:
+        warped_image_path = os.path.join(registration_output_dir, "warped_moving.nii.gz")
+        ants.image_write(res_reg["warpedmovout"], warped_image_path)
 
     # 4. Evaluate Structural and Topological Metrics
     fwd_tx = res_reg["fwdtransforms"]
@@ -477,6 +496,7 @@ def evaluate_mindboggle_pair(
             "invtransforms": [str(x) for x in inv_tx],
             "whichtoinvert_inv": which_inv,
         },
+        "warped_moving": warped_image_path,
     }
 
     clean_device_cache()
