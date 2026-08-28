@@ -6,7 +6,8 @@ harness's *core* into ANTsTorch itself: single-pair evaluation, dataset
 loading, and the accuracy/topology metrics, restricted to registration arms
 that come from ANTsTorch itself (``antstorch.syn.syn_registration()``'s four
 regularizers -- ``'gaussian'``, ``'sobolev'``, ``'dsti'``, ``'bspline'`` --
-plus ``antstorch.bspline_flows.bspline_svf_registration()``).
+plus ``antstorch.bspline_flows.bspline_svf_registration()`` and
+``gaussian_svf_registration()``).
 
 By explicit scope decision (see the project doc, "Portage de l'evaluation
 Mindboggle-101 dans ANTsTorch"), this port does NOT include:

@@ -15,6 +15,8 @@ decision, to registration arms that come from ANTsTorch itself:
   "bspline".
 - ``antstorch.bspline_flows.bspline_svf_registration()`` — the cubic
   B-spline stationary-velocity-field model (``'bspline_svf'``/``'svf'``).
+- ``antstorch.bspline_flows.gaussian_svf_registration()`` — the dense
+  Gaussian-regularized stationary-velocity-field model (``'gaussian_svf'``).
 
 This intentionally omits the ``syntx``-only capabilities the earlier
 extension of ``syntx.benchmark`` (see ``syntx.benchmark.antstorch_arms``)
@@ -58,6 +60,7 @@ _SYN_REGULARIZERS = {
     "bspline_syn": "bspline",
 }
 _BSPLINE_SVF_MODELS = ("bspline_svf", "svf")
+_GAUSSIAN_SVF_MODELS = ("gaussian_svf",)
 
 
 def clean_device_cache():
@@ -203,6 +206,83 @@ def _run_bspline_svf(fi, mi, matrix, translation, *, device, reg_iterations=None
     }
 
 
+def _run_gaussian_svf(
+    fi, mi, matrix, translation, *, device, reg_iterations=None,
+    shrink_factors=(4, 2, 1), smoothing_sigmas=(2.0, 1.0, 0.0),
+    gradient_step=0.2, momentum=0.0, update_field_sigma=3.0,
+    total_field_sigma=0.5, similarity="ants_ncc", neighborhood_radius=4,
+    velocity_weight=0.0, bending_weight=0.0, squaring_steps=7,
+    verbose=False,
+) -> Dict[str, Any]:
+    """Adapt dense Gaussian SVF output to the benchmark transform contract."""
+    from antstorch.ants_transform_io import build_transform_lists, default_outprefix, write_affine_transform
+    from antstorch.bspline_flows import ImageDomain, PhysicalGradientDescent, gaussian_svf_registration
+    from antstorch.syn.bridge import (
+        ants_image_metadata,
+        ants_image_to_tensor,
+        displacement_xyz_to_ants_image,
+        tensor_to_ants_image,
+    )
+
+    resolved_device = torch.device(device)
+    dtype = torch.float32
+    dimension = fi.dimension
+    matrix = matrix.to(device=resolved_device, dtype=dtype)
+    translation = translation.to(device=resolved_device, dtype=dtype)
+    fixed_meta = ants_image_metadata(fi)
+    moving_meta = ants_image_metadata(mi)
+    fixed_domain = ImageDomain(
+        fixed_meta["shape"], fixed_meta["spacing"], fixed_meta["origin"], fixed_meta["direction"]
+    )
+    moving_domain = ImageDomain(
+        moving_meta["shape"], moving_meta["spacing"], moving_meta["origin"], moving_meta["direction"]
+    )
+    fixed_tensor = ants_image_to_tensor(fi, resolved_device, dtype, normalize=True)
+    moving_tensor = ants_image_to_tensor(mi, resolved_device, dtype, normalize=True)
+    iterations = list(reg_iterations) if reg_iterations is not None else [100, 100, 20]
+    if len(iterations) != len(shrink_factors):
+        raise ValueError("reg_iterations must have one value per shrink factor")
+
+    result = gaussian_svf_registration(
+        fixed=fixed_tensor,
+        moving=moving_tensor,
+        fixed_domain=fixed_domain,
+        moving_domain=moving_domain,
+        shrink_factors=tuple(shrink_factors),
+        smoothing_sigmas=tuple(smoothing_sigmas),
+        iterations=iterations,
+        optimizer=PhysicalGradientDescent(gradient_step=gradient_step, momentum=momentum),
+        update_field_sigma=update_field_sigma,
+        total_field_sigma=total_field_sigma,
+        similarity=similarity,
+        neighborhood_radius=neighborhood_radius,
+        velocity_weight=velocity_weight,
+        bending_weight=bending_weight,
+        squaring_steps=squaring_steps,
+        initial_affine=(matrix, translation),
+        padding_mode="border",
+        stationary_boundary=True,
+        verbose=verbose,
+    )
+
+    outprefix = default_outprefix()
+    warp_path = f"{outprefix}1Warp.nii.gz"
+    inverse_warp_path = f"{outprefix}1InverseWarp.nii.gz"
+    affine_path = f"{outprefix}0GenericAffine.mat"
+    ants.image_write(displacement_xyz_to_ants_image(result["fwdtransforms"], fi), warp_path)
+    ants.image_write(displacement_xyz_to_ants_image(result["invtransforms"], fi), inverse_warp_path)
+    write_affine_transform(matrix.detach().cpu(), translation.detach().cpu(), dimension, affine_path)
+    fwdtransforms, invtransforms = build_transform_lists(
+        affine_path=affine_path, warp_path=warp_path, inverse_warp_path=inverse_warp_path
+    )
+    return {
+        "warpedmovout": tensor_to_ants_image(result["warpedmovout"], fi),
+        "fwdtransforms": fwdtransforms,
+        "invtransforms": invtransforms,
+        "whichtoinvert_inv": [True, False],
+    }
+
+
 def evaluate_mindboggle_pair(
     pair_idx: int = 0,
     model: str = "sobolev",
@@ -228,11 +308,12 @@ def evaluate_mindboggle_pair(
         type_of_transform="SyNOnly", regularizer=..., initial_affine=...)``
         -- the canonical affine already fit for this pair is supplied
         directly, so only the fluid/B-spline regularizer differs between
-        them), or ``'bspline_svf'``/``'svf'`` (dispatches to
+        them), ``'bspline_svf'``/``'svf'`` (dispatches to
         ``antstorch.bspline_flows.bspline_svf_registration()`` -- a
         different transformation family, a stationary velocity field, not a
         SyN variant despite ``'bspline_syn'``/``'bspline_svf'`` sharing the
-        word "bspline").
+        word "bspline"), or ``'gaussian_svf'`` (the corresponding dense
+        stationary-velocity model with Gaussian update/total-field smoothing).
     device : str, optional
         Compute device ('mps', 'cuda', 'cpu'). If None, automatically detected.
     pairs_csv : str, optional
@@ -260,7 +341,9 @@ def evaluate_mindboggle_pair(
         ``total_sigma`` (gaussian_syn/sobolev_syn/dsti_syn); ``update_field_mesh_size_at_base_level``/
         ``total_field_mesh_size_at_base_level``/``update_field_spline_distance``/
         ``total_field_spline_distance`` (bspline_syn); ``shrink_factors``/
-        ``smoothing_sigmas``/``mesh_size``/``spline_distance`` (bspline_svf).
+        ``smoothing_sigmas``/``mesh_size``/``spline_distance`` (bspline_svf);
+        ``update_field_sigma``/``total_field_sigma``/``momentum``
+        (gaussian_svf).
         When neither a mesh-size nor a spline-distance override is given for
         either bspline variant, both now default to the same 26 mm physical
         spline distance (:data:`antstorch.bspline_flows.registration.
@@ -339,10 +422,19 @@ def evaluate_mindboggle_pair(
             "learning_rate", "optimizer", "gradient_step", "similarity", "neighborhood_radius",
         )}
         res_reg = _run_bspline_svf(fi, mi, matrix, translation, device=device, verbose=verbose, **svf_kwargs)
+    elif model_lower in _GAUSSIAN_SVF_MODELS:
+        svf_kwargs = {k: v for k, v in kwargs.items() if k in (
+            "reg_iterations", "shrink_factors", "smoothing_sigmas", "gradient_step",
+            "momentum", "update_field_sigma", "total_field_sigma", "similarity",
+            "neighborhood_radius", "velocity_weight", "bending_weight", "squaring_steps",
+        )}
+        res_reg = _run_gaussian_svf(
+            fi, mi, matrix, translation, device=device, verbose=verbose, **svf_kwargs
+        )
     else:
         raise ValueError(
             f"Unknown registration model: '{model}'. Supported: "
-            f"{sorted(set(_SYN_REGULARIZERS) | set(_BSPLINE_SVF_MODELS))}"
+            f"{sorted(set(_SYN_REGULARIZERS) | set(_BSPLINE_SVF_MODELS) | set(_GAUSSIAN_SVF_MODELS))}"
         )
 
     t_reg = time.time() - t0_reg + t_aff

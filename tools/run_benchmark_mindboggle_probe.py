@@ -11,12 +11,13 @@ tools/run_bspline_svf_registration.py, not a re-introduction of the ported-out
 orchestrator (no resume, no cache, no parallel dispatch).
 
 By default it evaluates the same 6-pair probe subset used elsewhere in this
-project's history ({0, 1, 2, 45, 67, 82}) across all 5 ANTsTorch model
+project's history ({0, 1, 2, 45, 67, 82}) across all 6 ANTsTorch model
 variants -- gaussian_syn, sobolev_syn, dsti_syn, bspline_syn (all four the
 dense antstorch.syn.syn_registration() SyN stage, differing only in fluid/
-B-spline regularizer), plus bspline_svf (a different transformation family
-entirely, a stationary velocity field -- the '_syn' vs. '_svf' suffixes are
-deliberate disambiguation, not decoration) -- 30 registrations total.
+B-spline regularizer), plus gaussian_svf and bspline_svf (dense Gaussian and
+B-spline-parameterized stationary velocity fields -- the '_syn' vs. '_svf'
+suffixes are deliberate disambiguation, not decoration) -- 36 registrations
+total.
 Results are written as JSON plus a plain-text summary table; the canonical
 affine per pair is fit once and cached to disk, then reused across every
 model variant for that pair (the fairness invariant the harness preserves
@@ -29,18 +30,18 @@ First, just check the dataset is where the harness expects it::
     PYTHONPATH=. python tools/run_benchmark_mindboggle_probe.py --check-only \\
         --data-dir /Users/ntustison/Data/Public/Mindboggle/Volumes
 
-Run the default 6-pair x 5-model probe (uses ANTSTORCH_MINDBOGGLE_DATA_DIR
+Run the default 6-pair x 6-model probe (uses ANTSTORCH_MINDBOGGLE_DATA_DIR
 if set, otherwise pass --data-dir explicitly)::
 
     PYTHONPATH=. python tools/run_benchmark_mindboggle_probe.py \\
         --data-dir /Users/ntustison/Data/Public/Mindboggle/Volumes \\
         --device mps --verbose
 
-Run just two models on a couple of pairs, with a faster iteration schedule
+Run just three models on a couple of pairs, with a faster iteration schedule
 for a quick smoke test before committing to the full probe::
 
     PYTHONPATH=. python tools/run_benchmark_mindboggle_probe.py \\
-        --pair-idx 0 1 --models gaussian_syn bspline_svf \\
+        --pair-idx 0 1 --models gaussian_syn gaussian_svf bspline_svf \\
         --reg-iterations 20 20 10 --device mps
 
 Run the full 90-pair cohort (no resume/cache -- expect a long run; see the
@@ -63,7 +64,10 @@ from antstorch.benchmark import (
 )
 
 DEFAULT_PROBE_PAIRS = (0, 1, 2, 45, 67, 82)
-DEFAULT_MODELS = ("gaussian_syn", "sobolev_syn", "dsti_syn", "bspline_syn", "bspline_svf")
+DEFAULT_MODELS = (
+    "gaussian_syn", "sobolev_syn", "dsti_syn", "bspline_syn",
+    "gaussian_svf", "bspline_svf",
+)
 
 
 def parse_args() -> argparse.Namespace:
