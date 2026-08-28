@@ -7,7 +7,7 @@ doc, section 18): it has evaluate_mindboggle_pair() but deliberately no
 CLI and no cohort orchestrator (resume/cache/JSON aggregation across all 90
 pairs). This script is the standalone demo/driver that fills that gap for a
 first local run -- in the same spirit as tools/run_syn_registration.py and
-tools/run_bspline_svf_registration.py, not a re-introduction of the ported-out
+tools/run_svf_registration.py, not a re-introduction of the ported-out
 orchestrator (no resume, no cache, no parallel dispatch).
 
 By default it evaluates the same 6-pair probe subset used elsewhere in this
@@ -42,7 +42,7 @@ for a quick smoke test before committing to the full probe::
 
     PYTHONPATH=. python tools/run_benchmark_mindboggle_probe.py \\
         --pair-idx 0 1 --models gaussian_syn gaussian_svf bspline_svf \\
-        --reg-iterations 20 20 10 --device mps
+        --reg-iterations 20 20 10 5 --device mps
 
 Run the full 90-pair cohort (no resume/cache -- expect a long run; see the
 project doc's runtime note, roughly 40 minutes per model variant on MPS for

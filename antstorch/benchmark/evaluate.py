@@ -61,6 +61,10 @@ _SYN_REGULARIZERS = {
 }
 _BSPLINE_SVF_MODELS = ("bspline_svf", "svf")
 _GAUSSIAN_SVF_MODELS = ("gaussian_svf",)
+# One benchmark schedule for every transformation/regularizer family.
+DEFAULT_REG_ITERATIONS = (100, 100, 50, 10)
+DEFAULT_REGISTRATION_LEVELS = (8, 4, 2, 1)
+DEFAULT_REGISTRATION_SMOOTHING_SIGMAS = (3.0, 2.0, 1.0, 0.0)
 
 
 def clean_device_cache():
@@ -117,7 +121,8 @@ def _fit_or_load_canonical_affine(fi, mi, pair_idx, canonical_affine_dir, device
 
 
 def _run_bspline_svf(fi, mi, matrix, translation, *, device, reg_iterations=None,
-                      shrink_factors=(4, 2, 1), smoothing_sigmas=(2.0, 1.0, 0.0),
+                      shrink_factors=DEFAULT_REGISTRATION_LEVELS,
+                      smoothing_sigmas=DEFAULT_REGISTRATION_SMOOTHING_SIGMAS,
                       mesh_size=None, spline_distance=None, learning_rate=0.01,
                       optimizer="physical_gradient_descent",
                       gradient_step=0.2, similarity="ants_ncc", neighborhood_radius=4,
@@ -160,7 +165,7 @@ def _run_bspline_svf(fi, mi, matrix, translation, *, device, reg_iterations=None
     fixed_tensor = ants_image_to_tensor(fi, resolved_device, dtype, normalize=True)
     moving_tensor = ants_image_to_tensor(mi, resolved_device, dtype, normalize=True)
 
-    iterations = list(reg_iterations) if reg_iterations is not None else [100, 100, 20]
+    iterations = list(reg_iterations) if reg_iterations is not None else list(DEFAULT_REG_ITERATIONS)
     if len(iterations) != len(shrink_factors):
         raise ValueError("reg_iterations must have one value per shrink factor")
 
@@ -208,7 +213,8 @@ def _run_bspline_svf(fi, mi, matrix, translation, *, device, reg_iterations=None
 
 def _run_gaussian_svf(
     fi, mi, matrix, translation, *, device, reg_iterations=None,
-    shrink_factors=(4, 2, 1), smoothing_sigmas=(2.0, 1.0, 0.0),
+    shrink_factors=DEFAULT_REGISTRATION_LEVELS,
+    smoothing_sigmas=DEFAULT_REGISTRATION_SMOOTHING_SIGMAS,
     gradient_step=0.2, momentum=0.0, update_field_sigma=3.0,
     total_field_sigma=0.5, similarity="ants_ncc", neighborhood_radius=4,
     velocity_weight=0.0, bending_weight=0.0, squaring_steps=7,
@@ -239,7 +245,7 @@ def _run_gaussian_svf(
     )
     fixed_tensor = ants_image_to_tensor(fi, resolved_device, dtype, normalize=True)
     moving_tensor = ants_image_to_tensor(mi, resolved_device, dtype, normalize=True)
-    iterations = list(reg_iterations) if reg_iterations is not None else [100, 100, 20]
+    iterations = list(reg_iterations) if reg_iterations is not None else list(DEFAULT_REG_ITERATIONS)
     if len(iterations) != len(shrink_factors):
         raise ValueError("reg_iterations must have one value per shrink factor")
 
@@ -384,7 +390,7 @@ def evaluate_mindboggle_pair(
     t0_reg = time.time()
     model_lower = str(model).lower()
 
-    reg_iters = kwargs.get("reg_iterations")
+    reg_iters = kwargs.get("reg_iterations", DEFAULT_REG_ITERATIONS)
 
     if model_lower in _SYN_REGULARIZERS:
         regularizer = _SYN_REGULARIZERS[model_lower]
@@ -395,9 +401,9 @@ def evaluate_mindboggle_pair(
             regularizer=regularizer,
             device=device,
             verbose=verbose,
+            levels=kwargs.get("levels", DEFAULT_REGISTRATION_LEVELS),
         )
-        if reg_iters is not None:
-            syn_kwargs["reg_iterations"] = reg_iters
+        syn_kwargs["reg_iterations"] = reg_iters
         for key in (
             "levels", "grad_step", "flow_sigma", "total_sigma",
             "update_field_mesh_size_at_base_level", "total_field_mesh_size_at_base_level",
@@ -421,6 +427,7 @@ def evaluate_mindboggle_pair(
             "reg_iterations", "shrink_factors", "smoothing_sigmas", "mesh_size", "spline_distance",
             "learning_rate", "optimizer", "gradient_step", "similarity", "neighborhood_radius",
         )}
+        svf_kwargs["reg_iterations"] = reg_iters
         res_reg = _run_bspline_svf(fi, mi, matrix, translation, device=device, verbose=verbose, **svf_kwargs)
     elif model_lower in _GAUSSIAN_SVF_MODELS:
         svf_kwargs = {k: v for k, v in kwargs.items() if k in (
@@ -428,6 +435,7 @@ def evaluate_mindboggle_pair(
             "momentum", "update_field_sigma", "total_field_sigma", "similarity",
             "neighborhood_radius", "velocity_weight", "bending_weight", "squaring_steps",
         )}
+        svf_kwargs["reg_iterations"] = reg_iters
         res_reg = _run_gaussian_svf(
             fi, mi, matrix, translation, device=device, verbose=verbose, **svf_kwargs
         )

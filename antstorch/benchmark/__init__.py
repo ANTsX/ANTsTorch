@@ -36,6 +36,9 @@ from .data import (
     resolve_data_dir,
 )
 from .evaluate import (
+    DEFAULT_REG_ITERATIONS,
+    DEFAULT_REGISTRATION_LEVELS,
+    DEFAULT_REGISTRATION_SMOOTHING_SIGMAS,
     clean_device_cache,
     evaluate_mindboggle_pair,
     evaluate_pair,
@@ -51,6 +54,9 @@ __all__ = [
     "DEFAULT_DATA_DIR",
     "DEFAULT_DATA_DIR_ENV",
     "DEFAULT_PAIRS_CSV",
+    "DEFAULT_REG_ITERATIONS",
+    "DEFAULT_REGISTRATION_LEVELS",
+    "DEFAULT_REGISTRATION_SMOOTHING_SIGMAS",
     "MINDBOGGLE_SETUP_INSTRUCTIONS",
     "check_mindboggle_data",
     "get_n4_cached_subject_volume",
