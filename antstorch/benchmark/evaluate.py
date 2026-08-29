@@ -386,8 +386,12 @@ def evaluate_mindboggle_pair(
         If True, preprocesses input images with ANTsTorch's own N4 bias
         field correction (cached to disk under ``data_dir/.n4_cache``).
     registration_output_dir : str, optional
-        Persistent directory for the warped image and ANTs transform files.
-        If omitted, the historical temporary transform prefix is retained.
+        Persistent directory for the warped image, the warped moving label
+        map (``warped_moving_labels.nii.gz``, nearest-neighbor resampled
+        onto the fixed grid -- the same fixed-space warp
+        ``compute_bidirectional_dice()`` scores internally), and the ANTs
+        transform files. If omitted, the historical temporary transform
+        prefix is retained and no label map is written.
     **kwargs
         Model-specific overrides, forwarded to the underlying registration
         call. Common ones: ``reg_iterations``, ``grad_step``, ``levels``
@@ -515,6 +519,20 @@ def evaluate_mindboggle_pair(
     inv_tx = res_reg["invtransforms"]
     which_inv = res_reg.get("whichtoinvert_inv", [True, False])
 
+    # Persist the warped moving label map alongside warped_moving.nii.gz --
+    # the same fixed-space resampling of ml (nearestNeighbor, since labels
+    # are categorical) that compute_bidirectional_dice() below computes
+    # internally for its Dice score, recomputed here (a cheap apply_transforms
+    # call on a small integer label volume) purely so it can be written out,
+    # rather than changing compute_bidirectional_dice()'s return signature.
+    warped_labels_path = None
+    if registration_output_dir is not None:
+        warped_labels_path = os.path.join(registration_output_dir, "warped_moving_labels.nii.gz")
+        ml_warped = ants.apply_transforms(
+            fixed=fi, moving=ml, transformlist=fwd_tx, interpolator="nearestNeighbor"
+        )
+        ants.image_write(ml_warped, warped_labels_path)
+
     df_fixed, df_moving, dice_sym = compute_bidirectional_dice(fl, ml, fi, mi, fwd_tx, inv_tx, which_inv)
 
     fwd_warp_file = next(x for x in fwd_tx if isinstance(x, str) and x.endswith(".nii.gz"))
@@ -541,6 +559,7 @@ def evaluate_mindboggle_pair(
             "whichtoinvert_inv": which_inv,
         },
         "warped_moving": warped_image_path,
+        "warped_moving_labels": warped_labels_path,
     }
 
     clean_device_cache()

@@ -95,10 +95,73 @@ def test_evaluate_mindboggle_pair_gaussian_svf(mock_mindboggle_dataset, tmp_path
     _assert_valid_success_record(rec, "gaussian_svf")
     assert rec["warped_moving"] == str(registration_output_dir / "warped_moving.nii.gz")
     assert os.path.exists(rec["warped_moving"])
+    assert rec["warped_moving_labels"] == str(registration_output_dir / "warped_moving_labels.nii.gz")
+    assert os.path.exists(rec["warped_moving_labels"])
     assert os.path.exists(registration_output_dir / "registration_0GenericAffine.mat")
     assert os.path.exists(registration_output_dir / "registration_1Warp.nii.gz")
     assert os.path.exists(registration_output_dir / "registration_1InverseWarp.nii.gz")
     assert all(str(registration_output_dir) in path for path in rec["transforms"]["fwdtransforms"])
+
+
+@pytest.mark.parametrize("model", ["gaussian_syn", "bspline_svf", "gaussian_svf"])
+def test_warped_moving_labels_written_and_valid(mock_mindboggle_dataset, tmp_path, model):
+    """registration_output_dir must also persist a nearest-neighbor-resampled
+    warped moving label map, for every model family (dense SyN and both SVF
+    variants) -- not just the warped intensity image."""
+    pairs_csv, data_dir = mock_mindboggle_dataset
+    registration_output_dir = tmp_path / "pair_000" / model
+    kwargs = dict(
+        pair_idx=0,
+        model=model,
+        device="cpu",
+        pairs_csv=pairs_csv,
+        data_dir=data_dir,
+        canonical_affine_dir=str(tmp_path / "canonical_affines"),
+        registration_output_dir=str(registration_output_dir),
+        use_n4=False,
+        reg_iterations=[1, 1, 1, 1],
+    )
+    if model == "gaussian_svf":
+        kwargs.update(update_field_sigma=1.0, total_field_sigma=0.25, squaring_steps=2)
+    rec = evaluate_mindboggle_pair(**kwargs)
+    _assert_valid_success_record(rec, model)
+
+    labels_path = rec["warped_moving_labels"]
+    assert labels_path == str(registration_output_dir / "warped_moving_labels.nii.gz")
+    assert os.path.exists(labels_path)
+
+    warped_labels = ants.image_read(labels_path)
+    moving_labels = ants.image_read(
+        os.path.join(data_dir, "OASIS-TRT-20_volumes", "OASIS-TRT-20-2", "labels.DKT31.manual.nii.gz")
+    )
+    fixed_intensity = ants.image_read(
+        os.path.join(data_dir, "OASIS-TRT-20_volumes", "OASIS-TRT-20-1", "t1weighted_brain.nii.gz")
+    )
+    # Resampled onto the fixed grid, not the moving grid.
+    assert warped_labels.shape == fixed_intensity.shape
+    # Nearest-neighbor resampling: only label values already present in the
+    # (integer-valued) moving label map may appear -- no interpolated
+    # in-between values, unlike a bilinear/linear resample.
+    original_labels = set(np.unique(moving_labels.numpy()).tolist())
+    warped_values = set(np.unique(warped_labels.numpy()).tolist())
+    assert warped_values <= original_labels
+
+
+def test_warped_moving_labels_absent_without_registration_output_dir(mock_mindboggle_dataset, tmp_path):
+    pairs_csv, data_dir = mock_mindboggle_dataset
+    rec = evaluate_mindboggle_pair(
+        pair_idx=0,
+        model="bspline_svf",
+        device="cpu",
+        pairs_csv=pairs_csv,
+        data_dir=data_dir,
+        canonical_affine_dir=str(tmp_path / "canonical_affines"),
+        use_n4=False,
+        reg_iterations=[1, 1, 1, 1],
+    )
+    _assert_valid_success_record(rec, "bspline_svf")
+    assert rec["warped_moving"] is None
+    assert rec["warped_moving_labels"] is None
 
 
 @pytest.mark.parametrize("model", ["bspline_svf", "gaussian_svf"])
