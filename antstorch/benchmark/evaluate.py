@@ -227,24 +227,77 @@ def _run_bspline_svf(fi, mi, matrix, translation, *, device, reg_iterations=None
         moving_tensor_raw, composed_displacement, fixed_domain, moving_domain, padding_mode="zeros"
     )
 
+    # § 30 fix: write the *fully composed* forward/inverse fields, not the
+    # pure SVF piece alone next to a separate affine file. Empirically
+    # verified (see the project doc) that ants.apply_transforms()'s real
+    # composite-transform convention for transformlist=[warp_path,
+    # affine_path] is "apply the warp field first (evaluated at the
+    # untouched fixed-space point), THEN the affine (rotating the
+    # accumulated displacement vector)" -- i.e. the *opposite* order from
+    # what this adapter's own compose_displacements(affine, svf) computes
+    # for warpedmovout ("affine first, then the SVF flow evaluated at the
+    # affine-shifted point", matching bspline_svf_registration()'s own
+    # internal training-time convention). Those two conventions are both
+    # internally consistent but different -- reusing the raw pure-SVF field
+    # as "1Warp.nii.gz" next to the affine silently mismatches what
+    # ants.apply_transforms() reconstructs from it, which is invisible on
+    # the smooth warpedmovout intensity image but produces a visibly
+    # misaligned warped_moving_labels.nii.gz / dice_moving (the bug reported
+    # after § 29). Writing the single, already-composed field sidesteps the
+    # convention mismatch entirely: ants.apply_transforms() with a
+    # single-element transformlist just adds the field directly, no
+    # re-composition with a separate affine involved, so it reproduces
+    # exactly the same mapping warpedmovout was built from.
+    #
+    # The inverse field is built the mirror-image way: compose_displacements
+    # expects (first, second) with first(x) + second(x + first(x)); solving
+    # forward(p) = affine(p) + svf(affine(p)) for its algebraic inverse
+    # gives inverse(y) = affine_inverse(y + svf_inverse(y)) -- i.e.
+    # first=svf_inverse, second=affine_inverse (order swapped relative to
+    # the forward composition). Verified empirically via a forward/inverse
+    # round-trip on real registration output (max residual ~0.04 mm on a
+    # 1 mm grid -- see the project doc).
+    inverse_matrix = torch.linalg.inv(matrix)
+    inverse_translation = -torch.einsum("ij,j->i", inverse_matrix, translation)
+    affine_inverse_displacement = affine_displacement_field(
+        inverse_matrix, inverse_translation, fixed_domain, fixed_tensor
+    )
+    composed_inverse_displacement = compose_displacements(
+        result["invtransforms"], affine_inverse_displacement, fixed_domain
+    )
+
     outprefix = outprefix or default_outprefix()
     warp_path = f"{outprefix}1Warp.nii.gz"
     inverse_warp_path = f"{outprefix}1InverseWarp.nii.gz"
     affine_path = f"{outprefix}0GenericAffine.mat"
 
-    ants.image_write(displacement_xyz_to_ants_image(result["fwdtransforms"], fi), warp_path)
-    ants.image_write(displacement_xyz_to_ants_image(result["invtransforms"], fi), inverse_warp_path)
+    ants.image_write(displacement_xyz_to_ants_image(composed_displacement, fi), warp_path)
+    ants.image_write(displacement_xyz_to_ants_image(composed_inverse_displacement, fi), inverse_warp_path)
+    # affine_path is still written out for transparency/debugging (the
+    # canonical affine this pair's SVF field was fit against), but is no
+    # longer included in fwdtransforms/invtransforms below -- both are now
+    # single, fully composed fields.
     write_affine_transform(matrix.detach().cpu(), translation.detach().cpu(), dimension, affine_path)
 
     fwdtransforms, invtransforms = build_transform_lists(
-        affine_path=affine_path, warp_path=warp_path, inverse_warp_path=inverse_warp_path
+        affine_path=None, warp_path=warp_path, inverse_warp_path=inverse_warp_path
     )
 
     return {
         "warpedmovout": tensor_to_ants_image(warpedmovout_tensor, fi),
         "fwdtransforms": fwdtransforms,
         "invtransforms": invtransforms,
-        "whichtoinvert_inv": [True, False],
+        # Single-element lists now (no separate affine piece) -- nothing to
+        # invert on apply, matching build_transform_lists()'s own
+        # affine_path=None convention.
+        "whichtoinvert_inv": [False],
+        # bspline_svf_registration()'s own loss_history/level_loss_history
+        # (return_loss_history=True by default) -- flat per-iteration loss
+        # list and the same values grouped per pyramid level, both plain
+        # Python floats already, so no tensor conversion is needed before
+        # this reaches evaluate_mindboggle_pair()'s JSON persistence below.
+        "loss_history": result.get("loss_history"),
+        "level_loss_history": result.get("level_loss_history"),
     }
 
 
@@ -334,21 +387,39 @@ def _run_gaussian_svf(
         moving_tensor_raw, composed_displacement, fixed_domain, moving_domain, padding_mode="zeros"
     )
 
+    # § 30 fix -- see the matching, fully-commented block in
+    # _run_bspline_svf() above for the empirically-verified rationale: write
+    # the fully composed forward/inverse fields (matching the convention
+    # ants.apply_transforms() actually uses for a composite transform list),
+    # not the pure SVF piece next to a separate affine file.
+    inverse_matrix = torch.linalg.inv(matrix)
+    inverse_translation = -torch.einsum("ij,j->i", inverse_matrix, translation)
+    affine_inverse_displacement = affine_displacement_field(
+        inverse_matrix, inverse_translation, fixed_domain, fixed_tensor
+    )
+    composed_inverse_displacement = compose_displacements(
+        result["invtransforms"], affine_inverse_displacement, fixed_domain
+    )
+
     outprefix = outprefix or default_outprefix()
     warp_path = f"{outprefix}1Warp.nii.gz"
     inverse_warp_path = f"{outprefix}1InverseWarp.nii.gz"
     affine_path = f"{outprefix}0GenericAffine.mat"
-    ants.image_write(displacement_xyz_to_ants_image(result["fwdtransforms"], fi), warp_path)
-    ants.image_write(displacement_xyz_to_ants_image(result["invtransforms"], fi), inverse_warp_path)
+    ants.image_write(displacement_xyz_to_ants_image(composed_displacement, fi), warp_path)
+    ants.image_write(displacement_xyz_to_ants_image(composed_inverse_displacement, fi), inverse_warp_path)
     write_affine_transform(matrix.detach().cpu(), translation.detach().cpu(), dimension, affine_path)
     fwdtransforms, invtransforms = build_transform_lists(
-        affine_path=affine_path, warp_path=warp_path, inverse_warp_path=inverse_warp_path
+        affine_path=None, warp_path=warp_path, inverse_warp_path=inverse_warp_path
     )
     return {
         "warpedmovout": tensor_to_ants_image(warpedmovout_tensor, fi),
         "fwdtransforms": fwdtransforms,
         "invtransforms": invtransforms,
-        "whichtoinvert_inv": [True, False],
+        "whichtoinvert_inv": [False],
+        # Same pattern as _run_bspline_svf() above: gaussian_svf_registration()
+        # also returns return_loss_history=True by default, as plain floats.
+        "loss_history": result.get("loss_history"),
+        "level_loss_history": result.get("level_loss_history"),
     }
 
 
@@ -408,9 +479,13 @@ def evaluate_mindboggle_pair(
         Persistent directory for the warped image, the warped moving label
         map (``warped_moving_labels.nii.gz``, nearest-neighbor resampled
         onto the fixed grid -- the same fixed-space warp
-        ``compute_bidirectional_dice()`` scores internally), and the ANTs
-        transform files. If omitted, the historical temporary transform
-        prefix is retained and no label map is written.
+        ``compute_bidirectional_dice()`` scores internally), the ANTs
+        transform files, and (for the two SVF model families only, when the
+        underlying registration returns one) ``loss_history.json`` -- the
+        per-iteration loss and the same values grouped per pyramid level, so
+        the optimization's actual convergence curve can be inspected after
+        the fact. If omitted, the historical temporary transform prefix is
+        retained and no label map/loss history is written.
     **kwargs
         Model-specific overrides, forwarded to the underlying registration
         call. Common ones: ``reg_iterations``, ``grad_step``, ``levels``
@@ -552,6 +627,28 @@ def evaluate_mindboggle_pair(
         )
         ants.image_write(ml_warped, warped_labels_path)
 
+    # Persist the optimization convergence curve for the two SVF model
+    # families (syn_registration() already returns loss_history/
+    # level_loss_history in res_reg for the _syn models, propagated the same
+    # way below -- but syn's own JSON-in-results.json record has always
+    # included runtime_seconds/dice, never the curve itself). Written only
+    # when registration_output_dir is given and the underlying registration
+    # actually produced a history (res_reg.get("loss_history") is None for
+    # any model/config that ran with return_loss_history=False upstream).
+    loss_history_path = None
+    loss_history = res_reg.get("loss_history")
+    if registration_output_dir is not None and loss_history is not None:
+        loss_history_path = os.path.join(registration_output_dir, "loss_history.json")
+        with open(loss_history_path, "w", encoding="utf-8") as stream:
+            json.dump(
+                {
+                    "loss_history": loss_history,
+                    "level_loss_history": res_reg.get("level_loss_history"),
+                },
+                stream,
+                indent=2,
+            )
+
     df_fixed, df_moving, dice_sym = compute_bidirectional_dice(fl, ml, fi, mi, fwd_tx, inv_tx, which_inv)
 
     fwd_warp_file = next(x for x in fwd_tx if isinstance(x, str) and x.endswith(".nii.gz"))
@@ -579,6 +676,7 @@ def evaluate_mindboggle_pair(
         },
         "warped_moving": warped_image_path,
         "warped_moving_labels": warped_labels_path,
+        "loss_history": loss_history_path,
     }
 
     clean_device_cache()

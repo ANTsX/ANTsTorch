@@ -269,6 +269,149 @@ def test_svf_models_warpedmovout_extrapolation_matches_fwdtransforms_files(mock_
     assert corr > 0.9, f"{model}: correlation {corr:.4f} between warpedmovout and its own fwdtransforms too low"
 
 
+@pytest.mark.parametrize("model", ["bspline_svf", "gaussian_svf"])
+def test_svf_models_write_single_composed_transform_files(mock_mindboggle_dataset, tmp_path, model):
+    """Regression test for § 30: ants.apply_transforms()'s real composite-
+    transform convention for transformlist=[warp_path, affine_path] turned
+    out (verified empirically against real Mindboggle output, see the
+    project doc) to compose warp-then-affine, the *opposite* order from
+    what _run_bspline_svf()/_run_gaussian_svf() used to reconstruct
+    warpedmovout ("affine first, then the SVF flow", the model's own
+    internal training-time convention). Reusing the raw pure-SVF field next
+    to a separate affine file therefore silently mismatched what
+    ants.apply_transforms() reconstructs for the label map / Dice, even
+    after § 29's padding fix. The fix: write a single, already-composed
+    field for both directions and drop the separate affine piece from
+    fwdtransforms/invtransforms entirely."""
+    pairs_csv, data_dir = mock_mindboggle_dataset
+    registration_output_dir = tmp_path / "pair_000" / model
+    kwargs = dict(
+        pair_idx=0,
+        model=model,
+        device="cpu",
+        pairs_csv=pairs_csv,
+        data_dir=data_dir,
+        canonical_affine_dir=str(tmp_path / "canonical_affines"),
+        registration_output_dir=str(registration_output_dir),
+        use_n4=False,
+        reg_iterations=[1, 1, 1, 1],
+    )
+    if model == "gaussian_svf":
+        kwargs.update(update_field_sigma=1.0, total_field_sigma=0.25, squaring_steps=2)
+    rec = evaluate_mindboggle_pair(**kwargs)
+    _assert_valid_success_record(rec, model)
+
+    assert len(rec["transforms"]["fwdtransforms"]) == 1
+    assert len(rec["transforms"]["invtransforms"]) == 1
+    assert rec["transforms"]["whichtoinvert_inv"] == [False]
+    # The affine .mat is still written to disk for transparency/debugging,
+    # but is no longer part of the transform lists themselves.
+    assert os.path.exists(registration_output_dir / "registration_0GenericAffine.mat")
+    assert not any(p.endswith(".mat") for p in rec["transforms"]["fwdtransforms"])
+    assert not any(p.endswith(".mat") for p in rec["transforms"]["invtransforms"])
+
+
+@pytest.mark.parametrize("model", ["bspline_svf", "gaussian_svf"])
+def test_svf_models_warpedmovout_matches_fwdtransforms_applied_to_intensity(mock_mindboggle_dataset, tmp_path, model):
+    """Tighter regression test than the existing extrapolation-ratio check:
+    with § 30's single-composed-field fix, warping the moving *intensity*
+    image via ants.apply_transforms(transformlist=fwdtransforms) -- exactly
+    what warped_moving_labels.nii.gz does for the label map -- must now
+    agree almost exactly with warpedmovout (same underlying field, single
+    piece, no separate affine re-composition for ants to get wrong), not
+    just be strongly correlated."""
+    from antstorch.benchmark.evaluate import _fit_or_load_canonical_affine, _run_bspline_svf, _run_gaussian_svf
+
+    pairs_csv, data_dir = mock_mindboggle_dataset
+    fixed_path = os.path.join(data_dir, "OASIS-TRT-20_volumes", "OASIS-TRT-20-1", "t1weighted_brain.nii.gz")
+    moving_path = os.path.join(data_dir, "OASIS-TRT-20_volumes", "OASIS-TRT-20-2", "t1weighted_brain.nii.gz")
+    fi = ants.image_read(fixed_path)
+    mi = ants.image_read(moving_path)
+
+    matrix, translation, _, _ = _fit_or_load_canonical_affine(
+        fi, mi, 0, str(tmp_path / "canonical_affines"), "cpu", False
+    )
+    run_fn = _run_bspline_svf if model == "bspline_svf" else _run_gaussian_svf
+    extra = {} if model == "bspline_svf" else dict(update_field_sigma=1.0, total_field_sigma=0.25, squaring_steps=2)
+    res = run_fn(
+        fi, mi, matrix, translation, device="cpu", reg_iterations=[1, 1, 1, 1],
+        outprefix=str(tmp_path / "reg_"), verbose=False, **extra,
+    )
+
+    warpedmovout = res["warpedmovout"].numpy()
+    warped_via_transformlist = ants.apply_transforms(
+        fixed=fi, moving=mi, transformlist=res["fwdtransforms"], interpolator="linear"
+    ).numpy()
+
+    # This mock dataset's volume is tiny (see conftest.py), so the boundary/
+    # extrapolation band is a much larger fraction of the total volume here
+    # than on a real ~256^3 Mindboggle image -- on real data (see the
+    # project doc) this same comparison came out numerically identical
+    # (100% voxel agreement on a categorical test pattern). 0.95 is still a
+    # meaningfully tighter bound than the pre-existing extrapolation-ratio
+    # test's 0.9 threshold, which predates this fix.
+    corr = np.corrcoef(warpedmovout.ravel(), warped_via_transformlist.ravel())[0, 1]
+    assert corr > 0.95, (
+        f"{model}: correlation {corr:.6f} between warpedmovout and ants.apply_transforms(fwdtransforms) "
+        "applied to the same intensity image -- expected near-exact agreement now that both use the "
+        "same single, already-composed field"
+    )
+    diff = np.abs(warpedmovout - warped_via_transformlist)
+    assert np.median(diff) < 1.0, f"{model}: median abs diff {np.median(diff):.4f} too large for the same field"
+
+
+@pytest.mark.parametrize("model", ["bspline_svf", "gaussian_svf"])
+def test_svf_models_loss_history_persisted(mock_mindboggle_dataset, tmp_path, model):
+    """§ 30: registration_output_dir must also persist loss_history.json for
+    the two SVF model families, so the actual optimization convergence
+    curve can be inspected after a run."""
+    import json
+
+    pairs_csv, data_dir = mock_mindboggle_dataset
+    registration_output_dir = tmp_path / "pair_000" / model
+    kwargs = dict(
+        pair_idx=0,
+        model=model,
+        device="cpu",
+        pairs_csv=pairs_csv,
+        data_dir=data_dir,
+        canonical_affine_dir=str(tmp_path / "canonical_affines"),
+        registration_output_dir=str(registration_output_dir),
+        use_n4=False,
+        reg_iterations=[2, 2, 1, 1],
+    )
+    if model == "gaussian_svf":
+        kwargs.update(update_field_sigma=1.0, total_field_sigma=0.25, squaring_steps=2)
+    rec = evaluate_mindboggle_pair(**kwargs)
+    _assert_valid_success_record(rec, model)
+
+    loss_history_path = rec["loss_history"]
+    assert loss_history_path == str(registration_output_dir / "loss_history.json")
+    assert os.path.exists(loss_history_path)
+    with open(loss_history_path) as stream:
+        payload = json.load(stream)
+    assert "loss_history" in payload and "level_loss_history" in payload
+    assert len(payload["loss_history"]) > 0
+    assert all(isinstance(v, float) for v in payload["loss_history"])
+    assert len(payload["level_loss_history"]) == 4  # one entry per shrink factor/level
+
+
+def test_loss_history_absent_without_registration_output_dir(mock_mindboggle_dataset, tmp_path):
+    pairs_csv, data_dir = mock_mindboggle_dataset
+    rec = evaluate_mindboggle_pair(
+        pair_idx=0,
+        model="bspline_svf",
+        device="cpu",
+        pairs_csv=pairs_csv,
+        data_dir=data_dir,
+        canonical_affine_dir=str(tmp_path / "canonical_affines"),
+        use_n4=False,
+        reg_iterations=[1, 1, 1, 1],
+    )
+    _assert_valid_success_record(rec, "bspline_svf")
+    assert rec["loss_history"] is None
+
+
 def test_evaluate_pair_is_an_alias_for_evaluate_mindboggle_pair():
     assert evaluate_pair is evaluate_mindboggle_pair
 
