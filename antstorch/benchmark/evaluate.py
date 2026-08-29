@@ -135,7 +135,13 @@ def _run_bspline_svf(fi, mi, matrix, translation, *, device, reg_iterations=None
     ``translation`` are already in-memory tensors (no round trip through a
     ``.mat`` file needed, unlike the cross-package version)."""
     from antstorch.ants_transform_io import build_transform_lists, default_outprefix, write_affine_transform
-    from antstorch.bspline_flows import ImageDomain, bspline_svf_registration
+    from antstorch.bspline_flows import (
+        ImageDomain,
+        affine_displacement_field,
+        bspline_svf_registration,
+        compose_displacements,
+        warp_image,
+    )
     from antstorch.syn.bridge import (
         ants_image_metadata,
         ants_image_to_tensor,
@@ -190,6 +196,23 @@ def _run_bspline_svf(fi, mi, matrix, translation, *, device, reg_iterations=None
         verbose=verbose,
     )
 
+    # bspline_svf_registration() is tensor-native and never normalizes/
+    # denormalizes internally (by design, see its docstring) -- so
+    # result["warpedmovout"] is the *normalized* moving_tensor rewarped by
+    # the optimized field, not the original image intensity range. Rebuild
+    # warpedmovout from the un-normalized moving image instead, composing the
+    # (discarded) affine displacement with the pure SVF field exactly as
+    # DeterministicBSplineRegistration.transform() does internally
+    # (antstorch/bspline_flows/deterministic_registration.py) -- matching
+    # syn_registration()'s own pattern (antstorch/syn/syn.py) of always
+    # reconstructing its returned warpedmovout from non-normalized tensors.
+    moving_tensor_raw = ants_image_to_tensor(mi, resolved_device, dtype, normalize=False)
+    affine_displacement = affine_displacement_field(matrix, translation, fixed_domain, fixed_tensor)
+    composed_displacement = compose_displacements(affine_displacement, result["fwdtransforms"], fixed_domain)
+    warpedmovout_tensor = warp_image(
+        moving_tensor_raw, composed_displacement, fixed_domain, moving_domain, padding_mode="border"
+    )
+
     outprefix = outprefix or default_outprefix()
     warp_path = f"{outprefix}1Warp.nii.gz"
     inverse_warp_path = f"{outprefix}1InverseWarp.nii.gz"
@@ -204,7 +227,7 @@ def _run_bspline_svf(fi, mi, matrix, translation, *, device, reg_iterations=None
     )
 
     return {
-        "warpedmovout": tensor_to_ants_image(result["warpedmovout"], fi),
+        "warpedmovout": tensor_to_ants_image(warpedmovout_tensor, fi),
         "fwdtransforms": fwdtransforms,
         "invtransforms": invtransforms,
         "whichtoinvert_inv": [True, False],
@@ -222,7 +245,14 @@ def _run_gaussian_svf(
 ) -> Dict[str, Any]:
     """Adapt dense Gaussian SVF output to the benchmark transform contract."""
     from antstorch.ants_transform_io import build_transform_lists, default_outprefix, write_affine_transform
-    from antstorch.bspline_flows import ImageDomain, PhysicalGradientDescent, gaussian_svf_registration
+    from antstorch.bspline_flows import (
+        ImageDomain,
+        PhysicalGradientDescent,
+        affine_displacement_field,
+        compose_displacements,
+        gaussian_svf_registration,
+        warp_image,
+    )
     from antstorch.syn.bridge import (
         ants_image_metadata,
         ants_image_to_tensor,
@@ -271,6 +301,20 @@ def _run_gaussian_svf(
         verbose=verbose,
     )
 
+    # Same fix as _run_bspline_svf() above: gaussian_svf_registration() is
+    # also tensor-native with no internal normalization, so
+    # result["warpedmovout"] is the normalized moving_tensor rewarped by the
+    # optimized field. Rebuild it from the un-normalized moving image,
+    # composing the affine displacement with the pure SVF field exactly as
+    # DeterministicGaussianRegistration's own internal transform step does
+    # (antstorch/bspline_flows/gaussian_svf_registration.py).
+    moving_tensor_raw = ants_image_to_tensor(mi, resolved_device, dtype, normalize=False)
+    affine_displacement = affine_displacement_field(matrix, translation, fixed_domain, fixed_tensor)
+    composed_displacement = compose_displacements(affine_displacement, result["fwdtransforms"], fixed_domain)
+    warpedmovout_tensor = warp_image(
+        moving_tensor_raw, composed_displacement, fixed_domain, moving_domain, padding_mode="border"
+    )
+
     outprefix = outprefix or default_outprefix()
     warp_path = f"{outprefix}1Warp.nii.gz"
     inverse_warp_path = f"{outprefix}1InverseWarp.nii.gz"
@@ -282,7 +326,7 @@ def _run_gaussian_svf(
         affine_path=affine_path, warp_path=warp_path, inverse_warp_path=inverse_warp_path
     )
     return {
-        "warpedmovout": tensor_to_ants_image(result["warpedmovout"], fi),
+        "warpedmovout": tensor_to_ants_image(warpedmovout_tensor, fi),
         "fwdtransforms": fwdtransforms,
         "invtransforms": invtransforms,
         "whichtoinvert_inv": [True, False],

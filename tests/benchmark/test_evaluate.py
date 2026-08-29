@@ -7,6 +7,7 @@ registration/metric pipeline (no mocking) on a small volume so wall-clock
 time stays low."""
 import os
 
+import ants
 import numpy as np
 import pytest
 
@@ -98,6 +99,46 @@ def test_evaluate_mindboggle_pair_gaussian_svf(mock_mindboggle_dataset, tmp_path
     assert os.path.exists(registration_output_dir / "registration_1Warp.nii.gz")
     assert os.path.exists(registration_output_dir / "registration_1InverseWarp.nii.gz")
     assert all(str(registration_output_dir) in path for path in rec["transforms"]["fwdtransforms"])
+
+
+@pytest.mark.parametrize("model", ["bspline_svf", "gaussian_svf"])
+def test_svf_models_warpedmovout_preserves_original_intensity_range(mock_mindboggle_dataset, tmp_path, model):
+    """Regression test for the normalization asymmetry documented in the
+    project doc (SVF-vs-SyN warpedmovout value range investigation):
+    _run_bspline_svf()/_run_gaussian_svf() must reconstruct warpedmovout
+    from the un-normalized moving image (like syn_registration() already
+    does for the *_syn arms), not return the percentile-clip-normalized
+    tensor used internally to drive the registration's similarity metric.
+    The mock dataset's volumes (conftest.py) are ~N(100, 10) plus an
+    additive blob, i.e. comfortably outside [0, 1] -- so a max value that
+    stayed near 1.0 would mean warpedmovout was still in normalized space."""
+    pairs_csv, data_dir = mock_mindboggle_dataset
+    registration_output_dir = tmp_path / "pair_000" / model
+    kwargs = dict(
+        pair_idx=0,
+        model=model,
+        device="cpu",
+        pairs_csv=pairs_csv,
+        data_dir=data_dir,
+        canonical_affine_dir=str(tmp_path / "canonical_affines"),
+        registration_output_dir=str(registration_output_dir),
+        use_n4=False,
+        reg_iterations=[1, 1, 1, 1],
+    )
+    if model == "gaussian_svf":
+        kwargs.update(update_field_sigma=1.0, total_field_sigma=0.25, squaring_steps=2)
+    rec = evaluate_mindboggle_pair(**kwargs)
+    _assert_valid_success_record(rec, model)
+
+    warped = ants.image_read(rec["warped_moving"])
+    moving = ants.image_read(os.path.join(data_dir, "OASIS-TRT-20_volumes", "OASIS-TRT-20-2", "t1weighted_brain.nii.gz"))
+    assert warped.numpy().max() > 5.0, (
+        f"{model}: warpedmovout max={warped.numpy().max():.4f} looks normalized to [0, 1] "
+        "instead of the original image intensity range"
+    )
+    # Same order of magnitude as the original (un-normalized) moving image,
+    # not clipped down to a [0, 1]-ish percentile-normalized range.
+    assert warped.numpy().max() > 0.1 * moving.numpy().max()
 
 
 def test_evaluate_pair_is_an_alias_for_evaluate_mindboggle_pair():
