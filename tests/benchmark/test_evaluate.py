@@ -204,6 +204,71 @@ def test_svf_models_warpedmovout_preserves_original_intensity_range(mock_mindbog
     assert warped.numpy().max() > 0.1 * moving.numpy().max()
 
 
+@pytest.mark.parametrize("model", ["bspline_svf", "gaussian_svf"])
+def test_svf_models_warpedmovout_extrapolation_matches_fwdtransforms_files(mock_mindboggle_dataset, tmp_path, model):
+    """Regression test for the bug reported right after warped_moving_labels.nii.gz
+    was added (§ 28): warpedmovout was reconstructed with padding_mode="border"
+    (clamp-to-edge), while the *same* fwdtransforms, applied through
+    ants.apply_transforms() -- as both the warped label map and
+    compute_bidirectional_dice() do -- always extrapolate out-of-domain
+    points to 0. For the ~5% of voxels this mock pair's canonical affine
+    pushes outside the moving image's domain, that mismatch made
+    warpedmovout look like a smooth continuation of the brain while the
+    label map went to background in the exact same voxels -- "the label
+    image doesn't correspond to the transformed image". warpedmovout must
+    extrapolate the same way (padding_mode="zeros") as
+    ants.apply_transforms(transformlist=fwdtransforms) does, so all three
+    consumers of the same transform (warpedmovout, the label map, Dice)
+    agree everywhere, not just in the interior."""
+    from antstorch.benchmark.evaluate import _fit_or_load_canonical_affine, _run_bspline_svf, _run_gaussian_svf
+
+    pairs_csv, data_dir = mock_mindboggle_dataset
+    fixed_path = os.path.join(data_dir, "OASIS-TRT-20_volumes", "OASIS-TRT-20-1", "t1weighted_brain.nii.gz")
+    moving_path = os.path.join(data_dir, "OASIS-TRT-20_volumes", "OASIS-TRT-20-2", "t1weighted_brain.nii.gz")
+    fi = ants.image_read(fixed_path)
+    mi = ants.image_read(moving_path)
+
+    matrix, translation, _, _ = _fit_or_load_canonical_affine(
+        fi, mi, 0, str(tmp_path / "canonical_affines"), "cpu", False
+    )
+    run_fn = _run_bspline_svf if model == "bspline_svf" else _run_gaussian_svf
+    extra = {} if model == "bspline_svf" else dict(update_field_sigma=1.0, total_field_sigma=0.25, squaring_steps=2)
+    res = run_fn(
+        fi, mi, matrix, translation, device="cpu", reg_iterations=[1, 1, 1, 1],
+        outprefix=str(tmp_path / "reg_"), verbose=False, **extra,
+    )
+
+    warpedmovout = res["warpedmovout"].numpy()
+    warped_via_transformlist = ants.apply_transforms(
+        fixed=fi, moving=mi, transformlist=res["fwdtransforms"], interpolator="linear"
+    ).numpy()
+
+    # Wherever ants.apply_transforms() extrapolates to 0 (out-of-domain),
+    # warpedmovout must trend toward 0 there too -- not sit at a border-
+    # clamped value comparable to the rest of the (real, nonzero-background)
+    # brain image -- since the label map and Dice score are computed from
+    # the exact same extrapolation. A tolerance-based ratio (rather than
+    # requiring every voxel to be exactly 0) accounts for the narrow
+    # boundary band where torch's grid_sample and ITK/ants' own resampler
+    # can disagree by a fraction of a voxel on the in-/out-of-domain
+    # boundary itself -- padding_mode="border" (the bug) makes this ratio
+    # ~0.86 on this fixture; padding_mode="zeros" (the fix) brings it to ~0.17.
+    extrapolated = warped_via_transformlist < 1e-3
+    assert extrapolated.sum() > 0, "test fixture assumption failed: expected some out-of-domain voxels"
+    extrapolated_mean = np.abs(warpedmovout[extrapolated]).mean()
+    overall_mean = np.abs(warpedmovout).mean()
+    ratio = extrapolated_mean / overall_mean
+    assert ratio < 0.5, (
+        f"{model}: warpedmovout's mean value in the region ants.apply_transforms() (and therefore the "
+        f"warped label map) extrapolates to background is {ratio:.2f}x the image's overall mean -- too "
+        "close to a border-clamped continuation of the brain rather than trending to 0, indicating a "
+        "padding_mode mismatch between warpedmovout and the fwdtransforms files"
+    )
+    # And overall the two should closely agree (same geometric transform).
+    corr = np.corrcoef(warpedmovout.ravel(), warped_via_transformlist.ravel())[0, 1]
+    assert corr > 0.9, f"{model}: correlation {corr:.4f} between warpedmovout and its own fwdtransforms too low"
+
+
 def test_evaluate_pair_is_an_alias_for_evaluate_mindboggle_pair():
     assert evaluate_pair is evaluate_mindboggle_pair
 

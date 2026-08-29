@@ -206,11 +206,25 @@ def _run_bspline_svf(fi, mi, matrix, translation, *, device, reg_iterations=None
     # (antstorch/bspline_flows/deterministic_registration.py) -- matching
     # syn_registration()'s own pattern (antstorch/syn/syn.py) of always
     # reconstructing its returned warpedmovout from non-normalized tensors.
+    # padding_mode="zeros" here (not "border", unlike the internal
+    # bspline_svf_registration() call above, whose own padding_mode governs
+    # the optimization/training and is left untouched) -- matching both
+    # syn_registration()'s own default (antstorch/syn/syn.py, padding_mode:
+    # str = "zeros") and, critically, ants.apply_transforms()'s own
+    # out-of-domain extrapolation (which always returns 0, with no "clamp to
+    # edge" option). fwdtransforms/invtransforms (below) are handed back as
+    # real transform files and reused verbatim by evaluate_mindboggle_pair()
+    # for the warped label map (§ 28) and by compute_bidirectional_dice() --
+    # both go through ants.apply_transforms(), so warpedmovout must
+    # extrapolate the exact same way or the three outputs disagree exactly
+    # in the out-of-domain margin (visible as intensity looking "fine" via a
+    # border-clamped continuation while the label map goes to background
+    # there -- the bug reported after § 28).
     moving_tensor_raw = ants_image_to_tensor(mi, resolved_device, dtype, normalize=False)
     affine_displacement = affine_displacement_field(matrix, translation, fixed_domain, fixed_tensor)
     composed_displacement = compose_displacements(affine_displacement, result["fwdtransforms"], fixed_domain)
     warpedmovout_tensor = warp_image(
-        moving_tensor_raw, composed_displacement, fixed_domain, moving_domain, padding_mode="border"
+        moving_tensor_raw, composed_displacement, fixed_domain, moving_domain, padding_mode="zeros"
     )
 
     outprefix = outprefix or default_outprefix()
@@ -307,12 +321,17 @@ def _run_gaussian_svf(
     # optimized field. Rebuild it from the un-normalized moving image,
     # composing the affine displacement with the pure SVF field exactly as
     # DeterministicGaussianRegistration's own internal transform step does
-    # (antstorch/bspline_flows/gaussian_svf_registration.py).
+    # (antstorch/bspline_flows/gaussian_svf_registration.py). padding_mode=
+    # "zeros" (not "border") to match syn_registration()'s own default and
+    # ants.apply_transforms()'s out-of-domain extrapolation (always 0, no
+    # edge-clamp option) -- see the matching comment in _run_bspline_svf()
+    # for why this must agree with the warped label map / Dice computation,
+    # which both go through ants.apply_transforms() on the same fwdtransforms.
     moving_tensor_raw = ants_image_to_tensor(mi, resolved_device, dtype, normalize=False)
     affine_displacement = affine_displacement_field(matrix, translation, fixed_domain, fixed_tensor)
     composed_displacement = compose_displacements(affine_displacement, result["fwdtransforms"], fixed_domain)
     warpedmovout_tensor = warp_image(
-        moving_tensor_raw, composed_displacement, fixed_domain, moving_domain, padding_mode="border"
+        moving_tensor_raw, composed_displacement, fixed_domain, moving_domain, padding_mode="zeros"
     )
 
     outprefix = outprefix or default_outprefix()
