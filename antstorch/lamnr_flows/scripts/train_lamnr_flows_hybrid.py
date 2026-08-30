@@ -992,6 +992,7 @@ class HybridLAMNrTrainer:
         add("screen warmup / refresh", f"{args.screen_warmup} / {args.screen_refresh}")
         add("cca ridge / prefilter", f"{args.cca_ridge} / {args.prefilter_frac}")
         add("sample mode / temp", f"{args.sample_mode} / {args.sample_temp}")
+        add("preview samples / columns", f"{args.preview_samples} / {args.preview_columns}")
         add("grad checkpoint", args.grad_checkpoint)
 
         rows.append("-" * 72)
@@ -1770,6 +1771,7 @@ class HybridLAMNrTrainer:
                         for item in sampled
                     ],
                     preview_dir / f"{view.name}_samples_it{iteration:06d}.png",
+                    columns=self.args.preview_columns,
                 )
 
     @torch.no_grad()
@@ -1988,6 +1990,8 @@ def _build_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--prefilter-frac", type=float, default=0.5)
     parser.add_argument("--preview-interval", type=int, default=500)
     parser.add_argument("--preview-samples", type=int, default=8)
+    parser.add_argument("--preview-columns", type=int, default=4,
+        help="Number of columns in generated-sample preview grids.")
     parser.add_argument("--sample-mode", default="model", choices=["off", "model"])
     parser.add_argument("--sample-temp", type=float, default=1.0)
     parser.add_argument("--sample-grid-norm", default="to01",
@@ -2012,6 +2016,8 @@ def _build_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.accum_steps < 1:
         parser.error("--accum-steps must be >= 1")
+    if args.preview_samples < 1 or args.preview_columns < 1:
+        parser.error("--preview-samples and --preview-columns must be >= 1")
     if args.keep_last < 0 or args.keep_every < 0:
         parser.error("checkpoint retention values must be non-negative")
     return args
