@@ -41,6 +41,22 @@ def compute_bidirectional_dice(fl, ml, fi, mi, fwdtransforms, invtransforms, whi
     Returns
     -------
     dice_fixed, dice_moving, dice_sym : float
+
+    Notes
+    -----
+    ``ants.label_overlap_measures`` reports an undefined ratio (a label
+    with zero voxels in one of the two images being compared — e.g. a
+    label pushed entirely out of the resampling domain by a large
+    deformation, common for inter-subject pairs) as a sentinel value of
+    approximately ``1.797693e+308`` (``np.finfo(np.float64).max``)
+    rather than ``NaN``/``inf``. That sentinel is technically finite,
+    so a plain ``np.isfinite()`` filter lets it through; averaging
+    several such near-``DBL_MAX`` values then overflows ``float64`` and
+    silently produces a literal ``inf`` Dice score. Since a Dice-like
+    overlap ratio is always in ``[0, 1]`` by definition, both label
+    dice computations below additionally bound-check to ``[0.0, 1.0]``,
+    which correctly excludes this sentinel (and any other
+    out-of-range/NaN value) regardless of its magnitude.
     """
     if whichtoinvert_inv is None:
         whichtoinvert_inv = [True] + [False] * (len(invtransforms) - 1) if len(invtransforms) > 0 else []
@@ -55,7 +71,7 @@ def compute_bidirectional_dice(fl, ml, fi, mi, fwdtransforms, invtransforms, whi
     df_fixed = ov_fixed[~ov_fixed['Label'].astype(str).isin(['All', '0', '0.0'])]
     col_fixed = 'TotalOrTargetOverlap' if 'TotalOrTargetOverlap' in df_fixed.columns else 'TargetOverlap'
     vals_fixed = pd.to_numeric(df_fixed[col_fixed], errors='coerce').to_numpy(dtype=np.float64)
-    vals_fixed = vals_fixed[np.isfinite(vals_fixed)]
+    vals_fixed = vals_fixed[np.isfinite(vals_fixed) & (vals_fixed >= 0.0) & (vals_fixed <= 1.0)]
     dice_fixed = float(np.mean(vals_fixed)) if len(vals_fixed) > 0 else 0.0
 
     # 2. Moving Space Dice
@@ -69,7 +85,7 @@ def compute_bidirectional_dice(fl, ml, fi, mi, fwdtransforms, invtransforms, whi
     df_moving = ov_moving[~ov_moving['Label'].astype(str).isin(['All', '0', '0.0'])]
     col_moving = 'TotalOrTargetOverlap' if 'TotalOrTargetOverlap' in df_moving.columns else 'TargetOverlap'
     vals_moving = pd.to_numeric(df_moving[col_moving], errors='coerce').to_numpy(dtype=np.float64)
-    vals_moving = vals_moving[np.isfinite(vals_moving)]
+    vals_moving = vals_moving[np.isfinite(vals_moving) & (vals_moving >= 0.0) & (vals_moving <= 1.0)]
     dice_moving = float(np.mean(vals_moving)) if len(vals_moving) > 0 else 0.0
 
     dice_sym = 0.5 * (dice_fixed + dice_moving)

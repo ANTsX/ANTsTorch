@@ -54,11 +54,7 @@ def test_compute_bidirectional_dice_identity_transform_gives_perfect_overlap(tmp
 
 def test_compute_bidirectional_dice_partial_overlap_is_between_zero_and_one(tmp_path):
     # A moving label map shifted far enough from the fixed one that their
-    # regions only partially overlap. (A *fully* disjoint pair, where one
-    # side has zero pixels of a label the other side has, is a degenerate
-    # case for ants.label_overlap_measures -- its target-overlap ratio is
-    # 0/0 for that label -- and is not exercised by real Mindboggle pairs,
-    # where every DKT31 label is present in both images.)
+    # regions only partially overlap.
     zz, yy, xx = np.meshgrid(*[np.arange(s) for s in _SHAPE], indexing="ij")
     cz, cy, cx = _SHAPE[0] / 2, _SHAPE[1] / 2, _SHAPE[2] / 2
     r_fixed = np.sqrt((zz - cz) ** 2 + (yy - cy) ** 2 + (xx - cx) ** 2)
@@ -81,6 +77,52 @@ def test_compute_bidirectional_dice_partial_overlap_is_between_zero_and_one(tmp_
     )
     assert np.isfinite(dice_sym)
     assert 0.0 < dice_sym < 1.0
+
+
+def test_compute_bidirectional_dice_with_label_absent_from_one_side_stays_finite(tmp_path):
+    # Regression test for a real bug seen on an inter-subject Mindboggle
+    # pair: when a label present in one image has zero voxels in the
+    # other (e.g. a small cortical region pushed entirely out of the
+    # resampling domain by a large deformation), ants.label_overlap_measures
+    # reports that label's ratio not as NaN/inf but as a large finite
+    # sentinel value (approximately np.finfo(np.float64).max). A plain
+    # np.isfinite() filter lets that sentinel through, and averaging
+    # several such near-DBL_MAX values overflows float64 and silently
+    # produces a literal inf Dice score -- exactly what was observed on
+    # real data (dice_moving == inf for an inter-subject pair). Here we
+    # construct two label maps that share label 1 (partial overlap) but
+    # where label 2 exists only in the moving image and label 3 exists
+    # only in the fixed image, forcing this exact degenerate 0/0 ratio
+    # on both the fixed-space and moving-space passes.
+    zz, yy, xx = np.meshgrid(*[np.arange(s) for s in _SHAPE], indexing="ij")
+    cz, cy, cx = _SHAPE[0] / 2, _SHAPE[1] / 2, _SHAPE[2] / 2
+    r_fixed = np.sqrt((zz - cz) ** 2 + (yy - cy) ** 2 + (xx - cx) ** 2)
+    r_shifted = np.sqrt((zz - cz) ** 2 + (yy - cy) ** 2 + (xx - cx - 4) ** 2)
+
+    fixed_labels_arr = np.zeros(_SHAPE, dtype=np.float32)
+    fixed_labels_arr[r_fixed < 6] = 1
+    fixed_labels_arr[0:2, 0:2, 0:2] = 3  # label 3: present only in fixed
+
+    moving_labels_arr = np.zeros(_SHAPE, dtype=np.float32)
+    moving_labels_arr[r_shifted < 6] = 1
+    moving_labels_arr[-2:, -2:, -2:] = 2  # label 2: present only in moving
+
+    fixed_labels = ants.from_numpy(fixed_labels_arr, spacing=_SPACING)
+    moving_labels = ants.from_numpy(moving_labels_arr, spacing=_SPACING)
+    intensity = _intensity_image()
+    identity_path = _identity_affine_path(tmp_path)
+
+    dice_fixed, dice_moving, dice_sym = compute_bidirectional_dice(
+        fl=fixed_labels, ml=moving_labels, fi=intensity, mi=intensity,
+        fwdtransforms=[identity_path], invtransforms=[identity_path],
+        whichtoinvert_inv=[True],
+    )
+    assert np.isfinite(dice_fixed)
+    assert np.isfinite(dice_moving)
+    assert np.isfinite(dice_sym)
+    assert 0.0 <= dice_fixed <= 1.0
+    assert 0.0 <= dice_moving <= 1.0
+    assert 0.0 <= dice_sym <= 1.0
 
 
 def test_compute_jacobian_metrics_identity_warp_gives_unit_jacobian():
