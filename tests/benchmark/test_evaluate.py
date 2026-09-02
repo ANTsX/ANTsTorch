@@ -2,9 +2,10 @@
 against a tiny synthetic Mindboggle-style pair, covering all 6 ANTsTorch-native
 model variants (gaussian_syn/sobolev_syn/dsti_syn/bspline_syn -- the four
 antstorch.syn.syn_registration() regularizers, dense-SyN-stage only -- plus
-bspline_svf and gaussian_svf, two stationary-velocity families). Runs the real
-registration/metric pipeline (no mocking) on a small volume so wall-clock
-time stays low."""
+bspline_svf and gaussian_svf, two stationary-velocity families), plus
+ants_syn_quick, a traditional (non-ANTsTorch) ANTs baseline run via a direct
+ants.registration() call. Runs the real registration/metric pipeline (no
+mocking) on a small volume so wall-clock time stays low."""
 import os
 
 import ants
@@ -101,6 +102,134 @@ def test_evaluate_mindboggle_pair_gaussian_svf(mock_mindboggle_dataset, tmp_path
     assert os.path.exists(registration_output_dir / "registration_1Warp.nii.gz")
     assert os.path.exists(registration_output_dir / "registration_1InverseWarp.nii.gz")
     assert all(str(registration_output_dir) in path for path in rec["transforms"]["fwdtransforms"])
+
+
+def test_evaluate_mindboggle_pair_ants_syn_quick(mock_mindboggle_dataset, tmp_path):
+    # Traditional (non-ANTsTorch) ANTs baseline, added on top of the six
+    # ANTsTorch-native model variants above: a direct
+    # ants.registration(type_of_transform="antsRegistrationSyNQuick[so]")
+    # call, run deformable-only on top of the harness's shared canonical
+    # affine (see _ANTS_TRADITIONAL_MODELS/_run_ants_traditional() in
+    # evaluate.py). No reg_iterations override here, deliberately: unlike
+    # every other model family, this one has no harness-level default (the
+    # antsRegistrationSyNQuick[x] preset supplies its own internal
+    # multi-resolution schedule) -- the mock dataset's small volume keeps
+    # this fast even at the preset's own default iteration counts.
+    pairs_csv, data_dir = mock_mindboggle_dataset
+    registration_output_dir = tmp_path / "pair_000" / "ants_syn_quick"
+    rec = evaluate_mindboggle_pair(
+        pair_idx=0,
+        model="ants_syn_quick",
+        device="cpu",
+        pairs_csv=pairs_csv,
+        data_dir=data_dir,
+        canonical_affine_dir=str(tmp_path / "canonical_affines"),
+        registration_output_dir=str(registration_output_dir),
+        use_n4=False,
+    )
+    _assert_valid_success_record(rec, "ants_syn_quick")
+    # ants.registration()'s own transform-file convention: fwdtransforms is
+    # [warp, affine], invtransforms is [affine, inverse_warp] -- confirmed
+    # directly against real Mindboggle data (project doc, § 32) to already
+    # match what evaluate_mindboggle_pair() defaults whichtoinvert_inv to
+    # ([True, False]) when a model doesn't supply its own, so no § 30-style
+    # composition fixup is needed for this model family.
+    assert len(rec["transforms"]["fwdtransforms"]) == 2
+    assert len(rec["transforms"]["invtransforms"]) == 2
+    assert rec["warped_moving"] == str(registration_output_dir / "warped_moving.nii.gz")
+    assert os.path.exists(rec["warped_moving"])
+    assert rec["warped_moving_labels"] == str(registration_output_dir / "warped_moving_labels.nii.gz")
+    assert os.path.exists(rec["warped_moving_labels"])
+    # No loss_history for this model family (ants.registration() has no
+    # such concept) -- must stay None rather than erroring.
+    assert rec.get("loss_history") is None
+
+
+def test_ants_traditional_models_use_deformable_only_presets():
+    # Documents/locks the fairness-invariant requirement itself (see the
+    # docstring on _ANTS_TRADITIONAL_MODELS in evaluate.py): every entry
+    # must be a deformable-only preset -- "SyNOnly" outright, or an
+    # "antsRegistrationSyN*[x]" suffix ending in "o" (the "...[so]"/
+    # "...[bo]" deformable-only presets), signifying no separate ANTs
+    # rigid/affine stage duplicated on top of the shared canonical affine.
+    # A future preset that violates this (e.g. a bare "...[s]"/"...[b]"
+    # full-pipeline variant) would silently break the fairness invariant
+    # every other model in this harness preserves -- this test exists so
+    # that mistake fails loudly instead. Reuses the harness's own
+    # _is_deformable_only_ants_transform() (single source of truth for this
+    # check -- the same function evaluate_mindboggle_pair()'s dispatch uses
+    # to decide whether a raw type_of_transform string is even eligible)
+    # rather than re-implementing the pattern match here.
+    from antstorch.benchmark.evaluate import _ANTS_TRADITIONAL_MODELS, _is_deformable_only_ants_transform
+
+    for model_name, type_of_transform in _ANTS_TRADITIONAL_MODELS.items():
+        assert _is_deformable_only_ants_transform(type_of_transform), (
+            f"{model_name!r} -> {type_of_transform!r} is not a deformable-only "
+            "preset; it would recompute its own rigid/affine stage and break "
+            "the shared-canonical-affine fairness invariant"
+        )
+
+
+@pytest.mark.parametrize(
+    "type_of_transform", ["SyNOnly", "antsRegistrationSyNQuick[so]", "antsRegistrationSyN[bo]"]
+)
+def test_is_deformable_only_ants_transform_accepts_deformable_only_presets(type_of_transform):
+    from antstorch.benchmark.evaluate import _is_deformable_only_ants_transform
+
+    assert _is_deformable_only_ants_transform(type_of_transform)
+
+
+@pytest.mark.parametrize(
+    "type_of_transform", ["SyN", "antsRegistrationSyNQuick[s]", "antsRegistrationSyN[b]", "Affine"]
+)
+def test_is_deformable_only_ants_transform_rejects_full_pipeline_presets(type_of_transform):
+    from antstorch.benchmark.evaluate import _is_deformable_only_ants_transform
+
+    assert not _is_deformable_only_ants_transform(type_of_transform)
+
+
+def test_evaluate_mindboggle_pair_accepts_raw_ants_type_of_transform_directly(mock_mindboggle_dataset, tmp_path):
+    # The user should be able to pass the exact ants.registration()
+    # type_of_transform string as `model`, with no _ANTS_TRADITIONAL_MODELS
+    # alias required -- e.g. model="antsRegistrationSyNQuick[so]" directly,
+    # matching what they'd type when calling ants.registration() themselves.
+    # Matched case-sensitively against the *original* `model` (not
+    # model_lower): ants.registration()'s type_of_transform strings are
+    # themselves case-sensitive, so this must not go through the harness's
+    # usual lowercasing.
+    pairs_csv, data_dir = mock_mindboggle_dataset
+    rec = evaluate_mindboggle_pair(
+        pair_idx=0,
+        model="antsRegistrationSyNQuick[so]",
+        device="cpu",
+        pairs_csv=pairs_csv,
+        data_dir=data_dir,
+        canonical_affine_dir=str(tmp_path / "canonical_affines"),
+        use_n4=False,
+    )
+    assert rec["status"] == "SUCCESS"
+    assert np.isfinite(rec["dice_sym"])
+    assert 0.0 <= rec["dice_sym"] <= 1.0
+    assert len(rec["transforms"]["fwdtransforms"]) == 2
+    assert len(rec["transforms"]["invtransforms"]) == 2
+
+
+def test_evaluate_mindboggle_pair_rejects_full_pipeline_ants_transform(mock_mindboggle_dataset, tmp_path):
+    # A raw type_of_transform string that recomputes its own rigid/affine
+    # stage (no deformable-only suffix) must still be rejected -- passing
+    # the model string through directly must not bypass the
+    # fairness-invariant guard that _ANTS_TRADITIONAL_MODELS entries get.
+    pairs_csv, data_dir = mock_mindboggle_dataset
+    with pytest.raises(ValueError, match="Unknown registration model"):
+        evaluate_mindboggle_pair(
+            pair_idx=0,
+            model="antsRegistrationSyNQuick[s]",
+            device="cpu",
+            pairs_csv=pairs_csv,
+            data_dir=data_dir,
+            canonical_affine_dir=str(tmp_path / "canonical_affines"),
+            use_n4=False,
+        )
 
 
 @pytest.mark.parametrize("model", ["gaussian_syn", "bspline_svf", "gaussian_svf"])

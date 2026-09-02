@@ -17,6 +17,12 @@ decision, to registration arms that come from ANTsTorch itself:
   B-spline stationary-velocity-field model (``'bspline_svf'``/``'svf'``).
 - ``antstorch.bspline_flows.gaussian_svf_registration()`` — the dense
   Gaussian-regularized stationary-velocity-field model (``'gaussian_svf'``).
+- Traditional (non-ANTsTorch) ANTs baselines, evaluated via a direct
+  ``ants.registration(type_of_transform=...)`` call rather than any
+  ANTsTorch model (``_ANTS_TRADITIONAL_MODELS`` below) — added later than
+  the arms above, so that this harness can report ANTs' own registration
+  quality on the identical pairs/canonical-affine/metrics pipeline used for
+  every ANTsTorch arm, not just the ANTsTorch-native transform families.
 
 This intentionally omits the ``syntx``-only capabilities the earlier
 extension of ``syntx.benchmark`` (see ``syntx.benchmark.antstorch_arms``)
@@ -61,6 +67,47 @@ _SYN_REGULARIZERS = {
 }
 _BSPLINE_SVF_MODELS = ("bspline_svf", "svf")
 _GAUSSIAN_SVF_MODELS = ("gaussian_svf",)
+
+# Traditional (non-ANTsTorch) ANTs baselines, run via a direct
+# ants.registration(type_of_transform=...) call (see _run_ants_traditional()
+# below) rather than any antstorch.syn/antstorch.bspline_flows model. Each
+# entry maps a benchmark model name to the exact ants.registration
+# type_of_transform string to use.
+#
+# Every entry here MUST use a deformable-only preset ("SyNOnly", or an
+# "antsRegistrationSyN*[so|bo]"-style suffix) applied on top of this
+# harness's shared canonical affine (initial_transform=[affine_path],
+# fit once by _fit_or_load_canonical_affine() and reused by every model
+# variant for a given pair) -- never a preset that recomputes its own
+# rigid/affine stage (e.g. the plain "[s]"/"[b]" full-pipeline variants),
+# since that would silently break the fairness invariant this harness
+# otherwise guarantees (every model variant registered from the exact same
+# affine initialization). Add a new preset here, once its "...[so]"/
+# "...[bo]" (or equivalent deformable-only) suffix has been confirmed, and
+# it is available with zero changes to the dispatch logic in
+# evaluate_mindboggle_pair() below.
+_ANTS_TRADITIONAL_MODELS = {
+    "ants_syn_quick": "antsRegistrationSyNQuick[so]",
+}
+
+
+def _is_deformable_only_ants_transform(type_of_transform: str) -> bool:
+    """True for an ``ants.registration()`` ``type_of_transform`` string that
+    performs no separate rigid/affine stage of its own: either the literal
+    ``"SyNOnly"``, or an ``"antsRegistrationSyN*[x]"``-style preset whose
+    bracketed suffix ends in ``"o"`` (the deformable-only ``"...[so]"``/
+    ``"...[bo]"`` presets -- see the ``type_of_transform`` options table in
+    ``ants.registration.__doc__``). Guards the shared-canonical-affine
+    fairness invariant (see ``_ANTS_TRADITIONAL_MODELS`` above) against both
+    dict entries and any raw ``type_of_transform`` string passed directly as
+    ``model`` (see ``evaluate_mindboggle_pair()``'s dispatch below) -- a
+    preset that fails this check would recompute its own rigid/affine stage
+    on top of the shared affine, silently breaking that invariant.
+    """
+    if type_of_transform == "SyNOnly":
+        return True
+    return "[" in type_of_transform and type_of_transform.rstrip("]").endswith("o")
+
 # One benchmark schedule for every transformation/regularizer family.
 DEFAULT_REG_ITERATIONS = (100, 100, 50, 10)
 DEFAULT_REGISTRATION_LEVELS = (8, 4, 2, 1)
@@ -118,6 +165,78 @@ def _fit_or_load_canonical_affine(fi, mi, pair_idx, canonical_affine_dir, device
     matrix = aff_res["affine_matrix"].to(dtype=torch.float32)
     translation = aff_res["affine_translation"].to(dtype=torch.float32)
     return matrix, translation, runtime_seconds, affine_path
+
+
+# ants.registration() top-level keyword arguments this harness forwards from
+# **kwargs when present -- never forced to a harness-wide default, since
+# antsRegistrationSyN*[x] presets recreate the antsRegistrationSyN(Quick).sh
+# scripts' own internal multi-resolution schedules, which have not been
+# verified compatible with DEFAULT_REG_ITERATIONS (calibrated for
+# antstorch's own dense-SyN implementation, a different codepath entirely).
+_ANTS_TRADITIONAL_FORWARDED_KWARGS = (
+    "reg_iterations", "syn_metric", "syn_sampling", "grad_step",
+    "flow_sigma", "total_sigma", "aff_metric", "aff_sampling",
+    "aff_iterations", "aff_shrink_factors", "aff_smoothing_sigmas",
+)
+
+
+def _run_ants_traditional(fi, mi, affine_path, type_of_transform, *, outprefix=None,
+                           verbose=False, **kwargs):
+    """Runs a traditional (non-ANTsTorch) ANTs baseline via a direct
+    ``ants.registration()`` call, on top of this harness's shared canonical
+    affine.
+
+    Unlike ``_run_bspline_svf()``/``_run_gaussian_svf()``, no composition-
+    order fixup (project doc, § 30) is needed here: this *is* the real
+    ``ants.registration()``/``ants.apply_transforms()`` pipeline, so the
+    transform files it writes are, by construction, exactly what
+    ``ants.apply_transforms()`` expects -- confirmed directly against real
+    Mindboggle data (inter-subject pair 88): ``fwdtransforms`` comes back as
+    ``[warp, affine]`` and ``invtransforms`` as ``[affine, inverse_warp]``,
+    the same two-piece convention ``evaluate_mindboggle_pair()`` already
+    defaults ``whichtoinvert_inv`` to (``[True, False]``) when a model
+    doesn't supply its own.
+
+    Parameters
+    ----------
+    fi, mi : ants.ANTsImage
+        Fixed/moving intensity images.
+    affine_path : str
+        Path to the harness's shared canonical ``...0GenericAffine.mat``
+        (from ``_fit_or_load_canonical_affine()``), prepended via
+        ``initial_transform=[affine_path]`` so every model variant for this
+        pair starts from the identical affine -- the fairness invariant
+        this harness otherwise guarantees for every ANTsTorch arm.
+    type_of_transform : str
+        The exact ``ants.registration(type_of_transform=...)`` string (e.g.
+        ``"antsRegistrationSyNQuick[so]"``) -- see ``_ANTS_TRADITIONAL_MODELS``.
+    outprefix : str, optional
+        Forwarded to ``ants.registration()`` when given, so its transform
+        files land under ``registration_output_dir`` like every other model.
+    **kwargs
+        Any of ``_ANTS_TRADITIONAL_FORWARDED_KWARGS``, forwarded to
+        ``ants.registration()`` only when explicitly given (see that
+        tuple's docstring above for why nothing is defaulted here).
+
+    Returns
+    -------
+    dict
+        ``ants.registration()``'s own return dict, unmodified (already has
+        ``warpedmovout``/``fwdtransforms``/``invtransforms``;
+        ``evaluate_mindboggle_pair()`` falls back to
+        ``whichtoinvert_inv=[True, False]`` and ``loss_history=None`` when
+        those keys are absent, which is correct for this model family).
+    """
+    ants_kwargs = {k: v for k, v in kwargs.items() if k in _ANTS_TRADITIONAL_FORWARDED_KWARGS}
+    if outprefix is not None:
+        ants_kwargs["outprefix"] = outprefix
+    return ants.registration(
+        fixed=fi, moving=mi,
+        type_of_transform=type_of_transform,
+        initial_transform=[affine_path],
+        verbose=verbose,
+        **ants_kwargs,
+    )
 
 
 def _run_bspline_svf(fi, mi, matrix, translation, *, device, reg_iterations=None,
@@ -453,8 +572,16 @@ def evaluate_mindboggle_pair(
         ``antstorch.bspline_flows.bspline_svf_registration()`` -- a
         different transformation family, a stationary velocity field, not a
         SyN variant despite ``'bspline_syn'``/``'bspline_svf'`` sharing the
-        word "bspline"), or ``'gaussian_svf'`` (the corresponding dense
-        stationary-velocity model with Gaussian update/total-field smoothing).
+        word "bspline"), ``'gaussian_svf'`` (the corresponding dense
+        stationary-velocity model with Gaussian update/total-field smoothing),
+        any key in :data:`_ANTS_TRADITIONAL_MODELS` (e.g. ``'ants_syn_quick'``
+        -- a traditional, non-ANTsTorch ANTs baseline, dispatched to a direct
+        ``ants.registration(type_of_transform=...)`` call on top of the same
+        shared canonical affine), or -- with no alias required -- any
+        deformable-only ``ants.registration`` ``type_of_transform`` string
+        directly (e.g. ``model="antsRegistrationSyNQuick[so]"``, matched
+        case-sensitively since ANTs' own strings are; see
+        :func:`_is_deformable_only_ants_transform`).
     device : str, optional
         Compute device ('mps', 'cuda', 'cpu'). If None, automatically detected.
     pairs_csv : str, optional
@@ -495,7 +622,15 @@ def evaluate_mindboggle_pair(
         ``total_field_spline_distance`` (bspline_syn); ``shrink_factors``/
         ``smoothing_sigmas``/``mesh_size``/``spline_distance`` (bspline_svf);
         ``update_field_sigma``/``total_field_sigma``/``momentum``
-        (gaussian_svf).
+        (gaussian_svf); ``reg_iterations``/``syn_metric``/``syn_sampling``/
+        ``grad_step``/``flow_sigma``/``total_sigma``/``aff_metric``/
+        ``aff_sampling``/``aff_iterations``/``aff_shrink_factors``/
+        ``aff_smoothing_sigmas`` (any :data:`_ANTS_TRADITIONAL_MODELS` model,
+        e.g. ``ants_syn_quick`` -- forwarded verbatim to
+        ``ants.registration()`` only when given; unlike every other model
+        family here, none of these has a harness-level default, since the
+        ``antsRegistrationSyN*[x]`` presets recreate the ANTs shell scripts'
+        own internal multi-resolution schedules).
         When neither a mesh-size nor a spline-distance override is given for
         either bspline variant, both now default to the same 26 mm physical
         spline distance (:data:`antstorch.bspline_flows.bspline_svf_registration.
@@ -595,10 +730,36 @@ def evaluate_mindboggle_pair(
             fi, mi, matrix, translation, device=device, outprefix=registration_outprefix,
             verbose=verbose, **svf_kwargs
         )
+    elif model_lower in _ANTS_TRADITIONAL_MODELS or _is_deformable_only_ants_transform(model):
+        # Either a registered alias (_ANTS_TRADITIONAL_MODELS), or `model`
+        # itself IS the exact ants.registration(type_of_transform=...)
+        # string -- e.g. model="antsRegistrationSyNQuick[so]" works directly,
+        # with no alias required, as long as it's deformable-only (checked
+        # against the *original*, case-preserved `model`, never `model_lower`:
+        # ants.registration()'s type_of_transform strings are case-sensitive,
+        # so "antsregistrationsynquick[so]" would not be recognized by ANTs
+        # itself even though it matches _is_deformable_only_ants_transform's
+        # own pattern check). This is deliberately permissive -- any future
+        # deformable-only preset works immediately, without a new
+        # _ANTS_TRADITIONAL_MODELS entry -- while the fairness-invariant
+        # guard still rejects a full-pipeline preset like "...[s]"/"...[b]"
+        # (falls through to the ValueError below, same as any other unknown
+        # model string).
+        type_of_transform = _ANTS_TRADITIONAL_MODELS.get(model_lower, model)
+        ants_kwargs = {k: v for k, v in kwargs.items() if k in _ANTS_TRADITIONAL_FORWARDED_KWARGS}
+        res_reg = _run_ants_traditional(
+            fi, mi, affine_path, type_of_transform, outprefix=registration_outprefix,
+            verbose=verbose, **ants_kwargs
+        )
     else:
         raise ValueError(
             f"Unknown registration model: '{model}'. Supported: "
-            f"{sorted(set(_SYN_REGULARIZERS) | set(_BSPLINE_SVF_MODELS) | set(_GAUSSIAN_SVF_MODELS))}"
+            f"{sorted(set(_SYN_REGULARIZERS) | set(_BSPLINE_SVF_MODELS) | set(_GAUSSIAN_SVF_MODELS) | set(_ANTS_TRADITIONAL_MODELS))}, "
+            "or any deformable-only ants.registration type_of_transform string "
+            "directly (e.g. 'antsRegistrationSyNQuick[so]', 'SyNOnly', "
+            "'antsRegistrationSyN[bo]') -- one whose bracketed suffix ends in "
+            "'o', so it never recomputes its own rigid/affine stage on top of "
+            "this harness's shared canonical affine."
         )
 
     t_reg = time.time() - t0_reg + t_aff
