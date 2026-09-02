@@ -25,6 +25,22 @@ canonical affine per pair is fit once and cached to disk, then reused across
 every model variant for that pair (the fairness invariant the harness
 preserves from syntx.benchmark).
 
+``--models`` is deliberately NOT restricted to a fixed choice list: any
+model string antstorch.benchmark.evaluate_mindboggle_pair() accepts works
+here directly -- the six ANTsTorch-native variants above, any key in
+antstorch.benchmark.evaluate._ANTS_TRADITIONAL_MODELS (e.g.
+"ants_syn_quick", a traditional ants.registration()-based baseline), or any
+deformable-only ants.registration ``type_of_transform`` string passed
+verbatim (e.g. "antsRegistrationSyNQuick[so]", "SyNOnly",
+"antsRegistrationSyN[bo]") -- so a future preset needs no change here, only
+to evaluate_mindboggle_pair()'s own dispatch. evaluate_mindboggle_pair()
+itself raises a clear ValueError for anything else (including a
+non-deformable-only preset like "antsRegistrationSyNQuick[s]", which would
+silently break the shared-canonical-affine fairness invariant). Quote any
+model name containing "[" or "]" on the command line -- in zsh (macOS's
+default shell) an unquoted "[so]" is interpreted as a glob pattern, not a
+literal string.
+
 Example
 -------
 First, just check the dataset is where the harness expects it::
@@ -45,6 +61,16 @@ for a quick smoke test before committing to the full probe::
     PYTHONPATH=. python tools/run_benchmark_mindboggle_probe.py \\
         --pair-idx 0 1 --models gaussian_syn gaussian_svf bspline_svf \\
         --reg-iterations 20 20 10 5 --device mps
+
+Run the traditional ants_syn_quick baseline (quote the bracketed form if you
+use the raw ants.registration type_of_transform string instead of the
+"ants_syn_quick" alias -- see the module docstring above)::
+
+    PYTHONPATH=. python tools/run_benchmark_mindboggle_probe.py \\
+        --pair-idx 0 1 --models ants_syn_quick --device mps
+
+    PYTHONPATH=. python tools/run_benchmark_mindboggle_probe.py \\
+        --pair-idx 0 1 --models 'antsRegistrationSyNQuick[so]' --device mps
 
 Run the full 90-pair cohort (no resume/cache -- expect a long run; see the
 project doc's runtime note, roughly 40 minutes per model variant on MPS for
@@ -83,7 +109,20 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--pairs-csv", default=DEFAULT_PAIRS_CSV, help="Pairs CSV (default: the 90-pair definition bundled with antstorch.benchmark)")
     parser.add_argument("--pair-idx", type=int, nargs="+", default=list(DEFAULT_PROBE_PAIRS), help="Pair indices to evaluate")
-    parser.add_argument("--models", nargs="+", default=list(DEFAULT_MODELS), choices=list(DEFAULT_MODELS) + ["svf"], help="Model variants to run per pair")
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        default=list(DEFAULT_MODELS),
+        help="Model variants to run per pair. Not restricted to a fixed list: "
+        "any model string evaluate_mindboggle_pair() accepts works -- the six "
+        "ANTsTorch-native variants (default), any antstorch.benchmark.evaluate."
+        "_ANTS_TRADITIONAL_MODELS key (e.g. ants_syn_quick), or any "
+        "deformable-only ants.registration type_of_transform string verbatim "
+        "(e.g. 'antsRegistrationSyNQuick[so]' -- quote it, zsh treats an "
+        "unquoted [so] as a glob pattern). An unsupported/non-deformable-only "
+        "string raises a clear ValueError from evaluate_mindboggle_pair() "
+        "itself once registration starts.",
+    )
     parser.add_argument("--device", default=None, help="PyTorch device: cpu, cuda, or mps (default: auto-detected)")
     parser.add_argument("--canonical-affine-dir", default="results/canonical_affines", help="Per-pair canonical affine cache, shared across models")
     parser.add_argument(
@@ -160,7 +199,16 @@ def main() -> None:
 
     print("\n=== Summary (mean over successful pairs, per model) ===")
     for model in args.models:
-        model_records = [r for r in records if r.get("model_type") == model and r.get("status") == "SUCCESS"]
+        # Case-insensitive: evaluate_mindboggle_pair() records model_type in
+        # lowercase (model_lower) regardless of the case `model` was passed
+        # in, which matters here since a raw ants.registration
+        # type_of_transform string (e.g. "antsRegistrationSyNQuick[so]") is
+        # itself mixed-case -- a case-sensitive match here would silently
+        # report "no successful evaluations" for a model that actually ran.
+        model_records = [
+            r for r in records
+            if str(r.get("model_type", "")).lower() == model.lower() and r.get("status") == "SUCCESS"
+        ]
         if not model_records:
             print(f"  {model}: no successful evaluations")
             continue
