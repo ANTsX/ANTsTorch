@@ -82,6 +82,7 @@ the syntx harness, as a rough order of magnitude)::
 
 import argparse
 import json
+import re
 import time
 from pathlib import Path
 
@@ -96,6 +97,28 @@ DEFAULT_MODELS = (
     "gaussian_syn", "sobolev_syn", "dsti_syn", "bspline_syn",
     "gaussian_svf", "bspline_svf",
 )
+
+
+def _safe_model_dirname(model: str) -> str:
+    """Filesystem/ANTs-CLI-safe directory name for a `model` string.
+
+    A raw ants.registration type_of_transform string (e.g.
+    "antsRegistrationSyNQuick[so]") is a perfectly valid `model` value for
+    evaluate_mindboggle_pair(), but "[", "]", and "," are unsafe to use
+    verbatim as a directory name here: this script embeds `model` in
+    registration_output_dir, which real ants.registration() (invoked
+    underneath evaluate_mindboggle_pair() for these models) in turn passes
+    to its own `outprefix` -- and ANTs' underlying C++ command-line parser
+    (antsCommandLineParser.cxx) uses "[", "]", "," itself to delimit
+    compound arguments like ``--output [prefix,warped,inverse]``. A literal
+    "[" inside the *path* corrupts that bracket-matching, and antsRegistration
+    fails immediately with "Incorrect command line specification" -- exactly
+    the failure seen in practice. Only the directory name is sanitized here;
+    the exact original `model` string (unmodified) is still what's passed to
+    evaluate_mindboggle_pair() itself, so registration correctness is
+    unaffected.
+    """
+    return re.sub(r"[^\w.-]", "_", model).strip("_")
 
 
 def parse_args() -> argparse.Namespace:
@@ -175,7 +198,7 @@ def main() -> None:
                     verbose=args.verbose,
                     use_n4=args.use_n4,
                     registration_output_dir=str(
-                        args.output_dir / f"pair_{pair_idx:03d}" / model
+                        args.output_dir / f"pair_{pair_idx:03d}" / _safe_model_dirname(model)
                     ),
                     **kwargs,
                 )
