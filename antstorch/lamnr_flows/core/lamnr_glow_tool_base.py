@@ -3277,6 +3277,26 @@ class GlowToolBase(ABC):
         ap.add_argument("--manifest",      type=str, default=None)
         ap.add_argument("--source-image",  type=str, default=None)
         ap.add_argument("--target-image",  type=str, default=None)
+        ap.add_argument(
+            "--n-samples", type=int, default=None,
+            help=(
+                "Generate this many random within-manifest interpolations. "
+                "Each sample uses two distinct subjects and a random t. In "
+                "this mode --out is an output directory."
+            ),
+        )
+        ap.add_argument(
+            "--seed", type=int, default=12345,
+            help="Random seed for --n-samples (default: 12345).",
+        )
+        ap.add_argument(
+            "--t-min", type=float, default=0.0,
+            help="Minimum random interpolation value (default: 0).",
+        )
+        ap.add_argument(
+            "--t-max", type=float, default=1.0,
+            help="Maximum random interpolation value (default: 1).",
+        )
         ap.add_argument("--t",             type=float, default=0.5,
                         help="Interpolation t ∈ [0,1]: 0=source, 1=target/mean")
         ap.add_argument("--interp-level",  action="append", default=None,
@@ -3287,6 +3307,13 @@ class GlowToolBase(ABC):
                         default=True)
         self._add_size_arg(ap, required=True)
         args = ap.parse_args(argv)
+
+        if not 0.0 <= args.t <= 1.0:
+            raise ValueError("--t must be in [0,1].")
+        if not 0.0 <= args.t_min < args.t_max <= 1.0:
+            raise ValueError("--t-min and --t-max must satisfy 0 <= min < max <= 1.")
+        if args.n_samples is not None and args.n_samples < 1:
+            raise ValueError("--n-samples must be positive.")
 
         device = torch.device(args.devices)
         ckpt_path = resolve_ckpt_path(Path(args.ckpt))
@@ -3335,24 +3362,63 @@ class GlowToolBase(ABC):
         else:
             raise RuntimeError("Either --manifest or --source-image is required.")
 
-        # Resolve target
-        target_is_gauss = (args.target_image is None)
-        if target_is_gauss and args.interp_type != "lerp":
-            raise RuntimeError(
-                f"{args.interp_type.upper()} requires --target-image. The empirical "
-                "mean is the centre of the hypersphere and cannot be a spherical "
-                "interpolation endpoint. Use --interp-type lerp to interpolate "
-                "linearly toward the mean."
-            )
-
         out_path = Path(args.out)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
+        random_sample_mode = args.n_samples is not None
+        metadata_rows = []
+        if random_sample_mode:
+            if not args.manifest:
+                raise RuntimeError("--n-samples requires --manifest.")
+            if args.source_image or args.target_image:
+                raise RuntimeError(
+                    "Do not combine --n-samples with --source-image or "
+                    "--target-image; both endpoints are drawn from the manifest."
+                )
+            if len(source_paths) < 2:
+                raise RuntimeError(
+                    "--n-samples requires at least two images in the manifest."
+                )
+            out_path.mkdir(parents=True, exist_ok=True)
+            rng = np.random.default_rng(args.seed)
+            interpolation_jobs = []
+            for sample_index in range(args.n_samples):
+                source_index, target_index = rng.choice(
+                    len(source_paths), size=2, replace=False
+                )
+                interpolation_t = float(rng.uniform(args.t_min, args.t_max))
+                sample_out = out_path / f"sample_{sample_index:04d}.nii.gz"
+                interpolation_jobs.append(
+                    (
+                        source_paths[int(source_index)],
+                        source_paths[int(target_index)],
+                        interpolation_t,
+                        sample_out,
+                    )
+                )
+        else:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path = (
+                Path(args.target_image) if args.target_image is not None else None
+            )
+            if target_path is None and args.interp_type != "lerp":
+                raise RuntimeError(
+                    f"{args.interp_type.upper()} requires --target-image. The "
+                    "empirical mean is the centre of the hypersphere and cannot "
+                    "be a spherical interpolation endpoint. Use --interp-type "
+                    "lerp to interpolate linearly toward the mean."
+                )
+            interpolation_jobs = [
+                (src_path, target_path, args.t, out_path)
+                for src_path in source_paths
+            ]
 
-        for src_path in tqdm(source_paths, desc="interpolate"):
+        for src_path, target_path, interpolation_t, sample_out in tqdm(
+            interpolation_jobs, desc="interpolate"
+        ):
             x_src = self.read_image(src_path, target_size).unsqueeze(0).to(device)
             with torch.no_grad():
                 z_src_list = _encode_latents(model, x_src)
 
+            target_is_gauss = target_path is None
             if target_is_gauss:
                 # Target = Gaussian mean per level
                 z_tgt_list = []
@@ -3368,7 +3434,7 @@ class GlowToolBase(ABC):
                     )
             else:
                 x_tgt = self.read_image(
-                    Path(args.target_image), target_size
+                    target_path, target_size
                 ).unsqueeze(0).to(device)
                 with torch.no_grad():
                     z_tgt_list = _encode_latents(model, x_tgt)
@@ -3377,7 +3443,7 @@ class GlowToolBase(ABC):
             # Interpolate with µ-centring at each level
             z_interp_list = []
             for l in range(len(z_src_list)):
-                t_l = t_level.get(l, args.t)
+                t_l = t_level.get(l, interpolation_t)
 
                 # View-specific centre and typical-set radius for this level.
                 shp = shapes_by_view[v_idx_gauss][l]
@@ -3416,9 +3482,34 @@ class GlowToolBase(ABC):
             with torch.no_grad():
                 x_interp = self.decode_latents(model, z_interp_list, target_size)
 
-            self.save_volume(x_interp, out_path)
+            self.save_volume(x_interp, sample_out)
+            if random_sample_mode:
+                metadata_rows.append(
+                    {
+                        "output": str(sample_out),
+                        "source_image": str(src_path),
+                        "target_image": str(target_path),
+                        "t": f"{interpolation_t:.17g}",
+                        "interp_type": args.interp_type,
+                        "seed": args.seed,
+                    }
+                )
             del x_src, z_src_list, z_tgt_list, z_interp_list, x_interp
             gc.collect()
+
+        if random_sample_mode:
+            metadata_path = out_path / "samples.csv"
+            with metadata_path.open("w", newline="") as stream:
+                writer = csv.DictWriter(
+                    stream,
+                    fieldnames=[
+                        "output", "source_image", "target_image", "t",
+                        "interp_type", "seed",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerows(metadata_rows)
+            print(f"[recon-interpolate] metadata → {metadata_path}")
 
         print(f"[recon-interpolate] done → {out_path}")
 
