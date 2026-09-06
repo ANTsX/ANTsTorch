@@ -80,10 +80,32 @@ def test_cleanup_gpu_cpu_device_is_a_no_op():
 
 
 def test_mps_grid_sample_3d_available_is_false_without_mps_hardware():
-    # This sandbox has no MPS backend; the probe must degrade to False
-    # rather than raising (https://github.com/pytorch/pytorch/issues/160237).
+    # A machine with no MPS backend at all (most CI/sandbox machines) must
+    # get False without raising -- torch.backends.mps.is_available() itself
+    # is the short-circuit in mps_grid_sample_3d_available(), so this holds
+    # regardless of PyTorch version.
+    if torch.backends.mps.is_available():
+        pytest.skip("MPS is available on this machine; see the probe test below instead")
     mps_grid_sample_3d_available.cache_clear()
     assert mps_grid_sample_3d_available() is False
+
+
+def test_mps_grid_sample_3d_available_probes_rather_than_hardcodes_a_verdict():
+    # On real Apple Silicon this can legitimately be True: PyTorch may have
+    # since shipped a native MPS kernel for grid_sampler_3d (the gap tracked
+    # by https://github.com/pytorch/pytorch/issues/160237), or the process
+    # may have PYTORCH_ENABLE_MPS_FALLBACK=1 set, under which every
+    # unimplemented MPS op (including this one) transparently falls back to
+    # CPU and so "succeeds". Either way the whole point of probing instead
+    # of hardcoding a verdict is that this function must not be pinned to
+    # one answer -- only that it is a stable, non-raising bool.
+    mps_grid_sample_3d_available.cache_clear()
+    first = mps_grid_sample_3d_available()
+    assert isinstance(first, bool)
+    if not torch.backends.mps.is_available():
+        assert first is False
+    mps_grid_sample_3d_available.cache_clear()
+    assert mps_grid_sample_3d_available() == first
 
 
 def test_relocate_tensors_is_a_no_op_for_2d():

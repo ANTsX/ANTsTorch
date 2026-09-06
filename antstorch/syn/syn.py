@@ -723,22 +723,28 @@ def syn_registration(
     else:
         resolved_device = torch.device(device)
     if resolved_device.type == "mps" and dimension == 3 and not mps_grid_sample_3d_available():
-        # A separate, more fundamental gap than the backward-pass one above:
-        # MPS has no *forward* kernel at all for 3-D grid_sample
-        # (NotImplementedError: aten::grid_sampler_3d; see
-        # https://github.com/pytorch/pytorch/issues/160237), so this would
-        # crash immediately even for 'SyNOnly' / no-grad calls that the
-        # backward-pass skip above doesn't touch. Unlike that skip (which
-        # only fires on auto-detection), this also catches an explicitly
-        # requested device='mps' -- there is no way to make a 3-D SyN run
-        # work on MPS in the installed PyTorch build, so silently trying
-        # anyway would only replace this clear message with a cryptic one.
+        # mps_grid_sample_3d_available() probes forward AND backward: PyTorch
+        # PR #160541 (merged 2025-08-15, shipped starting with the 2.9.0
+        # stable release) added a native MPS kernel for grid_sampler_3d
+        # *forward*, closing the crash the backward-pass skip above doesn't
+        # touch (e.g. 'SyNOnly' / no-grad calls) -- but no MPS kernel for
+        # grid_sampler_3d_backward has been found as of this writing (see
+        # https://github.com/pytorch/pytorch/issues/160237), and every
+        # type_of_transform that differentiates through the affine/SyN warp
+        # needs backward too. Unlike the auto-detect-only skip above, this
+        # also catches an explicitly requested device='mps' -- there is no
+        # way to make a 3-D SyN run that needs backward work on MPS while
+        # either kernel is missing, so silently trying anyway would only
+        # replace this clear message with a cryptic one.
         warnings.warn(
-            "syn_registration: 3-D torch.nn.functional.grid_sample has no MPS kernel "
-            "in this PyTorch build (aten::grid_sampler_3d; see "
-            "https://github.com/pytorch/pytorch/issues/160237). Falling back to CPU. "
-            "Set PYTORCH_ENABLE_MPS_FALLBACK=1 instead if you would rather PyTorch "
-            "itself fall back transparently for every unimplemented MPS op.",
+            "syn_registration: 3-D torch.nn.functional.grid_sample is missing its "
+            "forward and/or backward MPS kernel in this PyTorch build "
+            "(aten::grid_sampler_3d / grid_sampler_3d_backward; forward shipped in "
+            "PyTorch 2.9.0 via https://github.com/pytorch/pytorch/pull/160541, but see "
+            "https://github.com/pytorch/pytorch/issues/160237 for the backward gap). "
+            "Falling back to CPU. Set PYTORCH_ENABLE_MPS_FALLBACK=1 instead if you "
+            "would rather PyTorch itself fall back transparently for every "
+            "unimplemented MPS op.",
             RuntimeWarning,
         )
         resolved_device = torch.device("cpu")
