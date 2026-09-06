@@ -1,10 +1,15 @@
+from unittest import mock
+
 import ants
 import numpy as np
+import pytest
 import torch
 
 from antstorch.syn.core import (
     auto_detect_device,
+    mps_grid_sample_3d_available,
     normalize_and_tensorize,
+    relocate_tensors_avoiding_mps_grid_sample_3d,
     cleanup_gpu,
 )
 
@@ -72,3 +77,72 @@ def test_normalize_and_tensorize_matches_manual_foreground_percentile_normalizat
 def test_cleanup_gpu_cpu_device_is_a_no_op():
     # Should not raise even though there is no GPU/MPS backend present.
     cleanup_gpu('cpu', backend='pytorch')
+
+
+def test_mps_grid_sample_3d_available_is_false_without_mps_hardware():
+    # This sandbox has no MPS backend; the probe must degrade to False
+    # rather than raising (https://github.com/pytorch/pytorch/issues/160237).
+    mps_grid_sample_3d_available.cache_clear()
+    assert mps_grid_sample_3d_available() is False
+
+
+def test_relocate_tensors_is_a_no_op_for_2d():
+    fixed = torch.zeros(1, 1, 8, 7)
+    moving = torch.zeros(1, 1, 8, 7)
+    result = relocate_tensors_avoiding_mps_grid_sample_3d(2, "test", fixed=fixed, moving=moving)
+    assert result["fixed"] is fixed
+    assert result["moving"] is moving
+
+
+def test_relocate_tensors_is_a_no_op_when_nothing_is_on_mps():
+    fixed = torch.zeros(1, 1, 4, 4, 4)
+    moving = torch.zeros(1, 1, 4, 4, 4)
+    result = relocate_tensors_avoiding_mps_grid_sample_3d(
+        3, "test", fixed=fixed, moving=moving, initial_affine=None
+    )
+    assert result["fixed"] is fixed
+    assert result["moving"] is moving
+    assert result["initial_affine"] is None
+
+
+def test_relocate_tensors_passes_through_when_mps_grid_sample_3d_available():
+    # Even a tensor reporting an "mps" device should pass through untouched
+    # once the installed PyTorch build has a real 3-D grid_sample kernel.
+    fixed = torch.zeros(1, 1, 4, 4, 4)
+    with mock.patch.object(torch.Tensor, "device", new_callable=mock.PropertyMock) as device_mock, \
+            mock.patch(
+                "antstorch.syn.core.pipeline.mps_grid_sample_3d_available", return_value=True
+            ):
+        device_mock.return_value = torch.device("mps")
+        result = relocate_tensors_avoiding_mps_grid_sample_3d(3, "test", fixed=fixed)
+    assert result["fixed"] is fixed
+
+
+def test_relocate_tensors_falls_back_to_cpu_for_mps_3d_without_kernel():
+    # Simulates https://github.com/pytorch/pytorch/issues/160237 on hardware
+    # this sandbox does not have: an "mps" tensor, 3-D, no 3-D grid_sample
+    # kernel -- fixed/moving/initial_affine must relocate to cpu together,
+    # with exactly one warning.
+    fixed = torch.zeros(1, 1, 4, 4, 4)
+    moving = torch.zeros(1, 1, 4, 4, 4)
+    matrix = torch.eye(3)
+    translation = torch.zeros(3)
+    with mock.patch.object(torch.Tensor, "device", new_callable=mock.PropertyMock) as device_mock, \
+            mock.patch(
+                "antstorch.syn.core.pipeline.mps_grid_sample_3d_available", return_value=False
+            ):
+        device_mock.return_value = torch.device("mps")
+        with pytest.warns(RuntimeWarning, match="grid_sampler_3d"):
+            result = relocate_tensors_avoiding_mps_grid_sample_3d(
+                3, "test_context", fixed=fixed, moving=moving, initial_affine=(matrix, translation)
+            )
+    # The mocked .device property reports "mps" for every tensor, including
+    # results of .cpu() (whose real storage was cpu-resident all along), so
+    # identity/device checks can't distinguish "relocated" from "untouched"
+    # here. The warning firing (above) is the behavioral signal that the
+    # mps + no-kernel branch actually ran; this just confirms values survive.
+    torch.testing.assert_close(result["fixed"], fixed)
+    torch.testing.assert_close(result["moving"], moving)
+    relocated_matrix, relocated_translation = result["initial_affine"]
+    torch.testing.assert_close(relocated_matrix, matrix)
+    torch.testing.assert_close(relocated_translation, translation)

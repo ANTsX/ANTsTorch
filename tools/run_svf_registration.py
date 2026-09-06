@@ -1,11 +1,29 @@
 #!/usr/bin/env python3
-"""Run ANTsTorch B-spline or Gaussian SVF registration on ANTs 2-D images.
+"""Run ANTsTorch B-spline or Gaussian SVF registration on 2-D or 3-D ANTs images.
+
+By default, registers the bundled ANTs ``r30``/``r27`` 2-D demo images; pass
+``--fixed``/``--moving`` to register your own images instead, 2-D or 3-D --
+``bspline_svf_registration()``/``gaussian_svf_registration()`` are both
+dimension-agnostic already (the same functions this project's Mindboggle
+benchmark runs on real 3-D brain volumes elsewhere). What used to make this
+script 2-D-only was its own hand-rolled ANTsPy<->PyTorch tensor-conversion
+helpers, not those registration functions; they have been replaced with the
+dimension-agnostic equivalents from ``antstorch.syn.bridge``
+(``ants_image_to_tensor``/``tensor_to_ants_image``/
+``displacement_xyz_to_ants_image``), which that module's own docstring
+already documents as bridging exactly these fields.
 
 Example
 -------
 Run the default four-level registration on CPU::
 
     PYTHONPATH=. python tools/run_svf_registration.py
+
+Register your own images instead of the bundled r30/r27 demo pair -- 2-D or
+3-D, e.g. a real Mindboggle-style pair::
+
+    PYTHONPATH=. python tools/run_svf_registration.py \
+        --fixed /path/to/fixed.nii.gz --moving /path/to/moving.nii.gz
 
 Use an accelerator and fewer iterations::
 
@@ -18,10 +36,11 @@ Run the dense Gaussian-regularized SVF::
         --transform-type gaussian_svf --update-field-sigma 3 \
         --total-field-sigma 0.5 --verbose
 
-Use the local ANTs neighborhood-correlation metric::
+Use the squared local normalized cross-correlation metric (the same
+similarity vocabulary as run_syn_registration.py's --similarity)::
 
     PYTHONPATH=. python tools/run_svf_registration.py \
-        --similarity ants_ncc --neighborhood-radius 2 --verbose
+        --similarity cc2 --neighborhood-radius 2 --verbose
 
 Run an affine pre-registration before the selected SVF (bspline_flows has no
 affine/rigid initialization of its own; see
@@ -37,7 +56,6 @@ import time
 from pathlib import Path
 
 import ants
-import numpy as np
 import torch
 
 from antstorch.ants_transform_io import write_affine_transform
@@ -48,14 +66,23 @@ from antstorch.bspline_flows import (
     bspline_svf_registration,
     gaussian_svf_registration,
 )
+from antstorch.syn.bridge import (
+    ants_image_to_tensor,
+    displacement_xyz_to_ants_image,
+    tensor_to_ants_image,
+)
 
 
 def ants_to_torch(image: ants.ANTsImage, device: torch.device) -> torch.Tensor:
-    """Convert ANTs x-y storage to singleton N-C-Y-X PyTorch storage."""
-    if image.dimension != 2 or image.components != 1:
-        raise ValueError("This example expects a scalar 2-D ANTs image")
-    array = np.ascontiguousarray(image.numpy().astype(np.float32, copy=False).T)
-    return torch.from_numpy(array).unsqueeze(0).unsqueeze(0).to(device)
+    """Convert a scalar 2-D or 3-D ANTs image to a singleton ``(1, 1, *torch_shape)``
+    tensor, raw (unnormalized) intensities -- a thin wrapper over
+    :func:`antstorch.syn.bridge.ants_image_to_tensor` (``normalize=False``,
+    matching this script's own historical behavior; that function defaults
+    to ``normalize=True``, a percentile-clip normalization this script has
+    never applied)."""
+    if image.components != 1:
+        raise ValueError("This example expects a scalar ANTs image")
+    return ants_image_to_tensor(image, device=device, normalize=False)
 
 
 def image_domain(image: ants.ANTsImage) -> ImageDomain:
@@ -69,32 +96,36 @@ def image_domain(image: ants.ANTsImage) -> ImageDomain:
 
 
 def torch_image_to_ants(tensor: torch.Tensor, reference: ants.ANTsImage) -> ants.ANTsImage:
-    """Convert a singleton N-C-Y-X tensor to a scalar ANTs image."""
-    array = np.ascontiguousarray(tensor.detach().cpu().numpy()[0, 0].T)
-    return ants.from_numpy(
-        array,
-        origin=reference.origin,
-        spacing=reference.spacing,
-        direction=reference.direction,
-    )
+    """Convert a singleton ``(1, 1, *torch_shape)`` tensor to a scalar ANTs
+    image -- :func:`antstorch.syn.bridge.tensor_to_ants_image`, dimension-agnostic."""
+    return tensor_to_ants_image(tensor, reference)
 
 
 def torch_field_to_ants(tensor: torch.Tensor, reference: ants.ANTsImage) -> ants.ANTsImage:
-    """Convert N-(x,y)-Y-X physical vectors to an ANTs vector image."""
-    if tensor.shape[0] != 1 or tensor.shape[1] != 2:
-        raise ValueError("This example expects a singleton batch of 2-D vectors")
-    array = np.ascontiguousarray(tensor.detach().cpu().permute(0, 3, 2, 1).numpy()[0])
-    return ants.from_numpy(
-        array,
-        origin=reference.origin,
-        spacing=reference.spacing,
-        direction=reference.direction,
-        has_components=True,
-    )
+    """Convert a channel-first ``(1, dim, *torch_shape)`` ITK-order physical
+    displacement field to an ANTs vector image --
+    :func:`antstorch.syn.bridge.displacement_xyz_to_ants_image`, the exact
+    convention ``bspline_svf_registration()``/``gaussian_svf_registration()``
+    return their fields in (per that function's own docstring), dimension-agnostic."""
+    return displacement_xyz_to_ants_image(tensor, reference)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        "--fixed",
+        type=Path,
+        default=None,
+        help="Path to the fixed image (scalar, 2-D or 3-D). Defaults to the bundled "
+        "ANTs 'r30' demo image (ants.get_ants_data('r30')) when omitted.",
+    )
+    parser.add_argument(
+        "--moving",
+        type=Path,
+        default=None,
+        help="Path to the moving image (scalar, 2-D or 3-D). Defaults to the bundled "
+        "ANTs 'r27' demo image (ants.get_ants_data('r27')) when omitted.",
+    )
     parser.add_argument(
         "--transform-type",
         choices=("bspline_svf", "gaussian_svf"),
@@ -138,8 +169,15 @@ def parse_args() -> argparse.Namespace:
         default=0.5,
         help="Gaussian SVF accumulated-velocity sigma in physical units (default: 0.5)",
     )
-    parser.add_argument("--similarity", choices=("mse", "ncc", "ants_ncc"), default="ants_ncc")
-    parser.add_argument("--neighborhood-radius", type=int, default=4)
+    parser.add_argument(
+        "--similarity",
+        choices=("mse", "lncc", "cc", "lncc2", "cc2", "mattes", "mi"),
+        default="lncc",
+        help="Similarity metric for the SVF stage -- identical vocabulary/implementation "
+        "as run_syn_registration.py's --similarity (default: lncc)",
+    )
+    parser.add_argument("--neighborhood-radius", type=int, default=4, help="Window radius for lncc/cc")
+    parser.add_argument("--num-bins", type=int, default=32, help="Histogram bins for mattes/mi")
     parser.add_argument("--coefficient-weight", type=float, default=0.0)
     parser.add_argument("--velocity-weight", type=float, default=0.0)
     parser.add_argument("--bending-weight", type=float, default=0.0)
@@ -155,8 +193,13 @@ def parse_args() -> argparse.Namespace:
         default="Affine",
         help="Linear-transform hierarchy for the affine pre-registration (default: Affine)",
     )
-    parser.add_argument("--affine-similarity", choices=("mse", "ncc", "ants_ncc"), default="mse")
+    parser.add_argument(
+        "--affine-similarity",
+        choices=("mse", "lncc", "cc", "lncc2", "cc2", "mattes", "mi"),
+        default="mse",
+    )
     parser.add_argument("--affine-neighborhood-radius", type=int, default=4)
+    parser.add_argument("--affine-num-bins", type=int, default=32, help="Histogram bins for affine mattes/mi")
     parser.add_argument("--affine-shrink-factors", type=int, nargs="+", default=(4, 2, 1))
     parser.add_argument("--affine-smoothing-sigmas", type=float, nargs="+", default=(2.0, 1.0, 0.0))
     parser.add_argument("--affine-iterations", type=int, nargs="+", default=(100, 75, 50))
@@ -202,8 +245,15 @@ def main() -> None:
             if len(values) != affine_level_count:
                 raise ValueError(f"{name} must have one value per affine shrink factor")
 
-    fixed_ants = ants.image_read(ants.get_ants_data("r30")).clone("float")
-    moving_ants = ants.image_read(ants.get_ants_data("r27")).clone("float")
+    # --fixed/--moving default to the bundled ANTs r30/r27 (2-D) demo pair
+    # when omitted -- ants.get_ants_data() resolves those from ANTsPy's own
+    # packaged test data, no network access needed. Any scalar 2-D or 3-D
+    # image works when given explicitly (ants_to_torch() above still rejects
+    # a non-scalar/multi-component image with a clear message).
+    fixed_path = str(args.fixed) if args.fixed is not None else ants.get_ants_data("r30")
+    moving_path = str(args.moving) if args.moving is not None else ants.get_ants_data("r27")
+    fixed_ants = ants.image_read(fixed_path).clone("float")
+    moving_ants = ants.image_read(moving_path).clone("float")
     fixed = ants_to_torch(fixed_ants, device)
     moving = ants_to_torch(moving_ants, device)
     fixed_domain = image_domain(fixed_ants)
@@ -222,6 +272,7 @@ def main() -> None:
             transform_type=args.affine_transform_type,
             similarity=args.affine_similarity,
             neighborhood_radius=args.affine_neighborhood_radius,
+            num_bins=args.affine_num_bins,
             shrink_factors=tuple(args.affine_shrink_factors),
             smoothing_sigmas=tuple(args.affine_smoothing_sigmas),
             iterations=tuple(args.affine_iterations),
@@ -260,6 +311,7 @@ def main() -> None:
         gradient_step=args.gradient_step,
         similarity=args.similarity,
         neighborhood_radius=args.neighborhood_radius,
+        num_bins=args.num_bins,
         velocity_weight=args.velocity_weight,
         bending_weight=args.bending_weight,
         initial_affine=initial_affine,
@@ -283,11 +335,14 @@ def main() -> None:
     elapsed = time.perf_counter() - start
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    ants.image_write(fixed_ants, str(args.output_dir / "fixed_r30.nii.gz"))
-    ants.image_write(moving_ants, str(args.output_dir / "moving_r27.nii.gz"))
+    # Generic output filenames (fixed.nii.gz/moving.nii.gz/warped_moving.nii.gz)
+    # rather than the old r30/r27-specific ones -- those names are wrong/
+    # misleading once --fixed/--moving point at arbitrary images.
+    ants.image_write(fixed_ants, str(args.output_dir / "fixed.nii.gz"))
+    ants.image_write(moving_ants, str(args.output_dir / "moving.nii.gz"))
     ants.image_write(
         torch_image_to_ants(result["warpedmovout"], fixed_ants),
-        str(args.output_dir / "warped_r27.nii.gz"),
+        str(args.output_dir / "warped_moving.nii.gz"),
     )
     # fwdtransforms/invtransforms are always the pure selected SVF
     # piece alone -- never composed with the affine below -- matching the
@@ -316,14 +371,14 @@ def main() -> None:
         write_affine_transform(
             result["affine_matrix"][0],
             result["affine_translation"][0],
-            dim=2,
+            dim=fixed_ants.dimension,
             filename=str(args.output_dir / "total_affine_0GenericAffine.mat"),
         )
 
     if affine_result is not None:
         ants.image_write(
             torch_image_to_ants(affine_result["warpedmovout"], fixed_ants),
-            str(args.output_dir / "affine_warped_r27.nii.gz"),
+            str(args.output_dir / "affine_warped_moving.nii.gz"),
         )
         for name, filename in (
             ("fwdtransforms", "affine_forward_displacement"),

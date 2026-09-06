@@ -1,10 +1,35 @@
 """Differentiable registration similarities and physical regularizers."""
 
+from typing import Optional
+
 import torch
 from torch import Tensor
 from torch.nn import functional as F
 
+from antstorch.syn.core.losses import local_ncc_loss_nd, mattes_mi_loss_nd
+
 from .bspline_domain import ImageDomain
+
+SIMILARITY_METRICS = ("mse", "lncc", "cc", "lncc2", "cc2", "mattes", "mi")
+"""The similarity-metric vocabulary shared by every antstorch.bspline_flows
+registration entry point (``affine_registration``, ``bspline_svf_registration``
+via ``DeterministicBSplineRegistration``, ``gaussian_svf_registration``) --
+identical set of names, and identical underlying implementation
+(:mod:`antstorch.syn.core.losses`), as :func:`antstorch.syn.syn_registration`'s
+own ``syn_metric``/``affine_similarity``. A ``similarity=`` value behaves the
+same whether you run the B-spline/Gaussian SVF framework or the SyN
+framework -- see :func:`similarity_loss`, the single dispatcher all of the
+above call.
+
+``lncc``/``cc`` are aliases for the (non-squared) local normalized
+cross-correlation; ``lncc2``/``cc2`` are its squared variant (closest analog
+of this project's former, now-removed, ``'ants_ncc'`` option -- ITK's
+``ANTSNeighborhoodCorrelationImageToImageMetricv4`` squared local
+correlation -- though not numerically identical, since ``lncc2``/``cc2`` use
+a box-filter/autograd implementation rather than ITK's hand-derived
+pseudo-gradient). ``mattes``/``mi`` are aliases for Mattes mutual
+information.
+"""
 
 
 def mean_squared_error(fixed: Tensor, warped_moving: Tensor) -> Tensor:
@@ -129,3 +154,56 @@ def bending_energy(field: Tensor, domain: ImageDomain) -> Tensor:
             second = torch.gradient(derivative, spacing=(domain.spacing[j],), dim=(torch_axis,))[0]
             terms.append(second.square().mean() * (2.0 if i != j else 1.0))
     return torch.stack(terms).sum()
+
+
+def similarity_loss(
+    name: str,
+    fixed: Tensor,
+    warped_moving: Tensor,
+    *,
+    neighborhood_radius: int = 2,
+    num_bins: int = 32,
+    mask: Optional[Tensor] = None,
+) -> Tensor:
+    """Dispatch to one of :data:`SIMILARITY_METRICS`.
+
+    The single implementation shared by ``affine_registration``,
+    ``DeterministicBSplineRegistration`` (and so ``bspline_svf_registration``),
+    and ``gaussian_svf_registration`` -- reusing exactly the same
+    :mod:`antstorch.syn.core.losses` functions, and matching the same
+    ``window_size = 2 * neighborhood_radius + 1`` convention, as
+    :func:`antstorch.syn.syn.syn_registration`'s own dispatcher
+    (``antstorch.syn.syn._similarity_loss``).
+
+    Parameters
+    ----------
+    name : {'mse', 'lncc', 'cc', 'lncc2', 'cc2', 'mattes', 'mi'}
+        Similarity metric.
+    fixed, warped_moving : Tensor
+        Images of identical shape, ``(N, C, *spatial)``.
+    neighborhood_radius : int
+        Local-window radius in voxels for ``'lncc'``/``'cc'``/``'lncc2'``/
+        ``'cc2'``; converted to ``local_ncc_loss_nd``'s ``window_size`` as
+        ``2 * neighborhood_radius + 1``. Unused for ``'mse'``/``'mattes'``/``'mi'``.
+    num_bins : int
+        Parzen histogram bin count for ``'mattes'``/``'mi'``. Unused otherwise.
+    mask : Tensor, optional
+        Binary evaluation mask, forwarded to the local-correlation/mutual-
+        information losses. Unused for ``'mse'``.
+    """
+    if fixed.shape != warped_moving.shape:
+        raise ValueError("fixed and warped moving images must have identical shapes")
+    if name not in SIMILARITY_METRICS:
+        raise ValueError(f"similarity must be one of {SIMILARITY_METRICS}, got {name!r}")
+    if name == "mse":
+        if mask is None:
+            return mean_squared_error(fixed, warped_moving)
+        denom = mask.sum().clamp_min(1e-8)
+        return ((fixed - warped_moving).square() * mask).sum() / denom
+    window_size = 2 * int(neighborhood_radius) + 1
+    if name in ("lncc", "cc"):
+        return local_ncc_loss_nd(fixed, warped_moving, mask=mask, window_size=window_size, squared=False)
+    if name in ("lncc2", "cc2"):
+        return local_ncc_loss_nd(fixed, warped_moving, mask=mask, window_size=window_size, squared=True)
+    # "mattes" / "mi"
+    return mattes_mi_loss_nd(fixed, warped_moving, mask=mask, num_bins=num_bins)

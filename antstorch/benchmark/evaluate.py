@@ -244,7 +244,7 @@ def _run_bspline_svf(fi, mi, matrix, translation, *, device, reg_iterations=None
                       smoothing_sigmas=DEFAULT_REGISTRATION_SMOOTHING_SIGMAS,
                       mesh_size=None, spline_distance=None, learning_rate=0.01,
                       optimizer="physical_gradient_descent",
-                      gradient_step=0.2, similarity="ants_ncc", neighborhood_radius=4,
+                      gradient_step=0.2, similarity="cc2", neighborhood_radius=4,
                       outprefix=None, verbose=False) -> Dict[str, Any]:
     """Adapts ``bspline_flows.bspline_svf_registration()``'s in-memory tensor
     output into the file-based ``fwdtransforms``/``invtransforms``/
@@ -425,7 +425,7 @@ def _run_gaussian_svf(
     shrink_factors=DEFAULT_REGISTRATION_LEVELS,
     smoothing_sigmas=DEFAULT_REGISTRATION_SMOOTHING_SIGMAS,
     gradient_step=0.2, momentum=0.0, update_field_sigma=3.0,
-    total_field_sigma=0.5, similarity="ants_ncc", neighborhood_radius=4,
+    total_field_sigma=0.5, similarity="cc2", neighborhood_radius=4,
     velocity_weight=0.0, bending_weight=0.0, squaring_steps=7,
     outprefix=None, verbose=False,
 ) -> Dict[str, Any]:

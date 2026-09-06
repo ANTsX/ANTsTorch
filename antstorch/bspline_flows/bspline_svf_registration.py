@@ -11,6 +11,8 @@ from .bspline_domain import ImageDomain, mesh_size_for_spline_distance
 from .bspline_synthesis import refine_bspline_coefficients
 from .deterministic_registration import DeterministicBSplineRegistration
 from .physical_gradient_descent import PhysicalGradientDescent
+from antstorch.syn.core.pipeline import relocate_tensors_avoiding_mps_grid_sample_3d
+from .similarity import SIMILARITY_METRICS
 from .spatial_transform import affine_displacement_field
 
 # Default physical B-spline knot spacing (ANTs' "spline distance") applied
@@ -200,8 +202,9 @@ def bspline_svf_registration(
     gradient_step: float = 0.2,
     momentum: float = 0.0,
     gradient_smoothing_sigma: float = 0.0,
-    similarity: str = "mse",
-    neighborhood_radius: Union[int, Sequence[int]] = 2,
+    similarity: str = "lncc",
+    neighborhood_radius: int = 2,
+    num_bins: int = 32,
     coefficient_weight: float = 0.0,
     velocity_weight: float = 0.0,
     bending_weight: float = 0.0,
@@ -228,9 +231,15 @@ def bspline_svf_registration(
     are in the physical units of the domains. Batches of any positive size are
     supported, with one coefficient lattice optimized per batch item.
 
-    ``similarity="ants_ncc"`` selects the squared local neighborhood
-    correlation used by ITK/ANTs. ``neighborhood_radius`` is an integer or an
-    ITK-order ``(x, y[, z])`` tuple; its default of 2 matches ITK.
+    ``similarity`` is one of ``{'mse', 'lncc', 'cc', 'lncc2', 'cc2', 'mattes',
+    'mi'}`` -- identical vocabulary and implementation as
+    ``affine_registration()``/``gaussian_svf_registration()``'s ``similarity``
+    and :func:`antstorch.syn.syn_registration`'s ``syn_metric`` (see
+    :data:`antstorch.bspline_flows.similarity.SIMILARITY_METRICS`).
+    ``neighborhood_radius`` (default 2) sets the local-window size for
+    ``'lncc'``/``'cc'``/``'lncc2'``/``'cc2'`` as ``2 * neighborhood_radius + 1``
+    voxels; ``num_bins`` (default 32) sets the Parzen histogram bin count for
+    ``'mattes'``/``'mi'``.
 
     ``optimizer="physical_gradient_descent"`` normalizes each batch item's
     coefficient-gradient direction after B-spline synthesis so that the
@@ -329,6 +338,17 @@ def bspline_svf_registration(
         raise TypeError("moving_domain must be a ImageDomain")
     if fixed_domain.dimension != moving_domain.dimension:
         raise ValueError("fixed_domain and moving_domain must have the same dimension")
+    _relocated = relocate_tensors_avoiding_mps_grid_sample_3d(
+        fixed_domain.dimension,
+        "bspline_svf_registration",
+        fixed=fixed,
+        moving=moving,
+        initial_affine=initial_affine,
+        initial_coefficients=initial_coefficients,
+    )
+    fixed, moving, initial_affine, initial_coefficients = (
+        _relocated["fixed"], _relocated["moving"], _relocated["initial_affine"], _relocated["initial_coefficients"]
+    )
     _validate_images(fixed, moving, fixed_domain, moving_domain)
     if not isinstance(verbose, bool):
         raise TypeError("verbose must be a bool")
@@ -346,8 +366,8 @@ def bspline_svf_registration(
         if optimizer_name == "physical_gradient_descent"
         else None
     )
-    if similarity not in ("mse", "ncc", "ants_ncc"):
-        raise ValueError("similarity must be 'mse', 'ncc', or 'ants_ncc'")
+    if similarity not in SIMILARITY_METRICS:
+        raise ValueError(f"similarity must be one of {SIMILARITY_METRICS}, got {similarity!r}")
     if padding_mode not in ("zeros", "border", "reflection"):
         raise ValueError("padding_mode must be 'zeros', 'border', or 'reflection'")
     for name, weight in (("coefficient_weight", coefficient_weight), ("velocity_weight", velocity_weight), ("bending_weight", bending_weight)):
@@ -496,6 +516,7 @@ def bspline_svf_registration(
             squaring_steps=squaring_steps,
             similarity=similarity,
             neighborhood_radius=neighborhood_radius,
+            num_bins=num_bins,
             padding_mode=padding_mode,
             coefficient_weight=coefficient_weight,
             velocity_weight=velocity_weight,

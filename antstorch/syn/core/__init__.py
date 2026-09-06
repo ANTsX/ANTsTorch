@@ -74,7 +74,9 @@ from .optimizers import (
 )
 from .pipeline import (
     auto_detect_device,
+    mps_grid_sample_3d_available,
     normalize_and_tensorize,
+    relocate_tensors_avoiding_mps_grid_sample_3d,
     cleanup_gpu,
 )
 from .utils import (
@@ -129,7 +131,9 @@ __all__ = [
     'compute_cfl_step',
     'check_convergence',
     'auto_detect_device',
+    'mps_grid_sample_3d_available',
     'normalize_and_tensorize',
+    'relocate_tensors_avoiding_mps_grid_sample_3d',
     'cleanup_gpu',
     'normalize_tensor',
     'auto_select_intensity_percentiles',

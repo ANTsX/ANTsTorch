@@ -7,13 +7,7 @@ from torch import Tensor, nn
 from .bspline_domain import ImageDomain
 from .bspline_synthesis import CubicBSplineSynthesis
 from .scaling_and_squaring import ScalingAndSquaring
-from .similarity import (
-    ants_neighborhood_correlation_loss,
-    bending_energy,
-    mean_squared_error,
-    normalized_cross_correlation_loss,
-    squared_l2_energy,
-)
+from .similarity import SIMILARITY_METRICS, bending_energy, similarity_loss, squared_l2_energy
 from .spatial_transform import compose_displacements, jacobian_determinant, warp_image
 
 
@@ -26,8 +20,9 @@ class DeterministicBSplineRegistration(nn.Module):
         moving_domain: Optional[ImageDomain] = None,
         *,
         squaring_steps: int = 7,
-        similarity: str = "ants_ncc",
+        similarity: str = "lncc",
         neighborhood_radius=2,
+        num_bins: int = 32,
         padding_mode: str = "zeros",
         coefficient_weight: float = 0.0,
         velocity_weight: float = 0.0,
@@ -46,10 +41,11 @@ class DeterministicBSplineRegistration(nn.Module):
             chunk_size=synthesis_chunk_size,
         )
         self.exponential = ScalingAndSquaring(fixed_domain, squaring_steps)
-        if similarity not in ("mse", "ncc", "ants_ncc"):
-            raise ValueError("similarity must be 'mse', 'ncc', or 'ants_ncc'")
+        if similarity not in SIMILARITY_METRICS:
+            raise ValueError(f"similarity must be one of {SIMILARITY_METRICS}, got {similarity!r}")
         self.similarity = similarity
         self.neighborhood_radius = neighborhood_radius
+        self.num_bins = num_bins
         self.padding_mode = padding_mode
         self.coefficient_weight = float(coefficient_weight)
         self.velocity_weight = float(velocity_weight)
@@ -94,14 +90,13 @@ class DeterministicBSplineRegistration(nn.Module):
         initial_affine_displacement: Optional[Tensor] = None,
     ) -> Dict[str, Tensor]:
         result = self.transform(coefficients, moving, initial_affine_displacement)
-        if self.similarity == "mse":
-            similarity = mean_squared_error(fixed, result["warped_moving"])
-        elif self.similarity == "ncc":
-            similarity = normalized_cross_correlation_loss(fixed, result["warped_moving"])
-        else:
-            similarity = ants_neighborhood_correlation_loss(
-                fixed, result["warped_moving"], self.neighborhood_radius
-            )
+        similarity = similarity_loss(
+            self.similarity,
+            fixed,
+            result["warped_moving"],
+            neighborhood_radius=self.neighborhood_radius,
+            num_bins=self.num_bins,
+        )
         coefficient_regularization = squared_l2_energy(coefficients)
         velocity_regularization = squared_l2_energy(result["velocity"])
         bending_regularization = bending_energy(result["velocity"], self.fixed_domain)

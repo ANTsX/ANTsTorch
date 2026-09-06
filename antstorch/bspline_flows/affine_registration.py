@@ -34,23 +34,16 @@ import torch
 from torch import Tensor
 
 from antstorch.syn.core.affine import HierarchicalAffine, get_rotation_matrix
+from antstorch.syn.core.pipeline import relocate_tensors_avoiding_mps_grid_sample_3d
 
 from .bspline_domain import ImageDomain
 from .bspline_svf_registration import _downsample, _pyramid_configuration, _smooth_image
-from .similarity import (
-    ants_neighborhood_correlation_loss,
-    mean_squared_error,
-    normalized_cross_correlation_loss,
-)
+from .similarity import SIMILARITY_METRICS, similarity_loss as _similarity_loss_impl
 from .spatial_transform import affine_displacement_field, physical_grid, warp_image
 
 
-def _similarity_loss(name: str, fixed: Tensor, warped: Tensor, neighborhood_radius) -> Tensor:
-    if name == "mse":
-        return mean_squared_error(fixed, warped)
-    if name == "ncc":
-        return normalized_cross_correlation_loss(fixed, warped)
-    return ants_neighborhood_correlation_loss(fixed, warped, neighborhood_radius)
+def _similarity_loss(name: str, fixed: Tensor, warped: Tensor, neighborhood_radius, num_bins: int = 32) -> Tensor:
+    return _similarity_loss_impl(name, fixed, warped, neighborhood_radius=neighborhood_radius, num_bins=num_bins)
 
 
 def _center_of_mass(image: Tensor, domain: ImageDomain) -> Tensor:
@@ -85,6 +78,7 @@ def _fit_single_affine(
     transform_type: str,
     similarity: str,
     neighborhood_radius,
+    num_bins: int,
     factors,
     sigmas,
     level_iterations,
@@ -120,7 +114,7 @@ def _fit_single_affine(
             translation = (moving_com - rotation @ fixed_com) if center_of_mass_init else torch.zeros(dimension, device=device, dtype=dtype)
             candidate_field = affine_displacement_field(rotation, translation, coarse_fixed_domain, coarse_fixed)
             warped = warp_image(coarse_moving, candidate_field, coarse_fixed_domain, coarse_moving_domain, padding_mode=padding_mode)
-            score = float(_similarity_loss(similarity, coarse_fixed, warped, neighborhood_radius).item())
+            score = float(_similarity_loss(similarity, coarse_fixed, warped, neighborhood_radius, num_bins).item())
             if best_score is None or score < best_score:
                 best_score, best_omega, best_translation = score, omega.clone(), translation.clone()
 
@@ -140,7 +134,7 @@ def _fit_single_affine(
             matrix, translation = homogeneous[:dimension, :dimension], homogeneous[:dimension, dimension]
             field = affine_displacement_field(matrix, translation, fixed_level_domain, fixed_level)
             warped = warp_image(moving_level, field, fixed_level_domain, moving_level_domain, padding_mode=padding_mode)
-            loss = _similarity_loss(similarity, fixed_level, warped, neighborhood_radius)
+            loss = _similarity_loss(similarity, fixed_level, warped, neighborhood_radius, num_bins)
             if not torch.isfinite(loss):
                 raise FloatingPointError(
                     f"non-finite affine registration loss at resolution level {level + 1} (batch item {batch_index})"
@@ -177,7 +171,8 @@ def affine_registration(
     *,
     transform_type: str = "Affine",
     similarity: str = "mse",
-    neighborhood_radius: Union[int, Sequence[int]] = 2,
+    neighborhood_radius: int = 2,
+    num_bins: int = 32,
     iterations: Union[int, Sequence[int]] = (100, 100, 100),
     learning_rate: Union[float, Sequence[float]] = 1e-2,
     shrink_factors: Sequence[int] = (4, 2, 1),
@@ -210,11 +205,17 @@ def affine_registration(
         defaults to ``fixed_domain``.
     transform_type : str
         Linear-transform hierarchy, see above.
-    similarity : {'mse', 'ncc', 'ants_ncc'}
-        Similarity metric, matching ``bspline_svf_registration()``'s options.
-    neighborhood_radius : int or sequence of int
-        Passed through to ``ants_neighborhood_correlation_loss`` when
-        ``similarity='ants_ncc'``.
+    similarity : {'mse', 'lncc', 'cc', 'lncc2', 'cc2', 'mattes', 'mi'}
+        Similarity metric -- identical vocabulary and implementation as
+        ``bspline_svf_registration()``/``gaussian_svf_registration()``'s
+        ``similarity`` and :func:`antstorch.syn.syn_registration`'s
+        ``syn_metric``/``affine_similarity`` (see
+        :data:`antstorch.bspline_flows.similarity.SIMILARITY_METRICS`).
+    neighborhood_radius : int
+        Local-window radius in voxels for ``'lncc'``/``'cc'``/``'lncc2'``/
+        ``'cc2'``; unused for ``'mse'``/``'mattes'``/``'mi'``.
+    num_bins : int
+        Parzen histogram bin count for ``'mattes'``/``'mi'``; unused otherwise.
     iterations, learning_rate, shrink_factors, smoothing_sigmas :
         Multi-resolution pyramid configuration, matching
         ``bspline_svf_registration()``'s parameters of the same name.
@@ -272,10 +273,14 @@ def affine_registration(
         raise ValueError("fixed and moving must have the same batch size")
     if fixed.dtype != moving.dtype or fixed.device != moving.device:
         raise ValueError("fixed and moving must have the same dtype and device")
+    _relocated = relocate_tensors_avoiding_mps_grid_sample_3d(
+        fixed_domain.dimension, "affine_registration", fixed=fixed, moving=moving
+    )
+    fixed, moving = _relocated["fixed"], _relocated["moving"]
     if transform_type not in ("Translation", "Rigid", "Similarity", "Affine"):
         raise ValueError("transform_type must be 'Translation', 'Rigid', 'Similarity', or 'Affine'")
-    if similarity not in ("mse", "ncc", "ants_ncc"):
-        raise ValueError("similarity must be 'mse', 'ncc', or 'ants_ncc'")
+    if similarity not in SIMILARITY_METRICS:
+        raise ValueError(f"similarity must be one of {SIMILARITY_METRICS}, got {similarity!r}")
     if padding_mode not in ("zeros", "border", "reflection"):
         raise ValueError("padding_mode must be 'zeros', 'border', or 'reflection'")
 
@@ -295,6 +300,7 @@ def affine_registration(
             transform_type=transform_type,
             similarity=similarity,
             neighborhood_radius=neighborhood_radius,
+            num_bins=num_bins,
             factors=factors,
             sigmas=sigmas,
             level_iterations=level_iterations,

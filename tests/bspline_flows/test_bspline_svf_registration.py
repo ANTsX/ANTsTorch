@@ -21,7 +21,9 @@ def _blob(domain, dtype=torch.float32):
 def test_registration_identity_shapes_and_finite_results(size):
     domain = ImageDomain(size)
     image = _blob(domain)
-    result = bspline_svf_registration(image, image, domain, iterations=0, mesh_size=1, squaring_steps=2)
+    result = bspline_svf_registration(
+        image, image, domain, iterations=0, mesh_size=1, squaring_steps=2, similarity="mse"
+    )
 
     expected_field = (1, len(size)) + domain.torch_size
     assert result["warpedmovout"].shape == image.shape
@@ -56,7 +58,7 @@ def test_registration_reduces_loss_for_synthetic_translation():
     assert result["loss_history"][-1] < result["loss_history"][0]
 
 
-@pytest.mark.parametrize("similarity", ["mse", "ncc", "ants_ncc"])
+@pytest.mark.parametrize("similarity", ["mse", "lncc", "cc", "lncc2", "cc2", "mattes", "mi"])
 def test_registration_similarity_modes_and_final_graph(similarity):
     domain = ImageDomain((8, 7))
     moving = _blob(domain).requires_grad_()
@@ -117,6 +119,7 @@ def test_registration_initial_affine_with_zero_svf_matches_affine_alone():
         iterations=0,
         mesh_size=1,
         padding_mode="border",
+        similarity="mse",
     )
     torch.testing.assert_close(
         result["fwdtransforms"], torch.zeros_like(expected_field), rtol=0, atol=1e-10
@@ -217,6 +220,7 @@ def test_multiresolution_refines_lattice_and_reports_each_level():
         shrink_factors=(4, 2, 1),
         smoothing_sigmas=(1.5, 0.75, 0.0),
         iterations=(0, 0, 0),
+        similarity="mse",
     )
     # Open cubic lattice refinement: 4 -> 5 -> 7 control points.
     assert result["coefficients"].shape == (1, 2, 7, 7)
@@ -276,7 +280,7 @@ def test_verbose_reports_levels_and_iterations(capsys):
     )
     output = capsys.readouterr().out
     assert "ANTsTorch B-spline SVF registration configuration:" in output
-    assert "similarity: mse" in output
+    assert "similarity: lncc" in output
     assert "stationary_boundary: True" in output
     assert "shrink_factors: (2, 1)" in output
     assert "iterations: (1, 1)" in output
@@ -340,7 +344,7 @@ def test_physical_gradient_descent_instance_supports_momentum_and_smoothing():
         ({"optimizer": "sgd"}, "optimizer"),
         ({"optimizer": "physical_gradient_descent", "gradient_step": 0.09}, "gradient_step"),
         ({"optimizer": "physical_gradient_descent", "gradient_step": 0.26}, "gradient_step"),
-        ({"similarity": "mi"}, "similarity"),
+        ({"similarity": "bogus"}, "similarity"),
         ({"iterations": -1}, "iterations"),
         ({"mesh_size": (1, 2, 3)}, "mesh_size"),
         ({"coefficient_grid_size": 3}, "coefficient_grid_size"),
