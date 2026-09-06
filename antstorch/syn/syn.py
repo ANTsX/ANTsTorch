@@ -45,6 +45,7 @@ regularization are relied on for stability instead.
 """
 
 import math
+import warnings
 from typing import Dict, Optional, Sequence, Tuple, Union
 
 import ants
@@ -71,7 +72,7 @@ from .core.grid import (
 from .core.inverse import update_inverse_field_nd
 from .core.jacobian import compute_jacobian_determinant_nd
 from .core.losses import local_ncc_loss_nd, mattes_mi_loss_nd
-from .core.pipeline import auto_detect_device
+from .core.pipeline import auto_detect_device, mps_grid_sample_3d_available
 from .core.smoothing import (
     apply_dsti_green_operator,
     apply_sobolev_green_operator,
@@ -425,6 +426,7 @@ def _fit_affine_from_ants(
     transform_type: str,
     similarity: str,
     neighborhood_radius,
+    num_bins: int,
     shrink_factors,
     smoothing_sigmas,
     iterations,
@@ -457,6 +459,7 @@ def _fit_affine_from_ants(
         transform_type=transform_type,
         similarity=similarity,
         neighborhood_radius=neighborhood_radius,
+        num_bins=num_bins,
         shrink_factors=shrink_factors,
         smoothing_sigmas=smoothing_sigmas,
         iterations=iterations,
@@ -482,6 +485,7 @@ def syn_registration(
     affine_transform_type: str = "Affine",
     affine_similarity: str = "mse",
     affine_neighborhood_radius: Union[int, Sequence[int]] = 2,
+    affine_num_bins: int = 32,
     affine_shrink_factors: Sequence[int] = (4, 2, 1),
     affine_smoothing_sigmas: Optional[Union[float, Sequence[float]]] = (2.0, 1.0, 0.0),
     affine_iterations: Union[int, Sequence[int]] = (100, 100, 50),
@@ -699,6 +703,7 @@ def syn_registration(
     if len(levels) != len(reg_iterations):
         raise ValueError("levels and reg_iterations must have the same length")
 
+    dimension = fixed.dimension
     if device is None:
         auto_device = auto_detect_device(requested_device=None)
         if auto_device == "mps":
@@ -717,8 +722,33 @@ def syn_registration(
         resolved_device = torch.device(auto_device)
     else:
         resolved_device = torch.device(device)
+    if resolved_device.type == "mps" and dimension == 3 and not mps_grid_sample_3d_available():
+        # mps_grid_sample_3d_available() probes forward AND backward: PyTorch
+        # PR #160541 (merged 2025-08-15, shipped starting with the 2.9.0
+        # stable release) added a native MPS kernel for grid_sampler_3d
+        # *forward*, closing the crash the backward-pass skip above doesn't
+        # touch (e.g. 'SyNOnly' / no-grad calls) -- but no MPS kernel for
+        # grid_sampler_3d_backward has been found as of this writing (see
+        # https://github.com/pytorch/pytorch/issues/160237), and every
+        # type_of_transform that differentiates through the affine/SyN warp
+        # needs backward too. Unlike the auto-detect-only skip above, this
+        # also catches an explicitly requested device='mps' -- there is no
+        # way to make a 3-D SyN run that needs backward work on MPS while
+        # either kernel is missing, so silently trying anyway would only
+        # replace this clear message with a cryptic one.
+        warnings.warn(
+            "syn_registration: 3-D torch.nn.functional.grid_sample is missing its "
+            "forward and/or backward MPS kernel in this PyTorch build "
+            "(aten::grid_sampler_3d / grid_sampler_3d_backward; forward shipped in "
+            "PyTorch 2.9.0 via https://github.com/pytorch/pytorch/pull/160541, but see "
+            "https://github.com/pytorch/pytorch/issues/160237 for the backward gap). "
+            "Falling back to CPU. Set PYTORCH_ENABLE_MPS_FALLBACK=1 instead if you "
+            "would rather PyTorch itself fall back transparently for every "
+            "unimplemented MPS op.",
+            RuntimeWarning,
+        )
+        resolved_device = torch.device("cpu")
     resolved_outprefix = outprefix if outprefix else default_outprefix()
-    dimension = fixed.dimension
 
     # --- Affine stage -----------------------------------------------------
     affine_result = None
@@ -735,6 +765,7 @@ def syn_registration(
             transform_type=affine_type,
             similarity=affine_similarity,
             neighborhood_radius=affine_neighborhood_radius,
+            num_bins=affine_num_bins,
             shrink_factors=affine_shrink_factors,
             smoothing_sigmas=affine_smoothing_sigmas,
             iterations=affine_iterations,

@@ -156,7 +156,7 @@ def test_affine_registration_matrix_and_translation_invert_consistently():
     "kwargs,exception,match",
     [
         ({"transform_type": "Nonsense"}, ValueError, "transform_type"),
-        ({"similarity": "mi"}, ValueError, "similarity"),
+        ({"similarity": "bogus"}, ValueError, "similarity"),
         ({"padding_mode": "wrap"}, ValueError, "padding_mode"),
     ],
 )

@@ -17,10 +17,12 @@ from .gaussian_svf_registration import gaussian_svf_registration
 from .bspline_svf_registration import DEFAULT_BSPLINE_SPLINE_DISTANCE_MM, bspline_svf_registration
 from .scaling_and_squaring import ScalingAndSquaring, scaling_and_squaring
 from .similarity import (
+    SIMILARITY_METRICS,
     ants_neighborhood_correlation_loss,
     bending_energy,
     mean_squared_error,
     normalized_cross_correlation_loss,
+    similarity_loss,
     squared_l2_energy,
 )
 from .spatial_transform import (
@@ -59,6 +61,8 @@ __all__ = [
     "ants_neighborhood_correlation_loss",
     "mean_squared_error",
     "normalized_cross_correlation_loss",
+    "similarity_loss",
+    "SIMILARITY_METRICS",
     "squared_l2_energy",
     "ALIGN_CORNERS",
     "affine_displacement_field",

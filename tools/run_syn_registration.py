@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Run ANTsTorch greedy symmetric SyN registration on the ANTs r30/r27 images.
+"""Run ANTsTorch greedy symmetric SyN registration on 2-D or 3-D ANTs images.
+
+By default, registers the bundled ANTs ``r30``/``r27`` demo images; pass
+``--fixed``/``--moving`` to register your own images instead (any
+dimensionality ``syn_registration()`` itself supports -- unlike
+``run_svf_registration.py``, this script has no 2-D-only tensor-conversion
+step of its own, since ``syn_registration`` accepts/returns
+``ants.ANTsImage`` objects directly).
 
 Sibling script to ``tools/run_svf_registration.py``, built as closely
 as possible to the same CLI shape and output-artifact conventions, but using
@@ -26,15 +33,21 @@ Run the default affine+SyN registration on CPU::
 
     PYTHONPATH=. python tools/run_syn_registration.py
 
+Register your own images instead of the bundled r30/r27 demo pair::
+
+    PYTHONPATH=. python tools/run_syn_registration.py \
+        --fixed /path/to/fixed.nii.gz --moving /path/to/moving.nii.gz
+
 Use an accelerator and fewer iterations::
 
     PYTHONPATH=. python tools/run_syn_registration.py \
         --device mps --reg-iterations 40 30 20 --output-dir syn_registration_output
 
-Use the local ANTs neighborhood-correlation metric for the dense SyN stage::
+Use the local normalized cross-correlation metric for the dense SyN stage
+(the same similarity vocabulary as run_svf_registration.py's --similarity)::
 
     PYTHONPATH=. python tools/run_syn_registration.py \
-        --syn-metric cc --neighborhood-radius 2 --verbose
+        --similarity cc --neighborhood-radius 2 --verbose
 
 Run the dense SyN stage alone, with no affine initialization (closest analog
 of ``run_svf_registration.py``'s own default)::
@@ -72,6 +85,20 @@ from antstorch.syn import syn_registration
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        "--fixed",
+        type=Path,
+        default=None,
+        help="Path to the fixed image. Defaults to the bundled ANTs 'r30' demo "
+        "image (ants.get_ants_data('r30')) when omitted.",
+    )
+    parser.add_argument(
+        "--moving",
+        type=Path,
+        default=None,
+        help="Path to the moving image. Defaults to the bundled ANTs 'r27' demo "
+        "image (ants.get_ants_data('r27')) when omitted.",
+    )
     parser.add_argument("--device", default="cpu", help="PyTorch device: cpu, cuda, or mps")
     parser.add_argument("--output-dir", type=Path, default=Path("syn_registration_output"))
     parser.add_argument(
@@ -121,12 +148,23 @@ def parse_args() -> argparse.Namespace:
         dest="antisymmetric",
         help="Disable the antisymmetric (Frechet-mean) common-mode projection between the two half-warps",
     )
-    parser.add_argument("--syn-metric", choices=("mse", "lncc", "cc", "lncc2", "cc2", "mattes", "mi"), default="lncc")
+    parser.add_argument(
+        "--similarity",
+        choices=("mse", "lncc", "cc", "lncc2", "cc2", "mattes", "mi"),
+        default="lncc",
+        help="Similarity metric for the dense SyN stage -- identical vocabulary/implementation "
+        "as run_svf_registration.py's --similarity (default: lncc)",
+    )
     parser.add_argument("--neighborhood-radius", type=int, default=2, help="Window radius for lncc/cc, or the SyN-stage local metric")
     parser.add_argument("--num-bins", type=int, default=32, help="Histogram bins for mattes/mi")
     parser.add_argument("--affine-transform-type", choices=("Translation", "Rigid", "Similarity", "Affine"), default="Affine")
-    parser.add_argument("--affine-similarity", choices=("mse", "ncc", "ants_ncc"), default="mse")
+    parser.add_argument(
+        "--affine-similarity",
+        choices=("mse", "lncc", "cc", "lncc2", "cc2", "mattes", "mi"),
+        default="mse",
+    )
     parser.add_argument("--affine-neighborhood-radius", type=int, default=4)
+    parser.add_argument("--affine-num-bins", type=int, default=32, help="Histogram bins for affine mattes/mi")
     parser.add_argument("--affine-shrink-factors", type=int, nargs="+", default=(4, 2, 1))
     parser.add_argument("--affine-smoothing-sigmas", type=float, nargs="+", default=(2.0, 1.0, 0.0))
     parser.add_argument("--affine-iterations", type=int, nargs="+", default=(100, 75, 50))
@@ -164,12 +202,20 @@ def main() -> None:
         if len(values) != affine_level_count:
             raise ValueError(f"{name} must have one value per affine shrink factor")
 
-    fixed_ants = ants.image_read(ants.get_ants_data("r30")).clone("float")
-    moving_ants = ants.image_read(ants.get_ants_data("r27")).clone("float")
+    # --fixed/--moving default to the bundled ANTs r30/r27 demo pair when
+    # omitted -- ants.get_ants_data() resolves those from ANTsPy's own
+    # packaged test data, no network access needed.
+    fixed_path = str(args.fixed) if args.fixed is not None else ants.get_ants_data("r30")
+    moving_path = str(args.moving) if args.moving is not None else ants.get_ants_data("r27")
+    fixed_ants = ants.image_read(fixed_path).clone("float")
+    moving_ants = ants.image_read(moving_path).clone("float")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    ants.image_write(fixed_ants, str(args.output_dir / "fixed_r30.nii.gz"))
-    ants.image_write(moving_ants, str(args.output_dir / "moving_r27.nii.gz"))
+    # Generic output filenames (fixed.nii.gz/moving.nii.gz) rather than the
+    # old r30/r27-specific ones -- those names are wrong/misleading once
+    # --fixed/--moving point at arbitrary images.
+    ants.image_write(fixed_ants, str(args.output_dir / "fixed.nii.gz"))
+    ants.image_write(moving_ants, str(args.output_dir / "moving.nii.gz"))
 
     start = time.perf_counter()
     result = syn_registration(
@@ -179,13 +225,14 @@ def main() -> None:
         affine_transform_type=args.affine_transform_type,
         affine_similarity=args.affine_similarity,
         affine_neighborhood_radius=args.affine_neighborhood_radius,
+        affine_num_bins=args.affine_num_bins,
         affine_shrink_factors=tuple(args.affine_shrink_factors),
         affine_smoothing_sigmas=tuple(args.affine_smoothing_sigmas),
         affine_iterations=tuple(args.affine_iterations),
         affine_learning_rate=tuple(args.affine_learning_rate),
         affine_multi_start=not args.affine_single_start,
         affine_center_of_mass_init=not args.affine_no_center_of_mass_init,
-        syn_metric=args.syn_metric,
+        syn_metric=args.similarity,
         neighborhood_radius=args.neighborhood_radius,
         num_bins=args.num_bins,
         levels=tuple(args.levels),
@@ -211,11 +258,11 @@ def main() -> None:
     )
     elapsed = time.perf_counter() - start
 
-    ants.image_write(result["warpedmovout"], str(args.output_dir / "warped_r27.nii.gz"))
+    ants.image_write(result["warpedmovout"], str(args.output_dir / "warped_moving.nii.gz"))
     if result.get("warpedfixout") is not None:
         # Specific to SyN's symmetric formulation -- fixed pulled back onto
         # the moving grid by the inverse transform. No B-spline-script analog.
-        ants.image_write(result["warpedfixout"], str(args.output_dir / "warped_fixed_r30.nii.gz"))
+        ants.image_write(result["warpedfixout"], str(args.output_dir / "warped_fixed.nii.gz"))
     if result["jacobian"] is not None:
         ants.image_write(result["jacobian"], str(args.output_dir / "jacobian.nii.gz"))
 

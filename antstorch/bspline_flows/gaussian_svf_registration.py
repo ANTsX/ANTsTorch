@@ -17,13 +17,8 @@ from .bspline_svf_registration import (
     _validate_initial_affine,
 )
 from .scaling_and_squaring import scaling_and_squaring
-from .similarity import (
-    ants_neighborhood_correlation_loss,
-    bending_energy,
-    mean_squared_error,
-    normalized_cross_correlation_loss,
-    squared_l2_energy,
-)
+from antstorch.syn.core.pipeline import relocate_tensors_avoiding_mps_grid_sample_3d
+from .similarity import SIMILARITY_METRICS, bending_energy, similarity_loss, squared_l2_energy
 from .spatial_transform import (
     affine_displacement_field,
     compose_displacements,
@@ -82,6 +77,7 @@ def _evaluate(
     *,
     similarity: str,
     neighborhood_radius,
+    num_bins: int = 32,
     velocity_weight: float,
     bending_weight: float,
     squaring_steps: int,
@@ -95,12 +91,9 @@ def _evaluate(
         else compose_displacements(initial_affine_displacement, svf_displacement, fixed_domain)
     )
     warped = warp_image(moving, displacement, fixed_domain, moving_domain, padding_mode=padding_mode)
-    if similarity == "mse":
-        similarity_value = mean_squared_error(fixed, warped)
-    elif similarity == "ncc":
-        similarity_value = normalized_cross_correlation_loss(fixed, warped)
-    else:
-        similarity_value = ants_neighborhood_correlation_loss(fixed, warped, neighborhood_radius)
+    similarity_value = similarity_loss(
+        similarity, fixed, warped, neighborhood_radius=neighborhood_radius, num_bins=num_bins
+    )
     velocity_regularization = squared_l2_energy(velocity)
     bending_regularization = bending_energy(velocity, fixed_domain)
     return {
@@ -128,8 +121,9 @@ def gaussian_svf_registration(
     momentum: float = 0.0,
     update_field_sigma: float = 3.0,
     total_field_sigma: float = 0.5,
-    similarity: str = "mse",
-    neighborhood_radius: Union[int, Sequence[int]] = 2,
+    similarity: str = "lncc",
+    neighborhood_radius: int = 2,
+    num_bins: int = 32,
     velocity_weight: float = 0.0,
     bending_weight: float = 0.0,
     squaring_steps: int = 7,
@@ -164,11 +158,22 @@ def gaussian_svf_registration(
         raise TypeError("moving_domain must be a ImageDomain")
     if fixed_domain.dimension != moving_domain.dimension:
         raise ValueError("fixed_domain and moving_domain must have the same dimension")
+    _relocated = relocate_tensors_avoiding_mps_grid_sample_3d(
+        fixed_domain.dimension,
+        "gaussian_svf_registration",
+        fixed=fixed,
+        moving=moving,
+        initial_affine=initial_affine,
+        initial_velocity=initial_velocity,
+    )
+    fixed, moving, initial_affine, initial_velocity = (
+        _relocated["fixed"], _relocated["moving"], _relocated["initial_affine"], _relocated["initial_velocity"]
+    )
     _validate_images(fixed, moving, fixed_domain, moving_domain)
     if not isinstance(verbose, bool) or not isinstance(stationary_boundary, bool):
         raise TypeError("verbose and stationary_boundary must be bools")
-    if similarity not in ("mse", "ncc", "ants_ncc"):
-        raise ValueError("similarity must be 'mse', 'ncc', or 'ants_ncc'")
+    if similarity not in SIMILARITY_METRICS:
+        raise ValueError(f"similarity must be one of {SIMILARITY_METRICS}, got {similarity!r}")
     if padding_mode not in ("zeros", "border", "reflection"):
         raise ValueError("padding_mode must be 'zeros', 'border', or 'reflection'")
     for name, weight in (("velocity_weight", velocity_weight), ("bending_weight", bending_weight)):
@@ -255,7 +260,7 @@ def gaussian_svf_registration(
             velocity.grad = None
             result = _evaluate(
                 velocity, fixed_level, moving_level, fixed_level_domain, moving_level_domain,
-                similarity=similarity, neighborhood_radius=neighborhood_radius,
+                similarity=similarity, neighborhood_radius=neighborhood_radius, num_bins=num_bins,
                 velocity_weight=velocity_weight, bending_weight=bending_weight,
                 squaring_steps=squaring_steps, padding_mode=padding_mode,
                 initial_affine_displacement=affine_level,
@@ -281,7 +286,7 @@ def gaussian_svf_registration(
                     velocity.copy_(_zero_boundary(velocity))
                 current = float(_evaluate(
                     velocity, fixed_level, moving_level, fixed_level_domain, moving_level_domain,
-                    similarity=similarity, neighborhood_radius=neighborhood_radius,
+                    similarity=similarity, neighborhood_radius=neighborhood_radius, num_bins=num_bins,
                     velocity_weight=velocity_weight, bending_weight=bending_weight,
                     squaring_steps=squaring_steps, padding_mode=padding_mode,
                     initial_affine_displacement=affine_level,
@@ -303,7 +308,7 @@ def gaussian_svf_registration(
     )
     result = _evaluate(
         velocity, fixed, moving, fixed_domain, moving_domain,
-        similarity=similarity, neighborhood_radius=neighborhood_radius,
+        similarity=similarity, neighborhood_radius=neighborhood_radius, num_bins=num_bins,
         velocity_weight=velocity_weight, bending_weight=bending_weight,
         squaring_steps=squaring_steps, padding_mode=padding_mode,
         initial_affine_displacement=affine_full,

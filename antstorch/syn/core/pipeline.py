@@ -6,9 +6,144 @@ the rest of ``antstorch.syn.core`` operates on, and provide GPU/MPS memory
 hygiene for iterative registration loops.
 """
 
+import functools
 import gc
+import warnings
 
 import numpy as np
+
+
+@functools.lru_cache(maxsize=1)
+def mps_grid_sample_3d_available() -> bool:
+    """Whether the installed PyTorch's MPS backend implements 3-D ``grid_sample``,
+    forward *and* backward.
+
+    PyTorch's MPS backend originally had no kernel at all for
+    ``aten::grid_sampler_3d`` -- not a numerical bug, an outright missing op
+    -- so any 3-D ``torch.nn.functional.grid_sample`` call on an ``mps``
+    tensor raised ``NotImplementedError`` immediately (see
+    https://github.com/pytorch/pytorch/issues/160237, tracked under the
+    broader MPS operator-coverage gap #141287). PyTorch PR #160541 (merged
+    2025-08-15, shipped in the 2.9.0 stable release and every release since,
+    including the 2.11.0 this has been confirmed against) added a native
+    MPS kernel for the *forward* pass -- but only forward: no companion PR
+    for ``grid_sampler_3d_backward`` on MPS has been found as of this
+    writing. Every registration function in this package
+    (``bspline_svf_registration``, ``gaussian_svf_registration``,
+    ``affine_registration``, ``syn_registration``) differentiates through
+    ``grid_sample`` every optimization iteration, so testing forward alone
+    would wrongly report "available" on a PyTorch new enough for #160541
+    but still missing the backward kernel, and the very first
+    ``.backward()`` call would then crash mid-run instead of relocating
+    up front. This probes both: a forward call, then a ``.backward()``
+    through it.
+
+    Probed empirically -- a throwaway 2x2x2 call -- rather than hardcoded,
+    so every caller of this function (and of
+    :func:`relocate_tensors_avoiding_mps_grid_sample_3d`, which uses it)
+    automatically stops paying the CPU-fallback cost the moment a future
+    PyTorch release ships the backward kernel too, with no code change
+    needed here. Cached for the life of the process: PyTorch's op coverage
+    cannot change mid-run.
+    """
+    import torch
+
+    if not torch.backends.mps.is_available():
+        return False
+    try:
+        probe_image = torch.zeros(1, 1, 2, 2, 2, device="mps", requires_grad=True)
+        probe_grid = torch.zeros(1, 2, 2, 2, 3, device="mps")
+        warped = torch.nn.functional.grid_sample(probe_image, probe_grid, align_corners=True)
+        warped.sum().backward()
+        return True
+    except (NotImplementedError, RuntimeError):
+        return False
+
+
+def relocate_tensors_avoiding_mps_grid_sample_3d(dimension: int, context: str, **named_tensors):
+    """Move MPS tensors to CPU together when 3-D ``grid_sample`` is unavailable there.
+
+    Every dense warp in ``antstorch.bspline_flows`` (and ``antstorch.syn``)
+    eventually calls ``torch.nn.functional.grid_sample`` -- directly, or via
+    ``antstorch.bspline_flows.spatial_transform.warp_image()``. On a 3-D
+    registration entirely on an ``mps`` device where
+    :func:`mps_grid_sample_3d_available` is ``False``, that call would raise
+    ``NotImplementedError: aten::grid_sampler_3d`` (see that function's
+    docstring). This relocates every tensor among ``named_tensors`` (values
+    may be a bare ``Tensor``, or a ``tuple``/``list`` of them, e.g. an
+    ``initial_affine=(matrix, translation)`` pair) from ``mps`` to ``cpu``
+    together, so the whole run proceeds consistently on one device instead
+    of crashing partway through -- the same "repli automatique vers CPU"
+    :func:`antstorch.syn.syn.syn_registration` already applies for its own
+    device auto-detection, extended here to cover every entry point
+    (``bspline_svf_registration``, ``gaussian_svf_registration``,
+    ``affine_registration``) and an explicitly requested ``device='mps'``,
+    not only auto-detection.
+
+    Parameters
+    ----------
+    dimension : int
+        The registration's spatial dimensionality (``fixed_domain.dimension``);
+        a no-op for anything but ``3`` (2-D ``grid_sampler_2d`` forward is
+        implemented on MPS).
+    context : str
+        Caller name, included in the warning message.
+    **named_tensors
+        Any number of ``name=value`` pairs; ``None``, non-tensor, or
+        already-CPU/CUDA values pass through untouched.
+
+    Returns
+    -------
+    dict
+        The same names, each value moved to CPU if relocation was needed
+        (identical dict otherwise) -- unpack with
+        ``fixed, moving = relocated["fixed"], relocated["moving"]``.
+    """
+    import torch
+
+    if dimension != 3:
+        return named_tensors
+
+    def _device_of(value):
+        if isinstance(value, torch.Tensor):
+            return value.device
+        if isinstance(value, (tuple, list)):
+            for item in value:
+                found = _device_of(item)
+                if found is not None:
+                    return found
+        return None
+
+    on_mps = any(
+        (found := _device_of(value)) is not None and found.type == "mps"
+        for value in named_tensors.values()
+    )
+    if not on_mps or mps_grid_sample_3d_available():
+        return named_tensors
+
+    warnings.warn(
+        f"{context}: 3-D torch.nn.functional.grid_sample is missing its forward and/or "
+        "backward MPS kernel in this PyTorch build (aten::grid_sampler_3d / "
+        "grid_sampler_3d_backward; forward shipped in PyTorch 2.9.0 via "
+        "https://github.com/pytorch/pytorch/pull/160541, but see "
+        "https://github.com/pytorch/pytorch/issues/160237 for the backward gap). "
+        "Falling back to CPU for this registration. Set PYTORCH_ENABLE_MPS_FALLBACK=1 "
+        "instead if you would rather PyTorch itself fall back transparently for every "
+        "unimplemented MPS op.",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+
+    def _to_cpu(value):
+        if isinstance(value, torch.Tensor):
+            return value.cpu() if value.device.type == "mps" else value
+        if isinstance(value, tuple):
+            return tuple(_to_cpu(item) for item in value)
+        if isinstance(value, list):
+            return [_to_cpu(item) for item in value]
+        return value
+
+    return {name: _to_cpu(value) for name, value in named_tensors.items()}
 
 
 def auto_detect_device(backend='pytorch', requested_device=None):
