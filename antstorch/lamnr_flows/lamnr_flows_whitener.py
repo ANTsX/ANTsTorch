@@ -20,7 +20,7 @@ from .misc import alignment_losses as la
 
 
 # Keep package-relative imports to match ANTsTorch layout
-from ..architectures.create_normalizing_flow_model import (
+from .architectures.create_normalizing_flow_model import (
     create_real_nvp_normalizing_flow_model as create_rnvp
 )
 from ..utilities.dataframe_dataset import MultiViewDataFrameDataset
