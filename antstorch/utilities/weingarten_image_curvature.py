@@ -178,6 +178,7 @@ def weingarten_image_curvature(
     Iz_t = _gaussian_filter_3d(img_t, sigmas, (0, 0, 1)) / spacing[2]
 
     grad_vol = torch.cat([Ix_t, Iy_t, Iz_t], dim=1)  # (1, 3, D, H, W)
+    del img_t, Ix_t, Iy_t, Iz_t
 
     # Process mask and 3-voxel border exclusion
     margin = 3
@@ -208,7 +209,8 @@ def weingarten_image_curvature(
     valid_indices = np.argwhere(mask_np)
     num_voxels = len(valid_indices)
 
-    out_array = np.zeros_like(array)
+    shape_d, shape_h, shape_w = array.shape
+    out_tensor = torch.zeros((shape_d, shape_h, shape_w), dtype=torch.float32, device=device)
 
     if num_voxels > 0:
         # Precompute 27-neighborhood offsets and pseudo-inverse matrix D_pinv
@@ -224,28 +226,29 @@ def weingarten_image_curvature(
 
         grid_coeffs_t = torch.from_numpy(grid_coeffs.astype(np.float32)).to(device)
         D_pinv_t = torch.from_numpy(D_pinv.astype(np.float32)).to(device)
+
+        # Precompute sliced pseudo-inverse and coordinate constants outside chunk loop
+        D_pinv_uv_t = D_pinv_t[1:3].unsqueeze(0)  # (1, 2, 27)
+        ui = grid_coeffs_t[:, 1].view(1, 27, 1)
+        vi = grid_coeffs_t[:, 2].view(1, 27, 1)
+        zi = grid_coeffs_t[:, 0].view(1, 27, 1)
+
         spacing_t = torch.from_numpy(spacing).to(device)
         origin_t = torch.from_numpy(origin).to(device)
-
-        results_mean = []
-        results_gauss = []
-        results_class = []
-
-        shape_d, shape_h, shape_w = array.shape
+        valid_indices_t = torch.from_numpy(valid_indices).to(device)
 
         for start_idx in range(0, num_voxels, chunk_size):
             end_idx = min(start_idx + chunk_size, num_voxels)
-            idx_chunk = torch.from_numpy(valid_indices[start_idx:end_idx]).to(device)
+            idx_chunk = valid_indices_t[start_idx:end_idx]
+            d_idx = idx_chunk[:, 0]
+            h_idx = idx_chunk[:, 1]
+            w_idx = idx_chunk[:, 2]
 
             # 1. Physical origin Q of target voxels
             Q = origin_t + spacing_t * idx_chunk  # (M, 3)
 
-            # 2. Gradient at voxel centers
-            Ix_val = Ix_t[0, 0, idx_chunk[:, 0], idx_chunk[:, 1], idx_chunk[:, 2]]
-            Iy_val = Iy_t[0, 0, idx_chunk[:, 0], idx_chunk[:, 1], idx_chunk[:, 2]]
-            Iz_val = Iz_t[0, 0, idx_chunk[:, 0], idx_chunk[:, 1], idx_chunk[:, 2]]
-
-            normal_unnorm = torch.stack([Ix_val, Iy_val, Iz_val], dim=1)  # (M, 3)
+            # 2. Vectorized gradient at voxel centers
+            normal_unnorm = grad_vol[0, :, d_idx, h_idx, w_idx].t()  # (M, 3)
             mag = torch.norm(normal_unnorm, dim=1, keepdim=True)
             normal = torch.where(mag > 1e-5, normal_unnorm / mag, torch.zeros_like(normal_unnorm))
 
@@ -298,10 +301,6 @@ def weingarten_image_curvature(
             tangent2 = tangent2 / t2_mag
 
             # 4. Generate 27 neighborhood points P in physical space
-            ui = grid_coeffs_t[:, 1].view(1, 27, 1)
-            vi = grid_coeffs_t[:, 2].view(1, 27, 1)
-            zi = grid_coeffs_t[:, 0].view(1, 27, 1)
-
             P = (
                 Q.unsqueeze(1)
                 + ui * tangent1.unsqueeze(1)
@@ -328,69 +327,72 @@ def weingarten_image_curvature(
                 padding_mode="zeros",
                 align_corners=True,
             )
-            PN = sampled.squeeze(0).squeeze(-1).permute(1, 2, 0)  # (M, 27, 3)
+            PN = sampled.squeeze(0).squeeze(-1).permute(1, 2, 0).contiguous()  # (M, 27, 3)
 
             g_mag = torch.norm(PN, dim=-1, keepdim=True)
             g_mag = torch.where(g_mag > 1e-9, g_mag, torch.ones_like(g_mag))
             PN = PN / g_mag  # Normalized sampled normal vectors
 
-            # 5. Weingarten shape matrix solve: C = D_pinv @ PN -> (M, 3, 3)
-            C = torch.matmul(D_pinv_t.unsqueeze(0), PN)
+            # 5. Weingarten shape matrix solve: C_uv = D_pinv_uv @ PN -> (M, 2, 3)
+            C_uv = torch.matmul(D_pinv_uv_t, PN)
 
-            dNdu = C[:, 1, :]
-            dNdv = C[:, 2, :]
+            dNdu = C_uv[:, 0, :]
+            dNdv = C_uv[:, 1, :]
 
-            # Compute fundamental coefficients: a, b, c, d
+            # Compute fundamental coefficients: a, d
             a = torch.sum(dNdu * tangent1, dim=1)
-            b = torch.sum(dNdv * tangent1, dim=1)
-            c = torch.sum(dNdu * tangent2, dim=1)
             d = torch.sum(dNdv * tangent2, dim=1)
 
-            # Mean curvature H and Gaussian curvature K
-            H = 0.5 * (a + d)
-            K = a * d - b * c
+            if opt_mode == "mean":
+                # Mean curvature H = 0.5 * (a + d), short-circuiting K, b, c, and characterization
+                H = 0.5 * (a + d)
+                invalid = torch.isnan(H) | torch.isinf(H)
+                chunk_res = torch.where(invalid, torch.zeros_like(H), H)
+            elif opt_mode == "gaussian":
+                # Gaussian curvature K = a * d - b * c, short-circuiting H and characterization
+                b = torch.sum(dNdv * tangent1, dim=1)
+                c = torch.sum(dNdu * tangent2, dim=1)
+                K = a * d - b * c
+                invalid = torch.isnan(K) | torch.isinf(K)
+                chunk_res = torch.where(invalid, torch.zeros_like(K), K)
+            else:
+                # Topographic characterization into 8 discrete classes
+                b = torch.sum(dNdv * tangent1, dim=1)
+                c = torch.sum(dNdu * tangent2, dim=1)
+                H = 0.5 * (a + d)
+                K = a * d - b * c
 
-            invalid = torch.isnan(H) | torch.isinf(H) | torch.isnan(K) | torch.isinf(K)
-            H = torch.where(invalid, torch.zeros_like(H), H)
-            K = torch.where(invalid, torch.zeros_like(K), K)
+                invalid = torch.isnan(H) | torch.isinf(H) | torch.isnan(K) | torch.isinf(K)
+                H = torch.where(invalid, torch.zeros_like(H), H)
+                K = torch.where(invalid, torch.zeros_like(K), K)
 
-            # Surface characterization into 8 classes
-            th = 1e-6
-            th_k = th * th
-            th_h = th
-            conds = [
-                (H > th_h) & (K > th_k),                          # 1: Peak
-                (H < -th_h) & (K > th_k),                         # 2: Pit
-                (H > th_h) & (K < -th_k),                         # 3: Saddle Ridge
-                (H < -th_h) & (K < -th_k),                        # 4: Saddle Valley
-                (H > th_h) & (torch.abs(K) <= th_k),              # 5: Ridge
-                (H < -th_h) & (torch.abs(K) <= th_k),             # 6: Valley
-                (torch.abs(H) <= th_h) & (torch.abs(K) <= th_k),  # 7: Flat
-                (torch.abs(H) <= th_h) & (K < -th_k),             # 8: Minimal surface
-            ]
-            choices = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
-            classes = torch.zeros_like(H)
-            for cond, choice in zip(conds, choices):
-                classes = torch.where(cond, torch.full_like(classes, choice), classes)
+                th = 1e-6
+                th_k = th * th
+                th_h = th
+                conds = [
+                    (H > th_h) & (K > th_k),                          # 1: Peak
+                    (H < -th_h) & (K > th_k),                         # 2: Pit
+                    (H > th_h) & (K < -th_k),                         # 3: Saddle Ridge
+                    (H < -th_h) & (K < -th_k),                        # 4: Saddle Valley
+                    (H > th_h) & (torch.abs(K) <= th_k),              # 5: Ridge
+                    (H < -th_h) & (torch.abs(K) <= th_k),             # 6: Valley
+                    (torch.abs(H) <= th_h) & (torch.abs(K) <= th_k),  # 7: Flat
+                    (torch.abs(H) <= th_h) & (K < -th_k),             # 8: Minimal surface
+                ]
+                choices = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+                classes = torch.zeros_like(H)
+                for cond, choice in zip(conds, choices):
+                    classes = torch.where(cond, torch.full_like(classes, choice), classes)
+                chunk_res = classes
 
-            results_mean.append(H.detach().cpu().numpy())
-            results_gauss.append(K.detach().cpu().numpy())
-            results_class.append(classes.detach().cpu().numpy())
+            # In-place scattering directly on GPU device
+            out_tensor[d_idx, h_idx, w_idx] = chunk_res
 
-        results_mean = np.concatenate(results_mean)
-        results_gauss = np.concatenate(results_gauss)
-        results_class = np.concatenate(results_class)
+        del valid_indices_t
 
-        if opt_mode == "mean":
-            out_array[mask_np] = results_mean
-        elif opt_mode == "gaussian":
-            out_array[mask_np] = results_gauss
-        elif opt_mode == "characterize":
-            out_array[mask_np] = results_class
-
-    out_img = ants.from_numpy(out_array)
+    out_array = out_tensor.cpu().numpy()
     if image.dimension == 2:
-        subarr = out_img.numpy()[:, :, 4]
+        subarr = out_array[:, :, 4]
         return ants.copy_image_info(image, ants.from_numpy(subarr))
     else:
-        return ants.copy_image_info(image, out_img)
+        return ants.copy_image_info(image, ants.from_numpy(out_array))
