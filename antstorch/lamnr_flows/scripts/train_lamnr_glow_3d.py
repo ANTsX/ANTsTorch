@@ -392,7 +392,7 @@ class LAMNrGlow3DTrainer(BaseLAMNrTrainer):
         required by multi-scale Glow 3D coupling and squeeze operations.
         """
         if torch.is_tensor(batch):
-            x_v = batch[:, vi : vi + 1, ...].to(dev)
+            x_v = batch[:, vi : vi + 1, ...].to(dev, dtype=self.model_dtype)
         else:
             xs  = _extract_views_from_batch(batch, num_views=self.args.num_views)
             x_v = xs[vi].to(dev)

@@ -181,6 +181,7 @@ class GlowTool3D(GlowToolBase):
             raise RuntimeError("antstorch.create_glow_normalizing_flow_model_3d is required.")
             
         H, W, D = target_size
+        self._input_normalization = str(cfg.get("input_normalization", "minmax")).lower()
         C = cfg.get("C", 1)
         
         # Normalize K and hidden logic (same as training scripts)
@@ -324,9 +325,13 @@ class GlowTool3D(GlowToolBase):
             
         t = torch.from_numpy(arr).float()
         
-        x_min = t.amin(dim=(1, 2, 3), keepdim=True)
-        x_max = t.amax(dim=(1, 2, 3), keepdim=True)
-        t = (t - x_min) / (x_max - x_min + 1e-8)
+        if getattr(self, "_input_normalization", "minmax") != "none":
+            x_min = t.amin(dim=(1, 2, 3), keepdim=True)
+            x_max = t.amax(dim=(1, 2, 3), keepdim=True)
+            t = (t - x_min) / (x_max - x_min + 1e-8)
+            # Match train_lamnr_glow_base.to01(), which is called by the
+            # hybrid trainer's _prepare() immediately before model inference.
+            t = torch.clamp(t, 1e-5, 1.0 - 1e-5)
         
         return t 
         
