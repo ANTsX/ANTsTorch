@@ -380,6 +380,47 @@ def resolve_ckpt_path(p: Path) -> Path:
     return p
 
 
+def _checkpoint_view_config(blob: dict, cfg: dict, view_name: str, view_idx: int) -> dict:
+    """Return the effective model config for one legacy or hybrid view.
+
+    Legacy Glow checkpoints keep architecture options in ``config``. Hybrid
+    checkpoints keep the authoritative per-view architecture in the top-level
+    ``views`` list. Merge the latter over the former so shared inference tools
+    instantiate exactly the model that produced the selected state dict.
+    """
+    effective = dict(cfg or {})
+    specs = blob.get("views")
+    if not isinstance(specs, (list, tuple)):
+        specs = effective.get("views")
+    if not isinstance(specs, (list, tuple)):
+        return effective
+
+    selected = None
+    for spec in specs:
+        if isinstance(spec, dict) and str(spec.get("name", "")) == view_name:
+            selected = spec
+            break
+    if selected is None and 0 <= int(view_idx) < len(specs):
+        candidate = specs[int(view_idx)]
+        if isinstance(candidate, dict):
+            selected = candidate
+    if selected is None:
+        return effective
+
+    # The hybrid loader initially reads raw voxel intensities, but its
+    # ``_prepare`` step applies the same per-volume min/max normalization as
+    # the specialized Glow trainers immediately before the model forward.
+    effective["input_normalization"] = "minmax"
+    model_cfg = selected.get("model")
+    if isinstance(model_cfg, dict):
+        effective.update(model_cfg)
+    shape = selected.get("shape")
+    if isinstance(shape, (list, tuple)) and len(shape) in (2, 3):
+        effective["target_shape"] = list(shape)
+    effective["C"] = int(selected.get("channels", effective.get("C", 1)))
+    return effective
+
+
 def _strip_dp_prefix(sd: dict) -> dict:
     """
     Remove wrapper prefixes from state_dict keys so a checkpoint saved from a
@@ -397,7 +438,10 @@ def _strip_dp_prefix(sd: dict) -> dict:
     that was then torch.compile'd, or vice versa), by stripping repeatedly
     until no more known prefixes match.
     """
-    prefixes = ("module.", "_orig_mod.")
+    # Hybrid image models are saved through ImageFlowWrapper, whose sole
+    # submodule is named ``flow``. The analysis tools build that underlying
+    # flow directly, so remove the wrapper prefix alongside DDP/compile ones.
+    prefixes = ("module.", "_orig_mod.", "flow.")
     changed = True
     while changed:
         changed = False
@@ -470,8 +514,13 @@ def load_weights_into_model(
         return None
 
     vidx_eff = int(view_idx)
-    if cfg_views and view_name in cfg_views:
-        vidx_eff = cfg_views.index(view_name)
+    if cfg_views:
+        cfg_view_names = [
+            str(v.get("name", "")) if isinstance(v, dict) else str(v)
+            for v in cfg_views
+        ]
+        if view_name in cfg_view_names:
+            vidx_eff = cfg_view_names.index(view_name)
 
     # (a) EMA
     if prefer_ema and isinstance(blob.get("ema"), (list, tuple)) and len(blob["ema"]) > 0:
@@ -481,6 +530,18 @@ def load_weights_into_model(
             ok, _ = try_load(sd)
             if ok:
                 return True, ("ema", f"slot={k}")
+
+    # Hybrid checkpoints use ``ema_models`` rather than the legacy ``ema``
+    # key.  Keep both spellings so the post-training tools work for either
+    # trainer without checkpoint conversion.
+    if (prefer_ema and isinstance(blob.get("ema_models"), (list, tuple))
+            and len(blob["ema_models"]) > 0):
+        k = max(0, min(vidx_eff, len(blob["ema_models"]) - 1))
+        sd = extract_sd(blob["ema_models"][k])
+        if sd is not None:
+            ok, _ = try_load(sd)
+            if ok:
+                return True, ("ema_models", f"slot={k}")
 
     # (b) models list
     if isinstance(blob.get("models"), (list, tuple)) and len(blob["models"]) > 0:
@@ -1854,7 +1915,7 @@ class GlowToolBase(ABC):
         ckpt_path = resolve_ckpt_path(Path(args.ckpt))
         blob      = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
         cfg       = blob.get("config", blob.get("cfg", {}))
-        cfg_views = cfg.get("views", None)
+        cfg_views = blob.get("views", cfg.get("views", None))
         target_size = self._get_target_size(args, cfg)
 
         manifest_path = Path(args.manifest)
@@ -1876,7 +1937,9 @@ class GlowToolBase(ABC):
 
         for vi, v_name in enumerate(view_names):
             print(f"[gauss-fit] encoding view '{v_name}' ({vi+1}/{V})...")
-            model = self.build_model(cfg, device, target_size)
+            model = self.build_model(
+                _checkpoint_view_config(blob, cfg, v_name, vi), device, target_size
+            )
             ok, src = load_weights_into_model(
                 model, blob, vi, prefer_ema=args.ema,
                 view_name=v_name, cfg_views=cfg_views
@@ -2343,7 +2406,7 @@ class GlowToolBase(ABC):
         ckpt_path = resolve_ckpt_path(Path(args.ckpt))
         blob      = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
         cfg       = blob.get("config", blob.get("cfg", {}))
-        cfg_views = cfg.get("views", None)
+        cfg_views = blob.get("views", cfg.get("views", None))
         target_size = self._get_target_size(args, cfg)
 
         gauss_blob = _load_gaussian_model(Path(args.gauss))
@@ -2367,7 +2430,9 @@ class GlowToolBase(ABC):
         obs_latents_per_level: List[Optional[torch.Tensor]] = [None] * L
         for v_name in obs_names:
             vi = view_names.index(v_name)
-            model = self.build_model(cfg, device, target_size)
+            model = self.build_model(
+                _checkpoint_view_config(blob, cfg, v_name, vi), device, target_size
+            )
             ok, src = load_weights_into_model(
                 model, blob, vi, prefer_ema=args.ema,
                 view_name=v_name, cfg_views=cfg_views
@@ -2397,7 +2462,9 @@ class GlowToolBase(ABC):
         for tgt_name in tgt_names:
             tgt_vi_gauss = gauss_views.index(tgt_name)
             vi_model = view_names.index(tgt_name)
-            model = self.build_model(cfg, device, target_size)
+            model = self.build_model(
+                _checkpoint_view_config(blob, cfg, tgt_name, vi_model), device, target_size
+            )
             ok, _ = load_weights_into_model(
                 model, blob, vi_model, prefer_ema=args.ema,
                 view_name=tgt_name, cfg_views=cfg_views
@@ -2591,7 +2658,7 @@ class GlowToolBase(ABC):
         ckpt_path = resolve_ckpt_path(Path(args.ckpt))
         blob      = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
         cfg       = blob.get("config", blob.get("cfg", {}))
-        cfg_views = cfg.get("views", None)
+        cfg_views = blob.get("views", cfg.get("views", None))
         target_size = self._get_target_size(args, cfg)
 
         manifest_path = Path(args.manifest)
@@ -2600,7 +2667,9 @@ class GlowToolBase(ABC):
         vi = int(args.view_index)
         v_name = view_names[vi]
 
-        model = self.build_model(cfg, device, target_size)
+        model = self.build_model(
+            _checkpoint_view_config(blob, cfg, v_name, vi), device, target_size
+        )
         ok, src = load_weights_into_model(
             model, blob, vi, prefer_ema=args.ema,
             view_name=v_name, cfg_views=cfg_views
@@ -2736,7 +2805,7 @@ class GlowToolBase(ABC):
         ckpt_path = resolve_ckpt_path(Path(args.ckpt))
         blob      = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
         cfg       = blob.get("config", blob.get("cfg", {}))
-        cfg_views = cfg.get("views", None)
+        cfg_views = blob.get("views", cfg.get("views", None))
         target_size = self._get_target_size(args, cfg)
 
         gauss_blob = _load_gaussian_model(Path(args.gauss))
@@ -2747,7 +2816,9 @@ class GlowToolBase(ABC):
         v_name = view_names[vi]
         v_idx_gauss = views.index(v_name)
 
-        model = self.build_model(cfg, device, target_size)
+        model = self.build_model(
+            _checkpoint_view_config(blob, cfg, v_name, vi), device, target_size
+        )
         ok, src = load_weights_into_model(
             model, blob, vi, prefer_ema=args.ema,
             view_name=v_name, cfg_views=cfg_views
@@ -2764,17 +2835,57 @@ class GlowToolBase(ABC):
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
+        def _view_slice(l: int) -> Tuple[int, int]:
+            """Slice of the selected view in a concatenated per-level Gaussian."""
+            slices = gauss_blob.get("level_view_slices")
+            if isinstance(slices, (list, tuple)) and l < len(slices):
+                row = slices[l]
+                if isinstance(row, dict):
+                    bounds = row.get(v_idx_gauss, row.get(str(v_idx_gauss)))
+                    if isinstance(bounds, (list, tuple)) and len(bounds) == 2:
+                        return int(bounds[0]), int(bounds[1])
+            start = sum(
+                int(np.prod(shapes_by_view[prior_vi][l]))
+                for prior_vi in range(v_idx_gauss)
+            )
+            size = int(np.prod(shapes_by_view[v_idx_gauss][l]))
+            return start, start + size
+
+        def _slice_view_flat(value, l: int):
+            """Accept old per-view values or slice new concatenated values."""
+            expected = int(np.prod(shapes_by_view[v_idx_gauss][l]))
+            start, stop = _view_slice(l)
+            if torch.is_tensor(value):
+                flat = value.reshape(-1)
+                if flat.numel() == expected:
+                    return flat
+                if flat.numel() < stop:
+                    raise ValueError(
+                        f"Level {l} latent has {flat.numel()} values; "
+                        f"cannot extract view slice [{start}:{stop}]."
+                    )
+                return flat[start:stop]
+            flat = np.asarray(value).reshape(-1)
+            if flat.size == expected:
+                return flat
+            if flat.size < stop:
+                raise ValueError(
+                    f"Level {l} latent has {flat.size} values; "
+                    f"cannot extract view slice [{start}:{stop}]."
+                )
+            return flat[start:stop]
+
         if mc_n == 0:
             def _to_z_tensor(value, l):
                 # `value` is either a native torch tensor straight out of
                 # _encode_latents (already the right dtype/shape, possibly
                 # with or without the batch dim), or a flat numpy vector
                 # that needs reshaping back to (C, H, W, D) and a batch dim.
+                value = _slice_view_flat(value, l)
                 if torch.is_tensor(value):
-                    v = value
-                    if v.dim() == len(shapes_by_view[v_idx_gauss][l]):
-                        v = v.unsqueeze(0)
-                    return v.to(device=device, dtype=torch.float32)
+                    return value.to(device=device, dtype=torch.float32).view(
+                        1, *shapes_by_view[v_idx_gauss][l]
+                    )
                 return torch.from_numpy(
                     np.asarray(value, dtype=np.float32)
                 ).view(1, *shapes_by_view[v_idx_gauss][l]).to(device)
@@ -2901,12 +3012,20 @@ class GlowToolBase(ABC):
             for s_i in tqdm(range(mc_n), desc="MC samples"):
                 z_samp = []
                 for l in range(L):
-                    mu_l  = np.asarray(mu_list[l], dtype=np.float64)
+                    mu_l  = np.asarray(_slice_view_flat(mu_list[l], l), dtype=np.float64)
                     Sig_l = Sigma_list[l] if isinstance(Sigma_list, (list, tuple)) else Sigma_list
                     shp   = shapes_by_view[v_idx_gauss][l]
                     D_l   = int(np.prod(shp))
+                    start, stop = _view_slice(l)
                     if isinstance(Sig_l, dict) and Sig_l.get("type") == "lowrank":
                         U      = np.asarray(Sig_l["U"], dtype=np.float64)
+                        if U.shape[0] != D_l:
+                            if U.shape[0] < stop:
+                                raise ValueError(
+                                    f"Level {l} low-rank U has {U.shape[0]} rows; "
+                                    f"cannot extract view slice [{start}:{stop}]."
+                                )
+                            U = U[start:stop]
                         eig    = np.asarray(Sig_l["eig"], dtype=np.float64)
                         sigma2 = float(Sig_l.get("sigma2", 0.0))
                         xi = np.random.randn(U.shape[1]) * float(args.mc_temp)
@@ -2914,6 +3033,10 @@ class GlowToolBase(ABC):
                         z_np = mu_l + U @ (np.sqrt(eig) * xi) + eps
                     elif Sig_l is not None:
                         S = np.asarray(Sig_l, dtype=np.float64)
+                        if S.ndim == 1 and S.size != D_l:
+                            S = S[start:stop]
+                        elif S.ndim == 2 and S.shape != (D_l, D_l):
+                            S = S[start:stop, start:stop]
                         noise = np.random.randn(D_l)
                         if S.ndim == 1:
                             z_np = mu_l + noise * (S ** 0.5) * float(args.mc_temp)
@@ -2988,7 +3111,7 @@ class GlowToolBase(ABC):
         ckpt_path = resolve_ckpt_path(Path(args.ckpt))
         blob      = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
         cfg       = blob.get("config", blob.get("cfg", {}))
-        cfg_views = cfg.get("views", None)
+        cfg_views = blob.get("views", cfg.get("views", None))
         target_size = self._get_target_size(args, cfg)
 
         manifest_path = Path(args.manifest)
@@ -3017,7 +3140,9 @@ class GlowToolBase(ABC):
                 )
             v_idx_gauss = gauss_views.index(v_name)
 
-        model = self.build_model(cfg, device, target_size)
+        model = self.build_model(
+            _checkpoint_view_config(blob, cfg, v_name, vi), device, target_size
+        )
         ok, src = load_weights_into_model(
             model, blob, vi, prefer_ema=args.ema,
             view_name=v_name, cfg_views=cfg_views
@@ -3200,7 +3325,7 @@ class GlowToolBase(ABC):
         ckpt_path = resolve_ckpt_path(Path(args.ckpt))
         blob      = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
         cfg       = blob.get("config", blob.get("cfg", {}))
-        cfg_views = cfg.get("views", None)
+        cfg_views = blob.get("views", cfg.get("views", None))
         target_size = self._get_target_size(args, cfg)
 
         manifest_path = Path(args.manifest)
@@ -3209,7 +3334,9 @@ class GlowToolBase(ABC):
         vi = int(args.view_index)
         v_name = view_names[vi]
 
-        model = self.build_model(cfg, device, target_size)
+        model = self.build_model(
+            _checkpoint_view_config(blob, cfg, v_name, vi), device, target_size
+        )
         ok, src = load_weights_into_model(
             model, blob, vi, prefer_ema=args.ema,
             view_name=v_name, cfg_views=cfg_views
@@ -3319,7 +3446,7 @@ class GlowToolBase(ABC):
         ckpt_path = resolve_ckpt_path(Path(args.ckpt))
         blob      = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
         cfg       = blob.get("config", blob.get("cfg", {}))
-        cfg_views = cfg.get("views", None)
+        cfg_views = blob.get("views", cfg.get("views", None))
         target_size = self._get_target_size(args, cfg)
 
         gauss_blob = _load_gaussian_model(Path(args.gauss))
@@ -3332,7 +3459,9 @@ class GlowToolBase(ABC):
         v_name = view_names[vi]
         v_idx_gauss = gauss_views.index(v_name)
 
-        model = self.build_model(cfg, device, target_size)
+        model = self.build_model(
+            _checkpoint_view_config(blob, cfg, v_name, vi), device, target_size
+        )
         ok, src = load_weights_into_model(
             model, blob, vi, prefer_ema=args.ema,
             view_name=v_name, cfg_views=cfg_views
@@ -3549,7 +3678,7 @@ class GlowToolBase(ABC):
         ckpt_path = resolve_ckpt_path(Path(args.ckpt))
         blob      = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
         cfg       = blob.get("config", blob.get("cfg", {}))
-        cfg_views = cfg.get("views", None)
+        cfg_views = blob.get("views", cfg.get("views", None))
         target_size = self._get_target_size(args, cfg)
 
         gauss_blob = _load_gaussian_model(Path(args.gauss))
@@ -3561,7 +3690,9 @@ class GlowToolBase(ABC):
         vi = int(args.view_index)
         v_name = view_names[vi]
 
-        model = self.build_model(cfg, device, target_size)
+        model = self.build_model(
+            _checkpoint_view_config(blob, cfg, v_name, vi), device, target_size
+        )
         ok, src = load_weights_into_model(
             model, blob, vi, prefer_ema=args.ema,
             view_name=v_name, cfg_views=cfg_views
@@ -3793,13 +3924,21 @@ class GlowToolBase(ABC):
         ckpt_path = resolve_ckpt_path(Path(args.ckpt))
         blob      = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
         cfg       = blob.get("config", blob.get("cfg", {}))
-        cfg_views = cfg.get("views", None)
+        cfg_views = blob.get("views", cfg.get("views", None))
         target_size = self._get_target_size(args, cfg)
 
-        model = self.build_model(cfg, device, target_size)
+        vi = int(args.view_index)
+        cfg_view_names = [
+            str(v.get("name", "")) if isinstance(v, dict) else str(v)
+            for v in (cfg_views or [])
+        ]
+        v_name = cfg_view_names[vi] if vi < len(cfg_view_names) else ""
+        model = self.build_model(
+            _checkpoint_view_config(blob, cfg, v_name, vi), device, target_size
+        )
         ok, src = load_weights_into_model(
-            model, blob, int(args.view_index), prefer_ema=args.ema,
-            cfg_views=cfg_views
+            model, blob, vi, prefer_ema=args.ema,
+            view_name=v_name, cfg_views=cfg_views
         )
         if not ok:
             raise RuntimeError(f"Could not load weights for view {args.view_index}")
