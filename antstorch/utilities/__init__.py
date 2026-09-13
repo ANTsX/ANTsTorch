@@ -60,3 +60,4 @@ from .schedulers import ParamSchedule, MultiParamScheduler, parse_schedules
 from .device_manager import set_default_device, get_default_device
 
 from .weingarten_image_curvature import weingarten_image_curvature
+from .denoise_image import denoise_image
