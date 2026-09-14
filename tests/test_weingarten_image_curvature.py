@@ -12,7 +12,10 @@ from ants.ops.weingarten_image_curvature import weingarten_image_curvature as an
 def test_sphere_image():
     # Construct a 3D sphere to compute curvature
     x, y, z = np.ogrid[-15:16, -15:16, -15:16]
-    r = np.sqrt(x**2 + y**2 + z**2)
+    # Avoid an exactly stationary center voxel.  The ANTs/ITK reference
+    # normalizes its zero gradient without guarding against zero and can stall
+    # in the subsequent eigensolve; a sub-voxel offset preserves the phantom.
+    r = np.sqrt((x - 0.17) ** 2 + (y - 0.23) ** 2 + (z - 0.31) ** 2)
     vol = np.where(r < 10.0, 1.0 - (r / 10.0) ** 2, 0.0).astype(np.float32)
     vol = ndimage.gaussian_filter(vol, sigma=1.0)
     return ants.from_numpy(vol, origin=(0, 0, 0), spacing=(1.0, 1.0, 1.0))
@@ -22,7 +25,7 @@ def test_sphere_image():
 def test_sphere_anisotropic():
     # Construct a 3D sphere with anisotropic spacing
     x, y, z = np.ogrid[-15:16, -15:16, -15:16]
-    r = np.sqrt(x**2 + y**2 + z**2)
+    r = np.sqrt((x - 0.17) ** 2 + (y - 0.23) ** 2 + (z - 0.31) ** 2)
     vol = np.where(r < 10.0, 1.0 - (r / 10.0) ** 2, 0.0).astype(np.float32)
     vol = ndimage.gaussian_filter(vol, sigma=1.0)
     return ants.from_numpy(vol, origin=(0, 0, 0), spacing=(1.2, 1.5, 1.8))
@@ -117,7 +120,7 @@ def test_weingarten_torch_masking(test_sphere_image):
 def test_weingarten_torch_2d():
     # Construct a 2D circle
     x, y = np.ogrid[-15:16, -15:16]
-    r = np.sqrt(x**2 + y**2)
+    r = np.sqrt((x - 0.17) ** 2 + (y - 0.23) ** 2)
     vol = np.where(r < 10.0, 1.0 - (r / 10.0) ** 2, 0.0).astype(np.float32)
     vol = ndimage.gaussian_filter(vol, sigma=1.0)
     image = ants.from_numpy(vol, origin=(0, 0), spacing=(1.0, 1.0))
@@ -160,7 +163,7 @@ def test_weingarten_torch_3d_orientations_and_spacings():
     Confirms exact geometry and metadata preservation (origin, spacing, direction).
     """
     x, y, z = np.ogrid[-15:16, -15:16, -15:16]
-    r = np.sqrt(x**2 + y**2 + z**2)
+    r = np.sqrt((x - 0.17) ** 2 + (y - 0.23) ** 2 + (z - 0.31) ** 2)
     vol = np.where(r < 10.0, 1.0 - (r / 10.0) ** 2, 0.0).astype(np.float32)
     vol = ndimage.gaussian_filter(vol, sigma=1.0)
 
@@ -219,7 +222,7 @@ def test_weingarten_torch_options_anisotropic_oriented():
     volumes with non-identity direction matrices and non-zero origins.
     """
     x, y, z = np.ogrid[-15:16, -15:16, -15:16]
-    r = np.sqrt(x**2 + y**2 + z**2)
+    r = np.sqrt((x - 0.17) ** 2 + (y - 0.23) ** 2 + (z - 0.31) ** 2)
     vol = np.where(r < 10.0, 1.0 - (r / 10.0) ** 2, 0.0).astype(np.float32)
     vol = ndimage.gaussian_filter(vol, sigma=1.0)
 
@@ -254,7 +257,7 @@ def test_weingarten_torch_2d_orientations_and_spacings():
     anisotropic pixel spacings, and non-zero origins.
     """
     x, y = np.ogrid[-15:16, -15:16]
-    r = np.sqrt(x**2 + y**2)
+    r = np.sqrt((x - 0.17) ** 2 + (y - 0.23) ** 2)
     vol2d = np.where(r < 10.0, 1.0 - (r / 10.0) ** 2, 0.0).astype(np.float32)
     vol2d = ndimage.gaussian_filter(vol2d, sigma=1.0)
 
