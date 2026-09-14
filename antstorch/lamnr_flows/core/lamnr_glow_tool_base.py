@@ -2780,10 +2780,21 @@ class GlowToolBase(ABC):
     # ------------------------------------------------------------------
 
     def cmd_recon_template(self, argv=None):
-        """Decode the Gaussian mean (µ) as a population template."""
+        """Decode a Gaussian population mean or the exact latent origin."""
         ap = argparse.ArgumentParser("recon-template")
         ap.add_argument("--ckpt",       type=str, required=True)
-        ap.add_argument("--gauss",      type=str, required=True)
+        ap.add_argument(
+            "--gauss", type=str, default=None,
+            help="Fitted Gaussian model. Required unless --zero-latents is used.",
+        )
+        ap.add_argument(
+            "--zero-latents", action="store_true",
+            help=(
+                "Decode the exact multiscale latent origin f^{-1}(0,...,0). "
+                "This mode does not require --gauss and is incompatible with "
+                "--mc-samples."
+            ),
+        )
         ap.add_argument("--views",      type=str, required=True)
         ap.add_argument("--view-index", type=int, default=0)
         ap.add_argument("--devices",    type=str, default="cuda:0")
@@ -2799,6 +2810,10 @@ class GlowToolBase(ABC):
 
         device = torch.device(args.devices)
         mc_n   = max(0, int(args.mc_samples))
+        if args.zero_latents and mc_n > 0:
+            ap.error("--zero-latents cannot be combined with --mc-samples.")
+        if not args.zero_latents and not args.gauss:
+            ap.error("--gauss is required unless --zero-latents is used.")
         if mc_n > 0:
             set_deterministic(int(args.seed))
 
@@ -2808,16 +2823,18 @@ class GlowToolBase(ABC):
         cfg_views = blob.get("views", cfg.get("views", None))
         target_size = self._get_target_size(args, cfg)
 
-        gauss_blob = _load_gaussian_model(Path(args.gauss))
-        views, _, shapes_by_view, L = _validate_gauss_blob(gauss_blob)
-
         view_names = [v.strip() for v in args.views.split(",") if v.strip()]
         vi = int(args.view_index)
+        if vi < 0 or vi >= len(view_names):
+            raise ValueError(
+                f"view-index {vi} is outside the configured views "
+                f"[0, {len(view_names) - 1}]."
+            )
         v_name = view_names[vi]
-        v_idx_gauss = views.index(v_name)
 
+        view_cfg = _checkpoint_view_config(blob, cfg, v_name, vi)
         model = self.build_model(
-            _checkpoint_view_config(blob, cfg, v_name, vi), device, target_size
+            view_cfg, device, target_size
         )
         ok, src = load_weights_into_model(
             model, blob, vi, prefer_ema=args.ema,
@@ -2828,13 +2845,64 @@ class GlowToolBase(ABC):
         print(f"[recon-template] loaded from {src}")
         self.prime_if_needed(model, target_size, device)
 
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if args.zero_latents:
+            # Probe only establishes the checkpoint-specific multiscale latent
+            # shapes. Its encoded values are discarded and replaced by exact
+            # zeros at every level before the inverse flow is evaluated.
+            channels = int(view_cfg.get("C", view_cfg.get("channels", 1)))
+            probe = torch.zeros(
+                (1, channels, *tuple(target_size)),
+                device=device,
+                dtype=torch.float32,
+            )
+            with torch.no_grad():
+                probe_latents = _encode_latents(model, probe)
+                zero_latents = [torch.zeros_like(z) for z in probe_latents]
+                # Deliberately bypass ``decode_latents`` here: its dimension-
+                # specific coercion may clamp or percentile-normalize image
+                # intensities.  The requested template is the literal decoder
+                # output f^{-1}(0), not a display-normalized version of it.
+                with torch.amp.autocast(
+                    device_type=device.type, enabled=False
+                ):
+                    x_zero, _ = model.forward_and_log_det(zero_latents)
+            if not torch.is_tensor(x_zero):
+                raise RuntimeError(
+                    "Decoding the latent origin did not return an image tensor."
+                )
+            if not torch.isfinite(x_zero).all():
+                raise RuntimeError(
+                    "Decoding the exact latent origin produced non-finite values; "
+                    "the zero-latent template was not written."
+                )
+            if args.sharpen_image:
+                print(
+                    "[warn] --sharpen-image post-processes f^{-1}(0); "
+                    "omit it to save the exact decoder output."
+                )
+                try:
+                    import ants as _ants
+                    arr = x_zero.squeeze().cpu().numpy()
+                    img = _ants.from_numpy(arr)
+                    arr2 = _ants.iMath_sharpen(img).numpy()
+                    x_zero = torch.from_numpy(arr2).view_as(x_zero)
+                except Exception as e:
+                    print(f"[warn] sharpen failed: {e}")
+            self.save_volume(x_zero, out_path)
+            print(f"[recon-template] zero-latent template saved → {out_path}")
+            return
+
+        gauss_blob = _load_gaussian_model(Path(args.gauss))
+        views, _, shapes_by_view, L = _validate_gauss_blob(gauss_blob)
+        v_idx_gauss = views.index(v_name)
+
         mu_list = gauss_blob["mu"]
         mu_nearest_real = gauss_blob.get("mu_nearest_real")
         nearest_real_image_paths = gauss_blob.get("nearest_real_image_paths") or {}
         nearest_real_candidates = gauss_blob.get("nearest_real_candidates_image_paths") or []
-        out_path = Path(args.out)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-
         def _view_slice(l: int) -> Tuple[int, int]:
             """Slice of the selected view in a concatenated per-level Gaussian."""
             slices = gauss_blob.get("level_view_slices")
