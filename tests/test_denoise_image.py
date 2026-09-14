@@ -71,7 +71,9 @@ def test_denoise_image_3d_gaussian_parity(synthetic_3d):
 
 
 def test_denoise_image_3d_rician_parity(synthetic_3d):
-    res_torch = denoise_image(synthetic_3d, p=1, r=1, noise_model="Rician", shrink_factor=1)
+    res_torch = denoise_image(
+        synthetic_3d, p=1, r=1, noise_model="Rician", shrink_factor=1, device="cpu"
+    )
     res_ants = ants.denoise_image(synthetic_3d, p=1, r=1, noise_model="Rician", shrink_factor=1)
 
     corr = np.corrcoef(res_torch.numpy().ravel(), res_ants.numpy().ravel())[0, 1]
