@@ -1,3 +1,10 @@
+import os
+
+# ANTs' non-local-means noise estimation has order-dependent reductions.  Set
+# this before the test session executes any ITK filters so strict parity checks
+# are reproducible across platforms.
+os.environ["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] = "1"
+
 import numpy as np
 import pytest
 import torch
