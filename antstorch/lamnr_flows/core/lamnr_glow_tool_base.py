@@ -47,9 +47,6 @@ try:
 except ImportError:
     tqdm = lambda x, **kw: x  # noqa: E731
 
-import matplotlib
-matplotlib.use("Agg")
-
 # ---------------------------------------------------------------------------
 # MPS safety patch
 # ---------------------------------------------------------------------------

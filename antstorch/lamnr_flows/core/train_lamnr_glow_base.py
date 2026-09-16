@@ -29,9 +29,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
@@ -600,15 +597,26 @@ def _save_metric_plots(
             is_spike = diff > (5 * rolling_mad + 1e-6)
             losses = np.where(is_spike, np.nan, losses)
             bpds   = np.where(is_spike, np.nan, bpds)
+        # Use the object-oriented Figure API rather than pyplot. These curves
+        # are written straight to disk, so no interactive backend is needed and
+        # attaching an Agg canvas explicitly keeps the rendering path
+        # independent of whatever backend the importing process is using.
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure
+
         for values, ylabel, title, fname in [
             (losses, "loss",    "Training loss",        "loss_curve.png"),
             (bpds,   "sum_bpd", "Sum BPD (train)",      "bpd_curve.png"),
         ]:
-            plt.figure()
-            plt.plot(iters, values)
-            plt.xlabel("iter"); plt.ylabel(ylabel); plt.title(title)
-            plt.tight_layout()
-            plt.savefig(out_dir / fname); plt.close()
+            fig = Figure()
+            FigureCanvasAgg(fig)
+            ax = fig.subplots()
+            ax.plot(iters, values)
+            ax.set_xlabel("iter")
+            ax.set_ylabel(ylabel)
+            ax.set_title(title)
+            fig.tight_layout()
+            fig.savefig(out_dir / fname)
     except Exception:
         pass
 
