@@ -466,9 +466,20 @@ class LAMNrGlow2DTrainer(BaseLAMNrTrainer):
             rank=self.rank,
             world_size=self.world_size,
         )
-        # Determine channel count from first batch
+        # Determine the channel count *per view* from the first batch.  A
+        # NIfTI ImageDataset commonly returns (B, V, H, W), where the second
+        # dimension contains packed single-channel views; treating V as C
+        # builds every Glow model with the total number of views as its input
+        # channels and later fails after _extract_views_from_batch splits it.
         sample_batch = next(iter(train_loader))
-        C = sample_batch.shape[2] if sample_batch.ndim == 5 else sample_batch.shape[1]
+        sample_views = _extract_views_from_batch(sample_batch, num_views=args.num_views)
+        view_channels = [int(view.shape[1]) for view in sample_views]
+        if len(set(view_channels)) != 1:
+            raise ValueError(
+                "All 2D views must have the same number of channels; "
+                f"got {view_channels}."
+            )
+        C = view_channels[0]
         self.input_shape = (C, args.H, args.W)
         args.C            = C
         args.channels     = C
