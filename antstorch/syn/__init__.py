@@ -8,10 +8,14 @@ registration entry point, :func:`syn_registration` (mirroring
 ``ants.registration``'s ``warpedmovout`` / ``fwdtransforms`` /
 ``invtransforms`` output convention, but with in-memory tensors throughout
 rather than files on disk) plus the ``ants.ANTsImage`` <-> tensor bridge in
-:mod:`antstorch.syn.bridge`. Per the integration proposal's Etape 2 scope,
-the affine initialization stage reuses/extends
-:func:`antstorch.bspline_flows.affine_registration.affine_registration`
-rather than porting ``syntx``'s separate ``robust_affine`` module.
+:mod:`antstorch.syn.bridge`. :func:`robust_affine` additionally ports the
+core PyTorch multi-start solver from ``syntx``'s ``robust_affine`` module
+(cone-constrained rotation search, SE(3) candidate clustering, and a
+multi-resolution Adam/L-BFGS Mattes-MI schedule). The port is scoped to
+that solver only: landmark/SIFT3D-seeded candidates
+(``syntx.landmarks``), ``mode='tournament'``, and the legacy multi-candidate
+``ants.registration`` C++ fallback pipeline are intentionally excluded --
+see :mod:`antstorch.syn.robust_affine` for the full scope note.
 
 Exports are explicit and non-wildcard: ``antstorch/__init__.py`` does
 ``from .bspline_flows import *``, and this package must never silently
@@ -34,10 +38,20 @@ from .bridge import (
     tensor_to_ants_image,
 )
 from .syn import syn_registration
+from .robust_affine import (
+    robust_affine,
+    robust_center_of_mass,
+    compute_center_of_mass,
+    compute_fov_center,
+)
 
 __all__ = [
     'core',
     'syn_registration',
+    'robust_affine',
+    'robust_center_of_mass',
+    'compute_center_of_mass',
+    'compute_fov_center',
     'ants_image_metadata',
     'ants_image_to_tensor',
     'tensor_to_ants_image',

@@ -380,6 +380,23 @@ def vicreg_multi(views_feats: List[torch.Tensor],
     B = views_feats[0].size(0)
     eps = 1e-4
 
+    # Invariance (pairwise MSE). Unlike the matmul-based losses in this
+    # module (pearson_multi, barlow_twins_multi), F.mse_loss compares
+    # element-wise rather than via matrix multiplication, so a batch-size
+    # mismatch between views does not fail fast: PyTorch first tries to
+    # *broadcast* the two shapes together, emitting a UserWarning ("Using
+    # a target size ... different to the input size ... likely lead to
+    # incorrect results") before the shapes turn out to be non-broadcastable
+    # and it raises RuntimeError anyway. Checking explicitly up front raises
+    # the same class of error immediately, with a clearer message and no
+    # warning noise.
+    for v, feats in enumerate(views_feats):
+        if feats.size(0) != B:
+            raise ValueError(
+                f"vicreg_multi: all views must share the same batch size; "
+                f"view 0 has batch size {B} but view {v} has {feats.size(0)}."
+            )
+
     # Invariance (pairwise MSE)
     inv = torch.tensor(0.0, device=views_feats[0].device, dtype=views_feats[0].dtype)
     n_pairs = 0
