@@ -6,11 +6,16 @@ import torch
 from torch import Tensor
 from torch.nn import functional as F
 
-from antstorch.syn.core.losses import local_ncc_loss_nd, mattes_mi_loss_nd
+from antstorch.syn.core.losses import (
+    local_ncc_loss_nd,
+    mattes_mi_loss_nd,
+    box_cc2_loss_nd,
+    soft_dice_loss_nd,
+)
 
 from .bspline_domain import ImageDomain
 
-SIMILARITY_METRICS = ("mse", "lncc", "cc", "lncc2", "cc2", "mattes", "mi")
+SIMILARITY_METRICS = ("mse", "lncc", "cc", "lncc2", "cc2", "mattes", "mi", "box_cc2", "dice")
 """The similarity-metric vocabulary shared by every antstorch.bspline_flows
 registration entry point (``affine_registration``, ``bspline_svf_registration``
 via ``DeterministicBSplineRegistration``, ``gaussian_svf_registration``) --
@@ -28,7 +33,14 @@ of this project's former, now-removed, ``'ants_ncc'`` option -- ITK's
 correlation -- though not numerically identical, since ``lncc2``/``cc2`` use
 a box-filter/autograd implementation rather than ITK's hand-derived
 pseudo-gradient). ``mattes``/``mi`` are aliases for Mattes mutual
-information.
+information. ``box_cc2`` is a native sliding box-filter squared LNCC
+(:func:`antstorch.syn.core.losses.box_cc2_loss_nd`) -- distinct from
+``cc2``'s ``avg_pool``-based box filter, with dual variance floors that
+suppress boundary gradient artifacts in zero-padded backgrounds; ported from
+``syntx.core.losses``. ``dice`` is a differentiable soft Dice loss
+(:func:`antstorch.syn.core.losses.soft_dice_loss_nd`), most useful when
+``fixed``/``warped_moving`` are continuous probability/membership maps
+rather than raw intensities.
 """
 
 
@@ -177,7 +189,7 @@ def similarity_loss(
 
     Parameters
     ----------
-    name : {'mse', 'lncc', 'cc', 'lncc2', 'cc2', 'mattes', 'mi'}
+    name : {'mse', 'lncc', 'cc', 'lncc2', 'cc2', 'mattes', 'mi', 'box_cc2', 'dice'}
         Similarity metric.
     fixed, warped_moving : Tensor
         Images of identical shape, ``(N, C, *spatial)``.
@@ -205,5 +217,9 @@ def similarity_loss(
         return local_ncc_loss_nd(fixed, warped_moving, mask=mask, window_size=window_size, squared=False)
     if name in ("lncc2", "cc2"):
         return local_ncc_loss_nd(fixed, warped_moving, mask=mask, window_size=window_size, squared=True)
+    if name == "box_cc2":
+        return box_cc2_loss_nd(fixed, warped_moving, window_size=window_size)
+    if name == "dice":
+        return soft_dice_loss_nd(fixed, warped_moving, mask=mask)
     # "mattes" / "mi"
     return mattes_mi_loss_nd(fixed, warped_moving, mask=mask, num_bins=num_bins)

@@ -220,6 +220,14 @@ def normalize_and_tensorize(fixed, moving, winsorize_quantiles=None, backend='py
     mi_np = moving.numpy()
 
     def _norm_fg(arr):
+        arr_min = float(arr.min())
+        arr_max = float(arr.max())
+        # Idempotency check: if already normalized to [0, 1] with an active
+        # range, avoid re-deriving percentile statistics from a collapsed
+        # foreground/background structure.
+        if arr_min >= -1e-4 and arr_max <= 1.0 + 1e-4 and arr_max >= 0.5:
+            return np.clip(arr, 0.0, 1.0).astype(np.float32)
+
         pos = arr[arr > 0]
         if len(pos) > 0:
             p02 = float(np.percentile(pos, 2.0))

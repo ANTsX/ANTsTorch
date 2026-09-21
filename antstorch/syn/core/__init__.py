@@ -35,6 +35,7 @@ from .grid import (
 )
 from .smoothing import (
     separable_gaussian_filter,
+    separable_1d_filter,
     get_cached_gaussian_kernel_1d,
     apply_sobolev_green_operator,
     apply_dsti_green_operator,
@@ -48,6 +49,13 @@ from .losses import (
     b_spline_3,
     mattes_mi_loss_core,
     mattes_mi_loss_nd,
+    BoxLNCCLoss,
+    box_lncc_loss_nd,
+    box_cc2_loss_nd,
+    compute_soft_distance_transform,
+    compute_image_distance_transform,
+    distance_transform_loss,
+    soft_dice_loss_nd,
 )
 from .jacobian import (
     _spatial_jacobian_nd,
@@ -102,6 +110,7 @@ __all__ = [
     'physical_to_normalized_torch_cached',
     'prepare_mid_images_and_gradients_torch',
     'separable_gaussian_filter',
+    'separable_1d_filter',
     'get_cached_gaussian_kernel_1d',
     'apply_sobolev_green_operator',
     'apply_dsti_green_operator',
@@ -113,6 +122,13 @@ __all__ = [
     'b_spline_3',
     'mattes_mi_loss_core',
     'mattes_mi_loss_nd',
+    'BoxLNCCLoss',
+    'box_lncc_loss_nd',
+    'box_cc2_loss_nd',
+    'compute_soft_distance_transform',
+    'compute_image_distance_transform',
+    'distance_transform_loss',
+    'soft_dice_loss_nd',
     '_spatial_jacobian_nd',
     'compute_jacobian_determinant_nd',
     'compute_jacobian_hinge_penalty',

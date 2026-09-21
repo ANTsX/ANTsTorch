@@ -8,6 +8,11 @@ from antstorch.syn.core import (
     b_spline_3,
     mattes_mi_loss_core,
     mattes_mi_loss_nd,
+    box_cc2_loss_nd,
+    compute_soft_distance_transform,
+    compute_image_distance_transform,
+    distance_transform_loss,
+    soft_dice_loss_nd,
 )
 
 
@@ -130,3 +135,119 @@ def test_mattes_mi_loss_nd_identical_images_more_negative_than_unrelated():
     unrelated = torch.rand(1, 1, 24, 24, dtype=torch.double)
     unrelated_mi = mattes_mi_loss_nd(fixed, unrelated, auto_mask=False)
     assert identical_mi.item() < unrelated_mi.item()
+
+
+# --- Ported from syntx (box_cc2, distance-transform, soft Dice) ---
+
+
+def test_box_cc2_loss_nd_identical_images_near_minus_one():
+    torch.manual_seed(0)
+    image = torch.rand(1, 1, 12, 14, 16)
+    loss = box_cc2_loss_nd(image, image.clone(), window_size=5)
+    assert loss.item() == pytest.approx(-1.0, abs=1e-3)
+
+
+def test_box_cc2_loss_nd_worse_for_unrelated_images():
+    torch.manual_seed(1)
+    fixed = torch.rand(1, 1, 12, 14, 16)
+    identical = box_cc2_loss_nd(fixed, fixed.clone(), window_size=5)
+    unrelated = box_cc2_loss_nd(fixed, torch.rand(1, 1, 12, 14, 16), window_size=5)
+    assert identical.item() < unrelated.item()
+
+
+def test_box_cc2_loss_nd_is_differentiable():
+    fixed = torch.rand(1, 1, 10, 10, 10)
+    moving = (fixed + 0.05 * torch.randn_like(fixed)).requires_grad_(True)
+    loss = box_cc2_loss_nd(fixed, moving, window_size=5)
+    loss.backward()
+    assert moving.grad is not None
+    assert torch.isfinite(moving.grad).all()
+
+
+def test_box_cc2_loss_nd_uniform_background_is_perfectly_correlated():
+    # Zero-padded / uniform-background regions should evaluate near 1.0
+    # correlation (loss near -1.0) thanks to the dual variance floors.
+    zeros = torch.zeros(1, 1, 8, 8, 8)
+    loss = box_cc2_loss_nd(zeros, zeros.clone(), window_size=3)
+    assert loss.item() == pytest.approx(-1.0, abs=1e-3)
+
+
+def test_compute_soft_distance_transform_zero_at_foreground_center():
+    mask = torch.zeros(1, 1, 32, 32)
+    mask[:, :, 10:22, 10:22] = 1.0
+    dist = compute_soft_distance_transform(mask, sigma=2.0)
+    assert dist.shape == mask.shape
+    # Distance should be smaller deep inside the foreground than near its edge.
+    assert dist[0, 0, 16, 16].item() < dist[0, 0, 11, 11].item()
+
+
+def test_compute_image_distance_transform_matches_scipy_edt():
+    import numpy as np
+    import scipy.ndimage as ndi
+
+    mask = np.zeros((16, 16), dtype=np.float32)
+    mask[4:12, 4:12] = 1.0
+    expected = ndi.distance_transform_edt(~(mask > 0.5))
+    result = compute_image_distance_transform(torch.from_numpy(mask))
+    np.testing.assert_allclose(result.numpy(), expected, atol=1e-4)
+
+
+def test_compute_image_distance_transform_tau_potential_in_unit_interval():
+    mask = torch.zeros(20, 20)
+    mask[5:15, 5:15] = 1.0
+    potential = compute_image_distance_transform(mask, tau=1.0)
+    assert potential.min().item() >= 0.0
+    assert potential.max().item() <= 1.0
+
+
+def test_distance_transform_loss_identical_masks_is_near_optimal():
+    mask = torch.zeros(1, 1, 24, 24)
+    mask[:, :, 6:18, 6:18] = 1.0
+    loss_same = distance_transform_loss(mask, mask.clone(), mode="potential_lncc", tau=0.2, window_size=5)
+    shifted = torch.zeros(1, 1, 24, 24)
+    shifted[:, :, 4:16, 4:16] = 1.0
+    loss_shifted = distance_transform_loss(mask, shifted, mode="potential_lncc", tau=0.2, window_size=5)
+    assert loss_same.item() < loss_shifted.item()
+
+
+def test_distance_transform_loss_edt_mse_is_differentiable():
+    mask = torch.zeros(1, 1, 16, 16, 16)
+    mask[:, :, 4:12, 4:12, 4:12] = 1.0
+    moving = (mask.clone() + 0.02 * torch.randn_like(mask)).clamp(0, 1).requires_grad_(True)
+    loss = distance_transform_loss(mask, moving, mode="edt_mse", is_distance_field=False)
+    loss.backward()
+    assert moving.grad is not None and torch.isfinite(moving.grad).all()
+
+
+def test_distance_transform_loss_unknown_mode_raises():
+    mask = torch.zeros(1, 1, 8, 8)
+    with pytest.raises(ValueError):
+        distance_transform_loss(mask, mask.clone(), mode="not_a_mode")
+
+
+def test_soft_dice_loss_nd_identical_masks_is_near_zero():
+    mask = torch.rand(1, 1, 10, 10, 10)
+    loss = soft_dice_loss_nd(mask, mask.clone())
+    assert loss.item() == pytest.approx(0.0, abs=1e-5)
+
+
+def test_soft_dice_loss_nd_disjoint_masks_is_near_one():
+    a = torch.zeros(1, 1, 10, 10)
+    a[:, :, :5, :] = 1.0
+    b = torch.zeros(1, 1, 10, 10)
+    b[:, :, 5:, :] = 1.0
+    loss = soft_dice_loss_nd(a, b)
+    assert loss.item() == pytest.approx(1.0, abs=1e-5)
+
+
+def test_soft_dice_loss_nd_is_differentiable_and_respects_mask():
+    fixed = torch.rand(1, 2, 8, 8, 8)
+    moving = (fixed.clone() + 0.1 * torch.randn_like(fixed)).clamp(0, 1).requires_grad_(True)
+    mask = torch.ones(1, 1, 8, 8, 8)
+    mask[:, :, :4] = 0.0
+    loss = soft_dice_loss_nd(fixed, moving, mask=mask)
+    loss.backward()
+    assert moving.grad is not None
+    assert torch.isfinite(moving.grad).all()
+    # Masked-out region should receive zero gradient.
+    assert torch.all(moving.grad[:, :, :4] == 0.0)

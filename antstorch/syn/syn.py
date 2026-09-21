@@ -71,7 +71,7 @@ from .core.grid import (
 )
 from .core.inverse import update_inverse_field_nd
 from .core.jacobian import compute_jacobian_determinant_nd
-from .core.losses import local_ncc_loss_nd, mattes_mi_loss_nd
+from .core.losses import local_ncc_loss_nd, mattes_mi_loss_nd, box_cc2_loss_nd, soft_dice_loss_nd
 from .core.pipeline import auto_detect_device, mps_grid_sample_3d_available
 from .core.smoothing import (
     apply_dsti_green_operator,
@@ -82,7 +82,7 @@ from .core.smoothing import (
 
 _LINEAR_TRANSFORM_TYPES = ("Translation", "Rigid", "Similarity", "Affine")
 _SYN_TRANSFORM_TYPES = ("SyN", "SyNOnly")
-_SIMILARITY_METRICS = ("mse", "lncc", "cc", "lncc2", "cc2", "mattes", "mi")
+_SIMILARITY_METRICS = ("mse", "lncc", "cc", "lncc2", "cc2", "mattes", "mi", "box_cc2", "dice")
 _REGULARIZERS = ("gaussian", "sobolev", "dsti", "bspline")
 
 
@@ -168,6 +168,10 @@ def _similarity_loss(name: str, I: Tensor, J: Tensor, mask: Optional[Tensor], wi
         return local_ncc_loss_nd(I, J, mask=mask, window_size=window_size, squared=False)
     if name in ("lncc2", "cc2"):
         return local_ncc_loss_nd(I, J, mask=mask, window_size=window_size, squared=True)
+    if name == "box_cc2":
+        return box_cc2_loss_nd(I, J, window_size=window_size)
+    if name == "dice":
+        return soft_dice_loss_nd(I, J, mask=mask)
     if name in ("mattes", "mi"):
         return mattes_mi_loss_nd(I, J, mask=mask, num_bins=num_bins)
     raise ValueError(f"Unknown similarity metric: {name!r}")

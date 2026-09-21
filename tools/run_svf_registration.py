@@ -171,7 +171,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--similarity",
-        choices=("mse", "lncc", "cc", "lncc2", "cc2", "mattes", "mi"),
+        choices=("mse", "lncc", "cc", "lncc2", "cc2", "mattes", "mi", "box_cc2", "dice"),
         default="lncc",
         help="Similarity metric for the SVF stage -- identical vocabulary/implementation "
         "as run_syn_registration.py's --similarity (default: lncc)",
@@ -195,7 +195,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--affine-similarity",
-        choices=("mse", "lncc", "cc", "lncc2", "cc2", "mattes", "mi"),
+        choices=("mse", "lncc", "cc", "lncc2", "cc2", "mattes", "mi", "box_cc2", "dice"),
         default="mse",
     )
     parser.add_argument("--affine-neighborhood-radius", type=int, default=4)

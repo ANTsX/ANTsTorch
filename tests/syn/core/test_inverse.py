@@ -114,3 +114,69 @@ def test_integrate_time_varying_velocity_field_constant_velocity_matches_analyti
 
     torch.testing.assert_close(phi_euler, expected, atol=1e-6, rtol=1e-5)
     torch.testing.assert_close(phi_rk4, expected, atol=1e-6, rtol=1e-5)
+
+
+# --- Ported from syntx: channels-first auto-detection ---
+
+
+def test_update_inverse_field_nd_anderson_channels_first_matches_channels_last():
+    torch.manual_seed(0)
+    spatial = (8, 9, 10)
+    dim = 3
+    W_cl = 0.05 * torch.randn(1, *spatial, dim, dtype=torch.double)
+    inv_cl = update_inverse_field_nd_anderson(W_cl, None, steps=10)
+
+    W_cf = torch.movedim(W_cl, -1, 1)
+    inv_cf = update_inverse_field_nd_anderson(W_cf, None, steps=10)
+
+    assert inv_cf.shape == W_cf.shape
+    torch.testing.assert_close(torch.movedim(inv_cf, 1, -1), inv_cl, atol=1e-10, rtol=0)
+
+
+def test_update_inverse_field_nd_hybrid_lm_channels_first_matches_channels_last():
+    torch.manual_seed(1)
+    spatial = (7, 8, 9)
+    dim = 3
+    W_cl = 0.05 * torch.randn(1, *spatial, dim, dtype=torch.double)
+    inv_cl = update_inverse_field_nd_hybrid_lm(
+        W_cl, None, steps=8, spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0),
+        direction=(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+    )
+    W_cf = torch.movedim(W_cl, -1, 1)
+    inv_cf = update_inverse_field_nd_hybrid_lm(
+        W_cf, None, steps=8, spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0),
+        direction=(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+    )
+    assert inv_cf.shape == W_cf.shape
+    torch.testing.assert_close(torch.movedim(inv_cf, 1, -1), inv_cl, atol=1e-10, rtol=0)
+
+
+def test_update_inverse_field_nd_dispatcher_channels_first_matches_channels_last():
+    torch.manual_seed(2)
+    spatial = (8, 8, 8)
+    dim = 3
+    W_cl = 0.05 * torch.randn(1, *spatial, dim, dtype=torch.double)
+    for method in ('anderson', 'fixed_point'):
+        inv_cl = update_inverse_field_nd(W_cl, -W_cl.clone(), steps=5, method=method)
+        W_cf = torch.movedim(W_cl, -1, 1)
+        inv_cf = update_inverse_field_nd(W_cf, -W_cf.clone(), steps=5, method=method)
+        assert inv_cf.shape == W_cf.shape, method
+        torch.testing.assert_close(torch.movedim(inv_cf, 1, -1), inv_cl, atol=1e-10, rtol=0)
+
+
+def test_update_inverse_field_nd_2d_is_unaffected_by_channels_first_detection():
+    # 2-D fields never trigger the (B, dim, *spatial) heuristic (dim=2 spatial
+    # axes can genuinely be the last axis with size 2), so channels-last stays
+    # the only supported convention here -- this just checks nothing crashes
+    # or silently permutes a 2-D field.
+    W_cl = 0.05 * torch.randn(1, 6, 7, 2, dtype=torch.double)
+    inv = update_inverse_field_nd_anderson(W_cl, None, steps=5)
+    assert inv.shape == W_cl.shape
+
+
+def test_update_inverse_field_nd_max_iters_alias_overrides_steps():
+    torch.manual_seed(3)
+    W_cl = 0.05 * torch.randn(1, 6, 6, 2, dtype=torch.double)
+    inv_via_steps = update_inverse_field_nd(W_cl, -W_cl.clone(), steps=3, method='anderson')
+    inv_via_alias = update_inverse_field_nd(W_cl, -W_cl.clone(), steps=999, max_iters=3, method='anderson')
+    torch.testing.assert_close(inv_via_alias, inv_via_steps, atol=1e-10, rtol=0)
