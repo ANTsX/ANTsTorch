@@ -6,6 +6,7 @@ image tensors are ``(N, C, H, W)`` or ``(N, C, D, H, W)``. Bias fields are
 scalar and dimensionless in log-intensity space.
 """
 
+import warnings
 from math import ceil, log2
 from typing import Optional, Union
 
@@ -106,25 +107,42 @@ def _histogram_sharpen(
     offset = (padded_size - bins) // 2
     padded = log_image.new_zeros((flat_shape[0], padded_size))
     padded[:, offset : offset + bins] = histogram
-    histogram_fft = torch.fft.fft(padded)
 
-    flat_slope = slope.reshape(flat_shape[0], 1)
-    scaled_fwhm = (bias_field_fwhm / flat_slope).clamp_min(eps)
-    frequency_index = torch.arange(padded_size, dtype=log_image.dtype, device=log_image.device)
-    distance = torch.minimum(frequency_index, padded_size - frequency_index)[None]
-    exponent = 4.0 * log_image.new_tensor(2.0).log() / scaled_fwhm.square()
-    scale = 2.0 * torch.sqrt(log_image.new_tensor(2.0).log() / log_image.new_tensor(torch.pi)) / scaled_fwhm
-    gaussian = scale * torch.exp(-distance.square() * exponent)
-    gaussian_fft = torch.fft.fft(gaussian)
-    wiener = gaussian_fft.conj() / (gaussian_fft.abs().square() + wiener_filter_noise)
-    deconvolved = torch.fft.ifft(histogram_fft * wiener.real).real.clamp_min(0.0)
+    # PyTorch's MPS backend allocates torch.fft.{fft,ifft}'s internal work
+    # buffer with shape [] and resizes it in place on first use; that
+    # resize itself is what triggers this UserWarning (see the "Triggered
+    # internally at .../Resize.cpp" note), not anything this function
+    # passes (no out= argument is given to any fft/ifft call below). It is
+    # purely an MPS-backend implementation detail -- CPU/CUDA never warn
+    # here -- so it is suppressed locally rather than left to spam every
+    # caller's warning filters; a genuine future removal of that resize
+    # behavior would surface as a hard error from PyTorch itself, not
+    # silently.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*was resized since it had shape.*",
+            category=UserWarning,
+        )
+        histogram_fft = torch.fft.fft(padded)
 
-    bin_coordinates = (
-        minimum.reshape(flat_shape[0], 1)
-        + (frequency_index[None] - offset) * flat_slope
-    )
-    numerator = torch.fft.ifft(torch.fft.fft(bin_coordinates * deconvolved) * gaussian_fft).real
-    denominator = torch.fft.ifft(torch.fft.fft(deconvolved) * gaussian_fft).real
+        flat_slope = slope.reshape(flat_shape[0], 1)
+        scaled_fwhm = (bias_field_fwhm / flat_slope).clamp_min(eps)
+        frequency_index = torch.arange(padded_size, dtype=log_image.dtype, device=log_image.device)
+        distance = torch.minimum(frequency_index, padded_size - frequency_index)[None]
+        exponent = 4.0 * log_image.new_tensor(2.0).log() / scaled_fwhm.square()
+        scale = 2.0 * torch.sqrt(log_image.new_tensor(2.0).log() / log_image.new_tensor(torch.pi)) / scaled_fwhm
+        gaussian = scale * torch.exp(-distance.square() * exponent)
+        gaussian_fft = torch.fft.fft(gaussian)
+        wiener = gaussian_fft.conj() / (gaussian_fft.abs().square() + wiener_filter_noise)
+        deconvolved = torch.fft.ifft(histogram_fft * wiener.real).real.clamp_min(0.0)
+
+        bin_coordinates = (
+            minimum.reshape(flat_shape[0], 1)
+            + (frequency_index[None] - offset) * flat_slope
+        )
+        numerator = torch.fft.ifft(torch.fft.fft(bin_coordinates * deconvolved) * gaussian_fft).real
+        denominator = torch.fft.ifft(torch.fft.fft(deconvolved) * gaussian_fft).real
     mapping = torch.where(denominator.abs() > eps, numerator / denominator, torch.zeros_like(numerator))
     mapping = mapping[:, offset : offset + bins]
 

@@ -303,8 +303,79 @@ def b_spline_3(x: torch.Tensor) -> torch.Tensor:
     return torch.where(abs_x < 1.0, y1, torch.where(abs_x < 2.0, y2, torch.zeros_like(x)))
 
 
-def mattes_mi_loss_core(I, J, mask=None, num_bins=32, min_val=-1.0, max_val=1.0, sampling_percentage=None):
+def _parzen_joint_histogram(w_x: torch.Tensor, w_y: torch.Tensor, chunk: int = 4096) -> torch.Tensor:
+    """Joint Parzen histogram ``H = w_x^T w_y`` for ``[N, B]`` B-spline weight matrices.
+
+    Accumulated as a batch of ``chunk``-row blocks (``torch.bmm``) followed
+    by a fixed-order sum, rather than one large ``matmul``.
+
+    Ported from ``syntx.core.losses``: on Apple MPS, ``w_x.t() @ w_y`` with
+    ``N`` on the order of ``1e5`` was found to be non-deterministic and, for
+    concentrated histograms, wrong by up to ~15% (an affine solver produced
+    different transforms on every first call). Blocked ``bmm`` with
+    ``chunk=4096`` is bitwise deterministic across allocations and much
+    closer to a float64 reference. Differentiable.
+    """
+    n, nb = w_x.shape
+    pad = (-n) % chunk
+    if pad:
+        z = torch.zeros(pad, nb, dtype=w_x.dtype, device=w_x.device)
+        w_x = torch.cat([w_x, z])
+        w_y = torch.cat([w_y, z])
+    a = w_x.view(-1, chunk, nb).transpose(1, 2)  # [M, B, chunk]
+    b = w_y.view(-1, chunk, nb)                  # [M, chunk, B]
+    return torch.bmm(a, b).sum(dim=0)             # [B, B]
+
+
+def parzen_weights(
+    v: torch.Tensor,
+    num_bins: int = 32,
+    min_val: float = -1.0,
+    max_val: float = 1.0,
+    pad: float = 2.0,
+) -> torch.Tensor:
+    """Cubic B-spline Parzen weights ``[N, num_bins]`` of a flat intensity vector.
+
+    ``v`` is clamped/scaled to ``[min_val, max_val]`` and mapped onto a
+    boundary-padded bin axis (``pad`` bins of margin on each side) so the
+    weights form a strict partition of unity everywhere in range --
+    avoiding the artificial boundary forces an unpadded bin axis produces
+    near the histogram's edges. Cache the result for an image whose samples
+    do not change across calls (e.g. the fixed image across optimization
+    iterations).
+    """
+    v = torch.nan_to_num(torch.clamp(v.float(), min_val, max_val), nan=0.0)
+    u_min, u_max = pad, float(num_bins - 1) - pad
+    scale = (u_max - u_min) / (max_val - min_val)
+    bins = torch.arange(num_bins, device=v.device, dtype=torch.float32).unsqueeze(0)
+    return b_spline_3(u_min + (v.view(-1, 1) - min_val) * scale - bins)
+
+
+def mattes_mi_from_weights(w_x: torch.Tensor, w_y: torch.Tensor) -> torch.Tensor:
+    """Negative Mattes MI from Parzen weight matrices (deterministic blocked histogram)."""
+    joint_hist = _parzen_joint_histogram(w_x, w_y)
+    pxy = joint_hist / (joint_hist.sum() + 1e-8)
+    px = pxy.sum(dim=1, keepdim=True)
+    py = pxy.sum(dim=0, keepdim=True)
+    ratio = pxy / (px * py + 1e-8)
+    return -torch.sum(pxy * torch.log(torch.clamp(ratio, min=1e-8)))
+
+
+def mattes_mi_loss_core(
+    I, J, mask=None, num_bins=32, min_val=-1.0, max_val=1.0, sampling_percentage=None,
+    fixed_weights: Optional[torch.Tensor] = None,
+):
     """Differentiable Mattes Mutual Information, via cubic B-spline Parzen windowing.
+
+    Ported from ``syntx.core.losses`` (upgraded from this module's earlier,
+    simpler version -- see git history): the joint histogram now uses a
+    boundary-padded Parzen bin axis (:func:`parzen_weights`, strict
+    partition of unity) accumulated via a deterministic blocked ``bmm``
+    (:func:`_parzen_joint_histogram`) instead of an unpadded bin axis and a
+    single large ``matmul`` -- more numerically stable on MPS/CUDA at large
+    voxel counts, at the cost of a small shift in absolute MI values versus
+    the previous implementation (the *ranking* of candidates under
+    optimization is unaffected).
 
     Parameters
     ----------
@@ -319,6 +390,12 @@ def mattes_mi_loss_core(I, J, mask=None, num_bins=32, min_val=-1.0, max_val=1.0,
     sampling_percentage : float, optional
         If given and ``< 1.0``, subsamples voxels with this fraction (via a
         fixed stride) before building the joint histogram.
+    fixed_weights : torch.Tensor, optional
+        Precomputed :func:`parzen_weights` of ``J`` (the fixed image in a
+        registration loop, whose samples/weights do not change across
+        iterations) -- valid only when its row count already matches ``I``'s
+        selected/subsampled voxel count; halves the per-iteration cost when
+        reused across many calls.
 
     Returns
     -------
@@ -336,45 +413,28 @@ def mattes_mi_loss_core(I, J, mask=None, num_bins=32, min_val=-1.0, max_val=1.0,
 
     if sampling_percentage is not None and sampling_percentage < 1.0:
         stride = max(1, int(1.0 / sampling_percentage))
-        x = x[::stride]
-        y = y[::stride]
+        x = x[::stride].contiguous()
+        y = y[::stride].contiguous()
 
     if x.numel() == 0:
         return torch.tensor(0.0, device=I.device, requires_grad=True)
 
-    x = torch.nan_to_num(torch.clamp(x, min_val, max_val), nan=0.0)
-    y = torch.nan_to_num(torch.clamp(y, min_val, max_val), nan=0.0)
-
-    sigma = (max_val - min_val) / (num_bins - 1)
-    bins = torch.linspace(min_val, max_val, num_bins, device=I.device).unsqueeze(0)
-
-    u_x = (x.view(-1, 1) - bins) / sigma
-    u_y = (y.view(-1, 1) - bins) / sigma
-
-    w_x = b_spline_3(u_x)
-    w_y = b_spline_3(u_y)
-
-    joint_hist = torch.matmul(w_x.t(), w_y)
-
-    pxy = joint_hist / (joint_hist.sum() + 1e-8)
-    px = pxy.sum(dim=1, keepdim=True)
-    py = pxy.sum(dim=0, keepdim=True)
-
-    ratio = pxy / (px * py + 1e-8)
-    safe_ratio = torch.clamp(ratio, min=1e-8)
-    mi = torch.sum(pxy * torch.log(safe_ratio))
-
-    return -mi
+    w_x = parzen_weights(x, num_bins, min_val, max_val)
+    w_y = fixed_weights if (fixed_weights is not None and fixed_weights.shape[0] == w_x.shape[0]) \
+        else parzen_weights(y, num_bins, min_val, max_val)
+    return mattes_mi_from_weights(w_x, w_y)
 
 
-def mattes_mi_loss_nd(I, J, mask=None, num_bins=32, sampling_percentage=None, auto_mask=True):
+def mattes_mi_loss_nd(
+    I, J, mask=None, num_bins=32, sampling_percentage=None, auto_mask=True,
+    fixed_range=None, fixed_weights=None,
+):
     """N-dimensional Mattes Mutual Information loss.
 
-    Rescales ``I`` and ``J`` to ``[-1, 1]`` internally (from their own
-    min/max) and, when ``auto_mask`` is enabled, restricts the joint
-    histogram to voxels where either image is non-trivially non-zero — this
-    excludes zero-padded background from contaminating the intensity
-    distributions.
+    Rescales ``I`` and ``J`` to ``[-1, 1]`` internally and, when
+    ``auto_mask`` is enabled, restricts the joint histogram to voxels where
+    either image is non-trivially non-zero — this excludes zero-padded
+    background from contaminating the intensity distributions.
 
     Parameters
     ----------
@@ -389,6 +449,18 @@ def mattes_mi_loss_nd(I, J, mask=None, num_bins=32, sampling_percentage=None, au
     auto_mask : bool
         If ``True``, exclude voxels where both ``|I|`` and ``|J|`` are
         below ``0.01``.
+    fixed_range : None, ``(min, max)``, or ``((min_I, max_I), (min_J, max_J))``
+        Intensity bounds used for the histogram axes. Default (``None``)
+        recomputes the bounds from the *current* masked voxels of each
+        image, so the axes move with the transform and MI values are not
+        comparable across candidates evaluated at different parameters.
+        Pass fixed bounds (ITK behavior) when comparing candidates during
+        optimization, e.g. ``fixed_range=(0.0, 1.0)`` for
+        foreground-normalized images.
+    fixed_weights : torch.Tensor, optional
+        Precomputed ``parzen_weights`` of the (masked, subsampled, scaled)
+        ``J`` image -- valid only with ``fixed_range`` and an unchanging
+        ``J`` sample; forwarded to :func:`mattes_mi_loss_core`.
 
     Returns
     -------
@@ -402,16 +474,35 @@ def mattes_mi_loss_nd(I, J, mask=None, num_bins=32, sampling_percentage=None, au
         else:
             mask = fg_mask
 
-    min_i, max_i = I.min(), I.max()
-    min_j, max_j = J.min(), J.max()
+    if mask is not None:
+        valid = mask > 0.5
+        x = I[valid]
+        y = J[valid]
+    else:
+        x = I.flatten()
+        y = J.flatten()
 
-    I_scaled = (I - min_i) / (max_i - min_i + 1e-8)
-    J_scaled = (J - min_j) / (max_j - min_j + 1e-8)
+    if x.numel() == 0:
+        return torch.tensor(0.0, device=I.device, requires_grad=True)
 
-    I_scaled = I_scaled * 2.0 - 1.0
-    J_scaled = J_scaled * 2.0 - 1.0
+    if fixed_range is None:
+        min_i, max_i = x.min().detach(), x.max().detach()
+        min_j, max_j = y.min().detach(), y.max().detach()
+    else:
+        fr = fixed_range
+        if isinstance(fr[0], (int, float)):
+            fr = (fr, fr)
+        min_i, max_i = float(fr[0][0]), float(fr[0][1])
+        min_j, max_j = float(fr[1][0]), float(fr[1][1])
 
-    return mattes_mi_loss_core(I_scaled, J_scaled, mask=mask, num_bins=num_bins, min_val=-1.0, max_val=1.0, sampling_percentage=sampling_percentage)
+    x_scaled = (x - min_i) / (max_i - min_i + 1e-8) * 2.0 - 1.0
+    y_scaled = (y - min_j) / (max_j - min_j + 1e-8) * 2.0 - 1.0
+
+    return mattes_mi_loss_core(
+        x_scaled, y_scaled, mask=None, num_bins=num_bins, min_val=-1.0, max_val=1.0,
+        sampling_percentage=sampling_percentage,
+        fixed_weights=fixed_weights if fixed_range is not None else None,
+    )
 
 
 class BoxLNCCLoss(torch.nn.Module):
