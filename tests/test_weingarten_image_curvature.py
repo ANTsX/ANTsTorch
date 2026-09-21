@@ -147,13 +147,30 @@ def test_weingarten_torch_devices(test_sphere_image):
     assert curv_cpu is not None
     assert curv_cpu.shape == test_sphere_image.shape
 
+    arr_cpu = curv_cpu.numpy()
+
+    def assert_accelerator_agreement(curv_accelerator):
+        arr_accelerator = curv_accelerator.numpy()
+        assert np.all(np.isfinite(arr_accelerator))
+
+        # Normalizing an almost-zero gradient amplifies the small rounding
+        # differences between CPU and accelerator grid_sample kernels.  As in
+        # the ANTs parity tests above, compare curvature only where the input
+        # signal (and therefore its estimated normal) is meaningful.
+        mask = (arr_cpu != 0.0) & (test_sphere_image.numpy() > 0.01)
+        assert np.any(mask)
+        max_diff = np.max(np.abs(arr_cpu[mask] - arr_accelerator[mask]))
+        corr = np.corrcoef(arr_cpu[mask], arr_accelerator[mask])[0, 1]
+        assert max_diff < 0.01
+        assert corr > 0.999
+
     # If GPU or MPS is available, verify on accelerator as well
     if torch.cuda.is_available():
         curv_cuda = weingarten_image_curvature(test_sphere_image, sigma=1.5, opt="mean", device="cuda")
-        assert np.allclose(curv_cpu.numpy(), curv_cuda.numpy(), atol=1e-4)
+        assert_accelerator_agreement(curv_cuda)
     elif torch.backends.mps.is_available():
         curv_mps = weingarten_image_curvature(test_sphere_image, sigma=1.5, opt="mean", device="mps")
-        assert np.allclose(curv_cpu.numpy(), curv_mps.numpy(), atol=1e-4)
+        assert_accelerator_agreement(curv_mps)
 
 
 def test_weingarten_torch_3d_orientations_and_spacings():
