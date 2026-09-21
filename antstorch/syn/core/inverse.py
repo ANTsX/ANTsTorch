@@ -79,6 +79,14 @@ def update_inverse_field_nd_hybrid_lm(
         Falls back to :func:`update_inverse_field_nd` (ITK-style fixed
         point) if no physical-space metadata is available at all.
     """
+    channels_first = False
+    if W_disp.dim() >= 3 and W_disp.shape[1] in (2, 3) and W_disp.shape[-1] not in (2, 3):
+        channels_first = True
+        perm = (0,) + tuple(range(2, W_disp.dim())) + (1,)
+        W_disp = W_disp.permute(perm)
+        if W_inv_disp is not None and W_inv_disp.dim() >= 3 and W_inv_disp.shape[1] in (2, 3):
+            W_inv_disp = W_inv_disp.permute(perm)
+
     B = W_disp.shape[0]
     dim = W_disp.shape[-1]
     spatial = W_disp.shape[1:-1]
@@ -194,9 +202,10 @@ def update_inverse_field_nd_hybrid_lm(
                 W_inv_disp = separable_gaussian_filter(W_inv_disp, smoothing_sigma, spacing=spacing)
             W_inv_disp = W_inv_disp * boundary_mask
 
-        return W_inv_disp
+        return torch.movedim(W_inv_disp, -1, 1) if channels_first else W_inv_disp
     else:
-        return update_inverse_field_nd(W_disp, W_inv_disp, steps=steps, relaxation=relaxation, smoothing_sigma=smoothing_sigma)
+        res = update_inverse_field_nd(W_disp, W_inv_disp, steps=steps, relaxation=relaxation, smoothing_sigma=smoothing_sigma)
+        return torch.movedim(res, -1, 1) if channels_first else res
 
 
 def integrate_time_varying_velocity_field(
@@ -371,6 +380,14 @@ def update_inverse_field_nd_anderson(
     torch.Tensor
         The estimated inverse displacement field, same shape as ``W_disp``.
     """
+    channels_first = False
+    if W_disp.dim() >= 3 and W_disp.shape[1] in (2, 3) and W_disp.shape[-1] not in (2, 3):
+        channels_first = True
+        perm = (0,) + tuple(range(2, W_disp.dim())) + (1,)
+        W_disp = W_disp.permute(perm)
+        if W_inv_disp is not None and W_inv_disp.dim() >= 3 and W_inv_disp.shape[1] in (2, 3):
+            W_inv_disp = W_inv_disp.permute(perm)
+
     B = W_disp.shape[0]
     dim = W_disp.shape[-1]
     spatial = W_disp.shape[1:-1]
@@ -535,7 +552,7 @@ def update_inverse_field_nd_anderson(
             else:
                 v_k = g_k
 
-    return v_k
+    return torch.movedim(v_k, -1, 1) if channels_first else v_k
 
 
 def update_inverse_field_nd(
@@ -550,7 +567,9 @@ def update_inverse_field_nd(
     spacing=None,
     origin=None,
     direction=None,
-    X_phys=None
+    X_phys=None,
+    max_iters=None,
+    **kwargs
 ) -> torch.Tensor:
     """Dimension-agnostic inversion of a displacement field.
 
@@ -586,27 +605,43 @@ def update_inverse_field_nd(
         coordinate space if any is missing.
     X_phys : torch.Tensor, optional
         Precomputed physical-coordinate grid.
+    max_iters : int, optional
+        Alias for ``steps`` (accepted for interface parity with ``syntx``);
+        overrides ``steps`` when given.
 
     Returns
     -------
     torch.Tensor
         The estimated inverse displacement field, same shape as ``W_disp``.
     """
+    channels_first = False
+    if W_disp.dim() >= 3 and W_disp.shape[1] in (2, 3) and W_disp.shape[-1] not in (2, 3):
+        channels_first = True
+        perm = (0,) + tuple(range(2, W_disp.dim())) + (1,)
+        W_disp = W_disp.permute(perm)
+        if W_inv_disp is not None and W_inv_disp.dim() >= 3 and W_inv_disp.shape[1] in (2, 3):
+            W_inv_disp = W_inv_disp.permute(perm)
+
+    if max_iters is not None:
+        steps = max_iters
+
     if method == 'hybrid_lm':
-        return update_inverse_field_nd_hybrid_lm(
+        res = update_inverse_field_nd_hybrid_lm(
             W_disp, W_inv_disp, steps=steps, relaxation=relaxation,
             smoothing_sigma=smoothing_sigma, max_error_threshold=max_error_threshold,
             mean_error_threshold=mean_error_threshold, spacing=spacing,
             origin=origin, direction=direction, X_phys=X_phys
         )
+        return torch.movedim(res, -1, 1) if channels_first else res
 
     if method == 'anderson':
-        return update_inverse_field_nd_anderson(
+        res = update_inverse_field_nd_anderson(
             W_disp, W_inv_disp, steps=steps,
             smoothing_sigma=smoothing_sigma, max_error_threshold=max_error_threshold,
             mean_error_threshold=mean_error_threshold, spacing=spacing,
             origin=origin, direction=direction, X_phys=X_phys
         )
+        return torch.movedim(res, -1, 1) if channels_first else res
 
     B = W_disp.shape[0]
     dim = W_disp.shape[-1]
@@ -663,7 +698,7 @@ def update_inverse_field_nd(
 
             W_inv_disp = W_inv_disp * boundary_mask
 
-        return W_inv_disp
+        return torch.movedim(W_inv_disp, -1, 1) if channels_first else W_inv_disp
     else:
         grids = [torch.linspace(-1, 1, size, device=device, dtype=dtype) for size in spatial]
         meshgrid = torch.meshgrid(*grids, indexing='ij')
@@ -707,7 +742,7 @@ def update_inverse_field_nd(
 
             W_inv_disp = W_inv_disp * boundary_mask
 
-        return W_inv_disp
+        return torch.movedim(W_inv_disp, -1, 1) if channels_first else W_inv_disp
 
 
 def compute_inverse_identity_error_nd(

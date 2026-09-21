@@ -74,6 +74,21 @@ def test_normalize_and_tensorize_matches_manual_foreground_percentile_normalizat
     np.testing.assert_allclose(recovered, expected, atol=1e-5)
 
 
+def test_normalize_and_tensorize_is_idempotent_on_already_normalized_input():
+    rng = np.random.default_rng(2)
+    already_norm = np.clip(rng.random((6, 6)), 0.0, 1.0).astype(np.float32)
+    # Give it an active (non-degenerate, near-[0,1]) range so it trips the
+    # idempotency fast path rather than the general percentile branch.
+    already_norm[0, 0] = 0.0
+    already_norm[1, 1] = 1.0
+    fixed = ants.from_numpy(already_norm)
+    moving = ants.from_numpy(already_norm.copy())
+
+    I_tensor, _ = normalize_and_tensorize(fixed, moving, backend='pytorch', device='cpu')
+    recovered = I_tensor[0, 0].numpy().T
+    np.testing.assert_allclose(recovered, np.clip(already_norm, 0.0, 1.0), atol=1e-6)
+
+
 def test_cleanup_gpu_cpu_device_is_a_no_op():
     # Should not raise even though there is no GPU/MPS backend present.
     cleanup_gpu('cpu', backend='pytorch')

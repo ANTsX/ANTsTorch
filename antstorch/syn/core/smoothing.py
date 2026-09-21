@@ -327,6 +327,67 @@ def apply_dsti1_green_operator(m, fluid_sigma=3.0, alpha=None):
     return apply_dsti_green_operator(m, fluid_sigma=fluid_sigma, alpha=alpha)
 
 
+def separable_1d_filter(x: torch.Tensor, kernels) -> torch.Tensor:
+    """Apply separable 1-D convolutions (``padding='same'``, zero-padded) to a
+    channel-first tensor.
+
+    Unlike the rest of this module (channel-last ``(B, *spatial, dim)``),
+    this operates on the plain image convention ``(B, C, *spatial)`` used by
+    :class:`antstorch.syn.core.losses.BoxLNCCLoss` — each entry of
+    ``kernels`` is applied along one spatial axis in turn via a reshaped
+    ``F.conv1d``. Supports 2-D ``(B, C, H, W)`` and 3-D ``(B, C, D, H, W)``.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Input of shape ``(B, C, *spatial)``.
+    kernels : sequence of torch.Tensor or None
+        One 1-D kernel per spatial axis (``len(kernels) == len(spatial)``);
+        ``None`` (or a length-1 kernel equal to ``1.0``) skips that axis.
+
+    Returns
+    -------
+    torch.Tensor
+        Filtered tensor, same shape as ``x``.
+    """
+    spatial_dims = len(kernels)
+    for d in range(spatial_dims):
+        k = kernels[d]
+        if k is None:
+            continue
+        k = k.view(1, 1, -1)
+        if k.shape[-1] == 1 and k.squeeze() == 1.0:
+            continue
+        if spatial_dims == 3:
+            if d == 0:   # Depth (dim 2)
+                B, C, D, H, W = x.shape
+                x = x.permute(0, 1, 3, 4, 2).reshape(B * C * H * W, 1, D)
+                pad = k.shape[-1] // 2
+                x = F.conv1d(x, k, padding=pad).view(B, C, H, W, D).permute(0, 1, 4, 2, 3)
+            elif d == 1:  # Height (dim 3)
+                B, C, D, H, W = x.shape
+                x = x.permute(0, 1, 2, 4, 3).reshape(B * C * D * W, 1, H)
+                pad = k.shape[-1] // 2
+                x = F.conv1d(x, k, padding=pad).view(B, C, D, W, H).permute(0, 1, 2, 4, 3)
+            elif d == 2:  # Width (dim 4)
+                B, C, D, H, W = x.shape
+                x = x.reshape(B * C * D * H, 1, W)
+                pad = k.shape[-1] // 2
+                x = F.conv1d(x, k, padding=pad).view(B, C, D, H, W)
+        elif spatial_dims == 2:
+            if d == 0:   # Height (dim 2)
+                B, C, H, W = x.shape
+                x = x.permute(0, 1, 3, 2).reshape(B * C * W, 1, H)
+                pad = k.shape[-1] // 2
+                x = F.conv1d(x, k, padding=pad).view(B, C, W, H).permute(0, 1, 3, 2)
+            elif d == 1:  # Width (dim 3)
+                B, C, H, W = x.shape
+                x = x.reshape(B * C * H, 1, W)
+                pad = k.shape[-1] // 2
+                x = F.conv1d(x, k, padding=pad).view(B, C, H, W)
+    return x
+
+
 def get_boundary_mask(spatial, device, dtype, rim_size=1):
     """Build a mask that is zero on the domain boundary and one in the interior.
 

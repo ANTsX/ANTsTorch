@@ -1,10 +1,17 @@
 """Similarity losses for intensity-based registration.
 
 Ported from ``syntx.core.losses`` (PyTorch backend only): local normalized
-cross-correlation (LNCC) with two autograd strategies, and Mattes mutual
-information via Parzen (cubic B-spline) windowing.
+cross-correlation (LNCC) with two autograd strategies, Mattes mutual
+information via Parzen (cubic B-spline) windowing, a native sliding
+box-filter LNCC/CC^2 (:func:`box_cc2_loss_nd`), distance-transform
+similarity (:func:`distance_transform_loss`), and soft Dice
+(:func:`soft_dice_loss_nd`).
 """
 
+from typing import Any, Literal, Optional, Sequence, Union
+
+import numpy as np
+import scipy.ndimage as ndi
 import torch
 import torch.nn.functional as F
 
@@ -405,3 +412,408 @@ def mattes_mi_loss_nd(I, J, mask=None, num_bins=32, sampling_percentage=None, au
     J_scaled = J_scaled * 2.0 - 1.0
 
     return mattes_mi_loss_core(I_scaled, J_scaled, mask=mask, num_bins=num_bins, min_val=-1.0, max_val=1.0, sampling_percentage=sampling_percentage)
+
+
+class BoxLNCCLoss(torch.nn.Module):
+    """Native sliding box-filter (squared) zero-normalized cross-correlation loss.
+
+    Unlike :func:`local_ncc_loss_nd` (which uses ``avg_pool2d``/``avg_pool3d``
+    for its box filter), this computes the box sums via
+    :func:`antstorch.syn.core.smoothing.separable_1d_filter` -- a
+    channel-first separable ``conv1d`` -- and features dual variance floors
+    (``smooth_nr=smooth_dr=1e-5``): in a zero-padded or uniform background
+    region this evaluates to ``(0 + 1e-5) / (0 + 1e-5) = 1.0``, treating flat
+    background as perfectly correlated and suppressing peripheral boundary
+    gradient artifacts at image edges.
+    """
+
+    def __init__(self, kernel_size: int = 5, smooth_nr: float = 1e-5, smooth_dr: float = 1e-5, squared: bool = True):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.smooth_nr = smooth_nr
+        self.smooth_dr = smooth_dr
+        self.squared = squared
+        self._target_cache = {}
+        self._target_refs = {}
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # Sum of squares over a window can overflow/underflow float16 under
+        # AMP autocast; disable it for this computation to stay in float32.
+        with torch.amp.autocast(device_type=pred.device.type, enabled=False):
+            pred_f = pred.float()
+            target_f = target.float()
+            from .smoothing import separable_1d_filter
+            dim = pred_f.dim() - 2
+            kernel_vol = float(self.kernel_size ** dim)
+            k = torch.ones(self.kernel_size, dtype=torch.float32, device=pred_f.device)
+            kernels = [k] * dim
+
+            target_id = id(target)
+            version = getattr(target, '_version', 0)
+            if not target.requires_grad and target_id in self._target_cache and self._target_cache[target_id][0] == version:
+                _, t_sum, t_var = self._target_cache[target_id]
+            else:
+                t_sum = separable_1d_filter(target_f, kernels)
+                t2_sum = separable_1d_filter(target_f * target_f, kernels)
+                t_var = torch.clamp(t2_sum - t_sum * t_sum / kernel_vol, min=self.smooth_dr)
+                if not target.requires_grad:
+                    if len(self._target_cache) >= 4:
+                        self._target_cache.clear()
+                        self._target_refs.clear()
+                    self._target_cache[target_id] = (version, t_sum, t_var)
+                    self._target_refs[target_id] = target
+
+            p_sum = separable_1d_filter(pred_f, kernels)
+            p2_sum = separable_1d_filter(pred_f * pred_f, kernels)
+            tp_sum = separable_1d_filter(target_f * pred_f, kernels)
+
+            cross = tp_sum - p_sum * t_sum / kernel_vol
+            p_var = torch.clamp(p2_sum - p_sum * p_sum / kernel_vol, min=self.smooth_dr)
+
+            if self.squared:
+                ncc = (cross * cross + self.smooth_nr) / (t_var * p_var + self.smooth_dr)
+            else:
+                ncc = cross / (torch.sqrt(t_var * p_var) + self.smooth_dr)
+            return -torch.mean(ncc)
+
+
+def box_lncc_loss_nd(
+    I: torch.Tensor,
+    J: torch.Tensor,
+    window_size: int = 5,
+    smooth_nr: float = 1e-5,
+    smooth_dr: float = 1e-5,
+    squared: bool = False,
+) -> torch.Tensor:
+    """Functional interface for :class:`BoxLNCCLoss` (linear CC if ``squared=False``, CC^2 if ``squared=True``)."""
+    loss_fn = BoxLNCCLoss(kernel_size=window_size, smooth_nr=smooth_nr, smooth_dr=smooth_dr, squared=squared)
+    return loss_fn(I, J)
+
+
+def box_cc2_loss_nd(
+    I: torch.Tensor,
+    J: torch.Tensor,
+    window_size: int = 5,
+    smooth_nr: float = 1e-5,
+    smooth_dr: float = 1e-5,
+) -> torch.Tensor:
+    """Functional interface for squared Box-LNCC loss (Box-CC^2). See :class:`BoxLNCCLoss`."""
+    return box_lncc_loss_nd(I, J, window_size=window_size, smooth_nr=smooth_nr, smooth_dr=smooth_dr, squared=True)
+
+
+def compute_soft_distance_transform(
+    image: torch.Tensor,
+    sigma: float = 3.0,
+    threshold: Optional[float] = None,
+    spacing: Optional[Sequence[float]] = None,
+) -> torch.Tensor:
+    """Compute a soft, differentiable distance transform using the heat method.
+
+    Approximates the Euclidean distance transform differentiably in PyTorch
+    via ``D_sigma(x) = -sigma * log(G_sigma * mask)``. When physical spacing
+    is provided, the diffusion filter scales by voxel spacing, yielding
+    distances in physical millimeter space.
+
+    Parameters
+    ----------
+    image : torch.Tensor of shape ``(B, C, *spatial)`` or ``(*spatial)``
+        Input image or segmentation.
+    sigma : float
+        Diffusion scale, in physical units (mm) if ``spacing`` is given,
+        voxel units otherwise.
+    threshold : float, optional
+        Foreground binarization threshold; if ``None``, uses a soft mask
+        derived from the (peak-normalized) absolute intensity.
+    spacing : sequence of float, optional
+        Physical voxel spacing in ITK ``(sx, sy[, sz])`` convention.
+
+    Returns
+    -------
+    torch.Tensor
+        Smooth, autograd-differentiable distance field, same shape as
+        ``image``.
+    """
+    orig_shape = image.shape
+    if image.dim() == 2:
+        img_nd = image.unsqueeze(0).unsqueeze(0)
+    elif image.dim() == 3:
+        if spacing is not None and len(spacing) == 2:
+            img_nd = image.unsqueeze(0)
+        else:
+            img_nd = image.unsqueeze(0).unsqueeze(0)
+    elif image.dim() in (4, 5):
+        img_nd = image
+    else:
+        raise ValueError(f"Unsupported image dimension: {image.dim()}")
+
+    if threshold is not None:
+        mask = torch.sigmoid((img_nd - threshold) * 10.0)
+    else:
+        max_val = torch.amax(img_nd.abs(), dim=tuple(range(2, img_nd.dim())), keepdim=True).clamp_min(1e-6)
+        mask = torch.clamp(img_nd.abs() / max_val, 0.0, 1.0)
+
+    from .smoothing import separable_gaussian_filter
+    mask_last = mask.movedim(1, -1)
+    if spacing is not None:
+        smoothed_last = separable_gaussian_filter(mask_last, sigma=sigma, spacing=spacing, sigma_mode='physical')
+    else:
+        smoothed_last = separable_gaussian_filter(mask_last, sigma=sigma)
+    smoothed = smoothed_last.movedim(-1, 1).clamp_min(1e-8)
+
+    dist = -float(sigma) * torch.log(smoothed)
+    return dist.view(orig_shape)
+
+
+def compute_image_distance_transform(
+    image: Union[torch.Tensor, np.ndarray, Any],
+    threshold: Optional[float] = None,
+    tau: Optional[float] = None,
+    signed: bool = False,
+    sampling_spacing: Optional[Sequence[float]] = None,
+    return_ants: bool = False,
+) -> Union[torch.Tensor, Any]:
+    """Compute an exact Euclidean distance transform (or smooth potential) from an image or mask.
+
+    Distances are computed in physical space (mm); if ``image`` is an
+    ``ants.ANTsImage``, its physical spacing is extracted automatically.
+
+    Parameters
+    ----------
+    image : ants.ANTsImage, torch.Tensor, or np.ndarray
+        Input image, segmentation, or edge map, of shape
+        ``(B, C, *spatial)``, ``(B, 1, *spatial)``, or ``(*spatial)``.
+    threshold : float, optional
+        Foreground binarization threshold. If ``None``, uses non-zero
+        voxels.
+    tau : float, optional
+        Bandwidth for the exponential potential ``P(x) = exp(-D(x) / tau)``.
+        If ``None``, returns the raw distance.
+    signed : bool
+        If ``True``, returns a signed distance transform (negative inside,
+        positive outside).
+    sampling_spacing : sequence of float, optional
+        Physical voxel spacing in ITK convention (``sx, sy[, sz]``). If
+        ``image`` is an ``ANTsImage`` and this is ``None``, ``image.spacing``
+        is used automatically.
+    return_ants : bool
+        If ``True`` and ``image`` is an ``ANTsImage``, returns an
+        ``ANTsImage`` with matching geometry instead of a tensor.
+
+    Returns
+    -------
+    torch.Tensor or ants.ANTsImage
+        Distance transform in physical units (mm).
+    """
+    is_ants = hasattr(image, 'spacing') and hasattr(image, 'numpy')
+    ref_image = image if is_ants else None
+
+    if is_ants:
+        if sampling_spacing is None:
+            sampling_spacing = tuple(float(s) for s in image.spacing)
+        img_np_raw = image.numpy().astype(np.float32)
+        device = torch.device('cpu')
+        dtype = torch.float32
+        orig_shape = img_np_raw.shape
+        img_nd = torch.from_numpy(img_np_raw).unsqueeze(0).unsqueeze(0)
+        sampling = sampling_spacing
+    else:
+        if not isinstance(image, torch.Tensor):
+            image_t = torch.as_tensor(image, dtype=torch.float32)
+        else:
+            image_t = image
+        device = image_t.device
+        dtype = image_t.dtype
+        orig_shape = image_t.shape
+
+        if image_t.dim() == 2:
+            img_nd = image_t.unsqueeze(0).unsqueeze(0)
+        elif image_t.dim() == 3:
+            if sampling_spacing is not None and len(sampling_spacing) == 2:
+                img_nd = image_t.unsqueeze(0)
+            else:
+                img_nd = image_t.unsqueeze(0).unsqueeze(0)
+        elif image_t.dim() in (4, 5):
+            img_nd = image_t
+        else:
+            raise ValueError(f"Unsupported image dimension: {image_t.dim()}")
+
+        # PyTorch tensors order spatial dims (Z, Y, X) / (Y, X); ITK spacing
+        # is ordered (sx, sy[, sz]) -- reverse to match.
+        if sampling_spacing is not None:
+            sampling = tuple(reversed(sampling_spacing))
+        else:
+            sampling = None
+
+    B, C = img_nd.shape[:2]
+    spatial_shape = img_nd.shape[2:]
+
+    img_np = img_nd.detach().cpu().numpy()
+    out_np = np.zeros_like(img_np, dtype=np.float32)
+
+    for b in range(B):
+        for c in range(C):
+            sl = img_np[b, c]
+            if threshold is not None:
+                fg = sl > threshold
+            else:
+                max_v = float(np.max(np.abs(sl)))
+                fg = np.abs(sl) > (1e-4 * max_v if max_v > 0 else 1e-4)
+
+            if not np.any(fg):
+                diag_span = float(np.sqrt(sum((dim_sz * (sp if sp else 1.0)) ** 2 for dim_sz, sp in zip(spatial_shape, sampling or [1.0] * len(spatial_shape)))))
+                edt = np.ones_like(sl, dtype=np.float32) * diag_span
+            elif np.all(fg):
+                edt = np.zeros_like(sl, dtype=np.float32)
+            else:
+                if signed:
+                    d_out = ndi.distance_transform_edt(~fg, sampling=sampling)
+                    d_in = ndi.distance_transform_edt(fg, sampling=sampling)
+                    edt = d_out - d_in
+                else:
+                    edt = ndi.distance_transform_edt(~fg, sampling=sampling)
+            out_np[b, c] = edt
+
+    if is_ants and return_ants:
+        import ants
+        out_res = out_np.reshape(orig_shape)
+        if tau is not None:
+            if tau <= 0.0:
+                raise ValueError(f"tau must be strictly positive, got {tau}")
+            out_res = np.exp(-np.abs(out_res) / float(tau))
+        return ants.from_numpy(
+            out_res.astype(np.float32),
+            origin=ref_image.origin,
+            spacing=ref_image.spacing,
+            direction=ref_image.direction,
+        )
+
+    out_t = torch.from_numpy(out_np).to(device=device, dtype=dtype)
+    if tau is not None:
+        if tau <= 0.0:
+            raise ValueError(f"tau must be strictly positive, got {tau}")
+        out_t = torch.exp(-torch.abs(out_t) / float(tau))
+    return out_t.view(orig_shape)
+
+
+def distance_transform_loss(
+    I: torch.Tensor,
+    J: torch.Tensor,
+    mode: Literal['potential_lncc', 'potential_mse', 'edt_mse', 'edt_l1', 'sdf_mse'] = 'potential_lncc',
+    tau: float = 0.10,
+    window_size: int = 9,
+    mask: Optional[torch.Tensor] = None,
+    is_distance_field: bool = False,
+    threshold: Optional[float] = None,
+    spacing: Optional[Sequence[float]] = None,
+) -> torch.Tensor:
+    """General distance-transform similarity loss, in physical space.
+
+    Computes distance-transform alignment between two images, segmentation
+    masks, or precomputed distance fields in physical space (mm). Usable by
+    any registration model, not only intensity-based ones.
+
+    Parameters
+    ----------
+    I, J : torch.Tensor of shape ``(B, C, *spatial)``
+        Input images, segmentations, or (if ``is_distance_field=True``)
+        precomputed distance fields.
+    mode : {'potential_lncc', 'potential_mse', 'edt_mse', 'edt_l1', 'sdf_mse'}
+        Loss formulation:
+
+        - ``'potential_lncc'``: negative LNCC on exponential distance
+          potentials ``exp(-D / tau)``.
+        - ``'potential_mse'``: MSE on exponential distance potentials.
+        - ``'edt_mse'``: MSE on Euclidean distance fields.
+        - ``'edt_l1'``: L1 error on Euclidean distance fields.
+        - ``'sdf_mse'``: MSE on signed distance fields.
+    tau : float
+        Decay bandwidth for exponential potentials, in physical units (mm).
+    window_size : int
+        LNCC window size, used only when ``mode='potential_lncc'``.
+    mask : torch.Tensor, optional
+        Spatial domain mask.
+    is_distance_field : bool
+        If ``True``, ``I``/``J`` are already distance fields; if ``False``,
+        soft distance transforms are computed from them first.
+    threshold : float, optional
+        Binarization threshold for ``I``/``J`` when
+        ``is_distance_field=False``.
+    spacing : sequence of float, optional
+        Physical voxel spacing in ITK ``(sx, sy[, sz])`` convention.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar similarity loss.
+
+    Raises
+    ------
+    ValueError
+        If ``mode`` is not one of the supported formulations.
+    """
+    if not is_distance_field:
+        D_I = compute_soft_distance_transform(I, sigma=tau * 10.0 if tau else 3.0, threshold=threshold, spacing=spacing)
+        D_J = compute_soft_distance_transform(J, sigma=tau * 10.0 if tau else 3.0, threshold=threshold, spacing=spacing)
+    else:
+        D_I = I
+        D_J = J
+
+    if mode == 'potential_lncc':
+        P_I = torch.exp(-torch.abs(D_I) / tau) if is_distance_field else torch.exp(-D_I / tau)
+        P_J = torch.exp(-torch.abs(D_J) / tau) if is_distance_field else torch.exp(-D_J / tau)
+        return local_ncc_loss_nd(P_I, P_J, mask=mask, window_size=window_size)
+    elif mode == 'potential_mse':
+        P_I = torch.exp(-torch.abs(D_I) / tau) if is_distance_field else torch.exp(-D_I / tau)
+        P_J = torch.exp(-torch.abs(D_J) / tau) if is_distance_field else torch.exp(-D_J / tau)
+        if mask is not None:
+            return torch.sum(((P_I - P_J) ** 2) * mask) / (mask.sum() + 1e-8)
+        return F.mse_loss(P_I, P_J)
+    elif mode in ('edt_mse', 'sdf_mse'):
+        if mask is not None:
+            return torch.sum(((D_I - D_J) ** 2) * mask) / (mask.sum() + 1e-8)
+        return F.mse_loss(D_I, D_J)
+    elif mode == 'edt_l1':
+        if mask is not None:
+            return torch.sum(torch.abs(D_I - D_J) * mask) / (mask.sum() + 1e-8)
+        return F.l1_loss(D_I, D_J)
+    else:
+        raise ValueError(f"Unknown distance transform loss mode: '{mode}'")
+
+
+def soft_dice_loss_nd(
+    I: torch.Tensor,
+    J: torch.Tensor,
+    mask: Optional[torch.Tensor] = None,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Differentiable soft Dice loss between continuous probability/membership tensors.
+
+    Supports single- or multi-channel tensors, in 2-D or 3-D.
+
+    Parameters
+    ----------
+    I : torch.Tensor of shape ``(B, C, *spatial)``
+        Fixed target probability/membership tensor.
+    J : torch.Tensor of shape ``(B, C, *spatial)``
+        Moving/deformed probability/membership tensor.
+    mask : torch.Tensor, optional
+        Spatial domain foreground mask of shape ``(B, 1, *spatial)`` or
+        ``(B, C, *spatial)``.
+    eps : float
+        Safety epsilon to prevent division by zero.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar soft Dice loss (``1.0 - mean_dice``).
+    """
+    if mask is not None:
+        I = I * mask
+        J = J * mask
+
+    spatial_dims = tuple(range(2, I.ndim))
+    intersection = 2.0 * torch.sum(I * J, dim=spatial_dims)
+    cardinality = torch.sum(I ** 2 + J ** 2, dim=spatial_dims) + eps
+
+    dice_per_channel = intersection / cardinality
+    return 1.0 - torch.mean(dice_per_channel)

@@ -185,7 +185,8 @@ def normalize_image(
     p_min: float = 2.0,
     p_max: float = 98.0,
     foreground_only: bool = True,
-    eps: float = 1e-6
+    eps: float = 1e-6,
+    force: bool = False
 ):
     """Normalize an ``ants.ANTsImage`` or NumPy array for registration workflows.
 
@@ -205,6 +206,12 @@ def normalize_image(
         foreground voxels.
     eps : float
         Numerical stability floor to prevent division by zero.
+    force : bool
+        If ``False`` (default), an input already scaled to ``[0, 1]`` (with
+        an active, non-degenerate range) is returned as-is, clipped, without
+        recomputing normalization statistics -- avoids double-normalization
+        drift when the caller may pass an already-normalized image. Pass
+        ``True`` to force recomputation regardless.
 
     Returns
     -------
@@ -221,6 +228,15 @@ def normalize_image(
 
     is_ants = hasattr(image, "numpy") and hasattr(image, "new_image_like")
     arr = image.numpy() if is_ants else np.asarray(image)
+
+    # Idempotency check: an already-normalized [0, 1] image is returned as-is
+    # (clipped), rather than re-deriving percentile statistics from an input
+    # whose foreground/background structure has already been collapsed.
+    arr_min = float(arr.min())
+    arr_max = float(arr.max())
+    if not force and arr_min >= -1e-4 and arr_max <= 1.0 + 1e-4 and arr_max >= 0.5:
+        norm_arr = np.clip(arr, 0.0, 1.0).astype(np.float32)
+        return image.new_image_like(norm_arr) if is_ants else norm_arr
 
     method = method.lower().strip()
 
