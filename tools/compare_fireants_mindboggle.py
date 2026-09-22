@@ -120,8 +120,22 @@ def _load_sibling_module():
 # "out-of-the-box default" schedule of its own worth comparing against --
 # its tutorial defaults (iterations=[200,100,25], optimizer_lr=0.5) are used
 # for an --matched=False run instead.
+#
+# Revision 2026-09-22 (project doc §39): the original True-branch used
+# optimizer_lr=0.25 -- an untested guess, halved from FireANTs' own tutorial
+# default with no empirical basis. A real 10-pair run showed this actually
+# *undertrains* GreedyRegistration relative to the unmatched (tutorial-lr)
+# run: dice_fixed (the forward-registration-only metric, unaffected by
+# FireANTs' separate field-inversion issue) dropped on the same pairs
+# (0/24/88: 0.465/0.440/0.490 unmatched -> 0.4225/0.3949/0.4492 matched),
+# and the overall fireants-vs-syntx gap widened slightly (-0.228 -> -0.242
+# mean delta) instead of narrowing. optimizer_lr is therefore kept at
+# FireANTs' own tutorial value (0.5) in both branches now -- only the
+# iteration budget is still reduced for the matched branch, for rough
+# wall-clock parity with the syntx/antstorch matched schedule, without
+# artificially throttling the learning rate FireANTs' own authors tuned.
 _FIREANTS_KWARGS = {
-    True: dict(scales=[4, 2, 1], iterations=[100, 100, 20], cc_kernel_size=5, optimizer_lr=0.25),
+    True: dict(scales=[4, 2, 1], iterations=[100, 100, 20], cc_kernel_size=5, optimizer_lr=0.5),
     False: dict(scales=[4, 2, 1], iterations=[200, 100, 25], cc_kernel_size=5, optimizer_lr=0.5),
 }
 
