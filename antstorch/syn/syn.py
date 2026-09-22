@@ -222,6 +222,8 @@ def _apply_regularizer(
     domain=None,
     spline_order: int = 3,
     enforce_stationary_boundary: bool = True,
+    gaussian_sigma_mode: str = "physical",
+    conservative_smooth: bool = False,
 ) -> Tensor:
     if regularizer == "bspline":
         # Its own strength knob (mesh_size, ITK control-point count minus
@@ -240,11 +242,36 @@ def _apply_regularizer(
     if sigma <= 0:
         return field
     if regularizer == "gaussian":
-        return separable_gaussian_filter(field, sigma, spacing=spacing_itk, sigma_mode="physical")
-    if regularizer == "sobolev":
-        return apply_sobolev_green_operator(field, fluid_sigma=sigma, spacing=spacing_itk)
-    if regularizer == "dsti":
-        return apply_dsti_green_operator(field, fluid_sigma=sigma)
+        # gaussian_sigma_mode='physical' (default) scales sigma per axis by
+        # spacing_itk, so the same nominal sigma is a comparably strong
+        # filter at every resolution regardless of voxel anisotropy -- this
+        # is this port's own, intentional convention. gaussian_sigma_mode=
+        # 'voxel' applies sigma directly in voxels with no spacing scaling
+        # instead, matching syntx.syn's own default 'gaussian' path (its
+        # separable_gaussian_filter call site passes no spacing/sigma_mode
+        # at all, so it defaults to voxel-space) -- pass this when comparing
+        # numerically against syntx (see the project doc, "comparaison
+        # syntx/antstorch, écart gaussian/sobolev").
+        return separable_gaussian_filter(field, sigma, spacing=spacing_itk, sigma_mode=gaussian_sigma_mode)
+    if regularizer in ("sobolev", "dsti"):
+        # conservative_smooth=False (default) applies only the spectral
+        # Green's-operator pass -- this port's own, intentional convention.
+        # conservative_smooth=True additionally applies a second, spatial
+        # Bessel-kernel Gaussian pass afterward, at half the Green's-operator
+        # sigma and in voxel space (no physical-spacing scaling) -- matching
+        # syntx.syn's own default ("conservative mode", fast_smooth=False)
+        # sobolev/dsti path, which stacks its spectral Green's operator with
+        # exactly this extra spatial pass. Pass this when comparing
+        # numerically against syntx; see the gaussian branch above for why
+        # this port does not do so by default.
+        result = (
+            apply_sobolev_green_operator(field, fluid_sigma=sigma, spacing=spacing_itk)
+            if regularizer == "sobolev"
+            else apply_dsti_green_operator(field, fluid_sigma=sigma)
+        )
+        if conservative_smooth:
+            result = separable_gaussian_filter(result, sigma * 0.5, sigma_mode="voxel")
+        return result
     raise ValueError(f"regularizer must be one of {_REGULARIZERS}, got {regularizer!r}")
 
 
@@ -305,6 +332,8 @@ def _fit_syn_level(
     verbose: bool,
     level_index: int,
     num_levels: int,
+    gaussian_sigma_mode: str = "physical",
+    conservative_smooth: bool = False,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor, list]:
     device, dtype = I_curr.device, I_curr.dtype
     fixed_meta_t = metadata_tensors_from_dict(fixed_meta, device, dtype)
@@ -370,11 +399,13 @@ def _fit_syn_level(
             grad_l * boundary_mask, regularizer, flow_sigma, fixed_meta["spacing"],
             mesh_size=update_mesh_size_level, domain=bspline_domain,
             enforce_stationary_boundary=bspline_enforce_stationary_boundary,
+            gaussian_sigma_mode=gaussian_sigma_mode, conservative_smooth=conservative_smooth,
         )
         grad_r = _apply_regularizer(
             grad_r * boundary_mask, regularizer, flow_sigma, fixed_meta["spacing"],
             mesh_size=update_mesh_size_level, domain=bspline_domain,
             enforce_stationary_boundary=bspline_enforce_stationary_boundary,
+            gaussian_sigma_mode=gaussian_sigma_mode, conservative_smooth=conservative_smooth,
         )
 
         delta_l = _cfl_normalize(grad_l, fixed_meta_t["spacing_t"], level_cfl_voxels)
@@ -513,6 +544,8 @@ def syn_registration(
     inverse_method: str = "anderson",
     in_loop_inverse_steps: int = 6,
     antisymmetric: bool = True,
+    gaussian_sigma_mode: str = "physical",
+    conservative_smooth: bool = False,
     padding_mode: str = "zeros",
     outprefix: str = "",
     device: Optional[Union[str, torch.device]] = None,
@@ -571,6 +604,26 @@ def syn_registration(
     elastic regularization of the composed field (``total_sigma`` for
     ``'gaussian'``/``'sobolev'``/``'dsti'``, plain Gaussian, disabled by
     default).
+
+    ``gaussian_sigma_mode`` and ``conservative_smooth`` tune two
+    ``'gaussian'``/``'sobolev'``/``'dsti'`` regularizer-formula details that
+    this port intentionally resolves differently from ``syntx.syn``'s own
+    default path, found while comparing the two on real Mindboggle-101 pairs
+    (project doc, "comparaison syntx/antstorch, écart gaussian/sobolev"):
+    ``gaussian_sigma_mode='physical'`` (default, this port's own choice)
+    scales ``'gaussian'``'s ``flow_sigma`` per axis by voxel spacing, so a
+    given nominal sigma is a comparably strong filter regardless of
+    anisotropy; pass ``'voxel'`` to apply it directly in voxels with no
+    spacing scaling instead, matching ``syntx.syn``'s own default
+    ``'gaussian'`` behavior. ``conservative_smooth=False`` (default, this
+    port's own choice) applies only the spectral Green's-operator pass for
+    ``'sobolev'``/``'dsti'``; ``True`` additionally applies a second, spatial
+    Bessel-kernel Gaussian pass afterward (at half the Green's-operator
+    sigma, in voxel space), matching ``syntx.syn``'s own default
+    ("conservative mode") ``'sobolev'``/``'dsti'`` path, which always stacks
+    both. Neither default changes this port's own long-standing behavior;
+    both exist to let a caller reproduce ``syntx.syn``'s numbers when that is
+    the goal.
 
     ``regularizer='bspline'`` is the ANTs/ITK ``BSplineSyN`` regularizer: a
     single-level cubic B-spline fit (via
@@ -958,6 +1011,8 @@ def syn_registration(
             verbose=verbose,
             level_index=level_index,
             num_levels=num_levels,
+            gaussian_sigma_mode=gaussian_sigma_mode,
+            conservative_smooth=conservative_smooth,
         )
         level_loss_history.append(history)
 
@@ -1055,6 +1110,8 @@ def syn_registration(
             "flow_sigma": flow_sigma,
             "total_sigma": total_sigma,
             "regularizer": regularizer,
+            "gaussian_sigma_mode": gaussian_sigma_mode,
+            "conservative_smooth": conservative_smooth,
             "update_field_mesh_size_at_base_level": resolved_update_field_mesh_size_at_base_level,
             "total_field_mesh_size_at_base_level": resolved_total_field_mesh_size_at_base_level,
             "update_field_spline_distance": update_field_spline_distance,

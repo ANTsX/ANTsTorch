@@ -5,7 +5,7 @@ import torch
 
 from antstorch.syn import syn_registration
 from antstorch.syn.bridge import ants_image_metadata, metadata_tensors
-from antstorch.syn.syn import _compose_fixed_grid, _physical_grid
+from antstorch.syn.syn import _apply_regularizer, _compose_fixed_grid, _physical_grid
 
 
 def _blob_2d(size, center, sigma=5.0, ramp=0.0):
@@ -239,6 +239,94 @@ def test_syn_only_reduces_loss_with_bspline_regularizer():
     assert result["provenance"]["regularizer"] == "bspline"
     assert result["provenance"]["update_field_mesh_size_at_base_level"] == 2
     assert result["provenance"]["total_field_mesh_size_at_base_level"] == 0
+
+
+# --- gaussian_sigma_mode / conservative_smooth (syntx-parity knobs) --------
+#
+# Added after comparing this port against syntx.syn on real Mindboggle-101
+# pairs (project doc, "comparaison syntx/antstorch, écart gaussian/sobolev"):
+# syntx.syn's own default 'gaussian' path applies flow_sigma directly in
+# voxels (no physical-spacing scaling), and its default 'sobolev'/'dsti'
+# path ("conservative mode") stacks a second spatial Gaussian pass on top of
+# the spectral Green's operator -- both different from this port's own
+# long-standing defaults. gaussian_sigma_mode/conservative_smooth let a
+# caller opt into syntx's conventions without changing this port's defaults.
+
+def _anisotropic_field_2d(seed=0):
+    torch.manual_seed(seed)
+    return torch.randn(1, 12, 10, 2)
+
+
+def test_apply_regularizer_gaussian_sigma_mode_defaults_to_physical():
+    field = _anisotropic_field_2d()
+    default = _apply_regularizer(field, "gaussian", 2.0, (2.0, 1.0))
+    explicit_physical = _apply_regularizer(field, "gaussian", 2.0, (2.0, 1.0), gaussian_sigma_mode="physical")
+    torch.testing.assert_close(default, explicit_physical)
+
+
+def test_apply_regularizer_gaussian_sigma_mode_voxel_differs_from_physical_when_anisotropic():
+    field = _anisotropic_field_2d()
+    physical = _apply_regularizer(field, "gaussian", 2.0, (2.0, 1.0), gaussian_sigma_mode="physical")
+    voxel = _apply_regularizer(field, "gaussian", 2.0, (2.0, 1.0), gaussian_sigma_mode="voxel")
+    assert not torch.allclose(physical, voxel)
+
+
+@pytest.mark.parametrize("regularizer", ["sobolev", "dsti"])
+def test_apply_regularizer_conservative_smooth_defaults_to_off(regularizer):
+    field = _anisotropic_field_2d()
+    default = _apply_regularizer(field, regularizer, 2.0, (1.0, 1.0))
+    explicit_off = _apply_regularizer(field, regularizer, 2.0, (1.0, 1.0), conservative_smooth=False)
+    torch.testing.assert_close(default, explicit_off)
+
+
+@pytest.mark.parametrize("regularizer", ["sobolev", "dsti"])
+def test_apply_regularizer_conservative_smooth_true_differs_from_default(regularizer):
+    field = _anisotropic_field_2d()
+    default = _apply_regularizer(field, regularizer, 2.0, (1.0, 1.0))
+    conservative = _apply_regularizer(field, regularizer, 2.0, (1.0, 1.0), conservative_smooth=True)
+    assert not torch.allclose(default, conservative)
+
+
+def test_apply_regularizer_conservative_smooth_is_a_no_op_for_gaussian_and_bspline():
+    # conservative_smooth only means anything for the spectral regularizers
+    # (sobolev/dsti); passing it for gaussian must not change behavior or
+    # raise -- _apply_regularizer's gaussian branch never reads it.
+    field = _anisotropic_field_2d()
+    default = _apply_regularizer(field, "gaussian", 2.0, (1.0, 1.0))
+    with_flag = _apply_regularizer(field, "gaussian", 2.0, (1.0, 1.0), conservative_smooth=True)
+    torch.testing.assert_close(default, with_flag)
+
+
+def test_syn_only_reduces_loss_with_conservative_smooth_sobolev():
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    result = syn_registration(
+        fixed, moving, type_of_transform="SyNOnly",
+        levels=(2, 1), reg_iterations=(15, 10), syn_metric="mse", grad_step=0.4, flow_sigma=2.0,
+        regularizer="sobolev", conservative_smooth=True,
+    )
+    assert result["loss_history"][-1] < result["loss_history"][0]
+    assert result["provenance"]["conservative_smooth"] is True
+
+
+def test_syn_only_reduces_loss_with_voxel_gaussian_sigma_mode():
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    result = syn_registration(
+        fixed, moving, type_of_transform="SyNOnly",
+        levels=(2, 1), reg_iterations=(15, 10), syn_metric="mse", grad_step=0.4, flow_sigma=2.0,
+        regularizer="gaussian", gaussian_sigma_mode="voxel",
+    )
+    assert result["loss_history"][-1] < result["loss_history"][0]
+    assert result["provenance"]["gaussian_sigma_mode"] == "voxel"
+
+
+def test_syn_registration_default_provenance_records_syntx_parity_knob_defaults():
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    result = syn_registration(
+        fixed, moving, type_of_transform="SyNOnly",
+        levels=(1,), reg_iterations=(5,), syn_metric="mse",
+    )
+    assert result["provenance"]["gaussian_sigma_mode"] == "physical"
+    assert result["provenance"]["conservative_smooth"] is False
 
 
 def test_syn_registration_bspline_regularizer_supports_total_field_smoothing_too():

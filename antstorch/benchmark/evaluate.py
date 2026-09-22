@@ -617,7 +617,12 @@ def evaluate_mindboggle_pair(
         Model-specific overrides, forwarded to the underlying registration
         call. Common ones: ``reg_iterations``, ``grad_step``, ``levels``
         (all four ``_syn`` variants); ``flow_sigma``/
-        ``total_sigma`` (gaussian_syn/sobolev_syn/dsti_syn); ``update_field_mesh_size_at_base_level``/
+        ``total_sigma`` (gaussian_syn/sobolev_syn/dsti_syn); ``gaussian_sigma_mode``/
+        ``conservative_smooth`` (gaussian_syn/sobolev_syn/dsti_syn -- both default
+        to this port's own regularizer-formula conventions; pass
+        ``gaussian_sigma_mode="voxel"``/``conservative_smooth=True`` to instead
+        reproduce ``syntx.syn``'s own default numbers, see
+        :func:`antstorch.syn.syn_registration`); ``update_field_mesh_size_at_base_level``/
         ``total_field_mesh_size_at_base_level``/``update_field_spline_distance``/
         ``total_field_spline_distance`` (bspline_syn); ``shrink_factors``/
         ``smoothing_sigmas``/``mesh_size``/``spline_distance`` (bspline_svf);
@@ -697,6 +702,7 @@ def evaluate_mindboggle_pair(
             "update_field_spline_distance", "total_field_spline_distance",
             "bspline_enforce_stationary_boundary", "syn_metric", "neighborhood_radius",
             "antisymmetric", "inverse_method", "in_loop_inverse_steps", "padding_mode",
+            "gaussian_sigma_mode", "conservative_smooth",
         ):
             if key in kwargs:
                 syn_kwargs[key] = kwargs[key]

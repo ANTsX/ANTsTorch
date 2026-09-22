@@ -69,14 +69,30 @@ _ANTSTORCH_MODEL_NAME = {
 # sobolev branch defaults, since antstorch's syn_registration() accepts all
 # of these as overrides via kwargs but syntx's benchmark harness does not
 # expose reg_iterations/levels overrides as freely for every branch.
-# dsti is deliberately NOT forced: syntx's dsti arm uses a different
-# optimizer entirely (reg_adam, not plain gradient descent) -- forcing
-# grad_step/metric parity there would not make the comparison fairer, only
+# dsti is deliberately NOT given grad_step/metric/schedule overrides: syntx's
+# dsti arm uses a different optimizer entirely (reg_adam, not plain gradient
+# descent) -- forcing parity there would not make the comparison fairer, only
 # more confusing, since the optimizer itself already differs.
+#
+# gaussian_sigma_mode='voxel' / conservative_smooth=True are new
+# antstorch.syn.syn_registration() kwargs (see antstorch/syn/syn.py,
+# _apply_regularizer) added specifically to close two regularizer-formula
+# differences found by this comparison script: antstorch's 'gaussian'
+# regularizer scales sigma by physical voxel spacing by default (syntx's
+# does not); antstorch's 'sobolev'/'dsti' apply only the spectral Green's
+# operator by default (syntx's default "conservative mode" stacks a second
+# spatial pass on top). Both now default to antstorch's own original
+# behavior -- set here, under --matched, to instead reproduce syntx's.
+# conservative_smooth is set for dsti too (unlike grad_step/metric/schedule
+# above) since it is a regularizer-formula knob, independent of the
+# optimizer difference that keeps dsti's other settings unmatched.
 MATCHED_KWARGS = {
-    "gaussian": dict(grad_step=0.25, syn_metric="cc2", levels=(4, 2, 1), reg_iterations=(100, 100, 20)),
-    "sobolev": dict(grad_step=0.25, syn_metric="cc2", levels=(4, 2, 1), reg_iterations=(100, 100, 20)),
+    "gaussian": dict(grad_step=0.25, syn_metric="cc2", levels=(4, 2, 1), reg_iterations=(100, 100, 20),
+                      gaussian_sigma_mode="voxel"),
+    "sobolev": dict(grad_step=0.25, syn_metric="cc2", levels=(4, 2, 1), reg_iterations=(100, 100, 20),
+                     conservative_smooth=True),
     "bspline": dict(grad_step=0.25, syn_metric="cc2", levels=(4, 2, 1), reg_iterations=(100, 100, 20)),
+    "dsti": dict(conservative_smooth=True),
 }
 MATCHED_KWARGS_SYNTX = {
     "gaussian": dict(similarity_metric="cc2", reg_iterations=[100, 100, 20]),
