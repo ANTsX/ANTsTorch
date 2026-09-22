@@ -20,7 +20,11 @@ from antstorch.syn import (
     compute_center_of_mass,
     compute_fov_center,
 )
-from antstorch.syn.robust_affine import _mps_grid_sample_backward_available, _resolve_solver_device
+from antstorch.syn.robust_affine import (
+    _mps_grid_sample_backward_available,
+    _mps_grid_sample_forward_available,
+    _resolve_solver_device,
+)
 
 
 def _synthetic_blob_2d(size=(64, 64)):
@@ -177,25 +181,49 @@ def test_resolve_solver_device_is_a_no_op_for_cpu_and_cuda():
         assert _resolve_solver_device(torch.device("cuda"), 3) == torch.device("cuda")
 
 
-def test_resolve_solver_device_falls_back_to_cpu_when_mps_grid_sample_backward_missing():
+def test_resolve_solver_device_falls_back_to_cpu_when_mps_grid_sample_forward_missing():
     # Regression test for the bug reported against this port: on a real Mac
-    # with an MPS build missing aten::grid_sampler_2d_backward (or _3d_),
-    # _run_pytorch_affine_solver's loss.backward() crashed with
-    # NotImplementedError instead of falling back, the same class of gap
-    # antstorch.syn.core.pipeline already works around for 3-D. This
-    # sandbox has no MPS hardware, so the missing-kernel path is exercised
-    # by mocking the probe rather than mocking torch.backends.mps itself.
+    # with an MPS build missing aten::grid_sampler_2d/3d entirely (no forward
+    # kernel), _run_pytorch_affine_solver's grid_sample_nd() call would
+    # crash with NotImplementedError instead of falling back. This sandbox
+    # has no MPS hardware, so the missing-kernel path is exercised by
+    # mocking the probe rather than mocking torch.backends.mps itself.
+    #
+    # _resolve_solver_device() checks forward availability specifically
+    # (not the stronger, no-longer-relevant-here backward probe,
+    # _mps_grid_sample_backward_available) -- see its docstring: objective()
+    # samples the moving image via grid_sample_nd(), which always dispatches
+    # to AnalyticalGridSample here (grid requires grad, the moving image
+    # never does), and that class's own hand-written backward never touches
+    # the native backward kernel at all, only forward.
     with mock.patch(
-        "antstorch.syn.robust_affine._mps_grid_sample_backward_available", return_value=False
+        "antstorch.syn.robust_affine._mps_grid_sample_forward_available", return_value=False
     ), mock.patch.object(torch.backends.mps, "is_available", return_value=True):
-        with pytest.warns(RuntimeWarning, match="grid_sample is missing its backward"):
+        with pytest.warns(RuntimeWarning, match="grid_sample has no forward MPS kernel"):
             resolved = _resolve_solver_device(torch.device("mps"), 2)
     assert resolved == torch.device("cpu")
 
 
-def test_resolve_solver_device_stays_on_mps_when_grid_sample_backward_available():
+def test_resolve_solver_device_stays_on_mps_when_grid_sample_forward_available():
     with mock.patch(
-        "antstorch.syn.robust_affine._mps_grid_sample_backward_available", return_value=True
+        "antstorch.syn.robust_affine._mps_grid_sample_forward_available", return_value=True
+    ), mock.patch.object(torch.backends.mps, "is_available", return_value=True):
+        resolved = _resolve_solver_device(torch.device("mps"), 2)
+    assert resolved == torch.device("mps")
+
+
+def test_resolve_solver_device_stays_on_mps_even_when_backward_probe_is_false():
+    # The key behavior change this fix introduces: objective()'s
+    # grid_sample calls (migrated to grid_sample_nd(), see the module
+    # docstring) no longer need the native backward kernel, so
+    # _resolve_solver_device() must not fall back to CPU just because
+    # _mps_grid_sample_backward_available() (the stronger, combined
+    # forward+backward probe) reports False -- only its own forward-only
+    # probe governs this decision now.
+    with mock.patch(
+        "antstorch.syn.robust_affine._mps_grid_sample_forward_available", return_value=True
+    ), mock.patch(
+        "antstorch.syn.robust_affine._mps_grid_sample_backward_available", return_value=False
     ), mock.patch.object(torch.backends.mps, "is_available", return_value=True):
         resolved = _resolve_solver_device(torch.device("mps"), 2)
     assert resolved == torch.device("mps")
@@ -207,6 +235,14 @@ def test_mps_grid_sample_backward_probe_is_false_without_mps_hardware():
     _mps_grid_sample_backward_available.cache_clear()
     assert _mps_grid_sample_backward_available(2) is False
     assert _mps_grid_sample_backward_available(3) is False
+
+
+def test_mps_grid_sample_forward_probe_is_false_without_mps_hardware():
+    if torch.backends.mps.is_available():
+        pytest.skip("MPS is available on this machine; see the mocked tests above instead")
+    _mps_grid_sample_forward_available.cache_clear()
+    assert _mps_grid_sample_forward_available(2) is False
+    assert _mps_grid_sample_forward_available(3) is False
 
 
 def test_compute_fov_center_is_geometric_center():

@@ -60,6 +60,49 @@ def mps_grid_sample_3d_available() -> bool:
         return False
 
 
+@functools.lru_cache(maxsize=1)
+def mps_grid_sample_3d_forward_available() -> bool:
+    """Whether the installed PyTorch's MPS backend implements 3-D
+    ``grid_sample`` *forward* -- independent of whether backward is also
+    available (see :func:`mps_grid_sample_3d_available` for that combined
+    check).
+
+    Added for :func:`antstorch.syn.syn.syn_registration`'s own 3-D/MPS gate
+    specifically: unlike the generic assumption documented on
+    :func:`mps_grid_sample_3d_available` ("every registration function in
+    this package differentiates through grid_sample every optimization
+    iteration"), ``syn_registration``'s per-iteration loss (via
+    :func:`antstorch.syn.core.grid.prepare_mid_images_and_gradients_torch`)
+    is, by default, always routed through
+    :class:`antstorch.syn.core.grid.AnalyticalGridSample` -- its backward
+    method never differentiates through the native op at all (it calls
+    ``F.grid_sample`` a second time in plain forward mode to sample the
+    source image's own spatial gradient, then combines that with the
+    incoming loss gradient by hand). So that loop only ever needs the
+    *forward* kernel, and gating it on backward availability -- as the
+    combined probe does -- forces an unnecessary CPU fallback on any
+    PyTorch build that already shipped forward (2.9.0+, see PR #160541)
+    even though it would run correctly, if more slowly to approximate
+    gradients, entirely on MPS. Kept as a distinct probe (not a parameter
+    on the existing one) so nothing else in this package silently starts
+    trusting forward-only availability without an explicit decision to
+    do so, the way ``syn_registration`` made after confirming its own
+    backward path never touches the missing kernel (project doc,
+    "implémentation de grid_sampler_3d_backward pour MPS").
+    """
+    import torch
+
+    if not torch.backends.mps.is_available():
+        return False
+    try:
+        probe_image = torch.zeros(1, 1, 2, 2, 2, device="mps")
+        probe_grid = torch.zeros(1, 2, 2, 2, 3, device="mps")
+        torch.nn.functional.grid_sample(probe_image, probe_grid, align_corners=True)
+        return True
+    except (NotImplementedError, RuntimeError):
+        return False
+
+
 def relocate_tensors_avoiding_mps_grid_sample_3d(dimension: int, context: str, **named_tensors):
     """Move MPS tensors to CPU together when 3-D ``grid_sample`` is unavailable there.
 

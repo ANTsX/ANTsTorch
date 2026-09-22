@@ -72,7 +72,7 @@ from .core.grid import (
 from .core.inverse import update_inverse_field_nd
 from .core.jacobian import compute_jacobian_determinant_nd
 from .core.losses import local_ncc_loss_nd, mattes_mi_loss_nd, box_cc2_loss_nd, soft_dice_loss_nd
-from .core.pipeline import auto_detect_device, mps_grid_sample_3d_available
+from .core.pipeline import auto_detect_device, mps_grid_sample_3d_available, mps_grid_sample_3d_forward_available
 from .core.smoothing import (
     apply_dsti_green_operator,
     apply_sobolev_green_operator,
@@ -779,32 +779,73 @@ def syn_registration(
         resolved_device = torch.device(auto_device)
     else:
         resolved_device = torch.device(device)
-    if resolved_device.type == "mps" and dimension == 3 and not mps_grid_sample_3d_available():
-        # mps_grid_sample_3d_available() probes forward AND backward: PyTorch
-        # PR #160541 (merged 2025-08-15, shipped starting with the 2.9.0
-        # stable release) added a native MPS kernel for grid_sampler_3d
-        # *forward*, closing the crash the backward-pass skip above doesn't
-        # touch (e.g. 'SyNOnly' / no-grad calls) -- but no MPS kernel for
-        # grid_sampler_3d_backward has been found as of this writing (see
-        # https://github.com/pytorch/pytorch/issues/160237), and every
-        # type_of_transform that differentiates through the affine/SyN warp
-        # needs backward too. Unlike the auto-detect-only skip above, this
-        # also catches an explicitly requested device='mps' -- there is no
-        # way to make a 3-D SyN run that needs backward work on MPS while
-        # either kernel is missing, so silently trying anyway would only
-        # replace this clear message with a cryptic one.
-        warnings.warn(
-            "syn_registration: 3-D torch.nn.functional.grid_sample is missing its "
-            "forward and/or backward MPS kernel in this PyTorch build "
-            "(aten::grid_sampler_3d / grid_sampler_3d_backward; forward shipped in "
-            "PyTorch 2.9.0 via https://github.com/pytorch/pytorch/pull/160541, but see "
-            "https://github.com/pytorch/pytorch/issues/160237 for the backward gap). "
-            "Falling back to CPU. Set PYTORCH_ENABLE_MPS_FALLBACK=1 instead if you "
-            "would rather PyTorch itself fall back transparently for every "
-            "unimplemented MPS op.",
-            RuntimeWarning,
-        )
-        resolved_device = torch.device("cpu")
+    # Whether this call will run _fit_affine_from_ants() -> bspline_flows.
+    # affine_registration() -- the one grid_sample-needing-backward code
+    # path in this function that is NOT (as of this writing) routed through
+    # AnalyticalGridSample, so it genuinely needs the native MPS backward
+    # kernel. It runs exactly when no initial_affine is supplied and
+    # type_of_transform requests a linear fit or the default 'SyN' (mirrors
+    # the branching below, at "# --- Affine stage ---"); 'SyNOnly' (with or
+    # without initial_affine) never reaches it.
+    needs_internal_affine_fit = initial_affine is None and (
+        type_of_transform in _LINEAR_TRANSFORM_TYPES or type_of_transform == "SyN"
+    )
+    if resolved_device.type == "mps" and dimension == 3:
+        if needs_internal_affine_fit and not mps_grid_sample_3d_available():
+            # mps_grid_sample_3d_available() probes forward AND backward: PyTorch
+            # PR #160541 (merged 2025-08-15, shipped starting with the 2.9.0
+            # stable release) added a native MPS kernel for grid_sampler_3d
+            # *forward*, closing the crash the backward-pass skip above doesn't
+            # touch (e.g. 'SyNOnly' / no-grad calls) -- but no MPS kernel for
+            # grid_sampler_3d_backward has been found as of this writing (see
+            # https://github.com/pytorch/pytorch/issues/160237). The internal
+            # affine fit (bspline_flows.affine_registration()) backpropagates
+            # through a raw torch.nn.functional.grid_sample call every
+            # iteration and genuinely needs that backward kernel -- there is
+            # no way to make it work on MPS while it is missing, so silently
+            # trying anyway would only replace this clear message with a
+            # cryptic one.
+            warnings.warn(
+                "syn_registration: 3-D torch.nn.functional.grid_sample is missing its "
+                "forward and/or backward MPS kernel in this PyTorch build "
+                "(aten::grid_sampler_3d / grid_sampler_3d_backward; forward shipped in "
+                "PyTorch 2.9.0 via https://github.com/pytorch/pytorch/pull/160541, but see "
+                "https://github.com/pytorch/pytorch/issues/160237 for the backward gap). "
+                "The internal affine fit needs the missing backward kernel, so falling "
+                "back to CPU for this call. Pass initial_affine explicitly (skipping the "
+                "internal fit) or use type_of_transform='SyNOnly' to avoid this, or set "
+                "PYTORCH_ENABLE_MPS_FALLBACK=1 instead if you would rather PyTorch itself "
+                "fall back transparently for every unimplemented MPS op.",
+                RuntimeWarning,
+            )
+            resolved_device = torch.device("cpu")
+        elif not needs_internal_affine_fit and not mps_grid_sample_3d_forward_available():
+            # No internal affine fit runs (initial_affine was supplied, or
+            # type_of_transform='SyNOnly' with none), so the only grid_sample
+            # calls left are _fit_syn_level()'s, via
+            # prepare_mid_images_and_gradients_torch() -> grid_sample_nd():
+            # image/grid there always satisfy AnalyticalGridSample's dispatch
+            # condition (grid requires grad -- it derives from the warp being
+            # optimized; the fixed/moving image content never does), so its
+            # hand-written backward runs instead of differentiating through
+            # the native op -- and that backward itself only ever calls
+            # grid_sample in plain forward mode (sampling the source image's
+            # own spatial gradient), never grid_sampler_3d_backward. Only
+            # forward needs to work, which is a strictly weaker (so more
+            # often satisfied) requirement than the combined probe above; see
+            # mps_grid_sample_3d_forward_available()'s docstring and the
+            # project doc, "implémentation de grid_sampler_3d_backward pour
+            # MPS". Only reached if even forward is missing (a PyTorch build
+            # older than 2.9.0, or MPS unavailable).
+            warnings.warn(
+                "syn_registration: 3-D torch.nn.functional.grid_sample has no forward MPS "
+                "kernel in this PyTorch build (aten::grid_sampler_3d; shipped in PyTorch "
+                "2.9.0 via https://github.com/pytorch/pytorch/pull/160541). Falling back to "
+                "CPU. Set PYTORCH_ENABLE_MPS_FALLBACK=1 instead if you would rather PyTorch "
+                "itself fall back transparently for every unimplemented MPS op.",
+                RuntimeWarning,
+            )
+            resolved_device = torch.device("cpu")
     resolved_outprefix = outprefix if outprefix else default_outprefix()
 
     # --- Affine stage -----------------------------------------------------
