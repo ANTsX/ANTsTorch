@@ -18,6 +18,7 @@ All fields use the channel-last convention ``(B, *spatial, dim)``.
 """
 
 import math
+import warnings
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -230,9 +231,22 @@ def apply_sobolev_green_operator(m, fluid_sigma=3.0, alpha=None, border_width=0,
 
     K_bc = _get_sobolev_filter_cached(spatial_shape, alpha_val, s, spacing, device, dtype)
 
-    m_fft = torch.fft.rfftn(m_cf.to(torch.float32), dim=spatial_dims)
-    v_fft = m_fft * K_bc
-    v_cf = torch.fft.irfftn(v_fft, s=spatial_shape, dim=spatial_dims).to(dtype=dtype)
+    # torch.fft.rfftn/irfftn on MPS resize an internal work buffer from a
+    # zero-dim placeholder every call, which PyTorch now flags as a
+    # deprecated resize (see the matching note in
+    # bspline_flows/n4_bias_field_correction.py) -- purely an MPS-backend
+    # implementation detail (no out= argument is passed anywhere below;
+    # CPU/CUDA never warn here), so it is suppressed locally rather than
+    # left to spam every caller's warning filters on every SyN iteration.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*was resized since it had shape.*",
+            category=UserWarning,
+        )
+        m_fft = torch.fft.rfftn(m_cf.to(torch.float32), dim=spatial_dims)
+        v_fft = m_fft * K_bc
+        v_cf = torch.fft.irfftn(v_fft, s=spatial_shape, dim=spatial_dims).to(dtype=dtype)
 
     if dim == 2:
         return v_cf.permute(0, 2, 3, 1)
@@ -292,32 +306,46 @@ def apply_dsti_green_operator(m, fluid_sigma=3.0, alpha=None):
     # Channel-first representation: (B, C, *spatial).
     curr = m.movedim(-1, 1).to(torch.float32)
 
-    # Forward separable DST-I across all spatial dimensions.
-    for d in range(dim):
-        axis = 2 + d
-        n_d = spatial_shape[d]
-        z_shape = list(curr.shape)
-        z_shape[axis] = 1
-        z = torch.zeros(z_shape, device=device, dtype=torch.float32)
-        rev = -torch.flip(curr, dims=[axis])
-        padded = torch.cat([z, curr, z, rev], dim=axis)
-        transformed = torch.fft.fft(padded, dim=axis)
-        curr = -torch.imag(transformed.narrow(axis, 1, n_d)).contiguous()
+    # torch.fft.fft on MPS resizes an internal work buffer from a zero-dim
+    # placeholder every call, which PyTorch now flags as a deprecated resize
+    # (see the matching note on apply_sobolev_green_operator above and in
+    # bspline_flows/n4_bias_field_correction.py) -- purely an MPS-backend
+    # implementation detail (no out= argument is passed below; CPU/CUDA
+    # never warn here), so it is suppressed locally rather than left to spam
+    # every caller's warning filters on every SyN iteration of every
+    # separable DST-I axis.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*was resized since it had shape.*",
+            category=UserWarning,
+        )
+        # Forward separable DST-I across all spatial dimensions.
+        for d in range(dim):
+            axis = 2 + d
+            n_d = spatial_shape[d]
+            z_shape = list(curr.shape)
+            z_shape[axis] = 1
+            z = torch.zeros(z_shape, device=device, dtype=torch.float32)
+            rev = -torch.flip(curr, dims=[axis])
+            padded = torch.cat([z, curr, z, rev], dim=axis)
+            transformed = torch.fft.fft(padded, dim=axis)
+            curr = -torch.imag(transformed.narrow(axis, 1, n_d)).contiguous()
 
-    # Multiply by the Dirichlet Sobolev Green's kernel.
-    curr = curr * K_dst.unsqueeze(0).unsqueeze(0)
+        # Multiply by the Dirichlet Sobolev Green's kernel.
+        curr = curr * K_dst.unsqueeze(0).unsqueeze(0)
 
-    # Inverse separable DST-I across all spatial dimensions.
-    for d in range(dim):
-        axis = 2 + d
-        n_d = spatial_shape[d]
-        z_shape = list(curr.shape)
-        z_shape[axis] = 1
-        z = torch.zeros(z_shape, device=device, dtype=torch.float32)
-        rev = -torch.flip(curr, dims=[axis])
-        padded = torch.cat([z, curr, z, rev], dim=axis)
-        transformed = torch.fft.fft(padded, dim=axis)
-        curr = (-torch.imag(transformed.narrow(axis, 1, n_d)) / (2.0 * (n_d + 1))).contiguous()
+        # Inverse separable DST-I across all spatial dimensions.
+        for d in range(dim):
+            axis = 2 + d
+            n_d = spatial_shape[d]
+            z_shape = list(curr.shape)
+            z_shape[axis] = 1
+            z = torch.zeros(z_shape, device=device, dtype=torch.float32)
+            rev = -torch.flip(curr, dims=[axis])
+            padded = torch.cat([z, curr, z, rev], dim=axis)
+            transformed = torch.fft.fft(padded, dim=axis)
+            curr = (-torch.imag(transformed.narrow(axis, 1, n_d)) / (2.0 * (n_d + 1))).contiguous()
 
     return curr.to(dtype=dtype).movedim(1, -1)
 
