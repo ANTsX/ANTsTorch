@@ -133,6 +133,93 @@ def test_syn_registration_explicit_mps_request_is_honored(monkeypatch):
         pass
 
 
+# --- 3-D MPS grid_sample gating (forward-only vs. combined probe) ----------
+#
+# syn_registration()'s explicit-device='mps'/dimension==3 gate (see
+# needs_internal_affine_fit in syn.py) uses one of two availability probes
+# depending on whether an internal affine fit will run: the combined
+# forward+backward probe (mps_grid_sample_3d_available) when it will
+# (bspline_flows.affine_registration() backpropagates through a raw
+# F.grid_sample call and needs real backward), or the weaker forward-only
+# probe (mps_grid_sample_3d_forward_available) when it won't -- SyNOnly, or
+# any call given an explicit initial_affine -- since _fit_syn_level()'s own
+# grid_sample calls always route through AnalyticalGridSample there (see
+# mps_grid_sample_3d_forward_available's docstring), which never needs
+# backward. These tests exercise the gating decision itself (which probe is
+# consulted, and whether its result triggers the CPU fallback) by mocking
+# both probes and an explicit device='mps' request; they do not require
+# real MPS hardware, and do not assert anything about whether the
+# subsequent (unmocked) computation on a fake 'mps' device succeeds.
+
+def _run_3d_mps_synonly(monkeypatch, forward_available, initial_affine=None):
+    monkeypatch.setattr("antstorch.syn.syn.mps_grid_sample_3d_forward_available", lambda: forward_available)
+
+    def _fail_if_called():
+        raise AssertionError("mps_grid_sample_3d_available (combined probe) must not be called here")
+
+    monkeypatch.setattr("antstorch.syn.syn.mps_grid_sample_3d_available", _fail_if_called)
+    fixed, moving = _ants_pair_3d()
+    kwargs = dict(type_of_transform="SyNOnly", levels=(1,), reg_iterations=(1,), device="mps")
+    if initial_affine is not None:
+        kwargs["initial_affine"] = initial_affine
+    try:
+        syn_registration(fixed, moving, **kwargs)
+    except AssertionError:
+        raise
+    except Exception:
+        pass
+
+
+def test_syn_registration_3d_mps_synonly_uses_forward_only_probe_and_falls_back_when_missing(monkeypatch, recwarn):
+    _run_3d_mps_synonly(monkeypatch, forward_available=False)
+    matching = [w for w in recwarn.list if "no forward MPS kernel" in str(w.message)]
+    assert len(matching) == 1
+
+
+def test_syn_registration_3d_mps_synonly_uses_forward_only_probe_and_stays_on_mps_when_available(monkeypatch, recwarn):
+    _run_3d_mps_synonly(monkeypatch, forward_available=True)
+    matching = [w for w in recwarn.list if "grid_sample" in str(w.message) and "MPS kernel" in str(w.message)]
+    assert matching == []
+
+
+def test_syn_registration_3d_mps_synonly_with_explicit_initial_affine_also_uses_forward_only_probe(monkeypatch, recwarn):
+    # initial_affine supplied -> no internal affine fit regardless of
+    # type_of_transform, so this must take the same forward-only-probe path
+    # as plain SyNOnly, not the combined-probe path.
+    _run_3d_mps_synonly(
+        monkeypatch, forward_available=True,
+        initial_affine=(torch.eye(3), torch.zeros(3)),
+    )
+    matching = [w for w in recwarn.list if "grid_sample" in str(w.message) and "MPS kernel" in str(w.message)]
+    assert matching == []
+
+
+def test_syn_registration_3d_mps_with_internal_affine_fit_uses_combined_probe(monkeypatch, recwarn):
+    # type_of_transform='SyN' with no initial_affine -> an internal affine
+    # fit *will* run (bspline_flows.affine_registration(), unmigrated, needs
+    # real backward), so the combined forward+backward probe must be
+    # consulted here, not the forward-only one.
+    monkeypatch.setattr("antstorch.syn.syn.mps_grid_sample_3d_available", lambda: False)
+
+    def _fail_if_called():
+        raise AssertionError("mps_grid_sample_3d_forward_available must not be called here")
+
+    monkeypatch.setattr("antstorch.syn.syn.mps_grid_sample_3d_forward_available", _fail_if_called)
+    fixed, moving = _ants_pair_3d()
+    try:
+        syn_registration(
+            fixed, moving, type_of_transform="SyN",
+            affine_iterations=(1,), affine_shrink_factors=(1,), affine_smoothing_sigmas=(0.0,),
+            affine_learning_rate=(0.05,), levels=(1,), reg_iterations=(1,), device="mps",
+        )
+    except AssertionError:
+        raise
+    except Exception:
+        pass
+    matching = [w for w in recwarn.list if "backward gap" in str(w.message)]
+    assert len(matching) == 1
+
+
 # --- Linear-only transform types --------------------------------------------
 
 

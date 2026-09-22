@@ -85,6 +85,7 @@ from .optimizers import (
 from .pipeline import (
     auto_detect_device,
     mps_grid_sample_3d_available,
+    mps_grid_sample_3d_forward_available,
     normalize_and_tensorize,
     relocate_tensors_avoiding_mps_grid_sample_3d,
     cleanup_gpu,
@@ -152,6 +153,7 @@ __all__ = [
     'check_convergence',
     'auto_detect_device',
     'mps_grid_sample_3d_available',
+    'mps_grid_sample_3d_forward_available',
     'normalize_and_tensorize',
     'relocate_tensors_avoiding_mps_grid_sample_3d',
     'cleanup_gpu',

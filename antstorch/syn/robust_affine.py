@@ -55,6 +55,7 @@ import torch.nn.functional as F
 from ..ants_transform_io import write_affine_transform
 from .bridge import ants_image_to_tensor
 from .core.affine import get_rotation_matrix, parse_ants_affine
+from .core.grid import grid_sample_nd
 from .core.losses import mattes_mi_loss_nd, parzen_weights
 from .core.utils import normalize_image
 
@@ -79,6 +80,12 @@ def _mps_grid_sample_backward_available(dim: int) -> bool:
     throwaway forward+backward call) and cached per dimension for the life
     of the process, so this automatically stops paying the CPU-fallback
     cost once a future PyTorch release ships the missing kernel.
+
+    No longer used by :func:`_resolve_solver_device` (see
+    :func:`_mps_grid_sample_forward_available` -- ``objective()``'s
+    ``grid_sample`` calls, since migrated to ``grid_sample_nd()``, never
+    need this stronger guarantee). Kept as a public, independently useful
+    probe and for the tests exercising it.
     """
     if not torch.backends.mps.is_available():
         return False
@@ -94,20 +101,54 @@ def _mps_grid_sample_backward_available(dim: int) -> bool:
         return False
 
 
-def _resolve_solver_device(device_obj: "torch.device", dim: int) -> "torch.device":
-    """Fall back to CPU when ``grid_sample`` backward is unavailable on ``device_obj``.
+@functools.lru_cache(maxsize=None)
+def _mps_grid_sample_forward_available(dim: int) -> bool:
+    """Whether the installed PyTorch's MPS backend implements ``grid_sample``
+    *forward* for the given spatial dimensionality -- independent of
+    backward (see :func:`_mps_grid_sample_backward_available`).
 
-    ``_run_pytorch_affine_solver`` differentiates through
-    ``F.grid_sample`` every optimization iteration (see :func:`objective`
-    inside it); on an ``mps`` device without the backward kernel for this
-    ``dim``, the very first ``loss.backward()`` would otherwise crash the
-    run. CUDA and CPU are assumed complete and are never probed.
+    ``objective()`` inside :func:`_run_pytorch_affine_solver` samples the
+    moving image at ``grid_sample_nd(e["mi"], grid, ...)`` (see
+    :mod:`antstorch.syn.core.grid`): ``e["mi"]``/``e["mi_mask"]`` (the
+    moving image/mask) never require grad, only ``grid`` does (it derives
+    from the affine parameters being optimized), so ``grid_sample_nd``
+    always dispatches this to :class:`antstorch.syn.core.grid.AnalyticalGridSample`
+    -- whose hand-written backward never differentiates through the native
+    op (it re-samples the source image's own spatial gradient with a second
+    plain-forward ``grid_sample`` call, then combines that with the
+    incoming loss gradient directly). So the solver's own backward pass
+    never touches ``aten::grid_sampler_{2,3}d_backward`` at all, and only
+    needs the strictly weaker forward kernel to be available -- see the
+    project doc, "implémentation de grid_sampler_3d_backward pour MPS".
     """
-    if device_obj.type != "mps" or _mps_grid_sample_backward_available(dim):
+    if not torch.backends.mps.is_available():
+        return False
+    try:
+        shape = (1, 1) + (2,) * dim
+        grid_shape = (1,) + (2,) * dim + (dim,)
+        probe_image = torch.zeros(shape, device="mps")
+        probe_grid = torch.zeros(grid_shape, device="mps")
+        F.grid_sample(probe_image, probe_grid, align_corners=True)
+        return True
+    except (NotImplementedError, RuntimeError):
+        return False
+
+
+def _resolve_solver_device(device_obj: "torch.device", dim: int) -> "torch.device":
+    """Fall back to CPU when ``grid_sample`` forward is unavailable on ``device_obj``.
+
+    ``objective()`` (see :func:`_mps_grid_sample_forward_available`'s
+    docstring) only ever needs ``grid_sample``'s forward kernel, never its
+    backward one -- so this checks forward-only availability, not the
+    combined forward+backward probe :func:`_mps_grid_sample_backward_available`
+    still provides for anything that might need the stronger guarantee.
+    CUDA and CPU are assumed complete and are never probed.
+    """
+    if device_obj.type != "mps" or _mps_grid_sample_forward_available(dim):
         return device_obj
     warnings.warn(
-        f"robust_affine: {dim}-D torch.nn.functional.grid_sample is missing its backward "
-        "MPS kernel in this PyTorch build (aten::grid_sampler_{}d_backward; see "
+        f"robust_affine: {dim}-D torch.nn.functional.grid_sample has no forward MPS kernel "
+        "in this PyTorch build (aten::grid_sampler_{}d; see "
         "https://github.com/pytorch/pytorch/issues/141287). Falling back to CPU for this "
         "solver run. Set PYTORCH_ENABLE_MPS_FALLBACK=1 instead if you would rather PyTorch "
         "itself fall back transparently for every unimplemented MPS op.".format(dim),
@@ -661,14 +702,14 @@ def _run_pytorch_affine_solver(
         if e["points"] is not None and not full:
             y = warp_to_moving_norm(e["points"]["phys"] @ A.t() + teff, e)
             grid = y.reshape(1, 1, *([1] * (dim - 2)), -1, dim) if dim == 3 else y.reshape(1, 1, -1, dim)
-            w = F.grid_sample(e["mi"], grid, mode="bilinear", padding_mode="zeros", align_corners=True).reshape(-1)
+            w = grid_sample_nd(e["mi"], grid, mode="bilinear", padding_mode="zeros", align_corners=True).reshape(-1)
             fv = e["points"]["fvals"]
             m = None
             if mask_mode == "union":
                 m = (fv > fg_level) | (w > fg_level)
             loss = mattes_mi_loss_nd(w, fv, mask=m, num_bins=num_bins, auto_mask=False, fixed_range=fixed_range)
             if fg_dice_weight > 0:
-                wm = F.grid_sample(e["mi_mask"], grid, mode="bilinear", padding_mode="zeros", align_corners=True).reshape(-1)
+                wm = grid_sample_nd(e["mi_mask"], grid, mode="bilinear", padding_mode="zeros", align_corners=True).reshape(-1)
                 fm = (fv > fg_level).to(wm.dtype)
                 loss = loss + fg_dice_weight * (1.0 - 2.0 * (fm * wm).sum() / (fm.sum() + wm.sum() + 1e-6))
             if lambda_shear > 0 or lambda_scale > 0:
@@ -676,7 +717,7 @@ def _run_pytorch_affine_solver(
             return loss
         y = warp_to_moving_norm(e["phys"] @ A.t() + teff, e)
         grid = y.reshape(1, *e["shape"], dim)
-        w = F.grid_sample(e["mi"], grid, mode="bilinear", padding_mode="zeros", align_corners=True)
+        w = grid_sample_nd(e["mi"], grid, mode="bilinear", padding_mode="zeros", align_corners=True)
         fw = None
         if mask_mode == "union":
             m = e["mask"] | (w > 0.01)
@@ -695,7 +736,7 @@ def _run_pytorch_affine_solver(
         loss = mattes_mi_loss_nd(w, e["fi"], mask=m, num_bins=num_bins, auto_mask=False,
                                   sampling_percentage=samp, fixed_range=fixed_range, fixed_weights=fw)
         if fg_dice_weight > 0:
-            wm = F.grid_sample(e["mi_mask"], grid, mode="bilinear", padding_mode="zeros", align_corners=True)
+            wm = grid_sample_nd(e["mi_mask"], grid, mode="bilinear", padding_mode="zeros", align_corners=True)
             fm = e["mask"].to(wm.dtype)
             loss = loss + fg_dice_weight * (1.0 - 2.0 * (fm * wm).sum() / (fm.sum() + wm.sum() + 1e-6))
         if lambda_shear > 0 or lambda_scale > 0:
