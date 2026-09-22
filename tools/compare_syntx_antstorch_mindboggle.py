@@ -61,11 +61,35 @@ _ANTSTORCH_MODEL_NAME = {
 }
 
 
-def _run_antstorch(reg, pair_idx, device, out_dir):
+# --matched forces both harnesses onto the same grad_step/similarity-metric/
+# pyramid schedule for the 3 plain-gradient-descent regularizers (gaussian,
+# sobolev, bspline), so any remaining Dice gap reflects the regularizer
+# implementation itself rather than each harness's own out-of-the-box
+# defaults. Left at 0.25/cc2/[4,2,1]/[100,100,20] -- syntx's own gaussian/
+# sobolev branch defaults, since antstorch's syn_registration() accepts all
+# of these as overrides via kwargs but syntx's benchmark harness does not
+# expose reg_iterations/levels overrides as freely for every branch.
+# dsti is deliberately NOT forced: syntx's dsti arm uses a different
+# optimizer entirely (reg_adam, not plain gradient descent) -- forcing
+# grad_step/metric parity there would not make the comparison fairer, only
+# more confusing, since the optimizer itself already differs.
+MATCHED_KWARGS = {
+    "gaussian": dict(grad_step=0.25, syn_metric="cc2", levels=(4, 2, 1), reg_iterations=(100, 100, 20)),
+    "sobolev": dict(grad_step=0.25, syn_metric="cc2", levels=(4, 2, 1), reg_iterations=(100, 100, 20)),
+    "bspline": dict(grad_step=0.25, syn_metric="cc2", levels=(4, 2, 1), reg_iterations=(100, 100, 20)),
+}
+MATCHED_KWARGS_SYNTX = {
+    "gaussian": dict(similarity_metric="cc2", reg_iterations=[100, 100, 20]),
+    "sobolev": dict(similarity_metric="cc2", reg_iterations=[100, 100, 20]),
+}
+
+
+def _run_antstorch(reg, pair_idx, device, out_dir, matched=False):
     sys.path.insert(0, ANTSTORCH_ROOT)
     from antstorch.benchmark.evaluate import evaluate_mindboggle_pair as antstorch_eval
 
     model = _ANTSTORCH_MODEL_NAME[reg]
+    extra = MATCHED_KWARGS.get(reg, {}) if matched else {}
     t0 = time.time()
     try:
         rec = antstorch_eval(
@@ -75,6 +99,7 @@ def _run_antstorch(reg, pair_idx, device, out_dir):
             data_dir=DATA_DIR,
             canonical_affine_dir=os.path.join(out_dir, "antstorch_canonical_affines"),
             verbose=False,
+            **extra,
         )
         rec["_wall_seconds"] = time.time() - t0
         rec["_library"] = "antstorch"
@@ -89,15 +114,19 @@ def _run_antstorch(reg, pair_idx, device, out_dir):
     return rec
 
 
-def _run_syntx(reg, pair_idx, device, out_dir):
+def _run_syntx(reg, pair_idx, device, out_dir, matched=False):
     sys.path.insert(0, os.path.join(SYNTX_ROOT, "src"))
     os.chdir(SYNTX_ROOT)  # syntx.benchmark.evaluate caches to "results/..." relative to cwd
     import syntx
     from syntx.benchmark.evaluate import evaluate_mindboggle_pair as syntx_eval
 
+    extra = MATCHED_KWARGS_SYNTX.get(reg, {}) if matched else {}
     t0 = time.time()
     try:
         if reg == "bspline":
+            # Already grad_step=0.25 / similarity_metric='cc2' /
+            # reg_iterations=[100,100,20] by construction (see the function
+            # docstring) -- nothing further to force for --matched here.
             rec = _syntx_bspline_pair_eval(pair_idx=pair_idx, device=device, verbose=False)
         else:
             rec = syntx_eval(
@@ -107,6 +136,7 @@ def _run_syntx(reg, pair_idx, device, out_dir):
                 data_dir=DATA_DIR,
                 pairs_csv="examples/pairs.csv",
                 verbose=False,
+                **extra,
             )
         rec["_wall_seconds"] = time.time() - t0
         rec["_library"] = "syntx"
@@ -203,7 +233,7 @@ def _syntx_bspline_pair_eval(pair_idx, device=None, verbose=False, seed=42):
     inv_tx = res_reg["invtransforms"]
     which_inv = res_reg.get("whichtoinvert_inv", [True, False])
     df_fixed, df_moving, dice_sym = compute_bidirectional_dice(fl, ml, fi, mi, fwd_tx, inv_tx, which_inv)
-    jac = compute_jacobian_metrics(fwd_tx[0]) if fwd_tx else {"folding_pct": float("nan"), "min": float("nan")}
+    jac = compute_jacobian_metrics(fi, fwd_tx[0]) if fwd_tx else {"folding_pct": float("nan"), "min": float("nan")}
 
     return {
         "pair_idx": int(pair_idx), "model_type": "bspline (non-officiel)",
@@ -221,8 +251,24 @@ def main():
     ap.add_argument("--pairs", type=int, nargs="+", default=PAIR_INDICES_DEFAULT)
     ap.add_argument("--models", nargs="+", default=MODELS, choices=MODELS)
     ap.add_argument("--device", default=None)
-    ap.add_argument("--out-dir", default=os.path.expanduser("~/Desktop/syntx_antstorch_mindboggle_comparison"))
+    ap.add_argument("--out-dir", default=None)
+    ap.add_argument(
+        "--matched", action="store_true",
+        help="Force grad_step=0.25 / similarity_metric='cc2' / levels=(4,2,1) / "
+             "reg_iterations=(100,100,20) on both sides for gaussian/sobolev/bspline "
+             "(dsti left alone: syntx's dsti arm uses a different optimizer, "
+             "reg_adam, not plain gradient descent, so forcing these wouldn't "
+             "isolate anything there). Use this to check whether a Dice gap seen "
+             "with each library's own out-of-the-box defaults survives once the "
+             "optimization settings are equalized -- i.e. whether it comes from "
+             "the regularizer/registration algorithm itself or just from the two "
+             "harnesses' differing defaults. Writes to a separate --out-dir suffix "
+             "('_matched') so it never overwrites an unmatched run.",
+    )
     args = ap.parse_args()
+    if args.out_dir is None:
+        base = os.path.expanduser("~/Desktop/syntx_antstorch_mindboggle_comparison")
+        args.out_dir = base + ("_matched" if args.matched else "")
 
     os.makedirs(args.out_dir, exist_ok=True)
     results = []
@@ -234,7 +280,7 @@ def main():
         for reg in args.models:
             for lib, fn in (("antstorch", _run_antstorch), ("syntx", _run_syntx)):
                 print(f"[{done + 1}/{total}] {lib} / {reg} / pair {pair_idx} ...", flush=True)
-                rec = fn(reg, pair_idx, args.device, args.out_dir)
+                rec = fn(reg, pair_idx, args.device, args.out_dir, matched=args.matched)
                 results.append(rec)
                 done += 1
                 status = rec.get("_status")
