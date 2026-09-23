@@ -39,13 +39,13 @@ in-memory model's output.
 Usage (run on a machine with h5py + torch installed; antstorch's source
 tree needs to be importable -- point --antstorch-src at the repo root):
 
-    python convert_wmh_bespoke.py \\
+    python tools/weights/convert_wmh_bespoke.py \\
         --weights-dir ~/.keras/ANTsXNet \\
         --out-dir ~/.antstorch \\
         --antstorch-src ~/Pkg/ANTsTorch
 
     # convert just one file:
-    python convert_wmh_bespoke.py --weights-dir ~/.keras/ANTsXNet \\
+    python tools/weights/convert_wmh_bespoke.py --weights-dir ~/.keras/ANTsXNet \\
         --out-dir ~/.antstorch --antstorch-src ~/Pkg/ANTsTorch \\
         --only hyperMapp3r
 """

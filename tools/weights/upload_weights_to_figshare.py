@@ -56,28 +56,28 @@ Usage:
     export FIGSHARE_TOKEN="your-personal-access-token"
 
     # dry run: see what would be uploaded, no network calls to figshare
-    python upload_weights_to_figshare.py --pt-dir ~/.antstorch --dry-run
+    python tools/weights/upload_weights_to_figshare.py --pt-dir ~/.antstorch --dry-run
 
     # test on one file first (strongly recommended)
-    python upload_weights_to_figshare.py --pt-dir ~/.antstorch --only hyperMapp3r
+    python tools/weights/upload_weights_to_figshare.py --pt-dir ~/.antstorch --only hyperMapp3r
 
     # then the full batch
-    python upload_weights_to_figshare.py --pt-dir ~/.antstorch
+    python tools/weights/upload_weights_to_figshare.py --pt-dir ~/.antstorch
 
     # reuse an article you already created/published in a partial run
-    python upload_weights_to_figshare.py --pt-dir ~/.antstorch --article-id 12345678
+    python tools/weights/upload_weights_to_figshare.py --pt-dir ~/.antstorch --article-id 12345678
 
     # add your own tags on top of the base set, and/or a specific license
-    python upload_weights_to_figshare.py --pt-dir ~/.antstorch --tags segmentation lung --license-id 1
+    python tools/weights/upload_weights_to_figshare.py --pt-dir ~/.antstorch --tags segmentation lung --license-id 1
 
     # figshare REQUIRES at least one category before an article can be published
     # (there's no account default for this, unlike license). Find one:
-    python upload_weights_to_figshare.py --list-categories
+    python tools/weights/upload_weights_to_figshare.py --list-categories
     # ... then either pass it on a normal run:
-    python upload_weights_to_figshare.py --pt-dir ~/.antstorch --category-ids 68 --only hyperMapp3r_pytorch
+    python tools/weights/upload_weights_to_figshare.py --pt-dir ~/.antstorch --category-ids 68 --only hyperMapp3r_pytorch
     # ... or, if files are already uploaded to an article whose publish failed
     # on the missing-categories error, finish it WITHOUT re-uploading:
-    python upload_weights_to_figshare.py --pt-dir ~/.antstorch --article-id 12345678 \\
+    python tools/weights/upload_weights_to_figshare.py --pt-dir ~/.antstorch --article-id 12345678 \\
         --finalize-only --category-ids 68
 """
 import argparse
@@ -309,9 +309,9 @@ def publish_article(token, article_id):
                 f"{e}\n\n"
                 "figshare requires at least one category before an article can be published. "
                 "Find a category id with:\n"
-                "    python upload_weights_to_figshare.py --list-categories\n"
+                "    python tools/weights/upload_weights_to_figshare.py --list-categories\n"
                 "then set it explicitly and re-finalize this article without re-uploading:\n"
-                f"    python upload_weights_to_figshare.py --pt-dir <dir> --article-id {article_id} "
+                f"    python tools/weights/upload_weights_to_figshare.py --pt-dir <dir> --article-id {article_id} "
                 f"--finalize-only --category-ids <id>"
             ) from None
         raise
@@ -385,7 +385,7 @@ def main():
     gpn_path = args.gpn_path
     if gpn_path is None:
         here = os.path.dirname(os.path.abspath(__file__))
-        gpn_path = os.path.normpath(os.path.join(here, "..", "antstorch", "utilities", "get_pretrained_network.py"))
+        gpn_path = os.path.normpath(os.path.join(here, "..", "..", "antstorch", "utilities", "get_pretrained_network.py"))
 
     wanted_ids = args.only if args.only else KNOWN_IDS
     to_upload = []

@@ -77,9 +77,9 @@ the signal, not a downstream crash.
 
 Usage:
 
-    python convert_harvard_oxford_atlas_labeling_bespoke.py --self-test
+    python tools/weights/convert_harvard_oxford_atlas_labeling_bespoke.py --self-test
 
-    python convert_harvard_oxford_atlas_labeling_bespoke.py \\
+    python tools/weights/convert_harvard_oxford_atlas_labeling_bespoke.py \\
         --weights-dir ~/.keras/ANTsXNet \\
         --out-dir ~/.antstorch \\
         --antstorch-src ~/Pkg/ANTsTorch
@@ -359,7 +359,7 @@ def run_self_test(antstorch_src=None):
         print("[self-test] classification OK (decoys correctly ignored)")
 
         if antstorch_src is None:
-            antstorch_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+            antstorch_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
         create_unet_model_path = os.path.join(antstorch_src, "antstorch", "architectures", "create_unet_model.py")
         if not os.path.exists(create_unet_model_path):
             print(f"[self-test] antstorch source not found at {create_unet_model_path} -- "

@@ -69,13 +69,13 @@ architectures:
 
 Usage (same convention as convert_wmh_bespoke.py / convert_lung_mouse_bespoke.py):
 
-    python convert_hippmapp3r_hypothalamus_claustrum_bespoke.py \\
+    python tools/weights/convert_hippmapp3r_hypothalamus_claustrum_bespoke.py \\
         --weights-dir ~/.keras/ANTsXNet \\
         --out-dir ~/.antstorch \\
         --antstorch-src ~/Pkg/ANTsTorch
 
     # convert just one file:
-    python convert_hippmapp3r_hypothalamus_claustrum_bespoke.py \\
+    python tools/weights/convert_hippmapp3r_hypothalamus_claustrum_bespoke.py \\
         --weights-dir ~/.keras/ANTsXNet --out-dir ~/.antstorch \\
         --antstorch-src ~/Pkg/ANTsTorch --only hippMapp3rInitial
 """
@@ -88,7 +88,7 @@ import h5py
 import torch
 
 # Reuse the low-level h5/torch plumbing from convert_wmh_bespoke.py -- must
-# live alongside this script (both under tools/).
+# live alongside this script (both under tools/weights/).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from convert_wmh_bespoke import (
     _load_arch_modules,

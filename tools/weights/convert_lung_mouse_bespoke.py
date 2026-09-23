@@ -6,7 +6,7 @@ Standalone (h5py + torch only -- no TensorFlow/antspynet needed) weight
 converter for the 20 lung_extraction / lung_segmentation / mouse.py
 `_pytorch` ids that still have no URL mapping in get_pretrained_network.py
 (see the "" placeholders added there on 2026-08-22). Modeled directly on
-tools/convert_wmh_bespoke.py's method and CLI: read each .h5 file's root
+tools/weights/convert_wmh_bespoke.py's method and CLI: read each .h5 file's root
 `layer_names` attribute (Keras's authoritative, fully-ordered list of every
 layer in true construction order), extract convolution weight tensors in
 that positional order, and assign them to the corresponding ANTsTorch
@@ -53,7 +53,7 @@ CONFIDENCE NOTES (please read before trusting a converted .pt blindly):
     allen_brain_mask/leftright_coronal/cerebellum_sagittal/coronal) rely on
     the standard Oktay et al. attention-gate design (3 convs per gate:
     theta, phi, psi) -- the same assumption already encoded in
-    tools/convert_antspynet_weights_to_antstorch.py's TF-based converter.
+    tools/weights/convert_antspynet_weights_to_antstorch.py's TF-based converter.
     GOOD confidence, but not independently verified end-to-end against a
     real antspynet Keras model in this environment (no TensorFlow here).
   * protonLobes (attention gating + create_multihead_unet_model_3d) adds a
@@ -69,7 +69,7 @@ CONFIDENCE NOTES (please read before trusting a converted .pt blindly):
     hand-derived role list mirroring the ported torch module's __init__
     order, plus a PReLU alpha-shape assumption (Keras PReLU alpha reduced
     to a per-channel vector if it isn't already 1-D) that is NOT verified
-    since (per scripts/verify_applications/README.md) the source .h5 for
+    since (per tools/verify_applications/README.md) the source .h5 for
     this id has not even been located in ~/.keras/ANTsXNet/ yet. BEST
     EFFORT only -- treat this one as a starting point to debug against,
     not a ready-to-trust converter.
@@ -77,13 +77,13 @@ CONFIDENCE NOTES (please read before trusting a converted .pt blindly):
 Usage (run on a machine with h5py + torch installed; antstorch's source
 tree needs to be importable -- point --antstorch-src at the repo root):
 
-    python convert_lung_mouse_bespoke.py \\
+    python tools/weights/convert_lung_mouse_bespoke.py \\
         --weights-dir ~/.keras/ANTsXNet \\
         --out-dir ~/.antstorch \\
         --antstorch-src ~/Pkg/ANTsTorch
 
     # convert just one file:
-    python convert_lung_mouse_bespoke.py --weights-dir ~/.keras/ANTsXNet \\
+    python tools/weights/convert_lung_mouse_bespoke.py --weights-dir ~/.keras/ANTsXNet \\
         --out-dir ~/.antstorch --antstorch-src ~/Pkg/ANTsTorch \\
         --only protonLungMri
 """

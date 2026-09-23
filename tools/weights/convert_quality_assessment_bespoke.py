@@ -86,13 +86,13 @@ error rather than converting incorrectly.
 Usage (run on a machine with h5py + torch installed; antstorch's source
 tree needs to be importable -- point --antstorch-src at the repo root):
 
-    python convert_quality_assessment_bespoke.py \\
+    python tools/weights/convert_quality_assessment_bespoke.py \\
         --weights-dir ~/.keras/ANTsXNet \\
         --out-dir ~/.antstorch \\
         --antstorch-src ~/Pkg/ANTsTorch
 
     # convert just one file (recommended first):
-    python convert_quality_assessment_bespoke.py \\
+    python tools/weights/convert_quality_assessment_bespoke.py \\
         --weights-dir ~/.keras/ANTsXNet --out-dir ~/.antstorch \\
         --antstorch-src ~/Pkg/ANTsTorch --only koniqMS3
 """
@@ -111,7 +111,7 @@ import torch
 
 # ---------------------------------------------------------------------------
 # Reuse the low-level h5 / state_dict helpers from convert_wmh_bespoke.py
-# (must stay in the same tools/ directory) instead of duplicating them.
+# (must stay in the same tools/weights/ directory) instead of duplicating them.
 # ---------------------------------------------------------------------------
 
 def _load_wmh_helpers():

@@ -6,7 +6,7 @@ ensemble (wmh_shiva_t1_flair_{0..4}). which_model=0 picks a single model
 instead of the full "all" ensemble, for a faster smoke test.
 
 Requires converted weights: wmh_shiva_t1_flair_{0..4}_pytorch. None of
-these are yet delivered to your machine -- run tools/convert_wmh_bespoke.py
+these are yet delivered to your machine -- run tools/weights/convert_wmh_bespoke.py
 locally first.
 """
 import ants

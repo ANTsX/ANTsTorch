@@ -5,7 +5,7 @@ Compares ``antstorch.fit_bspline_object_to_scattered_data`` and
 ``antstorch.fit_bspline_displacement_field`` against their ANTsPy
 counterparts (``ants.fit_bspline_object_to_scattered_data`` /
 ``ants.fit_bspline_displacement_field``), the same comparison methodology
-as ``tools/compare_n4_bias_field_correction.py``.
+as ``tools/benchmarks/compare_n4_bias_field_correction.py``.
 
 Three independent comparisons run by default:
 
@@ -29,19 +29,19 @@ Examples
 --------
 Synthetic scattered data, no image or network access required::
 
-    python tools/compare_bspline_scattered_data.py
+    python tools/benchmarks/compare_bspline_scattered_data.py
 
 Use the bundled 2-D ``r16`` image's pixel grid::
 
-    python tools/compare_bspline_scattered_data.py --image r16
+    python tools/benchmarks/compare_bspline_scattered_data.py --image r16
 
 Use 2000 random (off-grid) pixels from an image as scattered points::
 
-    python tools/compare_bspline_scattered_data.py --image r16 --num-points 2000
+    python tools/benchmarks/compare_bspline_scattered_data.py --image r16 --num-points 2000
 
 3-D synthetic data with a finer mesh and CUDA::
 
-    python tools/compare_bspline_scattered_data.py --dimension 3 --mesh-size 3 3 3 --device cuda
+    python tools/benchmarks/compare_bspline_scattered_data.py --dimension 3 --mesh-size 3 3 3 --device cuda
 """
 
 import argparse

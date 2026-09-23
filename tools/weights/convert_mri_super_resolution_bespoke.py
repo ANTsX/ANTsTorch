@@ -75,15 +75,15 @@ result -- if load_state_dict/verify_and_save raises, that itself is a
 useful signal about what needs correcting (most likely: the quad-grouping
 assumption, or a different default_dbpn() preset than assumed).
 
-Usage (same convention as the other bespoke converters in tools/):
+Usage (same convention as the other bespoke converters in tools/weights/):
 
-    python convert_mri_super_resolution_bespoke.py \\
+    python tools/weights/convert_mri_super_resolution_bespoke.py \\
         --weights-dir ~/.keras/ANTsXNet \\
         --out-dir ~/.antstorch \\
         --antstorch-src ~/Pkg/ANTsTorch
 
     # convert just one file (recommended first):
-    python convert_mri_super_resolution_bespoke.py \\
+    python tools/weights/convert_mri_super_resolution_bespoke.py \\
         --weights-dir ~/.keras/ANTsXNet --out-dir ~/.antstorch \\
         --antstorch-src ~/Pkg/ANTsTorch \\
         --only sig_smallshort_train_1x1x2_1chan_featgraderL6_best_mdl
@@ -101,7 +101,7 @@ import torch
 
 # Reuse the low-level h5/torch plumbing already validated in
 # convert_wmh_bespoke.py -- must live alongside this script (both under
-# tools/).
+# tools/weights/).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from convert_wmh_bespoke import _weights_root, h5_get_wb, set_conv
 
@@ -322,7 +322,7 @@ def save_and_verify(model, kwargs, build_fn, out_path, x):
 # Manifest: the 11 real sig_smallshort ids, confirmed 2026-08-22 directly
 # against antspynet's own get_pretrained_network.py switcher dict on GitHub
 # (these already have real figshare URLs there for the ORIGINAL .h5 -- see
-# tools/download_antspynet_h5_weights.py).
+# tools/weights/download_antspynet_h5_weights.py).
 # ---------------------------------------------------------------------------
 
 def build_manifest():

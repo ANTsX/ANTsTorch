@@ -6,8 +6,8 @@ antstorch.benchmark was ported as a "core only" harness (see the project
 doc, section 18): it has evaluate_mindboggle_pair() but deliberately no
 CLI and no cohort orchestrator (resume/cache/JSON aggregation across all 90
 pairs). This script is the standalone demo/driver that fills that gap for a
-first local run -- in the same spirit as tools/run_syn_registration.py and
-tools/run_svf_registration.py, not a re-introduction of the ported-out
+first local run -- in the same spirit as tools/registration/run_syn_registration.py and
+tools/registration/run_svf_registration.py, not a re-introduction of the ported-out
 orchestrator (no resume, no cache, no parallel dispatch).
 
 By default it evaluates the same 6-pair probe subset used elsewhere in this
@@ -45,20 +45,20 @@ Example
 -------
 First, just check the dataset is where the harness expects it::
 
-    PYTHONPATH=. python tools/run_benchmark_mindboggle_probe.py --check-only \\
+    PYTHONPATH=. python tools/benchmarks/run_benchmark_mindboggle_probe.py --check-only \\
         --data-dir /Users/ntustison/Data/Public/Mindboggle/Volumes
 
 Run the default 6-pair x 6-model probe (uses ANTSTORCH_MINDBOGGLE_DATA_DIR
 if set, otherwise pass --data-dir explicitly)::
 
-    PYTHONPATH=. python tools/run_benchmark_mindboggle_probe.py \\
+    PYTHONPATH=. python tools/benchmarks/run_benchmark_mindboggle_probe.py \\
         --data-dir /Users/ntustison/Data/Public/Mindboggle/Volumes \\
         --device mps --verbose
 
 Run just three models on a couple of pairs, with a faster iteration schedule
 for a quick smoke test before committing to the full probe::
 
-    PYTHONPATH=. python tools/run_benchmark_mindboggle_probe.py \\
+    PYTHONPATH=. python tools/benchmarks/run_benchmark_mindboggle_probe.py \\
         --pair-idx 0 1 --models gaussian_syn gaussian_svf bspline_svf \\
         --reg-iterations 20 20 10 5 --device mps
 
@@ -66,17 +66,17 @@ Run the traditional ants_syn_quick baseline (quote the bracketed form if you
 use the raw ants.registration type_of_transform string instead of the
 "ants_syn_quick" alias -- see the module docstring above)::
 
-    PYTHONPATH=. python tools/run_benchmark_mindboggle_probe.py \\
+    PYTHONPATH=. python tools/benchmarks/run_benchmark_mindboggle_probe.py \\
         --pair-idx 0 1 --models ants_syn_quick --device mps
 
-    PYTHONPATH=. python tools/run_benchmark_mindboggle_probe.py \\
+    PYTHONPATH=. python tools/benchmarks/run_benchmark_mindboggle_probe.py \\
         --pair-idx 0 1 --models 'antsRegistrationSyNQuick[so]' --device mps
 
 Run the full 90-pair cohort (no resume/cache -- expect a long run; see the
 project doc's runtime note, roughly 40 minutes per model variant on MPS for
 the syntx harness, as a rough order of magnitude)::
 
-    PYTHONPATH=. python tools/run_benchmark_mindboggle_probe.py \\
+    PYTHONPATH=. python tools/benchmarks/run_benchmark_mindboggle_probe.py \\
         --pair-idx $(seq 0 89) --device mps
 """
 

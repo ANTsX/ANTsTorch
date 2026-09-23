@@ -10,7 +10,7 @@ PyTorch ports of a subset of antspynet.architectures.create_custom_unet_model:
     * create_hypothalamus_unet_model_3d        (hypothalamus_segmentation, added 2026-08-22)
 
 Ported layer for layer, matching the Keras originals, so that weights
-converted via tools/convert_antspynet_weights_to_antstorch.py map cleanly
+converted via tools/weights/convert_antspynet_weights_to_antstorch.py map cleanly
 onto these state_dicts.
 """
 import torch

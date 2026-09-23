@@ -97,6 +97,8 @@ The ANTsTorch package is released under an [Apache License](https://github.com/A
 
 ## Other resources
 
+- [Development tools](tools/README.md)
+- [Model validation and ANTsPyNet parity](docs/model_validation.md)
 - [ANTsTorch Documentation (coming soon)](https://antsx.github.io/ANTsTorch/)  
 - [ANTsTorch self-contained examples](https://gist.github.com/ntustison/12a656a5fc2f6f9c4494c88dc09c5621#antsxnet)  
 - [ANTsTorch N4 and diffeomorphic B-spline registration tutorial](docs/antsx_tutorial_bspline_flows.md)

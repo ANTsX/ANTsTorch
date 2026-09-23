@@ -39,11 +39,11 @@ two keys travel with it from now on.
 
 Usage
 -----
-    python tools/patch_legacy_glow_checkpoint_config.py \\
+    python tools/weights/patch_legacy_glow_checkpoint_config.py \\
         /path/to/training_state.pt [more_checkpoints.pt ...]
 
     # dry run first (recommended):
-    python tools/patch_legacy_glow_checkpoint_config.py --dry-run /path/to/*.pt
+    python tools/weights/patch_legacy_glow_checkpoint_config.py --dry-run /path/to/*.pt
 
 By default this only touches checkpoints trained *before* the fix landed
 (2026-07-27) -- gated on the "env.timestamp" field antstorch's training

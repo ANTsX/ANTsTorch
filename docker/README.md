@@ -44,7 +44,7 @@ docker build \
 
 This will make the container larger, but all data and pretrained networks will be
 available at run time without downloading. You can also download a subset of data /
-networks, see the help for the `tools/download_antstorch_data.py` script.
+networks, see the help for the `tools/data/download_antstorch_data.py` script.
 
 
 ## Running the container

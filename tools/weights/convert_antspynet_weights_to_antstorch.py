@@ -25,7 +25,7 @@ convert_antspynet_weights_to_antstorch.py (clean, full, wrapper-aware, 2D/3D-awa
   module docstring.
 
 CLI:
-  python convert_antspynet_weights_to_antstorch.py \
+  python tools/weights/convert_antspynet_weights_to_antstorch.py \
     --task deep_flash_left_t1 \
     --out-prefix ~/.antstorch/deepFlashLeftT1Hierarchical_pytorch \
     --deconv-flip noflip \

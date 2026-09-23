@@ -12,7 +12,7 @@ without touching real weights or real preprocessing.
 ## Usage
 
 ```bash
-cd scripts/verify_applications
+cd tools/verify_applications
 python verify_lung_extraction_proton.py        # run one script directly
 python run_all.py                               # run all 30 and print a PASS/FAIL summary
 python run_all.py "verify_lung_*.py"             # run a subset (shell glob, quoted)
@@ -63,13 +63,13 @@ summary of the returned image(s). A non-zero exit code means it raised.
 converted and delivered to `~/.antstorch/` earlier this session (11 from
 2026-08-22, plus `sig_smallshort_train_1x1x2_1chan_featvggL6_best_mdl`
 converted and uploaded 2026-08-22 evening). Most of the rest need weights
-that are either not yet converted (run the relevant `tools/convert_*_bespoke.py`
+that are either not yet converted (run the relevant `tools/weights/convert_*_bespoke.py`
 locally -- see the project's gap-analysis doc for the exact commands) or
 whose source `.h5` was never located in `~/.keras/ANTsXNet/` at all.
 `verify_quality_assessment.py` no longer needs a special case: as of
 2026-08-23 the real ResNet-50 architecture behind
 `tidsQualityAssessment`/`koniqMS`/`koniqMS2`/`koniqMS3` was confirmed
-(see `tools/convert_quality_assessment_bespoke.py`), so it now behaves
+(see `tools/weights/convert_quality_assessment_bespoke.py`), so it now behaves
 like any other `⏳` script for `koniqMS3` -- it just also has a documented
 fallback (untrained placeholder model) if the weights aren't converted
 yet, so it never hard-fails.
