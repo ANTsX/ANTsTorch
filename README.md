@@ -40,6 +40,7 @@ python3 -m pip install git+https://github.com/ANTsX/ANTsTorch.git
 ```
 </details>
 
+<a id="applications"></a>
 <details>
 <summary>Applications</summary>
 
@@ -99,6 +100,6 @@ The ANTsTorch package is released under an [Apache License](https://github.com/A
 
 - [Development tools](tools/README.md)
 - [Model validation and ANTsPyNet parity](docs/model_validation.md)
-- [ANTsTorch Documentation (coming soon)](https://antsx.github.io/ANTsTorch/)  
+- [ANTsTorch documentation](docs/README.md)
 - [ANTsTorch self-contained examples](https://gist.github.com/ntustison/12a656a5fc2f6f9c4494c88dc09c5621#antsxnet)  
 - [ANTsTorch N4 and diffeomorphic B-spline registration tutorial](docs/antsx_tutorial_bspline_flows.md)
