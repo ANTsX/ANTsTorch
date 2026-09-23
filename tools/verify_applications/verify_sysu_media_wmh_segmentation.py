@@ -8,7 +8,7 @@ dependency on). Same source images (figshare ids 40251796 / 40251793).
 
 Requires converted weights: sysuMediaWmhFlairOnlyModel{0,1,2}_pytorch
 (use_ensemble=True averages all 3). These are NOT yet delivered to your
-machine -- run tools/convert_wmh_bespoke.py locally first (see the
+machine -- run tools/weights/convert_wmh_bespoke.py locally first (see the
 project's gap-analysis doc), or this will fail with a "no cached weights"
 error from get_pretrained_network.
 """

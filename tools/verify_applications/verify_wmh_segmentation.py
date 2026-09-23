@@ -9,7 +9,7 @@ a large chunk of the ported pipeline beyond just the WMH model itself.
 
 Requires converted weights: antsxnetWmhOr_pytorch (use_combined_model=True,
 the default) or antsxnetWmh_pytorch. Neither is yet delivered to your
-machine -- run tools/convert_wmh_bespoke.py locally first.
+machine -- run tools/weights/convert_wmh_bespoke.py locally first.
 """
 import ants
 import antstorch

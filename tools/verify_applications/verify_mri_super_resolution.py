@@ -8,13 +8,13 @@ SIQ DBPN model.
 
 Requires converted weights: sig_smallshort_train_1x1x2_1chan_featvggL6_best_mdl_pytorch.
 Not yet converted on your machine as of this writing -- run
-tools/convert_mri_super_resolution_bespoke.py first (see the project's
+tools/weights/convert_mri_super_resolution_bespoke.py first (see the project's
 gap-analysis doc for the exact command), so this will fail with a "no
 cached weights" error from get_pretrained_network until that's done.
 
 ⚠️ This is the newest and least-verified application in this folder: the
 create_siq_dbpn_super_resolution_model_3d architecture (UpSampling3D+Conv3D,
-not ConvTranspose) and tools/convert_mri_super_resolution_bespoke.py (which
+not ConvTranspose) and tools/weights/convert_mri_super_resolution_bespoke.py (which
 reads convolution_kernel_size/number_of_base_filters/etc. directly out of
 each real .h5's embedded model_config JSON) have only been checked against
 a synthetic round-trip .h5 -- never against one of the real

@@ -14,7 +14,7 @@ def lung_extraction(image,
     Ported from antspynet.utilities.lung_extraction, using ANTsTorch's
     generic U-Net (2-D/3-D) architectures.  The pretrained weights are
     resolved via get_pretrained_network(<id>_pytorch) -- see
-    tools/convert_antspynet_weights_to_antstorch.py for how to produce
+    tools/weights/convert_antspynet_weights_to_antstorch.py for how to produce
     them from the original ANTsPyNet Keras weights.
 
     Arguments

@@ -9,7 +9,7 @@ faster one-model smoke test.
 
 Requires converted weights: pvs_shiva_t1_flair_{0..4}_pytorch. None of
 these are yet delivered to your machine (21 shiva files total, >3 GB --
-see the project's gap-analysis doc) -- run tools/convert_wmh_bespoke.py
+see the project's gap-analysis doc) -- run tools/weights/convert_wmh_bespoke.py
 locally first.
 """
 import ants

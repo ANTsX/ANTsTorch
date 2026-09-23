@@ -5,11 +5,11 @@ Examples
 --------
 Use the bundled 2-D ``r16`` image::
 
-    python tools/compare_n4_bias_field_correction.py
+    python tools/benchmarks/compare_n4_bias_field_correction.py
 
 Use another 2-D or 3-D image and CUDA, if available::
 
-    python tools/compare_n4_bias_field_correction.py image.nii.gz --device cuda
+    python tools/benchmarks/compare_n4_bias_field_correction.py image.nii.gz --device cuda
 """
 
 import argparse

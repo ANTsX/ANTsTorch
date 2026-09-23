@@ -73,7 +73,7 @@ jobs:
         if: steps.restore-cache.outputs.cache-hit != 'true'
         run: |
           pip install -e .
-          python tools/download_antstorch_data.py --strict
+          python tools/data/download_antstorch_data.py --strict
 
       - name: Save newly downloaded ANTsTorch data to cache
         if: steps.restore-cache.outputs.cache-hit != 'true'

@@ -5,7 +5,7 @@ Updated 2026-08-23: unlike when this script was first written, real weights
 CAN now exist for these models -- koniqMS3.h5's embedded model_config JSON
 confirmed the ResNet architecture antstorch already assumed (see the
 confidence note at the top of antstorch/utilities/quality_assessment.py and
-tools/convert_quality_assessment_bespoke.py). This script now tries the
+tools/weights/convert_quality_assessment_bespoke.py). This script now tries the
 real built-in path first (which_model="koniqMS3", the one file whose
 architecture has actually been confirmed against a real model_config), and
 falls back to the untrained-placeholder smoke test if the weights haven't

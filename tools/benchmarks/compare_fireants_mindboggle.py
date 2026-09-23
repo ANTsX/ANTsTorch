@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Add FireANTs (github.com/rohitrango/fireants, ~/Pkg/fireants) as a third
 arm to the syntx-vs-antstorch Mindboggle-101 comparison
-(tools/compare_syntx_antstorch_mindboggle.py).
+(tools/benchmarks/compare_syntx_antstorch_mindboggle.py).
 
 Design decisions (confirmed with the user 2026-09-22, see the project doc,
 "Cadre du recalage d'ANTsTorch", section on the FireANTs integration):
@@ -54,7 +54,7 @@ _fit_or_load_canonical_affine` (same canonical-affine cache), and
 `antstorch.benchmark.metrics.compute_bidirectional_dice`/
 `compute_jacobian_metrics` (same Dice/Jacobian scoring) -- so FireANTs'
 numbers are directly comparable to every number already produced by
-tools/compare_syntx_antstorch_mindboggle.py, not a separately-defined
+tools/benchmarks/compare_syntx_antstorch_mindboggle.py, not a separately-defined
 metric.
 
 This is a *separate* script from compare_syntx_antstorch_mindboggle.py
@@ -64,9 +64,9 @@ directly -- both scripts must live in the same directory) and adds a third
 `fireants` column, so a single run produces one 3-way table.
 
 Usage (place next to compare_syntx_antstorch_mindboggle.py, e.g. in
-`tools/`):
+`tools/benchmarks/`):
 
-    python tools/compare_fireants_mindboggle.py --pairs 0 24 88 \\
+    python tools/benchmarks/compare_fireants_mindboggle.py --pairs 0 24 88 \\
         --models gaussian --device cuda:1
 
 Requires `~/Pkg/fireants` to be cloned on whatever machine this runs on
@@ -105,7 +105,7 @@ def _load_sibling_module():
         raise FileNotFoundError(
             f"Expected compare_syntx_antstorch_mindboggle.py next to this script "
             f"at '{_SIBLING_SCRIPT}' (to reuse its _run_syntx/_run_antstorch) -- "
-            f"place both files in the same directory (e.g. tools/)."
+            f"place both files in the same directory (e.g. tools/benchmarks/)."
         )
     spec = importlib.util.spec_from_file_location("compare_syntx_antstorch_mindboggle", _SIBLING_SCRIPT)
     mod = importlib.util.module_from_spec(spec)

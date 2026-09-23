@@ -8,7 +8,7 @@ dimensionality ``syn_registration()`` itself supports -- unlike
 step of its own, since ``syn_registration`` accepts/returns
 ``ants.ANTsImage`` objects directly).
 
-Sibling script to ``tools/run_svf_registration.py``, built as closely
+Sibling script to ``tools/registration/run_svf_registration.py``, built as closely
 as possible to the same CLI shape and output-artifact conventions, but using
 :func:`antstorch.syn.syn_registration` -- the affine+SyN framework -- instead
 of :func:`antstorch.bspline_flows.bspline_svf_registration`. Two differences
@@ -31,33 +31,33 @@ Example
 -------
 Run the default affine+SyN registration on CPU::
 
-    PYTHONPATH=. python tools/run_syn_registration.py
+    PYTHONPATH=. python tools/registration/run_syn_registration.py
 
 Register your own images instead of the bundled r30/r27 demo pair::
 
-    PYTHONPATH=. python tools/run_syn_registration.py \
+    PYTHONPATH=. python tools/registration/run_syn_registration.py \
         --fixed /path/to/fixed.nii.gz --moving /path/to/moving.nii.gz
 
 Use an accelerator and fewer iterations::
 
-    PYTHONPATH=. python tools/run_syn_registration.py \
+    PYTHONPATH=. python tools/registration/run_syn_registration.py \
         --device mps --reg-iterations 40 30 20 --output-dir syn_registration_output
 
 Use the local normalized cross-correlation metric for the dense SyN stage
 (the same similarity vocabulary as run_svf_registration.py's --similarity)::
 
-    PYTHONPATH=. python tools/run_syn_registration.py \
+    PYTHONPATH=. python tools/registration/run_syn_registration.py \
         --similarity cc --neighborhood-radius 2 --verbose
 
 Run the dense SyN stage alone, with no affine initialization (closest analog
 of ``run_svf_registration.py``'s own default)::
 
-    PYTHONPATH=. python tools/run_syn_registration.py \
+    PYTHONPATH=. python tools/registration/run_syn_registration.py \
         --type-of-transform SyNOnly --verbose
 
 Fit only an affine transform, no dense stage::
 
-    PYTHONPATH=. python tools/run_syn_registration.py \
+    PYTHONPATH=. python tools/registration/run_syn_registration.py \
         --type-of-transform Rigid --verbose
 
 Use the ANTs/ITK ``BSplineSyN`` regularizer (single-level cubic B-spline
@@ -67,7 +67,7 @@ mesh sizes are given at the pyramid's coarsest level and double at each
 finer one, mirroring ``antsRegistration``'s
 ``BSplineSyN[gradientStep,updateFieldMeshSizeAtBaseLevel,totalFieldMeshSizeAtBaseLevel,splineOrder]``::
 
-    PYTHONPATH=. python tools/run_syn_registration.py \
+    PYTHONPATH=. python tools/registration/run_syn_registration.py \
         --type-of-transform SyNOnly --regularizer bspline \
         --update-field-mesh-size-at-base-level 2 --verbose
 """

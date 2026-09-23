@@ -13,7 +13,7 @@ import ants
 # "sig_smallshort_train_*" weights were trained with these exact filter/
 # stage counts rather than one of default_dbpn()'s smaller named presets
 # ("small": nfilt=32/nff=64/nbp=4, "tiny": nfilt=32/nff=64/nbp=2). Every
-# .pt produced by tools/convert_mri_super_resolution_bespoke.py embeds the
+# .pt produced by tools/weights/convert_mri_super_resolution_bespoke.py embeds the
 # real values read directly out of each file's own model_config JSON, so
 # this fallback should never actually be used once weights are converted
 # with that script -- it exists only so a bare (unwrapped) state_dict
@@ -34,7 +34,7 @@ _VALID_EXPANSION_FACTORS = {
 def _load_state_dict_and_kwargs(weights_file_name, expansion_factor):
     """Returns (state_dict, architecture_kwargs). Prefers the
     "architecture_kwargs" saved alongside the weights by
-    tools/convert_mri_super_resolution_bespoke.py (read directly from the
+    tools/weights/convert_mri_super_resolution_bespoke.py (read directly from the
     real ANTsPyNet .h5's own model_config JSON at conversion time -- see
     that script's module docstring); falls back to
     _DBPN_3D_FALLBACK_KWARGS + strides=expansion_factor for a bare
@@ -76,7 +76,7 @@ def mri_super_resolution(image,
     a structurally different architecture, see that class's docstring). The
     real per-model hyperparameters (filter/stage counts) are read directly
     out of each real .h5's embedded model_config JSON by
-    tools/convert_mri_super_resolution_bespoke.py and saved alongside the
+    tools/weights/convert_mri_super_resolution_bespoke.py and saved alongside the
     weights -- see _load_state_dict_and_kwargs above -- so no
     _DBPN_3D_CONFIGS-style lookup table is hardcoded here any more. Use
     architecture_kwargs to override anything once you've confirmed it.

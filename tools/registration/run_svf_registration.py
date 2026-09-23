@@ -17,36 +17,36 @@ Example
 -------
 Run the default four-level registration on CPU::
 
-    PYTHONPATH=. python tools/run_svf_registration.py
+    PYTHONPATH=. python tools/registration/run_svf_registration.py
 
 Register your own images instead of the bundled r30/r27 demo pair -- 2-D or
 3-D, e.g. a real Mindboggle-style pair::
 
-    PYTHONPATH=. python tools/run_svf_registration.py \
+    PYTHONPATH=. python tools/registration/run_svf_registration.py \
         --fixed /path/to/fixed.nii.gz --moving /path/to/moving.nii.gz
 
 Use an accelerator and fewer iterations::
 
-    PYTHONPATH=. python tools/run_svf_registration.py \
+    PYTHONPATH=. python tools/registration/run_svf_registration.py \
         --device mps --iterations 40 30 20 --output-dir registration_output
 
 Run the dense Gaussian-regularized SVF::
 
-    PYTHONPATH=. python tools/run_svf_registration.py \
+    PYTHONPATH=. python tools/registration/run_svf_registration.py \
         --transform-type gaussian_svf --update-field-sigma 3 \
         --total-field-sigma 0.5 --verbose
 
 Use the squared local normalized cross-correlation metric (the same
 similarity vocabulary as run_syn_registration.py's --similarity)::
 
-    PYTHONPATH=. python tools/run_svf_registration.py \
+    PYTHONPATH=. python tools/registration/run_svf_registration.py \
         --similarity cc2 --neighborhood-radius 2 --verbose
 
 Run an affine pre-registration before the selected SVF (bspline_flows has no
 affine/rigid initialization of its own; see
 ``antstorch.bspline_flows.affine_registration``)::
 
-    PYTHONPATH=. python tools/run_svf_registration.py \
+    PYTHONPATH=. python tools/registration/run_svf_registration.py \
         --affine --affine-transform-type Rigid --verbose
 """
 

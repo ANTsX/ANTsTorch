@@ -8,7 +8,7 @@ image super resolution.  See:
     https://arxiv.org/abs/1803.02735
 
 Ported to match, layer for layer, the Keras implementation in ANTsPyNet so
-that weights converted via tools/convert_antspynet_weights_to_antstorch.py
+that weights converted via tools/weights/convert_antspynet_weights_to_antstorch.py
 map cleanly onto this state_dict.
 
 The 3-D variant (added 2026-08-22 for antstorch.utilities.mri_super_resolution)
@@ -230,7 +230,7 @@ class create_deep_back_projection_network_model_2d(nn.Module):
 # not guessed). The exact number_of_base_filters/number_of_feature_filters/
 # number_of_back_projection_stages actually used to train these specific
 # weights (vs. default_dbpn()'s "large"/"small"/"tiny" presets) is NOT
-# confirmed -- tools/convert_mri_super_resolution_bespoke.py reads these
+# confirmed -- tools/weights/convert_mri_super_resolution_bespoke.py reads these
 # directly from each real .h5's embedded model_config JSON at conversion
 # time rather than hardcoding a guess, which sidesteps that uncertainty.
 # =============================================================================

@@ -25,7 +25,7 @@ along**: input_channel_size=3, number_of_outputs=2, mode="regression",
 every other argument at its plain default (layers=(1,2,3,4),
 residual_block_schedule=(3,4,6,3), lowest_resolution=64, cardinality=1,
 squeeze_and_excite=False -- i.e. a standard ResNet-50). See
-tools/convert_quality_assessment_bespoke.py for the full derivation and a
+tools/weights/convert_quality_assessment_bespoke.py for the full derivation and a
 dedicated converter.
 
 This has only been independently confirmed against koniqMS3. It is
@@ -56,7 +56,7 @@ import ants
 # embedded "architecture_kwargs" (see _load_state_dict_and_kwargs below).
 # These are antstorch's create_resnet_model_2d plain defaults -- confirmed
 # to match the real koniqMS3.h5 exactly (see the confidence note above and
-# tools/convert_quality_assessment_bespoke.py). Every .pt produced by that
+# tools/weights/convert_quality_assessment_bespoke.py). Every .pt produced by that
 # script embeds this same config directly (re-derived per file, not
 # assumed), so this fallback should only matter for an older bare-state_dict
 # .pt that predates that script.
@@ -66,7 +66,7 @@ _QA_FALLBACK_KWARGS = dict(input_channel_size=3, number_of_outputs=2, mode="regr
 def _load_state_dict_and_kwargs(weights_file_name):
     """Returns (state_dict, architecture_kwargs). Prefers the
     "architecture_kwargs" saved alongside the weights by
-    tools/convert_quality_assessment_bespoke.py (read directly from the real
+    tools/weights/convert_quality_assessment_bespoke.py (read directly from the real
     ANTsPyNet .h5's own model_config JSON at conversion time); falls back to
     _QA_FALLBACK_KWARGS for a bare state_dict .pt that doesn't carry this
     metadata."""

@@ -26,8 +26,8 @@ value range consistent with the model's output activation (sigmoid ->
 
 No pretrained weights are loaded, so these tests do NOT validate
 numerical correctness against the original Keras models -- that is
-covered separately by tools/convert_antspynet_weights_to_antstorch.py
-and tools/convert_wmh_bespoke.py, which each reload a converted .pt file
+covered separately by tools/weights/convert_antspynet_weights_to_antstorch.py
+and tools/weights/convert_wmh_bespoke.py, which each reload a converted .pt file
 and compare against a bit-exact round trip.
 
 A few branches (protonLobes/maskLobes, ct, mouse_brain_parcellation)

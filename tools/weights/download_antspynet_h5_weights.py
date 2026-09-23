@@ -8,9 +8,9 @@ white_matter_hyperintensity_segmentation, hippmapp3r_segmentation/
 hypothalamus_segmentation/claustrum_segmentation, mri_super_resolution.py's
 SIQ DBPN models -- added 2026-08-22 -- and, added 2026-08-23,
 quality_assessment.py's tidsQualityAssessment/koniqMS* models) -- the
-inputs that tools/convert_wmh_bespoke.py, tools/convert_lung_mouse_bespoke.py,
-tools/convert_hippmapp3r_hypothalamus_claustrum_bespoke.py, and
-tools/convert_mri_super_resolution_bespoke.py read from
+inputs that tools/weights/convert_wmh_bespoke.py, tools/weights/convert_lung_mouse_bespoke.py,
+tools/weights/convert_hippmapp3r_hypothalamus_claustrum_bespoke.py, and
+tools/weights/convert_mri_super_resolution_bespoke.py read from
 `~/.keras/ANTsXNet/` to produce the ANTsTorch `_pytorch.pt` files. (No
 dedicated converter exists yet for quality_assessment -- see the manifest
 entry below for why downloading these 4 files is still useful.)
@@ -30,10 +30,10 @@ manifest below and is reported clearly at the end rather than silently
 skipped -- see the NOT_YET_PUBLIC list.
 
 Usage:
-    python download_antspynet_h5_weights.py
-    python download_antspynet_h5_weights.py --out-dir ~/.keras/ANTsXNet --workers 8
-    python download_antspynet_h5_weights.py --only protonLungMri hyperMapp3r
-    python download_antspynet_h5_weights.py --force   # redownload everything
+    python tools/weights/download_antspynet_h5_weights.py
+    python tools/weights/download_antspynet_h5_weights.py --out-dir ~/.keras/ANTsXNet --workers 8
+    python tools/weights/download_antspynet_h5_weights.py --only protonLungMri hyperMapp3r
+    python tools/weights/download_antspynet_h5_weights.py --force   # redownload everything
 """
 import argparse
 import os
@@ -135,7 +135,7 @@ MANIFEST = {
     # JSON confirmed the real architecture (a standard ResNet-50, exactly matching
     # antstorch's already-ported create_resnet_model_2d defaults) the same way it
     # did for the SIQ DBPN models used by mri_super_resolution -- see
-    # tools/convert_quality_assessment_bespoke.py, now a real dedicated converter
+    # tools/weights/convert_quality_assessment_bespoke.py, now a real dedicated converter
     # for these 4 ids (confirmed against koniqMS3 only so far; the other 3 are
     # presumed, not yet independently verified, to share the same architecture).
     "tidsQualityAssessment": 35295391,

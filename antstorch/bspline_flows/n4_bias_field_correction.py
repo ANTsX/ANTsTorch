@@ -186,7 +186,7 @@ def _shrunk_domain(domain: ImageDomain, shrink_factor: int) -> ImageDomain:
     different mappings of the same physical mesh, increasingly mismatched at
     finer mesh levels. That was A root cause of divergence at N4's default
     4-level/50-iteration setting -- but NOT the only one. Measured directly
-    against ANTsPy (see ``tools/compare_n4_bias_field_correction.py``),
+    against ANTsPy (see ``tools/benchmarks/compare_n4_bias_field_correction.py``),
     normalized log-bias MAE still grows with the number of fitting levels
     even after this fix, holding total iteration count roughly fixed
     (0.041 at 1 level -> 0.060 at 2 -> 0.105 at 3 -> 0.136 at 4, on ``r16``).
