@@ -11,6 +11,8 @@ import math
 import numpy as np
 import torch
 
+from ...registration import RegAdamState, reg_adam_direction
+
 
 class LARS(torch.optim.Optimizer):
     r"""Layer-wise Adaptive Rate Scaling (LARS) optimizer for velocity parameters.
@@ -152,22 +154,19 @@ class RegAdam(torch.optim.Optimizer):
                     state['exp_avg'] = torch.zeros_like(p)
                     state['exp_avg_sq'] = torch.zeros_like(p)
 
-                state['step'] += 1
-                k = state['step']
-                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
-
-                exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
-                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
-
-                bias_corr1 = 1.0 - beta1 ** k
-                bias_corr2 = 1.0 - beta2 ** k
-
-                denom = (exp_avg_sq.sqrt() / math.sqrt(bias_corr2)).add_(eps)
-                raw_step = (exp_avg / bias_corr1) / denom
+                shared_state = RegAdamState(
+                    step=state['step'],
+                    exp_avg=state['exp_avg'],
+                    exp_avg_sq=state['exp_avg_sq'],
+                )
+                shared_state, raw_step = reg_adam_direction(
+                    grad, shared_state, betas=(beta1, beta2), eps=eps,
+                )
+                state['step'] = shared_state.step
 
                 if reg_fn is not None:
                     smooth_step = reg_fn(raw_step)
-                elif reg_mode == 'gaussian' or (gauss_sig is not None and gauss_sig > 0 and reg_mode != 'sobolev'):
+                elif reg_mode == 'gaussian' and gauss_sig is not None and gauss_sig > 0:
                     from .smoothing import separable_gaussian_filter
                     if raw_step.ndim in (5, 6) and raw_step.shape[1] == 1:
                         s = raw_step.squeeze(1)

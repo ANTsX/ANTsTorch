@@ -50,6 +50,27 @@ def test_regadam_respects_cfl_step_bound():
     assert step_norm.max().item() <= 0.1 + 1e-6
 
 
+@pytest.mark.parametrize("regularizer", ["none", "dsti", "dsti1"])
+def test_regadam_does_not_fall_through_to_gaussian_regularization(monkeypatch, regularizer):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("Gaussian regularization should not be used")
+
+    monkeypatch.setattr(
+        "antstorch.syn.core.smoothing.separable_gaussian_filter",
+        fail_if_called,
+    )
+    p = torch.nn.Parameter(torch.zeros(1, 5, 5, 2))
+    opt = RegAdam(
+        [p],
+        lr=0.1,
+        regularizer=regularizer,
+        gaussian_sigma=1.5,
+        max_step_norm=None,
+    )
+    p.grad = torch.ones_like(p)
+    opt.step()
+
+
 def test_get_cfl_max_norm():
     velocity = torch.zeros(1, 4, 4, 2)
     velocity[0, 0, 0, 0] = 3.0

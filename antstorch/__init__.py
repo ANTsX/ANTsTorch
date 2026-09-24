@@ -9,4 +9,6 @@ from .lamnr_flows import lamnr_flows_whitener, apply_lamnr_flows_whitener
 from .utilities import *
 from .bspline_flows import *
 from . import syn
+from . import registration
+from . import direct
 from . import benchmark
