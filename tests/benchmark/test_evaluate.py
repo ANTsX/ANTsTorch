@@ -37,7 +37,10 @@ def _assert_valid_success_record(rec, model):
     assert len(rec["transforms"]["invtransforms"]) >= 1
 
 
-@pytest.mark.parametrize("model", ["gaussian_syn", "sobolev_syn", "dsti_syn", "bspline_syn"])
+@pytest.mark.parametrize("model", [
+    "gaussian_syn", "sobolev_syn", "dsti_syn", "bspline_syn",
+    "gaussian_regadam", "sobolev_regadam", "dsti_regadam", "bspline_regadam",
+])
 def test_evaluate_mindboggle_pair_syn_regularizers(mock_mindboggle_dataset, tmp_path, model):
     pairs_csv, data_dir = mock_mindboggle_dataset
     rec = evaluate_mindboggle_pair(
@@ -586,3 +589,32 @@ def test_evaluate_mindboggle_pair_shares_canonical_affine_across_models(mock_min
     )
     assert os.path.getmtime(affine_path) == mtime_after_first
     assert rec1["affine_dice_sym"] == pytest.approx(rec2["affine_dice_sym"], abs=1e-9)
+
+
+@pytest.mark.parametrize("syn_model,regadam_model", [
+    ("gaussian_syn", "gaussian_regadam"),
+    ("sobolev_syn", "sobolev_regadam"),
+    ("dsti_syn", "dsti_regadam"),
+    ("bspline_syn", "bspline_regadam"),
+])
+def test_regadam_arm_differs_from_its_syn_counterpart(mock_mindboggle_dataset, tmp_path, syn_model, regadam_model):
+    # Each '_regadam' arm is a separate arm (project doc, "écart dsti"
+    # §34-§41): same dense-SyN loop and regularizer as its '_syn'
+    # counterpart, but with syn_registration(optimizer='reg_adam') instead
+    # of the default 'gradient_descent'. optimizer and regularizer are
+    # independent knobs in syn_registration() itself, so this is exercised
+    # for all four regularizers, not just 'dsti' (where it was first added).
+    # This just confirms each new arm actually exercises a different update
+    # rule rather than silently aliasing its '_syn' counterpart.
+    pairs_csv, data_dir = mock_mindboggle_dataset
+    canonical_affine_dir = str(tmp_path / "canonical_affines")
+    common = dict(
+        pair_idx=0, device="cpu", pairs_csv=pairs_csv, data_dir=data_dir,
+        canonical_affine_dir=canonical_affine_dir, use_n4=False,
+        reg_iterations=[3, 2, 1, 1],
+    )
+    rec_syn = evaluate_mindboggle_pair(model=syn_model, **common)
+    rec_regadam = evaluate_mindboggle_pair(model=regadam_model, **common)
+    _assert_valid_success_record(rec_syn, syn_model)
+    _assert_valid_success_record(rec_regadam, regadam_model)
+    assert rec_syn["dice_sym"] != pytest.approx(rec_regadam["dice_sym"], abs=1e-9)

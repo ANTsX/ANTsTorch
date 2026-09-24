@@ -84,6 +84,20 @@ _LINEAR_TRANSFORM_TYPES = ("Translation", "Rigid", "Similarity", "Affine")
 _SYN_TRANSFORM_TYPES = ("SyN", "SyNOnly")
 _SIMILARITY_METRICS = ("mse", "lncc", "cc", "lncc2", "cc2", "mattes", "mi", "box_cc2", "dice")
 _REGULARIZERS = ("gaussian", "sobolev", "dsti", "bspline")
+# 'gradient_descent' (default): the existing CFL-bounded plain-gradient
+# Eulerian update. 'reg_adam': ported from syntx's greedy.py
+# GreedyRegistration.fit() -- per-voxel first/second Adam moments are
+# accumulated across iterations (reset at the start of each pyramid level,
+# matching syntx's "Reset Adam warm-up step at each scale level"), and the
+# bias-corrected Adam step-direction quotient is regularized (via the same
+# _apply_regularizer already used below) in place of the raw similarity
+# gradient -- everything downstream (CFL bound, antisymmetric projection,
+# Eulerian composition, in-loop inversion) is unchanged. See the project
+# doc ("écart dsti", §34/§36/§39-40) for why this was added: to test
+# whether syntx's own dsti-arm advantage comes from its Adam-momentum
+# optimizer rather than from the full time-varying-velocity-field (TVF)
+# architecture its benchmark harness actually routes 'dsti' through.
+_OPTIMIZERS = ("gradient_descent", "reg_adam")
 
 
 def _level_values(value, levels: int, name: str) -> tuple:
@@ -334,6 +348,9 @@ def _fit_syn_level(
     num_levels: int,
     gaussian_sigma_mode: str = "physical",
     conservative_smooth: bool = False,
+    optimizer: str = "gradient_descent",
+    adam_betas: Tuple[float, float] = (0.9, 0.999),
+    adam_eps: float = 1e-8,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor, list]:
     device, dtype = I_curr.device, I_curr.dtype
     fixed_meta_t = metadata_tensors_from_dict(fixed_meta, device, dtype)
@@ -341,6 +358,23 @@ def _fit_syn_level(
     X_phys = _physical_grid(fixed_meta, device, dtype)
     boundary_mask = get_boundary_mask(fixed_meta["torch_shape"], device, dtype)
     level_cfl_voxels = grad_step * math.sqrt(float(shrink_factor))
+
+    # reg_adam: per-voxel Adam first/second moments, reset at the start of
+    # every pyramid level (this function is called once per level) --
+    # mirrors syntx's greedy.py GreedyRegistration.fit() ("Reset Adam
+    # warm-up step at each scale level"). Kept as plain tensors (not a
+    # torch.optim.Optimizer over nn.Parameters) since warp_l2r/warp_r2l are
+    # not themselves the optimized leaves here -- the *gradient* fed into
+    # the existing regularizer/CFL/composition pipeline below is what
+    # changes between the two optimizer modes, nothing downstream of it.
+    use_reg_adam = optimizer == "reg_adam"
+    if use_reg_adam:
+        beta1, beta2 = adam_betas
+        exp_avg_l = torch.zeros_like(warp_l2r)
+        exp_avg_sq_l = torch.zeros_like(warp_l2r)
+        exp_avg_r = torch.zeros_like(warp_r2l)
+        exp_avg_sq_r = torch.zeros_like(warp_r2l)
+        adam_step = 0
 
     # ITK's BSplineSyN doubles the update/total-field control-point mesh
     # (like any TransformParametersAdaptor) from the coarsest pyramid level
@@ -394,6 +428,25 @@ def _fit_syn_level(
         grad_r = warp_r2l_leaf.grad
         if grad_l is None or grad_r is None or not torch.isfinite(grad_l).all() or not torch.isfinite(grad_r).all():
             raise FloatingPointError(f"non-finite SyN half-warp gradient at resolution level {level_index + 1}")
+
+        if use_reg_adam:
+            # Accumulate per-voxel Adam moments on the raw similarity
+            # gradient, then replace it with the bias-corrected step
+            # quotient -- exactly syntx greedy.py's exp_avg/exp_avg_sq
+            # update, just without its separate flow_sigma pre-smoothing
+            # step (this port applies the *regularizer* to the quotient
+            # below via the same _apply_regularizer call already used for
+            # 'gradient_descent', rather than introducing a second,
+            # differently-scoped smoothing pass).
+            adam_step += 1
+            exp_avg_l.mul_(beta1).add_(grad_l, alpha=1.0 - beta1)
+            exp_avg_sq_l.mul_(beta2).addcmul_(grad_l, grad_l, value=1.0 - beta2)
+            exp_avg_r.mul_(beta1).add_(grad_r, alpha=1.0 - beta1)
+            exp_avg_sq_r.mul_(beta2).addcmul_(grad_r, grad_r, value=1.0 - beta2)
+            bias_corr1 = 1.0 - beta1 ** adam_step
+            bias_corr2 = 1.0 - beta2 ** adam_step
+            grad_l = (exp_avg_l / bias_corr1) / ((exp_avg_sq_l / bias_corr2).sqrt().add_(adam_eps))
+            grad_r = (exp_avg_r / bias_corr1) / ((exp_avg_sq_r / bias_corr2).sqrt().add_(adam_eps))
 
         grad_l = _apply_regularizer(
             grad_l * boundary_mask, regularizer, flow_sigma, fixed_meta["spacing"],
@@ -536,6 +589,9 @@ def syn_registration(
     flow_sigma: float = 3.0,
     total_sigma: float = 0.0,
     regularizer: str = "gaussian",
+    optimizer: str = "gradient_descent",
+    adam_betas: Tuple[float, float] = (0.9, 0.999),
+    adam_eps: float = 1e-8,
     update_field_mesh_size_at_base_level: Optional[int] = None,
     total_field_mesh_size_at_base_level: int = 0,
     update_field_spline_distance: Optional[Union[float, Sequence[float]]] = None,
@@ -604,6 +660,19 @@ def syn_registration(
     elastic regularization of the composed field (``total_sigma`` for
     ``'gaussian'``/``'sobolev'``/``'dsti'``, plain Gaussian, disabled by
     default).
+
+    ``optimizer`` selects what the regularizer (``flow_sigma``) is applied
+    to each iteration: ``'gradient_descent'`` (default) applies it directly
+    to the raw similarity gradient, as above. ``'reg_adam'`` instead
+    accumulates per-voxel Adam first/second moments (``adam_betas``,
+    ``adam_eps``) across the level's iterations -- reset at the start of
+    each pyramid level -- and applies the regularizer to the resulting
+    bias-corrected step-direction quotient instead, ported from syntx's
+    ``greedy.py`` ``GreedyRegistration``. Everything else (the CFL bound,
+    antisymmetric projection, Eulerian composition) is unchanged; this
+    option exists to isolate whether an accuracy gap against another
+    library's regularizer comes from the regularizer itself or from the
+    Adam-momentum optimizer it happens to be paired with there.
 
     ``gaussian_sigma_mode`` and ``conservative_smooth`` tune two
     ``'gaussian'``/``'sobolev'``/``'dsti'`` regularizer-formula details that
@@ -725,6 +794,8 @@ def syn_registration(
         raise ValueError(f"syn_metric must be one of {_SIMILARITY_METRICS}")
     if regularizer not in _REGULARIZERS:
         raise ValueError(f"regularizer must be one of {_REGULARIZERS}")
+    if optimizer not in _OPTIMIZERS:
+        raise ValueError(f"optimizer must be one of {_OPTIMIZERS}")
     if update_field_mesh_size_at_base_level is not None and update_field_mesh_size_at_base_level < 0:
         raise ValueError("update_field_mesh_size_at_base_level must be >= 0")
     if total_field_mesh_size_at_base_level < 0:
@@ -1054,6 +1125,9 @@ def syn_registration(
             num_levels=num_levels,
             gaussian_sigma_mode=gaussian_sigma_mode,
             conservative_smooth=conservative_smooth,
+            optimizer=optimizer,
+            adam_betas=adam_betas,
+            adam_eps=adam_eps,
         )
         level_loss_history.append(history)
 
@@ -1151,6 +1225,7 @@ def syn_registration(
             "flow_sigma": flow_sigma,
             "total_sigma": total_sigma,
             "regularizer": regularizer,
+            "optimizer": optimizer,
             "gaussian_sigma_mode": gaussian_sigma_mode,
             "conservative_smooth": conservative_smooth,
             "update_field_mesh_size_at_base_level": resolved_update_field_mesh_size_at_base_level,

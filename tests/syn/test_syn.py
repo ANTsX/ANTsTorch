@@ -754,3 +754,79 @@ def test_syn_registration_linear_only_fwdtransforms_usable_with_ants_apply_trans
     diff = np.abs(applied.numpy() - result["warpedmovout"].numpy())
     assert diff.mean() < 1e-3
     assert diff.max() < 0.05
+
+
+# --- optimizer='reg_adam' ----------------------------------------------------
+
+
+def test_syn_registration_rejects_unknown_optimizer():
+    fixed, moving = _ants_pair_2d()
+    with pytest.raises(ValueError, match="optimizer"):
+        syn_registration(fixed, moving, type_of_transform="SyNOnly", optimizer="nonsense")
+
+
+def test_syn_only_reduces_loss_with_reg_adam_optimizer():
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    result = syn_registration(
+        fixed, moving, type_of_transform="SyNOnly",
+        levels=(2, 1), reg_iterations=(15, 10), syn_metric="mse", grad_step=0.4, flow_sigma=2.0,
+        regularizer="dsti", optimizer="reg_adam",
+    )
+    assert result["loss_history"][-1] < result["loss_history"][0]
+    assert len(result["level_loss_history"]) == 2
+    assert result["provenance"]["optimizer"] == "reg_adam"
+    assert torch.isfinite(torch.tensor(result["loss_history"])).all()
+
+
+def test_syn_registration_default_optimizer_is_gradient_descent():
+    fixed, moving = _ants_pair_2d()
+    result = syn_registration(
+        fixed, moving, type_of_transform="SyNOnly", levels=(1,), reg_iterations=(5,), syn_metric="mse",
+    )
+    assert result["provenance"]["optimizer"] == "gradient_descent"
+
+
+def test_reg_adam_optimizer_changes_the_update_trajectory_vs_gradient_descent():
+    # Same everything else (seeded identically via the same deterministic
+    # synthetic pair and fixed hyperparameters) -- reg_adam's per-voxel Adam
+    # moments should make its loss trajectory diverge from the plain
+    # CFL-bounded gradient-descent trajectory after the first iteration
+    # (where the two are identical, since Adam's bias-corrected quotient on
+    # iteration 1 with zero-initialized moments is proportional to
+    # sign(grad), not equal to grad -- so they can differ immediately).
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    kwargs = dict(
+        type_of_transform="SyNOnly", levels=(1,), reg_iterations=(8,), syn_metric="mse",
+        grad_step=0.4, flow_sigma=2.0, regularizer="dsti",
+    )
+    gd = syn_registration(fixed, moving, optimizer="gradient_descent", **kwargs)
+    ra = syn_registration(fixed, moving, optimizer="reg_adam", **kwargs)
+    gd_hist = torch.tensor(gd["loss_history"])
+    ra_hist = torch.tensor(ra["loss_history"])
+    assert torch.isfinite(gd_hist).all() and torch.isfinite(ra_hist).all()
+    assert not torch.allclose(gd_hist, ra_hist)
+
+
+def test_reg_adam_optimizer_resets_adam_moments_at_each_pyramid_level():
+    # Purely a "does it run without shape errors across a level change"
+    # check -- _fit_syn_level zero-initializes exp_avg/exp_avg_sq fresh on
+    # every call (i.e. every level), so the per-level warp resolution change
+    # must never hit a stale, wrongly-shaped Adam moment buffer.
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    result = syn_registration(
+        fixed, moving, type_of_transform="SyNOnly",
+        levels=(2, 1), reg_iterations=(6, 6), syn_metric="mse", grad_step=0.4, flow_sigma=2.0,
+        regularizer="sobolev", optimizer="reg_adam",
+    )
+    assert len(result["level_loss_history"]) == 2
+    assert torch.isfinite(torch.tensor(result["loss_history"])).all()
+
+
+def test_reg_adam_optimizer_works_in_3d():
+    fixed, moving = _ants_pair_3d()
+    result = syn_registration(
+        fixed, moving, type_of_transform="SyNOnly",
+        levels=(1,), reg_iterations=(5,), syn_metric="mse", grad_step=0.3, flow_sigma=1.5,
+        regularizer="dsti", optimizer="reg_adam",
+    )
+    assert torch.isfinite(torch.tensor(result["loss_history"])).all()
