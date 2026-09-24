@@ -12,7 +12,11 @@ decision, to registration arms that come from ANTsTorch itself:
   deliberate: it distinguishes these four dense-SyN-stage variants from
   ``'bspline_svf'`` below, which is a different transformation family
   entirely (a stationary velocity field) despite the two sharing the word
-  "bspline".
+  "bspline". Each has a ``'_regadam'`` counterpart (``'gaussian_regadam'``,
+  ``'sobolev_regadam'``, ``'dsti_regadam'``, ``'bspline_regadam'``) — the
+  same regularizer, but with ``syn_registration(optimizer='reg_adam')``
+  instead of the default ``'gradient_descent'`` (a lightweight port of
+  syntx's ``greedy.py`` Adam-momentum pattern; see the project doc, §40/§41).
 - ``antstorch.bspline_flows.bspline_svf_registration()`` — the cubic
   B-spline stationary-velocity-field model (``'bspline_svf'``/``'svf'``).
 - ``antstorch.bspline_flows.gaussian_svf_registration()`` — the dense
@@ -64,22 +68,36 @@ _SYN_REGULARIZERS = {
     "sobolev_syn": "sobolev",
     "dsti_syn": "dsti",
     "bspline_syn": "bspline",
-    # '_regadam' variant(s): same dense-SyN loop and regularizer, but with
-    # syn_registration(optimizer='reg_adam') instead of the default
-    # 'gradient_descent' -- see antstorch/syn/syn.py's _OPTIMIZERS docstring.
-    # Added specifically to test whether syntx's own advantage on 'dsti'
-    # (project doc, §34/§36/§39) comes from its Adam-momentum optimizer
-    # rather than from the full TVF architecture its own benchmark harness
-    # actually routes 'dsti' through -- a separate, new arm (dsti_regadam),
-    # deliberately NOT changing dsti_syn's own default so every prior run
-    # (§34-§39) stays reproducible as documented.
+    # '_regadam' variants: same dense-SyN loop and regularizer as their
+    # '_syn' counterpart above, but with syn_registration(optimizer=
+    # 'reg_adam') instead of the default 'gradient_descent' -- see
+    # antstorch/syn/syn.py's _OPTIMIZERS docstring. optimizer and
+    # regularizer are independent knobs in syn_registration() itself (the
+    # Adam-moment quotient is computed from the raw gradient before
+    # _apply_regularizer runs, for whichever regularizer was requested), so
+    # every regularizer has a '_regadam' counterpart here, not just 'dsti'.
+    # 'dsti_regadam' was added first, specifically to test whether syntx's
+    # own advantage on 'dsti' (project doc, §34/§36/§39) comes from its
+    # Adam-momentum optimizer rather than from the full TVF architecture
+    # its own benchmark harness actually routes 'dsti' through; the other
+    # three were added afterward (project doc, §41) once that turned out to
+    # be a generic optimizer switch, to let the same question be asked of
+    # 'gaussian'/'sobolev'/'bspline'. Each is a separate, new arm --
+    # deliberately NOT changing its '_syn' counterpart's own default, so
+    # every prior run (§34-§39) stays reproducible as documented.
+    "gaussian_regadam": "gaussian",
+    "sobolev_regadam": "sobolev",
     "dsti_regadam": "dsti",
+    "bspline_regadam": "bspline",
 }
 # model_lower values in _SYN_REGULARIZERS above that additionally force
 # syn_registration(optimizer=...) rather than leaving it at 'gradient_descent'
 # (or at whatever kwargs['optimizer'] the caller passed explicitly).
 _SYN_OPTIMIZER_OVERRIDE = {
+    "gaussian_regadam": "reg_adam",
+    "sobolev_regadam": "reg_adam",
     "dsti_regadam": "reg_adam",
+    "bspline_regadam": "reg_adam",
 }
 _BSPLINE_SVF_MODELS = ("bspline_svf", "svf")
 _GAUSSIAN_SVF_MODELS = ("gaussian_svf",)
@@ -584,14 +602,18 @@ def evaluate_mindboggle_pair(
         type_of_transform="SyNOnly", regularizer=..., initial_affine=...)``
         -- the canonical affine already fit for this pair is supplied
         directly, so only the fluid/B-spline regularizer differs between
-        them); ``'dsti_regadam'`` (same dense SyN stage and ``'dsti'``
-        regularizer as ``'dsti_syn'``, but with
+        them); ``'gaussian_regadam'``, ``'sobolev_regadam'``,
+        ``'dsti_regadam'``, ``'bspline_regadam'`` (each the same dense SyN
+        stage and regularizer as its ``'_syn'`` counterpart above, but with
         ``syn_registration(optimizer='reg_adam')`` instead of the default
-        ``'gradient_descent'`` -- a separate arm, added to test whether
-        syntx's own 'dsti' advantage comes from its Adam-momentum optimizer
-        rather than from the full time-varying-velocity-field architecture
-        its own benchmark harness actually uses for that model; see the
-        project doc), ``'bspline_svf'``/``'svf'`` (dispatches to
+        ``'gradient_descent'`` -- separate arms, since ``optimizer`` and
+        ``regularizer`` are independent in ``syn_registration()`` itself.
+        ``'dsti_regadam'`` was added first, to test whether syntx's own
+        'dsti' advantage comes from its Adam-momentum optimizer rather than
+        from the full time-varying-velocity-field architecture its own
+        benchmark harness actually uses for that model; the other three
+        followed once that turned out to be a generic optimizer switch, not
+        a 'dsti'-specific one -- see the project doc), ``'bspline_svf'``/``'svf'`` (dispatches to
         ``antstorch.bspline_flows.bspline_svf_registration()`` -- a
         different transformation family, a stationary velocity field, not a
         SyN variant despite ``'bspline_syn'``/``'bspline_svf'`` sharing the
@@ -639,15 +661,22 @@ def evaluate_mindboggle_pair(
     **kwargs
         Model-specific overrides, forwarded to the underlying registration
         call. Common ones: ``reg_iterations``, ``grad_step``, ``levels``
-        (all four ``_syn`` variants); ``flow_sigma``/
-        ``total_sigma`` (gaussian_syn/sobolev_syn/dsti_syn); ``gaussian_sigma_mode``/
-        ``conservative_smooth`` (gaussian_syn/sobolev_syn/dsti_syn -- both default
+        (all eight ``_syn``/``_regadam`` variants); ``flow_sigma``/
+        ``total_sigma`` (gaussian/sobolev/dsti, both ``_syn`` and
+        ``_regadam``); ``gaussian_sigma_mode``/
+        ``conservative_smooth`` (gaussian/sobolev/dsti, both ``_syn`` and
+        ``_regadam`` -- both default
         to this port's own regularizer-formula conventions; pass
         ``gaussian_sigma_mode="voxel"``/``conservative_smooth=True`` to instead
         reproduce ``syntx.syn``'s own default numbers, see
-        :func:`antstorch.syn.syn_registration`); ``update_field_mesh_size_at_base_level``/
+        :func:`antstorch.syn.syn_registration`); ``adam_betas``/``adam_eps``
+        (any ``_regadam`` variant -- forwarded to
+        :func:`antstorch.syn.syn_registration`'s own ``optimizer='reg_adam'``
+        moment-decay parameters; ``optimizer`` itself is set internally via
+        :data:`_SYN_OPTIMIZER_OVERRIDE` and is not a valid override here for
+        a ``_regadam`` model); ``update_field_mesh_size_at_base_level``/
         ``total_field_mesh_size_at_base_level``/``update_field_spline_distance``/
-        ``total_field_spline_distance`` (bspline_syn); ``shrink_factors``/
+        ``total_field_spline_distance`` (bspline_syn, bspline_regadam); ``shrink_factors``/
         ``smoothing_sigmas``/``mesh_size``/``spline_distance`` (bspline_svf);
         ``update_field_sigma``/``total_field_sigma``/``momentum``
         (gaussian_svf); ``reg_iterations``/``syn_metric``/``syn_sampling``/

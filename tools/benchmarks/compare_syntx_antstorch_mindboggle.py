@@ -13,16 +13,22 @@ Model-name mapping (see the project doc, this session's investigation):
     antstorch.benchmark.evaluate.evaluate_mindboggle_pair(model="<x>_syn").
   - dsti: syntx names it "syn_dsti1" (dsti1 regularizer via the reg_adam
     optimizer branch); antstorch names it "dsti_syn".
-  - dsti_regadam: antstorch-only variant, added 2026-09-24 (project doc
-    Section 40). Same dsti regularizer as dsti_syn but run through a
+  - <x>_regadam (x in gaussian/sobolev/dsti/bspline): antstorch-only
+    variants. dsti_regadam was added first, 2026-09-24 (project doc Section
+    40); the other three followed once it turned out optimizer='reg_adam'
+    is a fully generic switch in antstorch.syn.syn_registration(),
+    independent of the regularizer (project doc Section 41). Each is the
+    SAME regularizer as its <x>_syn counterpart but run through a
     lightweight port of syntx's RegAdam optimizer pattern (Adam-momentum
     quotient applied to the gradient before the existing regularizer call,
     reset each pyramid level -- see antstorch/syn/syn.py, optimizer=
-    "reg_adam") instead of antstorch's default plain gradient descent. It
-    is compared against the SAME syntx dsti arm as dsti_syn (there is no
-    separate syntx-side counterpart) -- the point is to see whether
-    matching syntx's optimizer, on antstorch's own greedy-SyN loop, closes
-    any of the dsti_syn vs syntx dsti gap documented in Sections 34/36/39.
+    "reg_adam") instead of antstorch's default plain gradient descent. Each
+    is compared against the SAME syntx arm as its <x>_syn counterpart --
+    there is no separate syntx-side "_regadam" model of its own for any of
+    the four -- the point is to see whether matching syntx's optimizer, on
+    antstorch's own greedy-SyN loop, closes any of the gap between antstorch
+    and syntx for that regularizer (first explored for dsti in Sections
+    34/36/39; the same question can now be asked of the other three).
   - bspline: antstorch exposes it directly as "bspline_syn" (one of the
     four _SYN_REGULARIZERS). syntx.benchmark.evaluate does NOT expose a
     "bspline" model name at all (its error message lists supported models
@@ -51,28 +57,38 @@ import time
 import traceback
 
 PAIR_INDICES_DEFAULT = [0, 24, 88]
-MODELS = ["gaussian", "sobolev", "dsti", "dsti_regadam", "bspline"]
+_BASE_MODELS = ["gaussian", "sobolev", "dsti", "bspline"]
+MODELS = _BASE_MODELS + [f"{m}_regadam" for m in _BASE_MODELS]
 
 SYNTX_ROOT = os.path.expanduser("~/Pkg/syntx")
 ANTSTORCH_ROOT = os.path.expanduser("~/Pkg/ANTsTorch")
 DATA_DIR = os.path.expanduser("~/Data/Public/Mindboggle/Volumes")
 
-# syntx model-name aliases for its evaluate_mindboggle_pair(model=...)
-# dsti_regadam has no syntx-side counterpart of its own -- it is compared
-# against the same syntx "dsti" arm as dsti_syn (see module docstring).
+
+def _base_reg(reg):
+    """Strips a "_regadam" suffix, if present: gaussian_regadam -> gaussian,
+    dsti -> dsti. Every "_regadam" model is compared against the same
+    syntx-side arm as its non-"_regadam" counterpart (see module docstring)
+    -- there is no separate syntx "_regadam" model for any of the four.
+    """
+    return reg[: -len("_regadam")] if reg.endswith("_regadam") else reg
+
+
+# syntx model-name aliases for its evaluate_mindboggle_pair(model=...).
+# "bspline" has no entry here -- see the "bspline" branch of _run_syntx()
+# below, which routes it (and "bspline_regadam") to _syntx_bspline_pair_eval()
+# instead, since syntx's own harness exposes no "bspline" model name at all.
 _SYNTX_MODEL_NAME = {
     "gaussian": "gaussian",
     "sobolev": "sobolev",
     "dsti": "syn_dsti1",
-    "dsti_regadam": "syn_dsti1",
 }
-_ANTSTORCH_MODEL_NAME = {
-    "gaussian": "gaussian_syn",
-    "sobolev": "sobolev_syn",
-    "dsti": "dsti_syn",
-    "dsti_regadam": "dsti_regadam",
-    "bspline": "bspline_syn",
-}
+# antstorch.benchmark.evaluate_mindboggle_pair(model=...) name for each
+# --models entry: the four base regularizers use the "_syn" suffix; the
+# four "_regadam" variants already match their antstorch.benchmark
+# _SYN_REGULARIZERS/_SYN_OPTIMIZER_OVERRIDE registry key directly.
+_ANTSTORCH_MODEL_NAME = {m: f"{m}_syn" for m in _BASE_MODELS}
+_ANTSTORCH_MODEL_NAME.update({f"{m}_regadam": f"{m}_regadam" for m in _BASE_MODELS})
 
 
 # --matched forces both harnesses onto the same grad_step/similarity-metric/
@@ -107,12 +123,19 @@ MATCHED_KWARGS = {
                      conservative_smooth=True),
     "bspline": dict(grad_step=0.25, syn_metric="cc2", levels=(4, 2, 1), reg_iterations=(100, 100, 20)),
     "dsti": dict(conservative_smooth=True),
-    # Same regularizer-formula matching as "dsti" (conservative_smooth). The
-    # optimizer itself (reg_adam vs plain gradient descent) is intentionally
-    # left unmatched -- it's the very thing being tested here -- and is
-    # already forced by antstorch.benchmark.evaluate's
-    # _SYN_OPTIMIZER_OVERRIDE for model="dsti_regadam", not by this script.
+    # Each "_regadam" variant gets the SAME regularizer-formula matching as
+    # its base counterpart above (gaussian_sigma_mode="voxel" for gaussian,
+    # conservative_smooth=True for sobolev/dsti, nothing for bspline -- it
+    # has no such formula knob), but never the grad_step/metric/schedule
+    # overrides: the optimizer itself (reg_adam vs plain gradient descent)
+    # is intentionally left unmatched -- it's the very thing being tested --
+    # and is already forced by antstorch.benchmark.evaluate's
+    # _SYN_OPTIMIZER_OVERRIDE for every "*_regadam" model name, not by this
+    # script.
+    "gaussian_regadam": dict(gaussian_sigma_mode="voxel"),
+    "sobolev_regadam": dict(conservative_smooth=True),
     "dsti_regadam": dict(conservative_smooth=True),
+    "bspline_regadam": dict(),
 }
 MATCHED_KWARGS_SYNTX = {
     "gaussian": dict(similarity_metric="cc2", reg_iterations=[100, 100, 20]),
@@ -156,10 +179,16 @@ def _run_syntx(reg, pair_idx, device, out_dir, matched=False):
     import syntx
     from syntx.benchmark.evaluate import evaluate_mindboggle_pair as syntx_eval
 
-    extra = MATCHED_KWARGS_SYNTX.get(reg, {}) if matched else {}
+    # A "_regadam" reg has no syntx-side model of its own -- run the SAME
+    # syntx-side evaluation as its base regularizer (see _base_reg() and the
+    # module docstring). rec["_regularizer"] below is still set to the
+    # original (unstripped) `reg`, so main()'s by_key grouping still pairs
+    # this record against the matching antstorch "_regadam" record.
+    base = _base_reg(reg)
+    extra = MATCHED_KWARGS_SYNTX.get(base, {}) if matched else {}
     t0 = time.time()
     try:
-        if reg == "bspline":
+        if base == "bspline":
             # Already grad_step=0.25 / similarity_metric='cc2' /
             # reg_iterations=[100,100,20] by construction (see the function
             # docstring) -- nothing further to force for --matched here.
@@ -167,7 +196,7 @@ def _run_syntx(reg, pair_idx, device, out_dir, matched=False):
         else:
             rec = syntx_eval(
                 pair_idx=pair_idx,
-                model=_SYNTX_MODEL_NAME[reg],
+                model=_SYNTX_MODEL_NAME[base],
                 device=device,
                 data_dir=DATA_DIR,
                 pairs_csv="examples/pairs.csv",
@@ -292,10 +321,14 @@ def main():
         "--matched", action="store_true",
         help="Force grad_step=0.25 / similarity_metric='cc2' / levels=(4,2,1) / "
              "reg_iterations=(100,100,20) on both sides for gaussian/sobolev/bspline "
-             "(dsti and dsti_regadam left alone on those settings: syntx's dsti arm "
-             "uses a different optimizer, reg_adam, not plain gradient descent, so "
-             "forcing these wouldn't isolate anything there -- only "
-             "conservative_smooth is matched for dsti/dsti_regadam). Use this to "
+             "(dsti and every *_regadam model left alone on those settings: the "
+             "syntx dsti arm -- also compared against every *_regadam model, see "
+             "module docstring -- uses a different optimizer, reg_adam, not plain "
+             "gradient descent, so forcing these wouldn't isolate anything there -- "
+             "only the regularizer-formula knob is matched for dsti/*_regadam, "
+             "i.e. conservative_smooth for sobolev_regadam/dsti_regadam/dsti, "
+             "gaussian_sigma_mode for gaussian_regadam, nothing extra for "
+             "bspline_regadam). Use this to "
              "check whether a Dice gap seen "
              "with each library's own out-of-the-box defaults survives once the "
              "optimization settings are equalized -- i.e. whether it comes from "
@@ -347,10 +380,13 @@ def main():
             delta = f"{(a['dice_sym'] - s['dice_sym']):+.4f}" if (s_ok and a_ok) else "—"
             s_t = f"{s.get('runtime_seconds', s.get('_wall_seconds', float('nan'))):.1f}" if s_ok else "—"
             a_t = f"{a.get('runtime_seconds', a.get('_wall_seconds', float('nan'))):.1f}" if a_ok else "—"
+            base = _base_reg(reg)
             if reg == "bspline":
                 label = reg + " (non-officiel)"
-            elif reg == "dsti_regadam":
-                label = reg + " (vs syntx dsti)"
+            elif reg == "bspline_regadam":
+                label = reg + " (non-officiel, vs syntx bspline)"
+            elif reg.endswith("_regadam"):
+                label = reg + f" (vs syntx {base})"
             else:
                 label = reg
             table_lines.append(f"| {pair_idx} | {label} | {s_dice} | {a_dice} | {delta} | {s_t} | {a_t} |")
