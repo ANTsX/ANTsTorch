@@ -1,7 +1,6 @@
 """Contours and analytical forces used by DiReCT."""
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor
 
 from ..syn.core.smoothing import separable_gaussian_filter

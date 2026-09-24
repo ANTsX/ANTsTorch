@@ -1,7 +1,7 @@
 """Tensor implementation of the historical DiReCT thickness iteration."""
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import torch
 from torch import Tensor

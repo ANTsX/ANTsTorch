@@ -45,13 +45,14 @@ def test_direct_core_returns_finite_thickness(optimizer):
     domain = ImageDomain((12, 12, 12))
     result = direct_cortical_thickness(
         segmentation, gray, white, domain,
-        iterations=1, integration_points=2, inverse_iterations=2,
+        iterations=3, integration_points=2, inverse_iterations=2,
         optimizer=optimizer,
     )
     assert result.thickness.shape == segmentation.shape
     assert torch.isfinite(result.thickness).all()
     assert (result.thickness >= 0).all()
-    assert len(result.energy_history) == 1
+    assert torch.count_nonzero(result.thickness) > 0
+    assert len(result.energy_history) == 3
 
 
 def test_ant_image_bridge_preserves_output_geometry():

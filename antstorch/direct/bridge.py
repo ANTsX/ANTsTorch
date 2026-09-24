@@ -1,8 +1,5 @@
 """ANTsImage interface for the tensor DiReCT implementation."""
 
-from typing import Optional, Tuple
-
-import numpy as np
 import torch
 
 from ..bspline_flows import ImageDomain
