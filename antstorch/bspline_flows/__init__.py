@@ -11,7 +11,7 @@ from .bspline_synthesis import (
     synthesize_bspline_velocity,
 )
 from .deterministic_registration import DeterministicBSplineRegistration
-from .n4_bias_field_correction import DEFAULT_N4_SPLINE_DISTANCE_MM, N4BiasFieldCorrection, n4_bias_field_correction
+from .n4_bias_field_correction import DEFAULT_N4_SPLINE_DISTANCE_MM, N4BiasFieldCorrection, n4_bias_field_correction_tensor
 from .physical_gradient_descent import PhysicalGradientDescent
 from .gaussian_svf_registration import gaussian_svf_registration
 from .bspline_svf_registration import DEFAULT_BSPLINE_SPLINE_DISTANCE_MM, bspline_svf_registration
@@ -49,7 +49,7 @@ __all__ = [
     "synthesize_bspline_velocity",
     "DeterministicBSplineRegistration",
     "N4BiasFieldCorrection",
-    "n4_bias_field_correction",
+    "n4_bias_field_correction_tensor",
     "DEFAULT_N4_SPLINE_DISTANCE_MM",
     "PhysicalGradientDescent",
     "gaussian_svf_registration",

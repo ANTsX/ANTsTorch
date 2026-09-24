@@ -14,7 +14,7 @@ levels, fit the current residual at every sample -> add it to a running
 coefficient lattice -> exactly refine that lattice for the next, finer
 level (see :func:`~.bspline_synthesis.refine_bspline_coefficients`). This is
 the same accumulate/refine pattern
-:func:`~.n4_bias_field_correction.n4_bias_field_correction` uses internally,
+:func:`~.n4_bias_field_correction.n4_bias_field_correction_tensor` uses internally,
 generalized here from N4's regular shrunk-image grid to arbitrary scattered
 points with independent parametric locations.
 """

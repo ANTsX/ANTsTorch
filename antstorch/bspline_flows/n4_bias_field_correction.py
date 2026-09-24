@@ -254,7 +254,7 @@ def _initial_lattice_size(domain: ImageDomain, spline_param) -> tuple:
     return tuple(int(value) + 3 for value in values)
 
 
-def n4_bias_field_correction(
+def n4_bias_field_correction_tensor(
     image: Tensor,
     domain: Optional[ImageDomain] = None,
     mask: Optional[Tensor] = None,
@@ -454,4 +454,4 @@ class N4BiasFieldCorrection(nn.Module):
         self.kwargs = kwargs
 
     def forward(self, image: Tensor, domain: Optional[ImageDomain] = None, mask: Optional[Tensor] = None, weight_mask: Optional[Tensor] = None) -> Tensor:
-        return n4_bias_field_correction(image, domain, mask, weight_mask=weight_mask, **self.kwargs)
+        return n4_bias_field_correction_tensor(image, domain, mask, weight_mask=weight_mask, **self.kwargs)

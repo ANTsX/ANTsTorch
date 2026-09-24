@@ -27,29 +27,6 @@ import torch
 import antstorch
 
 
-def ants_to_torch(image: ants.ANTsImage, device: torch.device) -> torch.Tensor:
-    """Convert ANTs x-y-z array storage to N-C-(D)-H-W PyTorch storage."""
-    array_itk = image.numpy().astype(np.float32, copy=False)
-    spatial_axes = tuple(range(image.dimension - 1, -1, -1))
-    array_torch = np.ascontiguousarray(np.transpose(array_itk, spatial_axes))
-    return torch.from_numpy(array_torch).unsqueeze(0).unsqueeze(0).to(device)
-
-
-def torch_to_ants(tensor: torch.Tensor, reference: ants.ANTsImage) -> ants.ANTsImage:
-    """Convert a singleton N-C PyTorch tensor back to reference ANTs geometry."""
-    if tensor.shape[:2] != (1, 1):
-        raise ValueError("This example expects a singleton batch and scalar image channel")
-    array_torch = tensor.detach().cpu().numpy()[0, 0]
-    spatial_axes = tuple(range(reference.dimension - 1, -1, -1))
-    array_itk = np.ascontiguousarray(np.transpose(array_torch, spatial_axes))
-    return ants.from_numpy(
-        array_itk,
-        origin=reference.origin,
-        spacing=reference.spacing,
-        direction=reference.direction,
-    )
-
-
 def normalized_bias_array(image: ants.ANTsImage) -> np.ndarray:
     """Remove N4's arbitrary global multiplicative bias-field scale."""
     array = image.numpy().astype(np.float64)
@@ -156,49 +133,38 @@ def main() -> None:
     )
     ants_seconds = time.perf_counter() - start
 
-    domain = antstorch.ImageDomain(
-        size=tuple(int(value) for value in t1.shape),
-        spacing=tuple(float(value) for value in t1.spacing),
-        origin=tuple(float(value) for value in t1.origin),
-        direction=tuple(tuple(float(value) for value in row) for row in t1.direction),
-    )
-    t1_tensor = ants_to_torch(t1, device)
-    mask_tensor = ants_to_torch(mask, device)
-
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
     synchronize(device)
     start = time.perf_counter()
     if args.verbose:
         print("Running ANTsTorch N4 corrected-image pass...")
-    n4_torch_tensor = antstorch.n4_bias_field_correction(
-        t1_tensor,
-        domain,
-        mask_tensor,
+    n4_torch = antstorch.n4_bias_field_correction(
+        t1,
+        mask,
         shrink_factor=args.shrink_factor,
         convergence=convergence,
         spline_param=tuple(mesh_size),
         stable_accumulation=stable_accumulation,
+        device=device,
         verbose=args.verbose,
     )
     if args.verbose:
         print("Running ANTsTorch N4 bias-field pass...")
-    bias_torch_tensor = antstorch.n4_bias_field_correction(
-        t1_tensor,
-        domain,
-        mask_tensor,
+    bias_torch = antstorch.n4_bias_field_correction(
+        t1,
+        mask,
         shrink_factor=args.shrink_factor,
         convergence=convergence,
         spline_param=tuple(mesh_size),
         return_bias_field=True,
         stable_accumulation=stable_accumulation,
+        device=device,
         verbose=args.verbose,
     )
     synchronize(device)
     torch_seconds = time.perf_counter() - start
 
-    n4_torch = torch_to_ants(n4_torch_tensor, t1)
-    bias_torch = torch_to_ants(bias_torch_tensor, t1)
     corrected_ants_array = n4_ants.numpy().astype(np.float64)
     corrected_torch_array = n4_torch.numpy().astype(np.float64)
     corrected_difference = corrected_torch_array - corrected_ants_array

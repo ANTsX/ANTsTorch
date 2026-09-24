@@ -71,7 +71,7 @@ The ANTsTorch implementation accepts batched 2-D and 3-D tensors. The mask
 may contain one channel or the same number of channels as the image.
 
 ```python
-from antstorch.bspline_flows import n4_bias_field_correction
+from antstorch.bspline_flows import n4_bias_field_correction_tensor
 
 device = (
     "cuda"
@@ -90,7 +90,7 @@ r16_domain = ants_domain(r16)
 
 convergence = {"iters": [50, 50, 50, 50], "tol": 1e-7}
 
-r16_n4_tensor = n4_bias_field_correction(
+r16_n4_tensor = n4_bias_field_correction_tensor(
     r16_tensor,
     domain=r16_domain,
     mask=r16_mask_tensor,
@@ -100,7 +100,7 @@ r16_n4_tensor = n4_bias_field_correction(
     rescale_intensities=True,
 )
 
-r16_bias_tensor = n4_bias_field_correction(
+r16_bias_tensor = n4_bias_field_correction_tensor(
     r16_tensor,
     domain=r16_domain,
     mask=r16_mask_tensor,
@@ -122,7 +122,7 @@ The tensors remain differentiable with respect to the input image:
 
 ```python
 differentiable_input = r16_tensor.detach().clone().requires_grad_(True)
-corrected = n4_bias_field_correction(
+corrected = n4_bias_field_correction_tensor(
     differentiable_input,
     domain=r16_domain,
     mask=r16_mask_tensor,
