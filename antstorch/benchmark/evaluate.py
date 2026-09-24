@@ -64,6 +64,22 @@ _SYN_REGULARIZERS = {
     "sobolev_syn": "sobolev",
     "dsti_syn": "dsti",
     "bspline_syn": "bspline",
+    # '_regadam' variant(s): same dense-SyN loop and regularizer, but with
+    # syn_registration(optimizer='reg_adam') instead of the default
+    # 'gradient_descent' -- see antstorch/syn/syn.py's _OPTIMIZERS docstring.
+    # Added specifically to test whether syntx's own advantage on 'dsti'
+    # (project doc, §34/§36/§39) comes from its Adam-momentum optimizer
+    # rather than from the full TVF architecture its own benchmark harness
+    # actually routes 'dsti' through -- a separate, new arm (dsti_regadam),
+    # deliberately NOT changing dsti_syn's own default so every prior run
+    # (§34-§39) stays reproducible as documented.
+    "dsti_regadam": "dsti",
+}
+# model_lower values in _SYN_REGULARIZERS above that additionally force
+# syn_registration(optimizer=...) rather than leaving it at 'gradient_descent'
+# (or at whatever kwargs['optimizer'] the caller passed explicitly).
+_SYN_OPTIMIZER_OVERRIDE = {
+    "dsti_regadam": "reg_adam",
 }
 _BSPLINE_SVF_MODELS = ("bspline_svf", "svf")
 _GAUSSIAN_SVF_MODELS = ("gaussian_svf",)
@@ -568,7 +584,14 @@ def evaluate_mindboggle_pair(
         type_of_transform="SyNOnly", regularizer=..., initial_affine=...)``
         -- the canonical affine already fit for this pair is supplied
         directly, so only the fluid/B-spline regularizer differs between
-        them), ``'bspline_svf'``/``'svf'`` (dispatches to
+        them); ``'dsti_regadam'`` (same dense SyN stage and ``'dsti'``
+        regularizer as ``'dsti_syn'``, but with
+        ``syn_registration(optimizer='reg_adam')`` instead of the default
+        ``'gradient_descent'`` -- a separate arm, added to test whether
+        syntx's own 'dsti' advantage comes from its Adam-momentum optimizer
+        rather than from the full time-varying-velocity-field architecture
+        its own benchmark harness actually uses for that model; see the
+        project doc), ``'bspline_svf'``/``'svf'`` (dispatches to
         ``antstorch.bspline_flows.bspline_svf_registration()`` -- a
         different transformation family, a stationary velocity field, not a
         SyN variant despite ``'bspline_syn'``/``'bspline_svf'`` sharing the
@@ -703,9 +726,14 @@ def evaluate_mindboggle_pair(
             "bspline_enforce_stationary_boundary", "syn_metric", "neighborhood_radius",
             "antisymmetric", "inverse_method", "in_loop_inverse_steps", "padding_mode",
             "gaussian_sigma_mode", "conservative_smooth",
+            "optimizer", "adam_betas", "adam_eps",
         ):
             if key in kwargs:
                 syn_kwargs[key] = kwargs[key]
+        if model_lower in _SYN_OPTIMIZER_OVERRIDE:
+            # A caller-supplied kwargs['optimizer'] (just forwarded above)
+            # still wins, so an explicit override is never silently dropped.
+            syn_kwargs.setdefault("optimizer", _SYN_OPTIMIZER_OVERRIDE[model_lower])
         # No harness-level override needed here anymore: when neither
         # update_field_mesh_size_at_base_level nor update_field_spline_distance
         # is present in syn_kwargs, syn_registration() itself now defaults

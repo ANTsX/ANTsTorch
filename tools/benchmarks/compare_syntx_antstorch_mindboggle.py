@@ -13,6 +13,16 @@ Model-name mapping (see the project doc, this session's investigation):
     antstorch.benchmark.evaluate.evaluate_mindboggle_pair(model="<x>_syn").
   - dsti: syntx names it "syn_dsti1" (dsti1 regularizer via the reg_adam
     optimizer branch); antstorch names it "dsti_syn".
+  - dsti_regadam: antstorch-only variant, added 2026-09-24 (project doc
+    Section 40). Same dsti regularizer as dsti_syn but run through a
+    lightweight port of syntx's RegAdam optimizer pattern (Adam-momentum
+    quotient applied to the gradient before the existing regularizer call,
+    reset each pyramid level -- see antstorch/syn/syn.py, optimizer=
+    "reg_adam") instead of antstorch's default plain gradient descent. It
+    is compared against the SAME syntx dsti arm as dsti_syn (there is no
+    separate syntx-side counterpart) -- the point is to see whether
+    matching syntx's optimizer, on antstorch's own greedy-SyN loop, closes
+    any of the dsti_syn vs syntx dsti gap documented in Sections 34/36/39.
   - bspline: antstorch exposes it directly as "bspline_syn" (one of the
     four _SYN_REGULARIZERS). syntx.benchmark.evaluate does NOT expose a
     "bspline" model name at all (its error message lists supported models
@@ -41,22 +51,26 @@ import time
 import traceback
 
 PAIR_INDICES_DEFAULT = [0, 24, 88]
-MODELS = ["gaussian", "sobolev", "dsti", "bspline"]
+MODELS = ["gaussian", "sobolev", "dsti", "dsti_regadam", "bspline"]
 
 SYNTX_ROOT = os.path.expanduser("~/Pkg/syntx")
 ANTSTORCH_ROOT = os.path.expanduser("~/Pkg/ANTsTorch")
 DATA_DIR = os.path.expanduser("~/Data/Public/Mindboggle/Volumes")
 
 # syntx model-name aliases for its evaluate_mindboggle_pair(model=...)
+# dsti_regadam has no syntx-side counterpart of its own -- it is compared
+# against the same syntx "dsti" arm as dsti_syn (see module docstring).
 _SYNTX_MODEL_NAME = {
     "gaussian": "gaussian",
     "sobolev": "sobolev",
     "dsti": "syn_dsti1",
+    "dsti_regadam": "syn_dsti1",
 }
 _ANTSTORCH_MODEL_NAME = {
     "gaussian": "gaussian_syn",
     "sobolev": "sobolev_syn",
     "dsti": "dsti_syn",
+    "dsti_regadam": "dsti_regadam",
     "bspline": "bspline_syn",
 }
 
@@ -93,6 +107,12 @@ MATCHED_KWARGS = {
                      conservative_smooth=True),
     "bspline": dict(grad_step=0.25, syn_metric="cc2", levels=(4, 2, 1), reg_iterations=(100, 100, 20)),
     "dsti": dict(conservative_smooth=True),
+    # Same regularizer-formula matching as "dsti" (conservative_smooth). The
+    # optimizer itself (reg_adam vs plain gradient descent) is intentionally
+    # left unmatched -- it's the very thing being tested here -- and is
+    # already forced by antstorch.benchmark.evaluate's
+    # _SYN_OPTIMIZER_OVERRIDE for model="dsti_regadam", not by this script.
+    "dsti_regadam": dict(conservative_smooth=True),
 }
 MATCHED_KWARGS_SYNTX = {
     "gaussian": dict(similarity_metric="cc2", reg_iterations=[100, 100, 20]),
@@ -272,9 +292,11 @@ def main():
         "--matched", action="store_true",
         help="Force grad_step=0.25 / similarity_metric='cc2' / levels=(4,2,1) / "
              "reg_iterations=(100,100,20) on both sides for gaussian/sobolev/bspline "
-             "(dsti left alone: syntx's dsti arm uses a different optimizer, "
-             "reg_adam, not plain gradient descent, so forcing these wouldn't "
-             "isolate anything there). Use this to check whether a Dice gap seen "
+             "(dsti and dsti_regadam left alone on those settings: syntx's dsti arm "
+             "uses a different optimizer, reg_adam, not plain gradient descent, so "
+             "forcing these wouldn't isolate anything there -- only "
+             "conservative_smooth is matched for dsti/dsti_regadam). Use this to "
+             "check whether a Dice gap seen "
              "with each library's own out-of-the-box defaults survives once the "
              "optimization settings are equalized -- i.e. whether it comes from "
              "the regularizer/registration algorithm itself or just from the two "
@@ -325,7 +347,12 @@ def main():
             delta = f"{(a['dice_sym'] - s['dice_sym']):+.4f}" if (s_ok and a_ok) else "—"
             s_t = f"{s.get('runtime_seconds', s.get('_wall_seconds', float('nan'))):.1f}" if s_ok else "—"
             a_t = f"{a.get('runtime_seconds', a.get('_wall_seconds', float('nan'))):.1f}" if a_ok else "—"
-            label = reg + (" (non-officiel)" if reg == "bspline" else "")
+            if reg == "bspline":
+                label = reg + " (non-officiel)"
+            elif reg == "dsti_regadam":
+                label = reg + " (vs syntx dsti)"
+            else:
+                label = reg
             table_lines.append(f"| {pair_idx} | {label} | {s_dice} | {a_dice} | {delta} | {s_t} | {a_t} |")
 
     md_lines = ["# Comparaison syntx vs antstorch — Mindboggle-101 (dense SyN)", "",
