@@ -16,7 +16,9 @@ divergence, la docstring du code a toujours raison).
 | `compare_fireants_mindboggle.py` | syntx vs antstorch vs FireANTs (3ᵉ bras) | Même liste que ci-dessus, mais FireANTs n'est réellement évalué que pour `gaussian` (les autres modèles restent affichés « n/a » côté FireANTs pour garder les colonnes syntx/antstorch renseignées) |
 | `compare_bspline_scattered_data.py` | ANTs vs ANTsTorch, ajustement B-spline sur données éparses (pas un modèle de recalage) | N/A — comparaison de primitive, pas de `--models` |
 | `compare_n4_bias_field_correction.py` | ANTs vs ANTsTorch, correction de champ de biais N4 (pas un modèle de recalage) | N/A — comparaison de primitive, pas de `--models` |
+| `compare_denoise_image.py` | ANTs `denoise_image` vs `antstorch.denoise_image` (moyennes non locales adaptatives, bruit ricien ou gaussien) | N/A — comparaison de primitive, pas de `--models` ; `--repeats 2+` rapporte aussi la variabilité d'une exécution ANTs à l'autre |
 | `compare_cortical_thickness.py` | ANTs `kelly_kapowski` vs moteur DiReCT tensoriel ANTsTorch sur une segmentation Deep Atropos partagée (`S_template3` par défaut) | N/A — mêmes entrées GM/WM et mêmes paramètres partagés ; `--optimizer` et `--regularizer` sélectionnent la variante ANTsTorch |
+| `run_ants_comparisons.sh` | Lance à la suite `compare_denoise_image.py`, `compare_n4_bias_field_correction.py` et `compare_cortical_thickness.py` sur un même périphérique (`DEVICE=cuda:0` par défaut), avec un journal par comparaison | N/A — variables `DEVICE`, `OUT_DIR`, `PYTHON`, `REPEATS`, `ANTS_THREADS` |
 
 ## Modèles natifs ANTsTorch (`antstorch.benchmark.evaluate_mindboggle_pair(model=...)`)
 
