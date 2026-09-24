@@ -5,6 +5,7 @@ from .brain_extraction import brain_extraction
 from .preprocess_image import preprocess_brain_image
 from .deep_atropos import deep_atropos
 from .cortical_thickness import cortical_thickness
+from .cortical_thickness import cortical_thickness2
 from .cortical_thickness import longitudinal_cortical_thickness
 from .deep_flash import deep_flash
 from .harvard_oxford_atlas_labeling import harvard_oxford_atlas_labeling

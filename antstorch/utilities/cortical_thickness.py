@@ -61,6 +61,52 @@ def cortical_thickness(t1, device=None, verbose: bool = False):
     }
 
 
+def cortical_thickness2(
+    t1,
+    device=None,
+    optimizer: str = "direct",
+    regularizer: str = "gaussian",
+    verbose: bool = False,
+):
+    """Cortical-thickness workflow using ANTsTorch's tensor DiReCT engine.
+
+    This provisional entry point mirrors :func:`cortical_thickness` while
+    leaving its established ``ants.kelly_kapowski`` behavior unchanged.
+    """
+    from ..direct import kelly_kapowski
+    from ..utilities.deep_atropos import deep_atropos
+
+    atropos = deep_atropos(
+        [t1, None, None], do_preprocessing=True, device=device, verbose=verbose
+    )
+    kk_segmentation = ants.image_clone(atropos["segmentation_image"])
+    kk_segmentation[kk_segmentation == 4] = 3
+    gray_matter = atropos["probability_images"][2]
+    white_matter = atropos["probability_images"][3] + atropos["probability_images"][4]
+    thickness = kelly_kapowski(
+        kk_segmentation,
+        gray_matter,
+        white_matter,
+        iterations=45,
+        gradient_step=0.025,
+        velocity_smoothing_variance=1.5,
+        optimizer=optimizer,
+        regularizer=regularizer,
+        device=device,
+        verbose=verbose,
+    )
+    return {
+        "thickness_image": thickness,
+        "segmentation_image": atropos["segmentation_image"],
+        "csf_probability_image": atropos["probability_images"][1],
+        "gray_matter_probability_image": atropos["probability_images"][2],
+        "white_matter_probability_image": atropos["probability_images"][3],
+        "deep_gray_matter_probability_image": atropos["probability_images"][4],
+        "brain_stem_probability_image": atropos["probability_images"][5],
+        "cerebellum_probability_image": atropos["probability_images"][6],
+    }
+
+
 def longitudinal_cortical_thickness(
     t1s,
     initial_template: "str|ants.ANTsImage" = "oasis",
