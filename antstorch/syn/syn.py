@@ -352,6 +352,8 @@ def _fit_syn_level(
     optimizer: str = "gradient_descent",
     adam_betas: Tuple[float, float] = (0.9, 0.999),
     adam_eps: float = 1e-8,
+    regadam_grad_sigma: float = 1.8,
+    regadam_quotient_sigma: float = 0.8,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor, list]:
     device, dtype = I_curr.device, I_curr.dtype
     fixed_meta_t = metadata_tensors_from_dict(fixed_meta, device, dtype)
@@ -427,20 +429,46 @@ def _fit_syn_level(
             raise FloatingPointError(f"non-finite SyN half-warp gradient at resolution level {level_index + 1}")
 
         if use_reg_adam:
-            # Accumulate per-voxel Adam moments on the raw similarity
-            # gradient, then replace it with the bias-corrected step
-            # quotient -- exactly syntx greedy.py's exp_avg/exp_avg_sq
-            # update, just without its separate flow_sigma pre-smoothing
-            # step (this port applies the *regularizer* to the quotient
-            # below via the same _apply_regularizer call already used for
-            # 'gradient_descent', rather than introducing a second,
-            # differently-scoped smoothing pass).
+            # Ported from syntx's greedy.py GreedyRegistration._fit_scale,
+            # whose regadam path is THREE stages, not one (verified against
+            # syntx/src/syntx/greedy.py directly after this port produced
+            # near-random real-data Dice -- see project doc, RegAdam
+            # real-data investigation):
+            #   1. Pre-smooth the RAW similarity gradient with a Gaussian
+            #      kernel (regadam_grad_sigma, voxel-space, syntx default
+            #      1.8 == its 'flow_sigma') *before* accumulating Adam
+            #      moments -- without this, the per-voxel Adam quotient is
+            #      computed from spatially incoherent noise.
+            #   2. Compute the bias-corrected Adam step-direction quotient
+            #      from that smoothed gradient.
+            #   3. Post-smooth the quotient itself with a SECOND, separate
+            #      Gaussian kernel (regadam_quotient_sigma, voxel-space,
+            #      syntx default 0.8 == its 'regadam_sigma') -- independent
+            #      of, and in addition to, the level's own `regularizer`
+            #      (dsti/sobolev/gaussian/bspline) applied further below.
+            # Earlier versions of this port skipped stages 1 and 3 (see git
+            # history), relying solely on the level regularizer to smooth
+            # the Adam quotient -- that is NOT equivalent: without spatial
+            # coherence in the gradient feeding Adam and in the resulting
+            # quotient, per-voxel Adam-normalized directions are close to
+            # sign noise (near-unit magnitude even in flat/background
+            # regions with tiny raw gradients), which overwhelms the
+            # registration on real data even though it passed synthetic
+            # unit tests.
+            if regadam_grad_sigma > 0:
+                grad_l = separable_gaussian_filter(grad_l, regadam_grad_sigma, sigma_mode="voxel")
+                grad_r = separable_gaussian_filter(grad_r, regadam_grad_sigma, sigma_mode="voxel")
+
             adam_state_l, grad_l = reg_adam_direction(
                 grad_l, adam_state_l, betas=adam_betas, eps=adam_eps,
             )
             adam_state_r, grad_r = reg_adam_direction(
                 grad_r, adam_state_r, betas=adam_betas, eps=adam_eps,
             )
+
+            if regadam_quotient_sigma > 0:
+                grad_l = separable_gaussian_filter(grad_l, regadam_quotient_sigma, sigma_mode="voxel")
+                grad_r = separable_gaussian_filter(grad_r, regadam_quotient_sigma, sigma_mode="voxel")
 
         grad_l = _apply_regularizer(
             grad_l * boundary_mask, regularizer, flow_sigma, fixed_meta["spacing"],
@@ -586,6 +614,8 @@ def syn_registration(
     optimizer: str = "gradient_descent",
     adam_betas: Tuple[float, float] = (0.9, 0.999),
     adam_eps: float = 1e-8,
+    regadam_grad_sigma: float = 1.8,
+    regadam_quotient_sigma: float = 0.8,
     update_field_mesh_size_at_base_level: Optional[int] = None,
     total_field_mesh_size_at_base_level: int = 0,
     update_field_spline_distance: Optional[Union[float, Sequence[float]]] = None,
@@ -657,16 +687,29 @@ def syn_registration(
 
     ``optimizer`` selects what the regularizer (``flow_sigma``) is applied
     to each iteration: ``'gradient_descent'`` (default) applies it directly
-    to the raw similarity gradient, as above. ``'reg_adam'`` instead
-    accumulates per-voxel Adam first/second moments (``adam_betas``,
-    ``adam_eps``) across the level's iterations -- reset at the start of
-    each pyramid level -- and applies the regularizer to the resulting
-    bias-corrected step-direction quotient instead, ported from syntx's
-    ``greedy.py`` ``GreedyRegistration``. Everything else (the CFL bound,
-    antisymmetric projection, Eulerian composition) is unchanged; this
-    option exists to isolate whether an accuracy gap against another
+    to the raw similarity gradient, as above. ``'reg_adam'`` instead runs
+    the three-stage pipeline ported from syntx's ``greedy.py``
+    ``GreedyRegistration`` (verified line-for-line against syntx after an
+    earlier, incomplete port produced near-random Dice on real Mindboggle-101
+    data despite passing synthetic unit tests -- see project doc): (1) the
+    raw similarity gradient is pre-smoothed with a voxel-space Gaussian
+    kernel, ``regadam_grad_sigma`` (default 1.8, matches syntx's own
+    ``flow_sigma`` default for this stage); (2) per-voxel Adam first/second
+    moments (``adam_betas``, ``adam_eps``) are accumulated from that
+    smoothed gradient across the level's iterations -- reset at the start
+    of each pyramid level -- producing a bias-corrected step-direction
+    quotient; (3) the quotient itself is smoothed with a SECOND, separate
+    voxel-space Gaussian kernel, ``regadam_quotient_sigma`` (default 0.8,
+    matches syntx's own ``regadam_sigma``). The level's own ``regularizer``
+    (dsti/sobolev/gaussian/bspline) is then applied on top of stage 3's
+    output, same as for ``'gradient_descent'``. Everything else (the CFL
+    bound, antisymmetric projection, Eulerian composition) is unchanged;
+    this option exists to isolate whether an accuracy gap against another
     library's regularizer comes from the regularizer itself or from the
-    Adam-momentum optimizer it happens to be paired with there.
+    Adam-momentum optimizer it happens to be paired with there. Both new
+    sigmas are no-ops (skipped) when ``optimizer='gradient_descent'``, and
+    each can be set to ``0`` to disable that one stage independently while
+    keeping ``'reg_adam'`` active.
 
     ``gaussian_sigma_mode`` and ``conservative_smooth`` tune two
     ``'gaussian'``/``'sobolev'``/``'dsti'`` regularizer-formula details that
@@ -1122,6 +1165,8 @@ def syn_registration(
             optimizer=optimizer,
             adam_betas=adam_betas,
             adam_eps=adam_eps,
+            regadam_grad_sigma=regadam_grad_sigma,
+            regadam_quotient_sigma=regadam_quotient_sigma,
         )
         level_loss_history.append(history)
 
