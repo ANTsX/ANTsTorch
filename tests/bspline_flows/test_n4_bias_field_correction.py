@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import torch
 
-from antstorch.bspline_flows import ImageDomain, N4BiasFieldCorrection, n4_bias_field_correction
+from antstorch.bspline_flows import ImageDomain, N4BiasFieldCorrection, n4_bias_field_correction_tensor
 
 
 def _options(dimension, iterations=3):
@@ -18,7 +18,7 @@ def _options(dimension, iterations=3):
 def test_constant_image_is_preserved(size):
     domain = ImageDomain(size, spacing=(1.3,) * len(size))
     image = torch.full((2, 1) + domain.torch_size, 7.0, dtype=torch.double)
-    corrected = n4_bias_field_correction(image, domain, **_options(len(size), iterations=1))
+    corrected = n4_bias_field_correction_tensor(image, domain, **_options(len(size), iterations=1))
     torch.testing.assert_close(corrected, image, rtol=2e-5, atol=2e-5)
 
 
@@ -27,7 +27,7 @@ def test_synthetic_smooth_bias_reduces_nonuniformity():
     y = torch.linspace(-1, 1, 20)[:, None]
     x = torch.linspace(-1, 1, 24)[None, :]
     image = torch.exp(0.4 * x + 0.2 * y)[None, None]
-    corrected = n4_bias_field_correction(image, domain, **_options(2, iterations=10))
+    corrected = n4_bias_field_correction_tensor(image, domain, **_options(2, iterations=10))
     assert corrected.std() / corrected.mean() < 0.6 * image.std() / image.mean()
 
 
@@ -37,7 +37,7 @@ def test_mask_preserves_values_outside_and_weight_mask_is_supported():
     mask = torch.zeros_like(image)
     mask[..., 2:-2, 3:-3] = 1
     confidence = mask * torch.linspace(0.2, 1.0, 16)[None, None, None, :]
-    corrected = n4_bias_field_correction(
+    corrected = n4_bias_field_correction_tensor(
         image, domain, mask, weight_mask=confidence, **_options(2, iterations=2)
     )
     torch.testing.assert_close(corrected[mask == 0], image[mask == 0])
@@ -48,8 +48,8 @@ def test_returned_bias_is_positive_and_reconstructs_correction():
     domain = ImageDomain((15, 13))
     image = torch.rand(1, 2, 13, 15, dtype=torch.double) + 0.5
     options = _options(2, iterations=2)
-    bias = n4_bias_field_correction(image, domain, return_bias_field=True, **options)
-    corrected = n4_bias_field_correction(image, domain, **options)
+    bias = n4_bias_field_correction_tensor(image, domain, return_bias_field=True, **options)
+    corrected = n4_bias_field_correction_tensor(image, domain, **options)
     assert torch.all(bias > 0)
     torch.testing.assert_close(corrected, image / bias, rtol=1e-13, atol=1e-13)
 
@@ -59,14 +59,14 @@ def test_module_and_function_match():
     image = torch.rand(1, 1, 10, 12) + 1
     options = _options(2, iterations=1)
     module = N4BiasFieldCorrection(**options)
-    torch.testing.assert_close(module(image, domain), n4_bias_field_correction(image, domain, **options))
+    torch.testing.assert_close(module(image, domain), n4_bias_field_correction_tensor(image, domain, **options))
 
 
 def test_gradient_propagates_to_input():
     torch.manual_seed(42)
     domain = ImageDomain((8, 7))
     image = (torch.rand(1, 1, 7, 8, dtype=torch.double) + 1.0).requires_grad_()
-    corrected = n4_bias_field_correction(
+    corrected = n4_bias_field_correction_tensor(
         image,
         domain,
         shrink_factor=1,
@@ -86,7 +86,7 @@ def test_n4_gradcheck_at_generic_intensities():
     image = (torch.rand(1, 1, 4, 4, dtype=torch.double) + 1.0).requires_grad_()
 
     def correction(value):
-        return n4_bias_field_correction(
+        return n4_bias_field_correction_tensor(
             value,
             domain,
             shrink_factor=1,
@@ -112,15 +112,15 @@ def test_stable_and_vectorized_atomic_accumulation_agree(size):
         number_of_histogram_bins=16,
         return_bias_field=True,
     )
-    atomic = n4_bias_field_correction(image, domain, stable_accumulation=False, **options)
-    stable = n4_bias_field_correction(image, domain, stable_accumulation=True, **options)
+    atomic = n4_bias_field_correction_tensor(image, domain, stable_accumulation=False, **options)
+    stable = n4_bias_field_correction_tensor(image, domain, stable_accumulation=True, **options)
     torch.testing.assert_close(stable, atomic, rtol=1e-13, atol=1e-13)
 
 
 def test_rescale_restores_masked_intensity_range():
     domain = ImageDomain((14, 12))
     image = torch.linspace(1, 5, 14 * 12).reshape(1, 1, 12, 14)
-    corrected = n4_bias_field_correction(
+    corrected = n4_bias_field_correction_tensor(
         image, domain, rescale_intensities=True, **_options(2, iterations=2)
     )
     assert corrected.amin().item() == pytest.approx(image.amin().item(), abs=1e-5)
@@ -137,7 +137,7 @@ def test_agrees_with_antspy_n4_on_smooth_2d_phantom():
     spacing = (1.3, 2.1)
     ants_image = ants.from_numpy(image_itk, spacing=spacing)
     ants_mask = ants.from_numpy(np.ones_like(image_itk), spacing=spacing)
-    ants_bias = ants.n4_bias_field_correction(
+    ants_bias = ants.n4_bias_field_correction_tensor(
         ants_image,
         ants_mask,
         shrink_factor=1,
@@ -147,7 +147,7 @@ def test_agrees_with_antspy_n4_on_smooth_2d_phantom():
     ).numpy()
 
     image_torch = torch.from_numpy(image_itk.T)[None, None]
-    torch_bias = n4_bias_field_correction(
+    torch_bias = n4_bias_field_correction_tensor(
         image_torch,
         ImageDomain((size_x, size_y), spacing=spacing),
         torch.ones_like(image_torch),
@@ -168,7 +168,7 @@ def test_agrees_with_antspy_n4_multiresolution():
     ants = pytest.importorskip("ants")
     r16 = ants.image_read(ants.get_data("r16")).clone("float")
     mask = r16 * 0 + 1
-    ants_bias = ants.n4_bias_field_correction(
+    ants_bias = ants.n4_bias_field_correction_tensor(
         r16,
         mask=mask,
         shrink_factor=4,
@@ -185,7 +185,7 @@ def test_agrees_with_antspy_n4_multiresolution():
         origin=r16.origin,
         direction=tuple(tuple(row) for row in r16.direction),
     )
-    torch_bias = n4_bias_field_correction(
+    torch_bias = n4_bias_field_correction_tensor(
         image_torch,
         domain,
         mask_torch,
@@ -210,8 +210,8 @@ def test_cpu_cuda_agreement():
     domain = ImageDomain((14, 12))
     image = torch.rand(1, 1, 12, 14) + 1.0
     options = _options(2, iterations=2)
-    cpu = n4_bias_field_correction(image, domain, **options)
-    gpu = n4_bias_field_correction(image.cuda(), domain, **options).cpu()
+    cpu = n4_bias_field_correction_tensor(image, domain, **options)
+    gpu = n4_bias_field_correction_tensor(image.cuda(), domain, **options).cpu()
     torch.testing.assert_close(gpu, cpu, rtol=2e-5, atol=2e-5)
 
 
@@ -230,9 +230,9 @@ def test_mps_is_repeatable_and_agrees_with_cpu():
         number_of_histogram_bins=32,
         return_bias_field=True,
     )
-    cpu = n4_bias_field_correction(image, domain, stable_accumulation=True, **options)
-    first = n4_bias_field_correction(image.to("mps"), domain, **options).cpu()
-    second = n4_bias_field_correction(image.to("mps"), domain, **options).cpu()
+    cpu = n4_bias_field_correction_tensor(image, domain, stable_accumulation=True, **options)
+    first = n4_bias_field_correction_tensor(image.to("mps"), domain, **options).cpu()
+    second = n4_bias_field_correction_tensor(image.to("mps"), domain, **options).cpu()
     assert torch.isfinite(first).all()
     torch.testing.assert_close(second, first, rtol=2e-5, atol=2e-5)
     torch.testing.assert_close(first, cpu, rtol=2e-3, atol=2e-3)
@@ -271,7 +271,7 @@ def test_default_spline_param_runs_and_is_finite():
     y = torch.linspace(-1, 1, 20)[:, None]
     x = torch.linspace(-1, 1, 24)[None, :]
     image = torch.exp(0.4 * x + 0.2 * y)[None, None]
-    corrected = n4_bias_field_correction(
+    corrected = n4_bias_field_correction_tensor(
         image, domain, shrink_factor=1, convergence={"iters": [2], "tol": 0.0}
     )
     assert corrected.shape == image.shape

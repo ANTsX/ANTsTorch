@@ -214,7 +214,7 @@ def get_n4_cached_subject_volume(
 ) -> ants.ANTsImage:
     """Loads an N4-bias-corrected subject volume from disk cache, or computes and caches it.
 
-    Uses :func:`antstorch.bspline_flows.n4_bias_field_correction` directly
+    Uses :func:`antstorch.bspline_flows.n4_bias_field_correction_tensor` directly
     (an in-package call, unlike ``syntx.benchmark.data``'s own version of
     this function, which reaches ``antstorch`` as an external, optional
     dependency).
@@ -232,7 +232,7 @@ def get_n4_cached_subject_volume(
     raw_img = ants.image_read(raw_brain_path)
     try:
         import torch
-        from antstorch.bspline_flows import n4_bias_field_correction
+        from antstorch.bspline_flows import n4_bias_field_correction_tensor
 
         arr = raw_img.numpy()
         tensor = torch.from_numpy(arr.transpose(2, 1, 0)).unsqueeze(0).unsqueeze(0).float()
@@ -243,7 +243,7 @@ def get_n4_cached_subject_volume(
         if verbose:
             print(f"[antstorch.benchmark] Computing N4 correction for {subject}...", flush=True)
 
-        corrected_tensor = n4_bias_field_correction(
+        corrected_tensor = n4_bias_field_correction_tensor(
             tensor,
             mask=mask,
             shrink_factor=4,
