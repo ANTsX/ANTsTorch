@@ -74,10 +74,7 @@ fi
     echo "date:   $(date -Iseconds)"
     echo "host:   $(hostname)"
     echo "device: ${DEVICE}"
-<<<<<<< HEAD
     echo "image:  ${IMAGE:-script defaults (r16 / S_template3)}"
-=======
->>>>>>> 2a4eac54389193467a5b83055848f05ae22db7f3
     echo "commit: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)$(git diff --quiet 2>/dev/null || echo ' (modified)')"
 } | tee "${OUT_DIR}/run_info.txt"
 command -v nvidia-smi >/dev/null && nvidia-smi --query-gpu=index,name,driver_version,memory.total --format=csv >> "${OUT_DIR}/run_info.txt"
@@ -104,26 +101,15 @@ DENOISE_ARGS=(--device "${DEVICE}" --repeats "${REPEATS}" --output-dir "${OUT_DI
 [[ -n "${ANTS_THREADS:-}" ]] && DENOISE_ARGS+=(--ants-threads "${ANTS_THREADS}")
 
 run denoise_image \
-<<<<<<< HEAD
     "${PYTHON}" tools/benchmarks/compare_denoise_image.py ${IMAGE_ARGS[@]+"${IMAGE_ARGS[@]}"} "${DENOISE_ARGS[@]}"
 
 run n4_bias_field_correction \
     "${PYTHON}" tools/benchmarks/compare_n4_bias_field_correction.py ${IMAGE_ARGS[@]+"${IMAGE_ARGS[@]}"} \
-=======
-    "${PYTHON}" tools/benchmarks/compare_denoise_image.py "${DENOISE_ARGS[@]}"
-
-run n4_bias_field_correction \
-    "${PYTHON}" tools/benchmarks/compare_n4_bias_field_correction.py \
->>>>>>> 2a4eac54389193467a5b83055848f05ae22db7f3
         --device "${DEVICE}" \
         --output-dir "${OUT_DIR}/n4_bias_field_correction"
 
 run cortical_thickness \
-<<<<<<< HEAD
     "${PYTHON}" tools/benchmarks/compare_cortical_thickness.py ${IMAGE_ARGS[@]+"${IMAGE_ARGS[@]}"} \
-=======
-    "${PYTHON}" tools/benchmarks/compare_cortical_thickness.py \
->>>>>>> 2a4eac54389193467a5b83055848f05ae22db7f3
         --device "${DEVICE}" \
         --output-dir "${OUT_DIR}/cortical_thickness"
 
