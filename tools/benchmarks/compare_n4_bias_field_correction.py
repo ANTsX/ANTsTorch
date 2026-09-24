@@ -10,6 +10,10 @@ Use the bundled 2-D ``r16`` image::
 Use another 2-D or 3-D image and CUDA, if available::
 
     python tools/benchmarks/compare_n4_bias_field_correction.py image.nii.gz --device cuda
+
+Write the output images to a dedicated directory::
+
+    python tools/benchmarks/compare_n4_bias_field_correction.py --output-dir results/n4
 """
 
 import argparse
@@ -78,11 +82,32 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--tolerance", type=float, default=0.0)
     parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print iteration progress from both ANTs and ANTsTorch N4.",
+    )
+    parser.add_argument(
+        "--stable-accumulation",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Control deterministic ANTsTorch reductions. The default uses "
+            "stable accumulation on MPS and fast accumulation elsewhere; "
+            "use --no-stable-accumulation to avoid slow MPS level setup."
+        ),
+    )
+    parser.add_argument(
         "--mesh-size",
         type=int,
         nargs="+",
         default=None,
         help="B-spline mesh size in ITK x-y-z order (default: one span per axis)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("."),
+        help="Directory for output images; it is created if needed (default: current directory).",
     )
     parser.add_argument("--output-prefix", default="n4_comparison")
     return parser.parse_args()
@@ -103,15 +128,23 @@ def main() -> None:
     if len(mesh_size) != t1.dimension:
         raise ValueError(f"--mesh-size needs {t1.dimension} values for this image")
     convergence = {"iters": args.iterations, "tol": args.tolerance}
+    stable_accumulation = args.stable_accumulation
+    if stable_accumulation is None:
+        stable_accumulation = device.type == "mps"
 
     start = time.perf_counter()
+    if args.verbose:
+        print("Running ANTs N4 corrected-image pass...")
     n4_ants = ants.n4_bias_field_correction(
         t1,
         mask=mask,
         shrink_factor=args.shrink_factor,
         convergence=convergence,
         spline_param=mesh_size,
+        verbose=args.verbose,
     )
+    if args.verbose:
+        print("Running ANTs N4 bias-field pass...")
     bias_ants = ants.n4_bias_field_correction(
         t1,
         mask=mask,
@@ -119,6 +152,7 @@ def main() -> None:
         convergence=convergence,
         spline_param=mesh_size,
         return_bias_field=True,
+        verbose=args.verbose,
     )
     ants_seconds = time.perf_counter() - start
 
@@ -135,6 +169,8 @@ def main() -> None:
         torch.cuda.reset_peak_memory_stats(device)
     synchronize(device)
     start = time.perf_counter()
+    if args.verbose:
+        print("Running ANTsTorch N4 corrected-image pass...")
     n4_torch_tensor = antstorch.n4_bias_field_correction(
         t1_tensor,
         domain,
@@ -142,7 +178,11 @@ def main() -> None:
         shrink_factor=args.shrink_factor,
         convergence=convergence,
         spline_param=tuple(mesh_size),
+        stable_accumulation=stable_accumulation,
+        verbose=args.verbose,
     )
+    if args.verbose:
+        print("Running ANTsTorch N4 bias-field pass...")
     bias_torch_tensor = antstorch.n4_bias_field_correction(
         t1_tensor,
         domain,
@@ -151,6 +191,8 @@ def main() -> None:
         convergence=convergence,
         spline_param=tuple(mesh_size),
         return_bias_field=True,
+        stable_accumulation=stable_accumulation,
+        verbose=args.verbose,
     )
     synchronize(device)
     torch_seconds = time.perf_counter() - start
@@ -166,7 +208,8 @@ def main() -> None:
     normalized_torch_bias = normalized_bias_array(bias_torch)
     bias_difference = np.log(normalized_torch_bias) - np.log(normalized_ants_bias)
 
-    prefix = Path(args.output_prefix)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    prefix = args.output_dir / args.output_prefix
     ants.image_write(n4_ants, f"{prefix}_ants_corrected.nii.gz")
     ants.image_write(n4_torch, f"{prefix}_antstorch_corrected.nii.gz")
     ants.image_write(bias_ants, f"{prefix}_ants_bias.nii.gz")
@@ -180,7 +223,10 @@ def main() -> None:
     print(f"ANTsTorch intensity range: {corrected_torch_array.min():.6g} to {corrected_torch_array.max():.6g}") 
     print(f"ANTs bias-field range: {normalized_ants_bias.min():.6g} to {normalized_ants_bias.max():.6g}")
     print(f"ANTsTorch bias-field range: {normalized_torch_bias.min():.6g} to {normalized_torch_bias.max():.6g}")
-    print(f"B-spline accumulation: {'stable matrix reduction' if device.type == 'mps' else 'vectorized scatter'}")
+    print(
+        "B-spline accumulation: "
+        f"{'stable matrix reduction' if stable_accumulation else 'vectorized scatter'}"
+    )
     print(f"Corrected-image RMSE: {np.sqrt(np.mean(corrected_difference**2)):.6g}")
     print(
         "Scale-aligned corrected-image RMSE: "
