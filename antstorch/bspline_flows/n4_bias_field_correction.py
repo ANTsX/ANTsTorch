@@ -8,6 +8,7 @@ scalar and dimensionless in log-intensity space.
 
 import warnings
 from math import ceil, log2
+from time import perf_counter
 from typing import Optional, Union
 
 import torch
@@ -29,6 +30,14 @@ from .bspline_synthesis import (
 # (``(4,) * dimension``, this package's own prior placeholder default, not
 # an ANTs value) -- see project doc §23.
 DEFAULT_N4_SPLINE_DISTANCE_MM = 200.0
+
+
+def _synchronize_device(device: torch.device) -> None:
+    """Synchronize accelerator work for accurate verbose timings."""
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elif device.type == "mps":
+        torch.mps.synchronize()
 
 
 def _expand_like_image(value: Optional[Tensor], image: Tensor, name: str, default: float) -> Tensor:
@@ -261,6 +270,7 @@ def n4_bias_field_correction(
     bias_field_fwhm: float = 0.15,
     eps: float = 1e-6,
     stable_accumulation: Optional[bool] = None,
+    verbose: bool = False,
 ) -> Tensor:
     """Differentiable N4-style correction for batched 2-D/3-D scalar images.
 
@@ -271,6 +281,8 @@ def n4_bias_field_correction(
     ``spline_param`` is left as ``None`` (the default), a physical spline
     distance of ``DEFAULT_N4_SPLINE_DISTANCE_MM`` (200 mm) is used,
     matching real ANTs' own ``N4BiasFieldCorrection`` default.
+    Set ``verbose=True`` to report the convergence measurement at every
+    fitting iteration.
     """
     if image.ndim not in (4, 5) or not image.is_floating_point():
         raise ValueError("image must be a floating (N,C,H,W) or (N,C,D,H,W) tensor")
@@ -342,6 +354,25 @@ def n4_bias_field_correction(
     )
 
     for level, maximum_iterations in enumerate(iterations):
+        next_lattice_itk = (
+            lattice_itk
+            if level == 0
+            else tuple(2 * value - 3 for value in lattice_itk)
+        )
+        if verbose:
+            accumulation_mode = "stable" if stable_accumulation else "fast"
+            print(
+                f"ANTsTorch N4 preparing level {level + 1}/{len(iterations)}: "
+                f"lattice={next_lattice_itk}, accumulation={accumulation_mode}",
+                flush=True,
+            )
+            _synchronize_device(image.device)
+            preparation_start = perf_counter()
+        if level > 0:
+            accumulated_coefficients = refine_bspline_coefficients(
+                accumulated_coefficients
+            )
+            lattice_itk = next_lattice_itk
         active = torch.ones(
             (image.shape[0], image.shape[1]) + (1,) * dimension,
             dtype=image.dtype,
@@ -354,7 +385,14 @@ def n4_bias_field_correction(
         # being rebuilt on every one of ``maximum_iterations`` iterations.
         geometry = _bspline_fit_geometry(shrunk_domain.torch_size, lattice_itk, image.dtype, image.device, eps)
         fit_context = _bspline_fit_context(weight_flat, geometry, stable_accumulation)
-        for _ in range(maximum_iterations):
+        if verbose:
+            _synchronize_device(image.device)
+            print(
+                f"ANTsTorch N4 prepared level {level + 1}/{len(iterations)} "
+                f"in {perf_counter() - preparation_start:.3f} s",
+                flush=True,
+            )
+        for iteration in range(maximum_iterations):
             uncorrected = log_input - log_bias
             sharpened = _histogram_sharpen(
                 uncorrected,
@@ -380,15 +418,20 @@ def n4_bias_field_correction(
                 dim=tuple(range(2, image.ndim)), keepdim=True
             ) / (count - 1.0)
             convergence_measurement = variance.sqrt() / mean.clamp_min(eps)
+            if verbose:
+                maximum_convergence = float(
+                    convergence_measurement.detach().max().cpu()
+                )
+                print(
+                    f"ANTsTorch N4 level {level + 1}/{len(iterations)}, "
+                    f"iteration {iteration + 1}/{maximum_iterations}: "
+                    f"convergence={maximum_convergence:.6g}"
+                )
             log_bias = new_log_bias
             accumulated_coefficients = accumulated_coefficients + active * coefficients
             # Tensor gating honors convergence independently for every batch
             # item/channel without a device-to-host synchronization.
             active = active * (convergence_measurement > tolerance).to(image.dtype)
-        if level + 1 < len(iterations):
-            accumulated_coefficients = refine_bspline_coefficients(accumulated_coefficients)
-            lattice_itk = tuple(2 * value - 3 for value in lattice_itk)
-
     full_log_bias = synthesize_bspline_velocity(accumulated_coefficients, domain)
     bias = torch.exp(full_log_bias)
     corrected = image / bias.clamp_min(eps)
