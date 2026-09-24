@@ -54,6 +54,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from ..ants_transform_io import build_transform_lists, default_outprefix, write_affine_transform
+from ..registration import reg_adam_direction
 from .bridge import (
     ants_image_metadata,
     ants_image_to_tensor,
@@ -369,12 +370,8 @@ def _fit_syn_level(
     # changes between the two optimizer modes, nothing downstream of it.
     use_reg_adam = optimizer == "reg_adam"
     if use_reg_adam:
-        beta1, beta2 = adam_betas
-        exp_avg_l = torch.zeros_like(warp_l2r)
-        exp_avg_sq_l = torch.zeros_like(warp_l2r)
-        exp_avg_r = torch.zeros_like(warp_r2l)
-        exp_avg_sq_r = torch.zeros_like(warp_r2l)
-        adam_step = 0
+        adam_state_l = None
+        adam_state_r = None
 
     # ITK's BSplineSyN doubles the update/total-field control-point mesh
     # (like any TransformParametersAdaptor) from the coarsest pyramid level
@@ -438,15 +435,12 @@ def _fit_syn_level(
             # below via the same _apply_regularizer call already used for
             # 'gradient_descent', rather than introducing a second,
             # differently-scoped smoothing pass).
-            adam_step += 1
-            exp_avg_l.mul_(beta1).add_(grad_l, alpha=1.0 - beta1)
-            exp_avg_sq_l.mul_(beta2).addcmul_(grad_l, grad_l, value=1.0 - beta2)
-            exp_avg_r.mul_(beta1).add_(grad_r, alpha=1.0 - beta1)
-            exp_avg_sq_r.mul_(beta2).addcmul_(grad_r, grad_r, value=1.0 - beta2)
-            bias_corr1 = 1.0 - beta1 ** adam_step
-            bias_corr2 = 1.0 - beta2 ** adam_step
-            grad_l = (exp_avg_l / bias_corr1) / ((exp_avg_sq_l / bias_corr2).sqrt().add_(adam_eps))
-            grad_r = (exp_avg_r / bias_corr1) / ((exp_avg_sq_r / bias_corr2).sqrt().add_(adam_eps))
+            adam_state_l, grad_l = reg_adam_direction(
+                grad_l, adam_state_l, betas=adam_betas, eps=adam_eps,
+            )
+            adam_state_r, grad_r = reg_adam_direction(
+                grad_r, adam_state_r, betas=adam_betas, eps=adam_eps,
+            )
 
         grad_l = _apply_regularizer(
             grad_l * boundary_mask, regularizer, flow_sigma, fixed_meta["spacing"],
