@@ -3,7 +3,6 @@
 #   denoise_image, n4_bias_field_correction, cortical_thickness
 #
 # Usage (from anywhere):
-<<<<<<< HEAD
 #   tools/benchmarks/run_ants_comparisons.sh [image.nii.gz]
 #
 # The optional image (or IMAGE=...) is used by all three comparisons. Without
@@ -12,11 +11,6 @@
 #
 # Environment overrides:
 #   IMAGE=path             Input image shared by the three comparisons
-=======
-#   tools/benchmarks/run_ants_comparisons.sh
-#
-# Environment overrides:
->>>>>>> 2a4eac54389193467a5b83055848f05ae22db7f3
 #   DEVICE=cuda:0          PyTorch device (default: cuda:0)
 #   OUT_DIR=path           Output root (default: results/ants_comparisons_<date>_<time>)
 #   PYTHON=python          Python interpreter
@@ -28,7 +22,6 @@
 
 set -uo pipefail
 
-<<<<<<< HEAD
 # Resolve the image before changing directory so relative paths still work.
 IMAGE="${1:-${IMAGE:-}}"
 if [[ -n "${IMAGE}" ]]; then
@@ -41,8 +34,6 @@ fi
 IMAGE_ARGS=()
 [[ -n "${IMAGE}" ]] && IMAGE_ARGS=("${IMAGE}")
 
-=======
->>>>>>> 2a4eac54389193467a5b83055848f05ae22db7f3
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
