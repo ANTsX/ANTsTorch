@@ -36,9 +36,16 @@ def normalized_bias_array(image: ants.ANTsImage) -> np.ndarray:
 def synchronize(device: torch.device) -> None:
     """Wait for asynchronous accelerator work before timing boundaries."""
     if device.type == "cuda":
-        torch.cuda.synchronize(device)
+        torch.cuda.synchronize(cuda_device_index(device))
     elif device.type == "mps":
         torch.mps.synchronize()
+
+
+def cuda_device_index(device: torch.device) -> int:
+    """Return the integer CUDA index accepted by older PyTorch releases."""
+    if device.type != "cuda":
+        raise ValueError("device must be a CUDA device")
+    return torch.cuda.current_device() if device.index is None else device.index
 
 
 def parse_args() -> argparse.Namespace:
@@ -134,7 +141,7 @@ def main() -> None:
     ants_seconds = time.perf_counter() - start
 
     if device.type == "cuda":
-        torch.cuda.reset_peak_memory_stats(device)
+        torch.cuda.reset_peak_memory_stats(cuda_device_index(device))
     synchronize(device)
     start = time.perf_counter()
     if args.verbose:
@@ -204,7 +211,8 @@ def main() -> None:
         f"{np.corrcoef(np.log(normalized_ants_bias).ravel(), np.log(normalized_torch_bias).ravel())[0, 1]:.8f}"
     )
     if device.type == "cuda":
-        print(f"ANTsTorch CUDA peak memory: {torch.cuda.max_memory_allocated(device) / 2**20:.1f} MiB")
+        peak_memory = torch.cuda.max_memory_allocated(cuda_device_index(device))
+        print(f"ANTsTorch CUDA peak memory: {peak_memory / 2**20:.1f} MiB")
     print(f"Outputs written with prefix: {prefix}")
 
 

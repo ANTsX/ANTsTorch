@@ -45,9 +45,18 @@ def synchronize(device) -> None:
     import torch
 
     if device.type == "cuda":
-        torch.cuda.synchronize(device)
+        torch.cuda.synchronize(cuda_device_index(device))
     elif device.type == "mps":
         torch.mps.synchronize()
+
+
+def cuda_device_index(device) -> int:
+    """Return the integer CUDA index accepted by older PyTorch releases."""
+    import torch
+
+    if device.type != "cuda":
+        raise ValueError("device must be a CUDA device")
+    return torch.cuda.current_device() if device.index is None else device.index
 
 
 def parse_radius(value: str):
@@ -206,7 +215,7 @@ def main() -> None:
         antstorch.denoise_image(image, mask=mask, device=device, **options)
         synchronize(device)
     if device.type == "cuda":
-        torch.cuda.reset_peak_memory_stats(device)
+        torch.cuda.reset_peak_memory_stats(cuda_device_index(device))
     torch_results, torch_times = [], []
     for run in range(args.repeats):
         if args.verbose:
@@ -272,7 +281,8 @@ def main() -> None:
         print(f"ANTsTorch run-to-run max |diff|: {torch_spread:.6g}")
 
     if device.type == "cuda":
-        print(f"ANTsTorch CUDA peak memory: {torch.cuda.max_memory_allocated(device) / 2**20:.1f} MiB")
+        peak_memory = torch.cuda.max_memory_allocated(cuda_device_index(device))
+        print(f"ANTsTorch CUDA peak memory: {peak_memory / 2**20:.1f} MiB")
     print(f"Outputs written with prefix: {prefix}")
 
 

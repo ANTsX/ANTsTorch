@@ -137,7 +137,7 @@ def test_agrees_with_antspy_n4_on_smooth_2d_phantom():
     spacing = (1.3, 2.1)
     ants_image = ants.from_numpy(image_itk, spacing=spacing)
     ants_mask = ants.from_numpy(np.ones_like(image_itk), spacing=spacing)
-    ants_bias = ants.n4_bias_field_correction_tensor(
+    ants_bias = ants.n4_bias_field_correction(
         ants_image,
         ants_mask,
         shrink_factor=1,
@@ -168,7 +168,7 @@ def test_agrees_with_antspy_n4_multiresolution():
     ants = pytest.importorskip("ants")
     r16 = ants.image_read(ants.get_data("r16")).clone("float")
     mask = r16 * 0 + 1
-    ants_bias = ants.n4_bias_field_correction_tensor(
+    ants_bias = ants.n4_bias_field_correction(
         r16,
         mask=mask,
         shrink_factor=4,
@@ -241,7 +241,9 @@ def test_mps_is_repeatable_and_agrees_with_cpu():
 def test_default_spline_param_is_none_sentinel():
     import inspect
 
-    from antstorch.bspline_flows.n4_bias_field_correction import n4_bias_field_correction as _fn
+    from antstorch.bspline_flows.n4_bias_field_correction import (
+        n4_bias_field_correction_tensor as _fn,
+    )
 
     assert inspect.signature(_fn).parameters["spline_param"].default is None
 
