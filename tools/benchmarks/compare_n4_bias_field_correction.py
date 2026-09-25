@@ -36,16 +36,34 @@ def normalized_bias_array(image: ants.ANTsImage) -> np.ndarray:
 def synchronize(device: torch.device) -> None:
     """Wait for asynchronous accelerator work before timing boundaries."""
     if device.type == "cuda":
-        torch.cuda.synchronize(cuda_device_index(device))
+        with torch.cuda.device(device):
+            torch.cuda.synchronize()
     elif device.type == "mps":
         torch.mps.synchronize()
 
 
-def cuda_device_index(device: torch.device) -> int:
-    """Return the integer CUDA index accepted by older PyTorch releases."""
-    if device.type != "cuda":
-        raise ValueError("device must be a CUDA device")
-    return torch.cuda.current_device() if device.index is None else device.index
+def reset_cuda_peak_memory(device: torch.device) -> bool:
+    """Reset optional CUDA memory statistics without blocking the benchmark."""
+    try:
+        with torch.cuda.device(device):
+            torch.cuda.reset_peak_memory_stats()
+    except (RuntimeError, TypeError) as error:
+        print(
+            "WARNING: CUDA peak-memory statistics are unavailable; "
+            f"continuing without them ({error})"
+        )
+        return False
+    return True
+
+
+def cuda_peak_memory(device: torch.device):
+    """Read optional peak memory from the selected CUDA device."""
+    try:
+        with torch.cuda.device(device):
+            return torch.cuda.max_memory_allocated()
+    except (RuntimeError, TypeError) as error:
+        print(f"WARNING: Could not read CUDA peak-memory statistics ({error})")
+        return None
 
 
 def parse_args() -> argparse.Namespace:
@@ -140,8 +158,7 @@ def main() -> None:
     )
     ants_seconds = time.perf_counter() - start
 
-    if device.type == "cuda":
-        torch.cuda.reset_peak_memory_stats(cuda_device_index(device))
+    track_cuda_memory = device.type == "cuda" and reset_cuda_peak_memory(device)
     synchronize(device)
     start = time.perf_counter()
     if args.verbose:
@@ -210,9 +227,10 @@ def main() -> None:
         "Normalized log-bias correlation: "
         f"{np.corrcoef(np.log(normalized_ants_bias).ravel(), np.log(normalized_torch_bias).ravel())[0, 1]:.8f}"
     )
-    if device.type == "cuda":
-        peak_memory = torch.cuda.max_memory_allocated(cuda_device_index(device))
-        print(f"ANTsTorch CUDA peak memory: {peak_memory / 2**20:.1f} MiB")
+    if track_cuda_memory:
+        peak_memory = cuda_peak_memory(device)
+        if peak_memory is not None:
+            print(f"ANTsTorch CUDA peak memory: {peak_memory / 2**20:.1f} MiB")
     print(f"Outputs written with prefix: {prefix}")
 
 
