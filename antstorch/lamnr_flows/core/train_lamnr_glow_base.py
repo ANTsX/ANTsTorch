@@ -164,11 +164,18 @@ class GlowDDP(DistributedDataParallel):
 # Shared utility functions
 # ---------------------------------------------------------------------------
 
-def set_deterministic(seed: int) -> None:
+def set_deterministic(seed: int, deterministic: bool = True) -> None:
+    """Seed RNGs and configure cuDNN.
+
+    deterministic=True (default) restricts cuDNN to deterministic kernels and
+    disables autotuning, for bit-reproducible runs. deterministic=False lets
+    cuDNN autotune (benchmark=True) and pick the fastest kernels, which can be
+    noticeably faster for Conv3d but is not bit-reproducible across runs.
+    """
     torch.manual_seed(seed)
     np.random.seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = bool(deterministic)
+    torch.backends.cudnn.benchmark = not bool(deterministic)
 
 
 def _check_hw_divisible(
@@ -788,7 +795,7 @@ class BaseLAMNrTrainer(abc.ABC):
     def setup(self, args) -> None:
         """Call once from main() after arg parsing."""
         self.args = args
-        set_deterministic(args.seed)
+        set_deterministic(args.seed, getattr(args, "deterministic", True))
 
         # Optional: torch.autograd.set_detect_anomaly(True) makes backward()
         # raise immediately at the *forward* op that produced a NaN/Inf

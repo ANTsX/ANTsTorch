@@ -496,6 +496,8 @@ def _build_args() -> argparse.Namespace:
     ap.add_argument("--precision", default="mixed", choices=["double","float","mixed"])
     ap.add_argument("--amp-dtype", default="bf16", choices=["bf16","fp16"])
     ap.add_argument("--seed",      type=int, default=0)
+    ap.add_argument("--deterministic", action=argparse.BooleanOptionalAction, default=True,
+        help="cuDNN deterministic kernels (default). --no-deterministic enables cuDNN autotuning (faster, not bit-reproducible).")
 
     # Optimizer & scheduler
     ap.add_argument("--lr",               type=float, default=1e-4)

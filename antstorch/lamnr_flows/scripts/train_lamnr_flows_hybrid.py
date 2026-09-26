@@ -623,7 +623,7 @@ class HybridLAMNrTrainer:
 
     def setup(self, args: argparse.Namespace) -> None:
         self.args = args
-        set_deterministic(args.seed)
+        set_deterministic(args.seed, getattr(args, "deterministic", True))
         # Optional: torch.autograd.set_detect_anomaly(True) pinpoints the
         # exact forward op behind a NaN/Inf gradient at the cost of a large
         # slowdown. Off by default; mirrors BaseLAMNrTrainer's --detect-anomaly.
@@ -1866,6 +1866,8 @@ def _build_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--subject-column", default="")
     parser.add_argument("--devices", default="cpu")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--deterministic", action=argparse.BooleanOptionalAction, default=True,
+        help="cuDNN deterministic kernels (default). --no-deterministic enables cuDNN autotuning (faster, not bit-reproducible).")
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--num-workers", type=int, default=0)

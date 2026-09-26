@@ -836,7 +836,7 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
         from pathlib import Path
 
         self.args = args
-        set_deterministic(args.seed)
+        set_deterministic(args.seed, getattr(args, "deterministic", True))
 
         # Device
         if args.devices.lower() == "cpu":
@@ -1133,6 +1133,8 @@ def _build_args() -> argparse.Namespace:
     ap.add_argument("--devices", type=str, default="cpu",
         help="Device string, e.g. 'cpu', 'cuda:0', 'mps'.")
     ap.add_argument("--seed",    type=int, default=0)
+    ap.add_argument("--deterministic", action=argparse.BooleanOptionalAction, default=True,
+        help="cuDNN deterministic kernels (default). --no-deterministic enables cuDNN autotuning (faster, not bit-reproducible).")
 
     # Optimizer & scheduler
     ap.add_argument("--lr",               type=float, default=2e-4)
