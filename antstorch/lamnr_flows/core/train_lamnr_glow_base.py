@@ -890,7 +890,14 @@ class BaseLAMNrTrainer(abc.ABC):
         self.projectors: Optional[nn.ModuleList] = None
         if args.align != "none":
             with torch.no_grad():
-                x_tmpl = to01(xs[0][:1].to(dtype=torch.float32, device=dev))
+                x_tmpl = xs[0][:1]
+                if x_tmpl.ndim == 3:
+                    # (B, H, W) -> (B, 1, H, W)
+                    x_tmpl = x_tmpl.unsqueeze(1)
+                elif x_tmpl.ndim == 4 and int(getattr(args, "spatial_dims", 2)) == 3:
+                    # Raw 3-D volume batch without a channel dim: (B, H, W, D) -> (B, 1, H, W, D)
+                    x_tmpl = x_tmpl.unsqueeze(1)
+                x_tmpl = to01(x_tmpl.to(dtype=torch.float32, device=dev))
                 z_probe, _ = self.models[0].inverse_and_log_det(x_tmpl)
                 flat_dim = flatten_latents(
                     z_probe,
