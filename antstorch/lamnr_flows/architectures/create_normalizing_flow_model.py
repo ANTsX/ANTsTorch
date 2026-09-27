@@ -551,3 +551,93 @@ def create_glow_normalizing_flow_model_3d(
         _print_model_summary(model, input_shape=input_shape)
 
     return model
+
+
+def create_normalizing_flow_model_1d(
+    channels: int,
+    length: int,
+    K: int = 16,
+    hidden_channels: int = 64,
+    kernel_size: int = 3,
+    scale_cap: float = 0.5,
+    shift_cap: Optional[float] = None,
+    scale_map: str = "tanh",
+    split_mode_alternate: bool = True,
+    use_glow_blocks: bool = False,
+    actnorm: bool = False,
+    actnorm_s_cap: float = 5.0,
+    conv_s_cap: Optional[float] = None,
+    leaky: float = 0.1,
+    net_actnorm: bool = False,
+    padding_mode: str = "zeros",
+    q0=None,
+    verbose: bool = False,
+):
+    """
+    Create a 1D Convolutional Normalizing Flow model (ConvFlow1d).
+
+    Parameters
+    ----------
+    channels : int
+        Number of channels (features) per time step.
+    length : int
+        Number of temporal time steps.
+    K : int, default=16
+        Number of coupling steps.
+    hidden_channels : int, default=64
+        Hidden channels in convolutional sub-networks.
+    kernel_size : int, default=3
+        Kernel size for 1D convolutions.
+    scale_cap : float, default=0.5
+        Tanh clamp applied to scale parameter.
+    shift_cap : float or None, default=None
+        Tanh clamp applied to shift parameter.
+    scale_map : str, default="tanh"
+        Scale activation mapping.
+    split_mode_alternate : bool, default=True
+        Whether to alternate split partitions across layers.
+    use_glow_blocks : bool, default=False
+        Whether to use GlowBlock1d instead of standard coupling blocks.
+    actnorm : bool, default=False
+        Whether to prepend an ActNorm layer before each coupling block.
+    actnorm_s_cap : float, default=5.0
+        Bound on the ActNorm log-scale.
+    conv_s_cap : float or None, default=None
+        Bound on the 1x1 convolution log-diagonal (Glow blocks only).
+    leaky : float, default=0.1
+        LeakyReLU slope.
+    net_actnorm : bool, default=False
+        Whether to use ActNorm inside coupling conv subnets.
+    padding_mode : str, default="zeros"
+        Padding of the coupling convolutions ("zeros" or "circular").
+    q0 : antsnormflows distribution or None
+        Base distribution.
+    verbose : bool, default=False
+        Whether to print model summary.
+    """
+    model = nf.ConvFlow1d(
+        channels=channels,
+        length=length,
+        K=K,
+        hidden_channels=hidden_channels,
+        kernel_size=kernel_size,
+        scale_cap=scale_cap,
+        shift_cap=shift_cap,
+        scale_map=scale_map,
+        split_mode_alternate=split_mode_alternate,
+        use_glow_blocks=use_glow_blocks,
+        actnorm=actnorm,
+        actnorm_s_cap=actnorm_s_cap,
+        conv_s_cap=conv_s_cap,
+        leaky=leaky,
+        net_actnorm=net_actnorm,
+        padding_mode=padding_mode,
+        q0=q0,
+    )
+
+    model = _maybe_compile(model)
+
+    if verbose:
+        print(f"Created 1D ConvFlow model with {channels} channels, length {length}, padding_mode={padding_mode}.")
+
+    return model
