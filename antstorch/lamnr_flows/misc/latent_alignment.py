@@ -289,7 +289,7 @@ class Projector(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Latent flattening helper (shared 2D / 3D)
+# Latent flattening helper (shared 1D / 2D / 3D)
 # ---------------------------------------------------------------------------
 
 def flatten_latents(
@@ -304,7 +304,9 @@ def flatten_latents(
     without pooling; this is exact but can make the first projector layer very
     large.
 
-    Supports 2D ``(N, C, H, W)`` and 3D ``(N, C, H, W, D)`` tensors.
+    Supports 1D ``(N, C, L)``, 2D ``(N, C, H, W)`` and 3D ``(N, C, H, W, D)``
+    tensors; with ``all-pooled``, 1D latents keep ``target_pool_size`` temporal
+    bins per channel.
     """
     if strategy not in {"all-pooled", "all-flat"}:
         raise ValueError(
@@ -329,6 +331,11 @@ def flatten_latents(
             feature = F.adaptive_avg_pool2d(
                 level,
                 (target_pool_size, target_pool_size),
+            ).flatten(1)
+        elif level.ndim == 3:
+            feature = F.adaptive_avg_pool1d(
+                level,
+                target_pool_size,
             ).flatten(1)
         else:
             feature = level.flatten(1)

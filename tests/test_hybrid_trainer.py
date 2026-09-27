@@ -11,7 +11,11 @@ from antstorch.lamnr_flows.scripts.train_lamnr_flows_hybrid import (
     HybridLAMNrTrainer,
     HybridManifestDataset,
     HybridViewSpec,
+    SignalNormalizer,
     _augment_image_group,
+    _augment_signal_group,
+    _load_signal,
+    _signal_augmentation_config,
     _build_args,
     _scheduled_augmentation_config,
     build_manifest_from_config,
@@ -260,3 +264,232 @@ def test_hybrid_trainer_real_flow_smoke(tmp_path):
         tmp_path / "run" / "training_state.pt"
     ) == 2
     assert trainer.ema_models is not None
+
+
+# ---------------------------------------------------------------------------
+# signal1d views
+# ---------------------------------------------------------------------------
+
+def _signal_spec(**overrides):
+    raw = {"name": "kp", "type": "signal1d", "path_column": "kp", "shape": [3, 16]}
+    raw.update(overrides)
+    return HybridViewSpec.from_dict(raw)
+
+
+def test_signal_view_spec_validation():
+    spec = _signal_spec()
+    assert (spec.kind, spec.channels, spec.shape) == ("signal1d", 3, (16,))
+    assert (spec.layout, spec.resample) == ("auto", "linear")
+    assert _signal_spec(layout="lc").layout == "LC"
+    with pytest.raises(ValueError, match="layout"):
+        _signal_spec(layout="CHW")
+    with pytest.raises(ValueError, match="resample"):
+        _signal_spec(resample="nearest")
+    with pytest.raises(ValueError, match="normalization"):
+        _signal_spec(normalization="robust")
+    with pytest.raises(ValueError, match="path_column"):
+        HybridViewSpec.from_dict({"name": "kp", "type": "signal1d", "shape": [3, 16]})
+
+
+def test_load_signal_layouts_formats_and_resampling(tmp_path):
+    rng = np.random.default_rng(0)
+    signal = rng.normal(size=(3, 16)).astype("float32")  # (C, L)
+
+    np.save(tmp_path / "cl.npy", signal)
+    np.save(tmp_path / "lc.npy", signal.T)
+    torch.save(torch.from_numpy(signal.T.copy()), tmp_path / "lc.pt")
+    pd.DataFrame(signal.T, columns=["a", "b", "c"]).to_csv(tmp_path / "header.csv", index=False)
+    pd.DataFrame(signal.T).to_csv(tmp_path / "noheader.csv", index=False, header=False)
+    spec = _signal_spec()
+    for name in ["cl.npy", "lc.npy", "lc.pt", "header.csv", "noheader.csv"]:
+        loaded = _load_signal(str(tmp_path / name), spec)
+        assert loaded.shape == (3, 16), name
+        np.testing.assert_allclose(loaded.numpy(), signal, rtol=1e-5, atol=1e-5, err_msg=name)
+
+    # Square arrays are ambiguous unless the layout is given.
+    square = rng.normal(size=(3, 3)).astype("float32")
+    np.save(tmp_path / "square.npy", square)
+    square_spec = _signal_spec(shape=[3, 3])
+    with pytest.raises(ValueError, match="ambiguous"):
+        _load_signal(str(tmp_path / "square.npy"), square_spec)
+    loaded = _load_signal(str(tmp_path / "square.npy"), _signal_spec(shape=[3, 3], layout="LC"))
+    np.testing.assert_allclose(loaded.numpy(), square.T)
+
+    # Resampling one period of a sinusoid from 40 to 16 samples.
+    t40 = np.arange(40) / 40
+    wave = np.stack([np.sin(2 * np.pi * (t40 + k / 3)) for k in range(3)]).astype("float32")
+    np.save(tmp_path / "wave.npy", wave)
+    t16 = np.arange(16) / 16
+    expected = np.stack([np.sin(2 * np.pi * (t16 + k / 3)) for k in range(3)])
+    periodic = _load_signal(str(tmp_path / "wave.npy"), _signal_spec(resample="periodic"))
+    np.testing.assert_allclose(periodic.numpy(), expected, atol=1e-3)
+    for mode in ["linear", "cubic"]:
+        out = _load_signal(str(tmp_path / "wave.npy"), _signal_spec(resample=mode))
+        assert out.shape == (3, 16) and torch.isfinite(out).all()
+
+
+def test_signal_normalizer_roundtrip_and_state():
+    rng = np.random.default_rng(1)
+    signals = [
+        torch.from_numpy((300 + 80 * rng.normal(size=(3, 16))).astype("float32"))
+        for _ in range(20)
+    ]
+    for mode in ["0mean", "01", "none"]:
+        normalizer = SignalNormalizer(mode).fit(signals)
+        stacked = torch.stack([normalizer.transform(s) for s in signals])
+        if mode == "0mean":
+            assert stacked.mean().abs() < 1e-4
+            assert (stacked.transpose(0, 1).reshape(3, -1).std(dim=1, unbiased=False) - 1).abs().max() < 1e-4
+        elif mode == "01":
+            assert stacked.min() >= -1e-6 and stacked.max() <= 1 + 1e-6
+        restored = normalizer.inverse_transform(normalizer.transform(signals[0]))
+        torch.testing.assert_close(restored, signals[0], rtol=1e-5, atol=1e-3)
+        clone = SignalNormalizer()
+        clone.load_state_dict(json.loads(json.dumps(normalizer.state_dict())))
+        torch.testing.assert_close(clone.transform(signals[1]), normalizer.transform(signals[1]))
+
+
+def test_hybrid_trainer_signal1d_smoke(tmp_path):
+    rng = np.random.default_rng(5)
+    rows = []
+    t = np.arange(20) / 20
+    for index in range(6):
+        path = tmp_path / f"kp_{index}.npy"
+        phase = rng.uniform(0, 1, size=(4, 1))
+        # Pixel-scale keypoints stored as (L, C) with a different length.
+        np.save(path, (300 + 50 * np.sin(2 * np.pi * (t + phase))).T.astype("float32"))
+        rows.append({"subject": f"s{index}", "kp": str(path),
+                     "b1": 1.0 + index, "b2": 0.5 * index ** 2})
+    manifest = tmp_path / "manifest.csv"
+    pd.DataFrame(rows).to_csv(manifest, index=False)
+    config = tmp_path / "views.json"
+    config.write_text(json.dumps({
+        "subject_column": "subject",
+        "views": [
+            {"name": "kp", "type": "signal1d", "path_column": "kp",
+             "shape": [4, 16], "resample": "periodic",
+             "augmentation": {"max_roll": 1, "noise_std": 0.005},
+             "model": {"K": 2, "hidden": 8, "use_glow_blocks": True,
+                       "padding_mode": "circular", "alignment_pool_size": 8}},
+            {"name": "tau", "type": "tabular", "columns": ["b1", "b2"],
+             "model": {"K": 1, "hidden": 4}},
+        ],
+    }))
+    args = _build_args([
+        "--manifest", str(manifest), "--config", str(config),
+        "--out-dir", str(tmp_path / "run"), "--batch-size", "2",
+        "--max-iter", "1", "--eval-interval", "1", "--align-warmup", "0",
+        "--proj-dim", "4", "--proj-hidden", "8", "--devices", "cpu",
+        "--preview-interval", "1", "--preview-samples", "2",
+        "--save-recon", "--export-max-samples", "2",
+    ])
+    trainer = HybridLAMNrTrainer()
+    trainer.setup(args)
+    assert isinstance(trainer.normalizers["kp"], SignalNormalizer)
+    summary = (tmp_path / "run" / "run_config.txt").read_text()
+    assert "view[0] signal augmentation" in summary and "max_roll" in summary
+    # all-pooled keeps alignment_pool_size temporal bins per channel.
+    assert trainer._alignment_pool_size(trainer.views[0]) == 8
+    values, masks = next(iter(trainer.train_loader))
+    assert tuple(values[0].shape[1:]) == (4, 16)
+    assert values[0].abs().max() < 10  # standardized, not pixels
+    loss, align, bpds = trainer._batch_loss((values, masks), 1)
+    assert torch.isfinite(loss) and torch.isfinite(align) and len(bpds) == 2
+    trainer.opt.zero_grad(set_to_none=True)
+    trainer.train()  # includes previews with tempered model sampling
+    run = tmp_path / "run"
+    assert (run / "previews" / "kp_recon_it000001.png").exists()
+    assert (run / "previews" / "kp_samples_it000001.png").exists()
+    exported = sorted((run / "export" / "kp" / "reconstructions").glob("*.npy"))
+    assert exported
+    recon = np.load(exported[0])
+    assert recon.shape == (4, 16) and 200 < recon.mean() < 400  # original units
+    blob = torch.load(run / "training_state.pt", map_location="cpu", weights_only=False)
+    assert blob["normalizers"]["kp"]["kind"] == "signal1d"
+    assert trainer._load_checkpoint(run / "training_state.pt") == 2
+
+
+def test_signal_augmentation_validation_and_schedule():
+    with pytest.raises(ValueError, match="unknown augmentation keys"):
+        _signal_spec(augmentation={"flip": 0.5})
+    with pytest.raises(ValueError, match="max_roll"):
+        _signal_spec(augmentation={"max_roll": 16})
+    with pytest.raises(ValueError, match="roll_prob"):
+        _signal_spec(augmentation={"roll_prob": 1.5})
+    with pytest.raises(ValueError, match="noise_std"):
+        _signal_spec(augmentation={"noise_std": -0.1})
+    assert _signal_augmentation_config(_signal_spec(), 0) == {
+        "max_roll": 0, "roll_prob": 1.0, "noise_std": 0.0,
+    }
+    spec = _signal_spec(augmentation={
+        "max_roll": 2, "noise_std": 0.005,
+        "schedules": "noise_std:linear:0.005->0.0@100,max_roll:linear:4->0@100",
+    })
+    start = _signal_augmentation_config(spec, 0)
+    end = _signal_augmentation_config(spec, 100)
+    assert start["noise_std"] == pytest.approx(0.005) and start["max_roll"] == 4
+    assert end["noise_std"] == pytest.approx(0.0) and end["max_roll"] == 0
+
+
+def test_signal_augmentation_roll_range_sharing_and_noise():
+    torch.manual_seed(0)
+    base = torch.arange(16, dtype=torch.float32).repeat(3, 1)  # (3, 16) ramp
+    roll_only = {"max_roll": 2, "roll_prob": 1.0, "noise_std": 0.0}
+
+    def shift_of(tensor):
+        # The ramp's first sample (0) moves to index k (mod 16) under roll(k).
+        k = int(torch.nonzero(tensor[0] == 0)[0])
+        return k if k < 8 else k - 16
+
+    seen = set()
+    for _ in range(300):
+        a, b = _augment_signal_group([base.clone(), base.clone()], [roll_only, roll_only])
+        assert shift_of(a) == shift_of(b)  # shared within a group
+        assert torch.equal(torch.roll(base, shift_of(a), dims=-1), a)  # pure circular roll
+        seen.add(shift_of(a))
+    assert seen == {-2, -1, 0, 1, 2}
+
+    # Separate groups draw independent shifts.
+    different = 0
+    for _ in range(200):
+        (a,) = _augment_signal_group([base.clone()], [roll_only])
+        (b,) = _augment_signal_group([base.clone()], [roll_only])
+        different += shift_of(a) != shift_of(b)
+    assert different > 100
+
+    never = {"max_roll": 2, "roll_prob": 0.0, "noise_std": 0.0}
+    (out,) = _augment_signal_group([base.clone()], [never])
+    assert torch.equal(out, base)
+
+    noisy = {"max_roll": 0, "roll_prob": 1.0, "noise_std": 0.005}
+    zeros = torch.zeros(34, 64)
+    (out,) = _augment_signal_group([zeros], [noisy])
+    assert out.std().item() == pytest.approx(0.005, rel=0.1)
+
+
+def test_signal_augmentation_in_dataset_train_only(tmp_path):
+    ramp = np.tile(np.arange(16, dtype="float32"), (3, 1))
+    rows = []
+    for index in range(4):
+        path = tmp_path / f"s{index}.npy"
+        np.save(path, ramp)
+        rows.append({"a": str(path), "b": str(path)})
+    frame = pd.DataFrame(rows)
+    aug = {"max_roll": 3, "roll_prob": 1.0}
+    views = [
+        _signal_spec(name="a", path_column="a", augmentation=aug, augmentation_group="clip"),
+        _signal_spec(name="b", path_column="b", augmentation=aug, augmentation_group="clip"),
+    ]
+    none = {v.name: SignalNormalizer("none").fit([torch.from_numpy(ramp)]) for v in views}
+    train = HybridManifestDataset(frame, views, none, do_augmentation=True)
+    val = HybridManifestDataset(frame, views, none, do_augmentation=False)
+    torch.manual_seed(1)
+    shifted = 0
+    for index in range(len(frame)):
+        (a, b), _ = train[index]
+        assert torch.equal(a, b)  # same augmentation_group -> same phase shift
+        shifted += not torch.equal(a, torch.from_numpy(ramp))
+        (va, vb), _ = val[index]
+        assert torch.equal(va, torch.from_numpy(ramp))  # no augmentation in validation
+    assert shifted > 0
+

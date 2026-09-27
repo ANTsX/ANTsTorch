@@ -1,4 +1,4 @@
-"""Hybrid LAMNr trainer for tabular, 2D-image, and 3D-image views.
+"""Hybrid LAMNr trainer for tabular, 1D-signal, 2D-image, and 3D-image views.
 
 The trainer consumes one row-aligned CSV manifest plus a JSON view
 configuration. Each view owns its normalizing-flow architecture and its
@@ -16,6 +16,41 @@ Example configuration::
          "columns": ["Braak1_2", "Braak3_4", "Braak5_6"]}
       ]
     }
+
+``signal1d`` views hold multichannel sequences of shape ``(channels, length)``
+(e.g. 17 2D keypoints over a gait cycle -> ``"shape": [34, 64]``) stored as
+``.npy``, ``.pt``/``.pth`` or ``.csv`` files and modeled with ``ConvFlow1d``::
+
+    {"name": "keypoints", "type": "signal1d", "path_column": "KeypointFile",
+     "shape": [34, 64], "layout": "LC", "resample": "periodic",
+     "normalization": "0mean",
+     "model": {"K": 16, "hidden": 64, "use_glow_blocks": true,
+               "padding_mode": "circular", "alignment_pool_size": 16}}
+
+``layout`` is the on-disk axis order ("CL", "LC", or "auto", which infers it
+from ``channels`` and refuses ambiguous square arrays). ``resample`` maps the
+stored length to ``length`` ("linear", "cubic", or "periodic" for a cyclic
+periodic cubic spline). ``normalization`` ("0mean", "01", "none") is a
+per-channel scaler fit on the training split and saved in the checkpoint.
+The coupling ``scale_cap`` defaults to ``--scale-cap`` like the other flow
+views; set ``model.scale_cap`` to override it. ``model.alignment_pool_size``
+(default ``min(16, length)``) sets the number of temporal bins kept by
+``--alignment-latents all-pooled``.
+
+Signal views have their own training augmentation, off by default and
+independent of the image augmentation CLI (``--disable-augmentation`` still
+turns it off)::
+
+    "augmentation": {"max_roll": 2, "roll_prob": 1.0, "noise_std": 0.005,
+                     "schedules": "noise_std:cos:0.005->0.0@50k"}
+
+``max_roll`` is a circular phase shift of up to +/- ``max_roll`` time steps
+(keep it small for heel-strike-normalized cycles so the template stays
+phase-aligned), applied with probability ``roll_prob``; ``noise_std`` is
+Gaussian noise added after normalization (standardized units). Signal views
+sharing an ``augmentation_group`` share the phase shift (e.g. two modalities
+of the same clip); otherwise each view draws its own. ``schedules`` accepts
+``max_roll``, ``roll_prob`` and ``noise_std``.
 
 Run with::
 
@@ -57,6 +92,7 @@ from antstorch.lamnr_flows.architectures.create_normalizing_flow_model import (
     create_glow_normalizing_flow_model_2d,
     create_glow_normalizing_flow_model_3d,
     create_real_nvp_normalizing_flow_model,
+    create_conv_flow_model_1d,
 )
 from antstorch.lamnr_flows.core.train_lamnr_glow_base import (
     make_warmup,
@@ -77,7 +113,12 @@ from antstorch.lamnr_flows.scripts.train_lamnr_flows_tabular import (
 )
 
 
-VIEW_TYPES = {"tabular", "image2d", "image3d"}
+VIEW_TYPES = {"tabular", "image2d", "image3d", "signal1d"}
+SIGNAL_LAYOUTS = {"auto", "CL", "LC"}
+SIGNAL_RESAMPLE_MODES = {"linear", "cubic", "periodic"}
+SIGNAL_DEFAULT_POOL_SIZE = 16
+SIGNAL_AUGMENTATION_DEFAULTS = {"max_roll": 0, "roll_prob": 1.0, "noise_std": 0.0}
+SIGNAL_AUGMENTATION_KEYS = set(SIGNAL_AUGMENTATION_DEFAULTS) | {"schedules"}
 
 
 class HybridViewStep(nn.Module):
@@ -131,6 +172,8 @@ class HybridViewSpec:
     key_regex: Optional[str] = None
     csv: Optional[str] = None
     key_column: Optional[str] = None
+    layout: str = "auto"
+    resample: str = "linear"
 
     @classmethod
     def from_dict(cls, raw: Dict[str, Any]) -> "HybridViewSpec":
@@ -163,6 +206,8 @@ class HybridViewSpec:
             key_regex=raw.get("key_regex"),
             csv=raw.get("csv"),
             key_column=raw.get("key_column"),
+            layout=str(raw.get("layout", "auto")),
+            resample=str(raw.get("resample", "linear")),
         )
         if kind == "tabular":
             if not spec.columns:
@@ -172,6 +217,49 @@ class HybridViewSpec:
                     f"Tabular RealNVP view {name!r} needs at least two columns; "
                     "a one-dimensional affine-coupling flow is degenerate."
                 )
+        elif kind == "signal1d":
+            if not spec.path_column:
+                raise ValueError(f"Signal view {name!r} requires 'path_column'.")
+            if len(spec.shape) not in (1, 2) or any(x <= 0 for x in spec.shape):
+                raise ValueError(
+                    f"Signal view {name!r} requires a positive shape of length 1 (length) or 2 (channels, length)."
+                )
+            if len(spec.shape) == 2:
+                spec.channels = spec.shape[0]
+                spec.shape = (spec.shape[1],)
+            if spec.channels <= 0:
+                raise ValueError("channels must be positive.")
+            spec.layout = spec.layout.upper() if spec.layout.lower() != "auto" else "auto"
+            if spec.layout not in SIGNAL_LAYOUTS:
+                raise ValueError(
+                    f"Signal view {name!r}: layout must be one of {sorted(SIGNAL_LAYOUTS)}; "
+                    f"got {spec.layout!r}."
+                )
+            spec.resample = spec.resample.lower()
+            if spec.resample not in SIGNAL_RESAMPLE_MODES:
+                raise ValueError(
+                    f"Signal view {name!r}: resample must be one of "
+                    f"{sorted(SIGNAL_RESAMPLE_MODES)}; got {spec.resample!r}."
+                )
+            if spec.normalization.lower() not in ("0mean", "01", "none"):
+                raise ValueError(
+                    f"Signal view {name!r}: normalization must be '0mean', '01' or 'none'."
+                )
+            unknown = sorted(set(spec.augmentation) - SIGNAL_AUGMENTATION_KEYS)
+            if unknown:
+                raise ValueError(
+                    f"Signal view {name!r}: unknown augmentation keys {unknown}; "
+                    f"expected a subset of {sorted(SIGNAL_AUGMENTATION_KEYS)}."
+                )
+            aug = {**SIGNAL_AUGMENTATION_DEFAULTS, **spec.augmentation}
+            if not 0 <= int(aug["max_roll"]) < spec.shape[0]:
+                raise ValueError(
+                    f"Signal view {name!r}: max_roll must be in [0, length); got {aug['max_roll']}."
+                )
+            if not 0.0 <= float(aug["roll_prob"]) <= 1.0:
+                raise ValueError(f"Signal view {name!r}: roll_prob must be in [0, 1].")
+            if float(aug["noise_std"]) < 0.0:
+                raise ValueError(f"Signal view {name!r}: noise_std must be >= 0.")
         else:
             expected = 2 if kind == "image2d" else 3
             if not spec.path_column:
@@ -287,6 +375,10 @@ def _save_hybrid_metric_plots(csv_path: Path, out_dir: Path) -> None:
         tqdm.write(f"[metrics] plot generation skipped: {error}")
 
 
+def _optional_float(value: Any) -> Optional[float]:
+    return None if value is None else float(value)
+
+
 def _is_present(value: Any) -> bool:
     return pd.notna(value) and str(value).strip() != ""
 
@@ -355,6 +447,164 @@ def _load_image(path: str, spec: HybridViewSpec) -> torch.Tensor:
             tensor.unsqueeze(0), size=target, mode=mode, align_corners=False
         ).squeeze(0)
     return tensor
+
+
+def _read_signal_array(p: Path) -> np.ndarray:
+    lower = p.name.lower()
+    if lower.endswith(".npy"):
+        return np.load(p, allow_pickle=False)
+    if lower.endswith(".pt") or lower.endswith(".pth"):
+        obj = torch.load(p, map_location="cpu", weights_only=True)
+        return obj.detach().cpu().numpy() if torch.is_tensor(obj) else np.asarray(obj)
+    if lower.endswith(".csv"):
+        # Read without assuming a header, then drop leading non-numeric rows
+        # (a header line) so headerless files keep their first sample.
+        frame = pd.read_csv(p, header=None).apply(pd.to_numeric, errors="coerce")
+        array = frame.to_numpy(dtype=np.float64)
+        first = 0
+        while first < len(array) and not np.isfinite(array[first]).any():
+            first += 1
+        return array[first:]
+    raise ValueError(f"Unsupported signal file format for {p}.")
+
+
+def _resample_signal(tensor: torch.Tensor, length: int, mode: str) -> torch.Tensor:
+    """Resample a ``(C, L_in)`` signal to ``(C, length)``."""
+    length_in = int(tensor.shape[-1])
+    if length_in == length:
+        return tensor
+    if mode == "linear":
+        return F.interpolate(
+            tensor.unsqueeze(0), size=(length,), mode="linear", align_corners=False
+        ).squeeze(0)
+    from scipy.interpolate import CubicSpline
+
+    values = tensor.double().numpy()
+    if mode == "cubic":
+        # Endpoint-aligned (the first and last samples are kept).
+        t_in = np.linspace(0.0, 1.0, length_in)
+        t_out = np.linspace(0.0, 1.0, length)
+        out = CubicSpline(t_in, values, axis=1)(t_out)
+    elif mode == "periodic":
+        # One period sampled at t = k / L_in (the endpoint t = 1 is the start
+        # of the next cycle); a periodic spline keeps the cycle seamless.
+        t_in = np.arange(length_in + 1) / length_in
+        closed = np.concatenate([values, values[:, :1]], axis=1)
+        t_out = np.arange(length) / length
+        out = CubicSpline(t_in, closed, axis=1, bc_type="periodic")(t_out)
+    else:
+        raise ValueError(f"Unknown signal resample mode {mode!r}.")
+    return torch.from_numpy(np.ascontiguousarray(out, dtype=np.float32))
+
+
+def _load_signal(path: str, spec: HybridViewSpec) -> torch.Tensor:
+    """Load one signal file as a raw (unnormalized) ``(channels, length)`` tensor."""
+    p = Path(path).expanduser()
+    if not p.exists():
+        raise FileNotFoundError(p)
+
+    array = np.asarray(_read_signal_array(p), dtype=np.float32)
+    if array.ndim == 1:
+        if spec.channels != 1:
+            raise ValueError(
+                f"{p}: 1D array but view {spec.name!r} expects {spec.channels} channels."
+            )
+        array = array[None, :]
+    elif array.ndim != 2:
+        raise ValueError(f"{p}: expected a 1D or 2D array; got shape {array.shape}.")
+    else:
+        layout = spec.layout
+        if layout == "auto":
+            rows_match = array.shape[0] == spec.channels
+            cols_match = array.shape[1] == spec.channels
+            if rows_match and cols_match:
+                raise ValueError(
+                    f"{p}: square array {array.shape} is ambiguous; set the view's "
+                    "'layout' to 'CL' or 'LC'."
+                )
+            if rows_match:
+                layout = "CL"
+            elif cols_match:
+                layout = "LC"
+            else:
+                raise ValueError(
+                    f"{p}: shape {array.shape} has no axis of size {spec.channels} "
+                    f"(channels of view {spec.name!r})."
+                )
+        if layout == "LC":
+            array = array.T
+        if array.shape[0] != spec.channels:
+            raise ValueError(
+                f"Expected {spec.channels} signal channels; got {array.shape[0]} from {p} "
+                f"(layout={spec.layout})."
+            )
+
+    tensor = torch.from_numpy(np.ascontiguousarray(array))
+    tensor = _resample_signal(tensor, spec.shape[0], spec.resample)
+    return tensor.contiguous()
+
+
+class SignalNormalizer:
+    """Per-channel scaler for ``(channels, length)`` signal views.
+
+    Statistics are pooled over samples and time points of the training split.
+    Modes mirror ``TabularNormalizer``: '0mean' (z-score), '01' (min-max) and
+    'none'. The state is saved in the checkpoint with the tabular normalizers.
+    """
+
+    def __init__(self, mode: str = "0mean"):
+        mode = str(mode).lower()
+        if mode not in ("0mean", "01", "none"):
+            raise ValueError(f"SignalNormalizer mode must be '0mean', '01' or 'none'; got {mode!r}.")
+        self.mode = mode
+        self._shift: Optional[np.ndarray] = None
+        self._scale: Optional[np.ndarray] = None
+        self._fitted = False
+
+    def fit(self, signals: Sequence[torch.Tensor]) -> "SignalNormalizer":
+        if self.mode != "none":
+            stacked = torch.stack([s.double() for s in signals])  # (N, C, L)
+            per_channel = stacked.transpose(0, 1).reshape(stacked.shape[1], -1).numpy()
+            if self.mode == "0mean":
+                shift = per_channel.mean(axis=1)
+                scale = per_channel.std(axis=1)
+            else:
+                shift = per_channel.min(axis=1)
+                scale = per_channel.max(axis=1) - shift
+            self._shift = shift.astype(np.float32)
+            self._scale = np.where(scale > 1e-8, scale, 1.0).astype(np.float32)
+        self._fitted = True
+        return self
+
+    def transform(self, signal: torch.Tensor) -> torch.Tensor:
+        if self.mode == "none" or self._shift is None:
+            return signal.float()
+        shift = torch.from_numpy(self._shift).to(signal.device)[:, None]
+        scale = torch.from_numpy(self._scale).to(signal.device)[:, None]
+        return ((signal.float() - shift) / scale).float()
+
+    def inverse_transform(self, signal: torch.Tensor) -> torch.Tensor:
+        signal = signal.detach().cpu().float()
+        if self.mode == "none" or self._shift is None:
+            return signal
+        shift = torch.from_numpy(self._shift)[:, None]
+        scale = torch.from_numpy(self._scale)[:, None]
+        return signal * scale + shift
+
+    def state_dict(self) -> dict:
+        return {
+            "kind": "signal1d",
+            "mode": self.mode,
+            "shift": self._shift.tolist() if self._shift is not None else None,
+            "scale": self._scale.tolist() if self._scale is not None else None,
+            "fitted": self._fitted,
+        }
+
+    def load_state_dict(self, d: dict) -> None:
+        self.mode = d["mode"]
+        self._shift = np.array(d["shift"], dtype=np.float32) if d.get("shift") is not None else None
+        self._scale = np.array(d["scale"], dtype=np.float32) if d.get("scale") is not None else None
+        self._fitted = bool(d.get("fitted", False))
 
 
 def _default_augmentation_config(args: argparse.Namespace) -> Dict[str, Any]:
@@ -497,6 +747,51 @@ def _augment_image_group(
     return augmented
 
 
+def _signal_augmentation_config(spec: HybridViewSpec, step: int) -> Dict[str, Any]:
+    """Resolve one signal view's augmentation parameters at a training step."""
+    current = {**SIGNAL_AUGMENTATION_DEFAULTS, **spec.augmentation}
+    schedule_spec = str(current.pop("schedules", "") or "").strip()
+    if schedule_spec:
+        scheduler = antstorch.MultiParamScheduler(antstorch.parse_schedules(schedule_spec))
+        values = scheduler.step(int(step))
+        for key in SIGNAL_AUGMENTATION_DEFAULTS:
+            if key in values:
+                current[key] = float(values[key])
+    length = int(spec.shape[0])
+    return {
+        "max_roll": int(min(max(round(float(current["max_roll"])), 0), length - 1)),
+        "roll_prob": float(min(max(float(current["roll_prob"]), 0.0), 1.0)),
+        "noise_std": max(0.0, float(current["noise_std"])),
+    }
+
+
+def _augment_signal_group(
+    tensors: List[torch.Tensor],
+    configs: List[Dict[str, Any]],
+) -> List[torch.Tensor]:
+    """Circular phase shift (shared across the group) plus per-view noise.
+
+    One uniform draw decides whether to shift and one decides the shift, so
+    views with identical settings receive the identical shift ``k``.
+    """
+    if not tensors:
+        return tensors
+    apply_draw = float(torch.rand(()).item())
+    shift_draw = float(torch.rand(()).item())
+    augmented = []
+    for tensor, config in zip(tensors, configs):
+        max_roll = int(config["max_roll"])
+        if max_roll > 0 and apply_draw < float(config["roll_prob"]):
+            shift = min(int(shift_draw * (2 * max_roll + 1)), 2 * max_roll) - max_roll
+            if shift:
+                tensor = torch.roll(tensor, shifts=shift, dims=-1)
+        noise_std = float(config["noise_std"])
+        if noise_std > 0.0:
+            tensor = tensor + noise_std * torch.randn_like(tensor)
+        augmented.append(tensor)
+    return augmented
+
+
 class HybridManifestDataset(Dataset):
     """Lazy row-aligned heterogeneous dataset with explicit availability masks."""
 
@@ -557,6 +852,16 @@ class HybridManifestDataset(Dataset):
                     ).squeeze(0)
                 else:
                     value = torch.zeros(len(spec.columns), dtype=torch.float32)
+            elif spec.kind == "signal1d":
+                path_value = row[spec.path_column]
+                present = _is_present(path_value) and Path(str(path_value)).expanduser().exists()
+                if present:
+                    value = _load_signal(str(path_value), spec)
+                    normalizer = self.normalizers.get(spec.name)
+                    if normalizer is not None:
+                        value = normalizer.transform(value)
+                else:
+                    value = torch.zeros((spec.channels, *spec.shape), dtype=torch.float32)
             else:
                 path_value = row[spec.path_column]
                 present = _is_present(path_value) and Path(str(path_value)).expanduser().exists()
@@ -570,7 +875,7 @@ class HybridManifestDataset(Dataset):
         if self.do_augmentation:
             grouped_indices: Dict[str, List[int]] = {}
             for vi, spec in enumerate(self.views):
-                if spec.kind == "tabular" or not masks[vi]:
+                if spec.kind not in ("image2d", "image3d") or not masks[vi]:
                     continue
                 group = spec.augmentation_group or f"__view__{spec.name}"
                 grouped_indices.setdefault(group, []).append(vi)
@@ -579,6 +884,20 @@ class HybridManifestDataset(Dataset):
                     self.augmentation_groups.get(group, {}), step
                 )
                 augmented = _augment_image_group([values[i] for i in indices], config)
+                for vi, tensor in zip(indices, augmented):
+                    values[vi] = tensor
+
+            signal_groups: Dict[str, List[int]] = {}
+            for vi, spec in enumerate(self.views):
+                if spec.kind != "signal1d" or not masks[vi]:
+                    continue
+                group = spec.augmentation_group or f"__view__{spec.name}"
+                signal_groups.setdefault(group, []).append(vi)
+            for indices in signal_groups.values():
+                configs = [
+                    _signal_augmentation_config(self.views[i], step) for i in indices
+                ]
+                augmented = _augment_signal_group([values[i] for i in indices], configs)
                 for vi, tensor in zip(indices, augmented):
                     values[vi] = tensor
         return values, torch.tensor(masks, dtype=torch.bool)
@@ -695,11 +1014,16 @@ class HybridLAMNrTrainer:
         train_frame, val_frame = _split_manifest(
             frame, args.val_fraction, args.seed, subject_column
         )
-        self.normalizers: Dict[str, TabularNormalizer] = {}
+        self.normalizers: Dict[str, Any] = {}
         for view in self.views:
             available = _view_availability(train_frame, view)
             if not available.any():
                 raise ValueError(f"View {view.name!r} has no available training observations.")
+            if view.kind == "signal1d":
+                paths = train_frame.loc[available, view.path_column]
+                signals = [_load_signal(str(path), view) for path in paths]
+                self.normalizers[view.name] = SignalNormalizer(view.normalization).fit(signals)
+                continue
             if view.kind != "tabular":
                 continue
             matrix = train_frame[view.columns].apply(pd.to_numeric, errors="coerce").to_numpy()
@@ -714,7 +1038,7 @@ class HybridLAMNrTrainer:
         configured_groups = dict(config.get("augmentation_groups", {}))
         group_members: Dict[str, List[HybridViewSpec]] = {}
         for view in self.views:
-            if view.kind != "tabular":
+            if view.kind in ("image2d", "image3d"):
                 group = view.augmentation_group or f"__view__{view.name}"
                 group_members.setdefault(group, []).append(view)
         self.augmentation_groups: Dict[str, Dict[str, Any]] = {}
@@ -790,7 +1114,7 @@ class HybridLAMNrTrainer:
         self.models = nn.ModuleList([
             HybridViewStep(
                 model, view.kind, args.alignment_latents,
-                args.alignment_pool_size,
+                self._alignment_pool_size(view),
             ).to(self.dev)
             for model, view in zip(bare_models, self.views)
         ])
@@ -1009,6 +1333,12 @@ class HybridLAMNrTrainer:
             else:
                 add(f"view[{index}] shape / channels", f"{view.shape} / {view.channels}")
                 add(f"view[{index}] augmentation group", view.augmentation_group)
+                if view.kind == "signal1d":
+                    add(
+                        f"view[{index}] signal augmentation",
+                        {**SIGNAL_AUGMENTATION_DEFAULTS, **view.augmentation}
+                        if not self.args.disable_augmentation else "disabled",
+                    )
             add(f"view[{index}] model", view.model)
 
         rows.append("-" * 72)
@@ -1016,6 +1346,14 @@ class HybridLAMNrTrainer:
 
     def _cfg(self, view: HybridViewSpec, name: str, default: Any) -> Any:
         return view.model.get(name, default)
+
+    def _alignment_pool_size(self, view: HybridViewSpec) -> int:
+        """Per-view ``all-pooled`` size; 1D signals keep more temporal bins."""
+        if view.kind == "signal1d":
+            default = min(SIGNAL_DEFAULT_POOL_SIZE, view.shape[0])
+        else:
+            default = self.args.alignment_pool_size
+        return int(self._cfg(view, "alignment_pool_size", default))
 
     def _build_model(self, view: HybridViewSpec) -> nn.Module:
         if view.kind == "tabular":
@@ -1042,6 +1380,27 @@ class HybridLAMNrTrainer:
                 spectral_norm_scales=bool(self._cfg(view, "spectral_norm_scales", False)),
                 additive_first_n=int(self._cfg(view, "additive_first_n", 0)),
                 actnorm_every=int(self._cfg(view, "actnorm_every", 1)),
+            )
+        elif view.kind == "signal1d":
+            channels = view.channels
+            length = view.shape[0]
+            model = create_conv_flow_model_1d(
+                channels=channels,
+                length=length,
+                K=int(self._cfg(view, "K", 16)),
+                hidden_channels=int(self._cfg(view, "hidden", 64)),
+                kernel_size=int(self._cfg(view, "kernel_size", 3)),
+                scale_cap=float(self._cfg(view, "scale_cap", self.args.scale_cap)),
+                shift_cap=_optional_float(self._cfg(view, "shift_cap", None)),
+                scale_map=str(self._cfg(view, "scale_map", "tanh")),
+                split_mode_alternate=bool(self._cfg(view, "split_mode_alternate", True)),
+                use_glow_blocks=bool(self._cfg(view, "use_glow_blocks", False)),
+                actnorm=bool(self._cfg(view, "actnorm", False)),
+                actnorm_s_cap=float(self._cfg(view, "actnorm_s_cap", 5.0)),
+                conv_s_cap=_optional_float(self._cfg(view, "conv_s_cap", None)),
+                leaky=float(self._cfg(view, "leaky", 0.1)),
+                net_actnorm=bool(self._cfg(view, "net_actnorm", False)),
+                padding_mode=str(self._cfg(view, "padding_mode", "zeros")),
             )
         else:
             input_shape = (view.channels, *view.shape)
@@ -1104,7 +1463,9 @@ class HybridLAMNrTrainer:
 
     def _prepare(self, tensor: torch.Tensor, view: HybridViewSpec) -> torch.Tensor:
         tensor = tensor.to(device=self.dev, dtype=torch.float32)
-        return tensor if view.kind == "tabular" else to01(tensor)
+        if view.kind in ("tabular", "signal1d"):
+            return tensor
+        return to01(tensor)
 
     def _encode(self, model: nn.Module, x: torch.Tensor, view: HybridViewSpec):
         if view.kind == "tabular":
@@ -1114,7 +1475,7 @@ class HybridLAMNrTrainer:
         flat = flatten_latents(
             z,
             strategy=self.args.alignment_latents,
-            target_pool_size=self.args.alignment_pool_size,
+            target_pool_size=self._alignment_pool_size(view),
         )
         return z, flat
 
@@ -1827,7 +2188,14 @@ class HybridLAMNrTrainer:
                     view_dir = export_dir / view.name / "reconstructions"
                     view_dir.mkdir(parents=True, exist_ok=True)
                     remaining = max(0, self.args.export_max_samples - len(image_records[view.name]))
-                    for row, image in list(zip(rows, recon.detach().float().cpu()))[:remaining]:
+                    recon_cpu = recon.detach().float().cpu()
+                    if view.kind == "signal1d" and view.name in self.normalizers:
+                        # Export signals in their original units (e.g. pixels).
+                        recon_cpu = torch.stack([
+                            self.normalizers[view.name].inverse_transform(item)
+                            for item in recon_cpu
+                        ]) if len(recon_cpu) else recon_cpu
+                    for row, image in list(zip(rows, recon_cpu))[:remaining]:
                         output = view_dir / f"row_{int(row):06d}.npy"
                         np.save(output, image.numpy())
                         image_records[view.name].append({"row": int(row), "path": str(output)})
