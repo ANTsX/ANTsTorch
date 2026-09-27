@@ -553,7 +553,7 @@ def create_glow_normalizing_flow_model_3d(
     return model
 
 
-def create_conv_flow_model_1d(
+def create_normalizing_flow_model_1d(
     channels: int,
     length: int,
     K: int = 16,

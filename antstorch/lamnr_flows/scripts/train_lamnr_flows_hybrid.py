@@ -92,7 +92,7 @@ from antstorch.lamnr_flows.architectures.create_normalizing_flow_model import (
     create_glow_normalizing_flow_model_2d,
     create_glow_normalizing_flow_model_3d,
     create_real_nvp_normalizing_flow_model,
-    create_conv_flow_model_1d,
+    create_normalizing_flow_model_1d,
 )
 from antstorch.lamnr_flows.core.train_lamnr_glow_base import (
     make_warmup,
@@ -1384,7 +1384,7 @@ class HybridLAMNrTrainer:
         elif view.kind == "signal1d":
             channels = view.channels
             length = view.shape[0]
-            model = create_conv_flow_model_1d(
+            model = create_normalizing_flow_model_1d(
                 channels=channels,
                 length=length,
                 K=int(self._cfg(view, "K", 16)),
