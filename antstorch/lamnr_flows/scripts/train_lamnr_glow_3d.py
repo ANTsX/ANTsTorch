@@ -7,7 +7,12 @@ This script retains only 3D-specific concerns:
   - CLI argument definitions (adds --D, --spatial-dims)
   - 3D volumetric data loading via build_loaders_from_globs_3d()
   - LAMNrGlow3DTrainer.build_models()  → create_glow_normalizing_flow_model_3d
-  - LAMNrGlow3DTrainer.extract_view()  → 3D volume view extraction + to01
+  - LAMNrGlow3DTrainer.extract_view()  → 3D volume view extraction + --intensity
+
+``--intensity 0mean`` (or ``none``) keeps absolute intensities (e.g. CT in
+HU): it disables the ANTs augmentation and the per-image min-max
+(ImageDataset ``normalize_intensity=False``) and, for ``0mean``,
+standardizes each view with statistics fit on the training batches.
 
 All shared logic (training loop, gradient accumulation, alignment losses,
 memory management, checkpoint save/load) lives in train_lamnr_glow_base.py.
@@ -65,8 +70,12 @@ def build_loaders_from_globs_3d(
     is_ddp: bool = False,
     rank: int = 0,
     world_size: int = 1,
+    intensity: str = "to01",
 ):
     """Load 3D ANTs volumes for multi-view training."""
+    raw_intensity = str(intensity).lower() != "to01"
+    if raw_intensity:
+        do_aug = False
 
     def _expand_globs_per_view(view_specs):
         import glob, os
@@ -190,6 +199,7 @@ def build_loaders_from_globs_3d(
         data_augmentation_sd_histogram_warping=0.025,
         number_of_samples=int(train_samples),
         aug_scheduler=aug_sched_fn,
+        normalize_intensity=not raw_intensity,
     )
     train_ds.global_step_ref = global_step
 
@@ -204,7 +214,8 @@ def build_loaders_from_globs_3d(
         # reconstructions of every subject rather than one noisy sample).
         images=(images_val if images_val else images_train),
         template=tmpl,
-        do_data_augmentation=True,
+        do_data_augmentation=not raw_intensity,
+        normalize_intensity=not raw_intensity,
         data_augmentation_transform_type="affineAndDeformation",
         data_augmentation_sd_affine=0.0,
         data_augmentation_sd_deformation=0.0,
@@ -366,6 +377,7 @@ class LAMNrGlow3DTrainer(BaseLAMNrTrainer):
             val_frac=float(args.val_frac),
             subject_limit=(args.subject_limit if args.subject_limit > 0 else None),
             do_aug=True,
+            intensity=str(getattr(args, "intensity", "to01")),
             aug_schedules=(args.aug_schedules if not args.disable_aug_anneal else None),
             disable_aug_anneal=args.disable_aug_anneal,
             seed=args.seed,
@@ -404,7 +416,7 @@ class LAMNrGlow3DTrainer(BaseLAMNrTrainer):
                 x_v = x_v.unsqueeze(1)
             # ----------------------------------------
             
-        return to01(x_v.to(dtype=torch.float32))
+        return self.apply_intensity(x_v.to(dtype=torch.float32), vi, to01_fn=to01)
 
     def cleanup_checkpoints(self, keep_every: Optional[int] = None) -> None:
         """
@@ -432,7 +444,7 @@ class LAMNrGlow3DTrainer(BaseLAMNrTrainer):
 # main
 # ---------------------------------------------------------------------------
 
-def _build_args() -> argparse.Namespace:
+def _build_args(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser("LAMNr Glow 3D trainer")
 
     # Input data
@@ -565,6 +577,14 @@ def _build_args() -> argparse.Namespace:
             "sd_histogram_warping:exp:0.05->0.00@120k"
         ))
     ap.add_argument("--disable-aug-anneal", action="store_true")
+    ap.add_argument("--intensity", default="to01", choices=["to01", "0mean", "none"],
+        help="Intensity handling. 'to01' (default): per-image min-max as before. "
+             "'0mean': per-view z-score fit on training batches and saved in the "
+             "checkpoint (absolute intensities, e.g. CT in HU). 'none': raw values. "
+             "Non-'to01' modes disable data augmentation and ImageDataset's "
+             "per-image normalization. Inference tools currently require 'to01'.")
+    ap.add_argument("--intensity-fit-batches", type=int, default=64,
+        help="Training batches used to fit the --intensity 0mean statistics.")
 
     # Previews
     ap.add_argument("--sample-mode", default="model", choices=["model","data","off"])
@@ -594,7 +614,7 @@ def _build_args() -> argparse.Namespace:
     ap.add_argument("--cca-ridge",      type=float, default=1e-3)
     ap.add_argument("--prefilter-frac", type=float, default=0.5)
 
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     args.num_views = len(args.view)
 
     if isinstance(args.K, list):

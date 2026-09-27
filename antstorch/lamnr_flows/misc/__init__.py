@@ -15,3 +15,5 @@ from .alignment_losses import (
     hsic_multi, 
     lpnorm_multi
 )
+
+from .channel_normalizer import ChannelNormalizer

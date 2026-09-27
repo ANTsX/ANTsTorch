@@ -10,6 +10,7 @@ from antstorch.lamnr_flows.misc import LatentAlignmentLossManager
 from antstorch.lamnr_flows.scripts.train_lamnr_flows_hybrid import (
     HybridLAMNrTrainer,
     HybridManifestDataset,
+    ChannelNormalizer,
     HybridViewSpec,
     SignalNormalizer,
     _augment_image_group,
@@ -492,4 +493,103 @@ def test_signal_augmentation_in_dataset_train_only(tmp_path):
         (va, vb), _ = val[index]
         assert torch.equal(va, torch.from_numpy(ramp))  # no augmentation in validation
     assert shifted > 0
+
+
+# ---------------------------------------------------------------------------
+# image intensity modes (e.g. decoded optical flow)
+# ---------------------------------------------------------------------------
+
+def test_image_intensity_spec_validation():
+    spec = HybridViewSpec.from_dict(
+        {"name": "im", "type": "image2d", "path_column": "im", "shape": [8, 8]}
+    )
+    assert spec.intensity == "to01"
+    flow = HybridViewSpec.from_dict({
+        "name": "flow", "type": "image2d", "path_column": "flow",
+        "channels": 2, "shape": [8, 8], "intensity": "0MEAN",
+    })
+    assert flow.intensity == "0mean"
+    with pytest.raises(ValueError, match="intensity must be"):
+        HybridViewSpec.from_dict({
+            "name": "im", "type": "image2d", "path_column": "im",
+            "shape": [8, 8], "intensity": "robust",
+        })
+    with pytest.raises(ValueError, match="only applies to image views"):
+        HybridViewSpec.from_dict({
+            "name": "tau", "type": "tabular", "columns": ["a", "b"], "intensity": "none",
+        })
+
+
+def test_channel_normalizer_streaming_matches_stacked_statistics():
+    rng = np.random.default_rng(3)
+    images = [
+        torch.from_numpy(rng.normal([[[2.0]], [[-5.0]]], [[[0.5]], [[3.0]]], size=(2, 8, 8)).astype("float32"))
+        for _ in range(12)
+    ]
+    normalizer = ChannelNormalizer("0mean", kind="image2d").fit(iter(images))
+    stacked = torch.stack(images).transpose(0, 1).reshape(2, -1).double()
+    np.testing.assert_allclose(normalizer._shift, stacked.mean(dim=1).numpy(), rtol=1e-5)
+    np.testing.assert_allclose(normalizer._scale, stacked.std(dim=1, unbiased=False).numpy(), rtol=1e-5)
+    out = normalizer.transform(images[0])
+    assert out.shape == (2, 8, 8)
+    torch.testing.assert_close(normalizer.inverse_transform(out), images[0], rtol=1e-5, atol=1e-5)
+    assert normalizer.state_dict()["kind"] == "image2d"
+    assert SignalNormalizer is ChannelNormalizer
+
+
+def test_hybrid_trainer_zero_mean_flow_view(tmp_path):
+    rng = np.random.default_rng(6)
+    rows = []
+    for index in range(6):
+        path = tmp_path / f"flow_{index}.npy"
+        # Signed two-channel field (u, v), channels-first.
+        flow = np.stack([
+            3.0 + rng.normal(size=(8, 8)),
+            -2.0 + 0.5 * rng.normal(size=(8, 8)),
+        ]).astype("float32")
+        np.save(path, flow)
+        rows.append({"subject": f"s{index}", "flow": str(path),
+                     "b1": 1.0 + index, "b2": 0.5 * index ** 2})
+    manifest = tmp_path / "manifest.csv"
+    pd.DataFrame(rows).to_csv(manifest, index=False)
+    config = tmp_path / "views.json"
+    config.write_text(json.dumps({
+        "subject_column": "subject",
+        "views": [
+            {"name": "flow", "type": "image2d", "path_column": "flow",
+             "channels": 2, "shape": [8, 8], "intensity": "0mean",
+             "augmentation": {"enabled": False},
+             "model": {"L": 1, "K": [1], "hidden": [4]}},
+            {"name": "tau", "type": "tabular", "columns": ["b1", "b2"],
+             "model": {"K": 1, "hidden": 4}},
+        ],
+    }))
+    args = _build_args([
+        "--manifest", str(manifest), "--config", str(config),
+        "--out-dir", str(tmp_path / "run"), "--batch-size", "2",
+        "--max-iter", "1", "--eval-interval", "1", "--align-warmup", "0",
+        "--proj-dim", "4", "--proj-hidden", "8", "--devices", "cpu",
+        "--preview-interval", "1", "--preview-samples", "1",
+        "--save-recon", "--export-max-samples", "2",
+    ])
+    trainer = HybridLAMNrTrainer()
+    trainer.setup(args)
+    assert isinstance(trainer.normalizers["flow"], ChannelNormalizer)
+    summary = (tmp_path / "run" / "run_config.txt").read_text()
+    assert "view[0] intensity" in summary and "0mean" in summary
+    values, masks = next(iter(trainer.train_loader))
+    x = trainer._prepare(values[0], trainer.views[0])
+    assert x.min() < 0  # signed values survive (no per-sample min-max)
+    assert abs(float(x.mean())) < 1.0
+    loss, align, bpds = trainer._batch_loss((values, masks), 1)
+    assert torch.isfinite(loss) and torch.isfinite(align)
+    trainer.opt.zero_grad(set_to_none=True)
+    trainer.train()
+    exported = sorted((tmp_path / "run" / "export" / "flow" / "reconstructions").glob("*.npy"))
+    assert exported
+    recon = np.load(exported[0])
+    assert recon.shape == (2, 8, 8)
+    assert 1.5 < recon[0].mean() < 4.5 and -3.5 < recon[1].mean() < -0.5  # original units
+    blob = torch.load(tmp_path / "run" / "training_state.pt", map_location="cpu", weights_only=False)
+    assert blob["normalizers"]["flow"]["kind"] == "image2d"
 

@@ -115,7 +115,12 @@ class ImageDataset(Dataset):
         Is the specified output (if not None) segmentation images.
 
     number_of_samples : integer
-        Standard DataSet parameter.    
+        Standard DataSet parameter.
+
+    normalize_intensity : boolean
+        If True (default), each modality is min-max normalized to [0, 1]
+        with ants.iMath_normalize. Set to False to keep the original
+        intensities (the caller is then responsible for normalization).
 
     Returns
     -------
@@ -139,7 +144,8 @@ class ImageDataset(Dataset):
                  is_output_segmentation=False,
                  duplicate_channels=None,
                  number_of_samples=1,
-                 aug_scheduler: Optional[Callable[[int], Dict[str, float]]] = None):
+                 aug_scheduler: Optional[Callable[[int], Dict[str, float]]] = None,
+                 normalize_intensity: bool = True):
 
         self.images = images
         self.number_of_modalities = 1
@@ -159,6 +165,10 @@ class ImageDataset(Dataset):
         self.number_of_samples = number_of_samples
         self.duplicate_channels = duplicate_channels
         self.aug_scheduler = aug_scheduler
+        # When False, skip the per-image iMath_normalize (min-max to [0, 1])
+        # so absolute intensities survive (e.g. CT in HU, or when a trainer
+        # applies its own dataset-level normalization).
+        self.normalize_intensity = bool(normalize_intensity)
         self.global_step_ref = None   
         self._global_step = 0         
 
@@ -243,7 +253,8 @@ class ImageDataset(Dataset):
             center_of_mass_template = ants.get_center_of_mass(self.template*0 + 1)
             center_of_mass_image = ants.get_center_of_mass(image[0]*0 + 1)
             translation = np.asarray(center_of_mass_image) - np.asarray(center_of_mass_template)
-            xfrm = ants.create_ants_transform(transform_type="Euler3DTransform",
+            xfrm = ants.create_ants_transform(
+                transform_type=("Euler2DTransform" if self.template.dimension == 2 else "Euler3DTransform"),
                 center=np.asarray(center_of_mass_template), translation=translation)
             for i in range(self.number_of_modalities):
                 image[i] = ants.apply_ants_transform_to_image(xfrm, image[i], self.template)
@@ -252,8 +263,9 @@ class ImageDataset(Dataset):
                     xfrm, output, self.template, interpolation="nearestneighbor"
                 )
 
-        for i in range(self.number_of_modalities):
-            image[i] = ants.iMath_normalize(image[i])
+        if self.normalize_intensity:
+            for i in range(self.number_of_modalities):
+                image[i] = ants.iMath_normalize(image[i])
         image_array = np.zeros((*image[0].shape, self.number_of_modalities))
         for i in range(self.number_of_modalities):
             if image[i].dimension == 2:

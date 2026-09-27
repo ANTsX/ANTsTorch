@@ -43,6 +43,7 @@ from tqdm.auto import tqdm
 import ants
 import antstorch
 
+from antstorch.lamnr_flows.misc.channel_normalizer import ChannelNormalizer
 from antstorch.lamnr_flows.misc.latent_alignment import (
     LatentAlignmentLossManager,
     Projector,
@@ -257,8 +258,23 @@ def _copy_actnorm_state(src: nn.Module, dst: nn.Module) -> None:
                         setattr(md, fld, bool(getattr(ms, fld)))
 
 @torch.no_grad()
-def _prime_if_needed(model: nn.Module, x: torch.Tensor) -> None:
+def _prime_if_needed(
+    model: nn.Module, x: torch.Tensor, spatial_dims: Optional[int] = None
+) -> None:
     x1 = x[:1]
+    if spatial_dims is not None:
+        # Caller knows the layout: only add a missing channel axis. This
+        # avoids the heuristic below, which treats a 2-channel 2D batch
+        # (B, 2, H, W) as a channel-less 3D volume.
+        if x1.ndim == spatial_dims + 1:
+            x1 = x1.unsqueeze(1)
+        p = next(model.parameters(), None)
+        x1 = x1.to(p.device if p is not None else x1.device, dtype=torch.float32)
+        try:
+            _ = model.inverse_and_log_det(x1)
+        except Exception:
+            _ = model.log_prob(x1)
+        return
     
     # --- PLINDAGE ARCHITECTURAL COMPATIBLE 2D / 3D ---
     # Si le tenseur est en 3D (sans batch/canal) -> (1, 1, H, W, D) ou (1, 1, H, W)
@@ -454,7 +470,8 @@ def _sample_chunk(
     except Exception as e:
         msg = str(e).lower()
         if "latent shapes unknown" in msg and warm_x is not None:
-            _prime_if_needed(model, warm_x)
+            # warm_x comes from extract_view: already (B, C, *spatial).
+            _prime_if_needed(model, warm_x, spatial_dims=warm_x.ndim - 2)
             try:
                 try:
                     s = model.sample(n, temperature=temp_tensor)
@@ -705,6 +722,7 @@ def screen_dump_run_config(
     add("auto_resume / use_ckpt_config", f"{_fmt_bool(cfg.get('auto_resume'))} / {_fmt_bool(cfg.get('use_ckpt_config'))}")
 
     # Data & Augmentation
+    add("intensity", cfg.get("intensity", "to01"))
     add("slice_idx", cfg.get("slice_idx"))
     add("val_frac", cfg.get("val_frac"))
     add("subject_limit", cfg.get("subject_limit") or None)
@@ -766,8 +784,76 @@ class BaseLAMNrTrainer(abc.ABC):
     -------------------------
     build_models(args)  -> List[nn.Module]
     build_loaders(args) -> (train_loader, val_loader, global_step)
-    extract_view(batch, vi, dev) -> torch.Tensor  # view extraction + to01
+    extract_view(batch, vi, dev) -> torch.Tensor  # view extraction + intensity
+
+    Intensity handling (``--intensity``)
+    ------------------------------------
+    ``to01`` (default) keeps each subclass's historical behavior. ``0mean``
+    fits one ChannelNormalizer per view on training batches (augmentation is
+    disabled for non-``to01`` modes) and saves it in the checkpoint; ``none``
+    feeds the raw values. Subclasses route their output through
+    ``apply_intensity``.
     """
+
+    # ------------------------------------------------------------------
+    # Intensity handling
+    # ------------------------------------------------------------------
+
+    INTENSITY_MODES = ("to01", "0mean", "none")
+
+    @property
+    def intensity(self) -> str:
+        args = getattr(self, "args", None)
+        mode = str(getattr(args, "intensity", "to01") or "to01").lower()
+        if mode not in self.INTENSITY_MODES:
+            raise ValueError(f"--intensity must be one of {self.INTENSITY_MODES}; got {mode!r}.")
+        return mode
+
+    def apply_intensity(self, x: torch.Tensor, vi: int, to01_fn=None) -> torch.Tensor:
+        """Map one extracted view batch (B, C, ...) to model space."""
+        if getattr(self, "_intensity_bypass", False):
+            return x
+        mode = self.intensity
+        if mode == "to01":
+            return to01_fn(x) if to01_fn is not None else x
+        if mode == "none":
+            return x
+        normalizers = getattr(self, "intensity_normalizers", None)
+        if not normalizers:
+            raise RuntimeError("--intensity 0mean: normalizers have not been fit yet.")
+        return normalizers[vi].transform_batch(x)
+
+    def _spatial_dims(self) -> Optional[int]:
+        shape = getattr(self, "input_shape", None)
+        return (len(shape) - 1) if shape else None
+
+    @torch.no_grad()
+    def fit_intensity_normalizers(self, loader, num_views: int) -> None:
+        """Fit per-view ChannelNormalizers on up to --intensity-fit-batches batches."""
+        max_batches = int(getattr(self.args, "intensity_fit_batches", 64) or 64)
+        cpu = torch.device("cpu")
+
+        def _batches(vi):
+            for bi, batch in enumerate(loader):
+                if bi >= max_batches:
+                    break
+                yield self.extract_view(batch, vi, cpu)
+
+        self._intensity_bypass = True
+        try:
+            self.intensity_normalizers = [
+                ChannelNormalizer("0mean", kind=f"glow{self._spatial_dims() or ''}d")
+                .fit(_batches(vi), channel_dim=1)
+                for vi in range(num_views)
+            ]
+        finally:
+            self._intensity_bypass = False
+        if getattr(self, "rank", 0) == 0:
+            for vi, n in enumerate(self.intensity_normalizers):
+                tqdm.write(
+                    f"[intensity] view {vi}: mean={np.round(n._shift, 4).tolist()} "
+                    f"std={np.round(n._scale, 4).tolist()}"
+                )
 
     # ------------------------------------------------------------------
     # Abstract interface
@@ -883,13 +969,25 @@ class BaseLAMNrTrainer(abc.ABC):
         self.models: List[nn.Module] = self.build_models(args)
         self.ema_models: Optional[List[nn.Module]] = None
 
+        # Dataset-level intensity normalization (--intensity 0mean)
+        self.intensity_normalizers: Optional[List[ChannelNormalizer]] = None
+        if self.intensity == "0mean":
+            self.fit_intensity_normalizers(self.train_loader, len(self.models))
+
         # ActNorm warmup with real data
         with torch.no_grad():
             try:
                 warm_batch = next(iter(self.train_loader))
                 xs = _extract_views_from_batch(warm_batch, num_views=len(self.models))
                 for vi, m in enumerate(self.models):
-                    _prime_if_needed(m, xs[vi])
+                    if self.intensity == "to01":
+                        _prime_if_needed(m, xs[vi])
+                    else:
+                        # Prime ActNorm on exactly what training will see.
+                        _prime_if_needed(
+                            m, self.extract_view(warm_batch, vi, dev),
+                            spatial_dims=self._spatial_dims(),
+                        )
             except StopIteration:
                 pass
 
@@ -904,7 +1002,10 @@ class BaseLAMNrTrainer(abc.ABC):
                 elif x_tmpl.ndim == 4 and int(getattr(args, "spatial_dims", 2)) == 3:
                     # Raw 3-D volume batch without a channel dim: (B, H, W, D) -> (B, 1, H, W, D)
                     x_tmpl = x_tmpl.unsqueeze(1)
-                x_tmpl = to01(x_tmpl.to(dtype=torch.float32, device=dev))
+                if self.intensity == "to01":
+                    x_tmpl = to01(x_tmpl.to(dtype=torch.float32, device=dev))
+                else:
+                    x_tmpl = self.extract_view(warm_batch, 0, dev)[:1]
                 z_probe, _ = self.models[0].inverse_and_log_det(x_tmpl)
                 flat_dim = flatten_latents(
                     z_probe,
@@ -1071,6 +1172,12 @@ class BaseLAMNrTrainer(abc.ABC):
             # backward compatibility. Do not remove this key without also
             # checking those call sites.
             "config":  {**vars(self.args), "s_cap_wired_to_conv": True},
+            # Dataset-level intensity normalizers (--intensity 0mean); the
+            # inference tools refuse non-to01 checkpoints until they apply them.
+            "intensity_normalizers": (
+                [n.state_dict() for n in self.intensity_normalizers]
+                if getattr(self, "intensity_normalizers", None) else None
+            ),
             "scaler":  (
                 self.scaler.state_dict()
                 if self.scaler is not None and self.scaler.is_enabled()
@@ -1190,9 +1297,20 @@ class BaseLAMNrTrainer(abc.ABC):
         if args.use_ckpt_config and mismatches:
             print("[resume] arch overrides:", {k: (getattr(args, k), ckpt_cfg[k]) for k in mismatches})
 
+        ckpt_intensity = str(ckpt_cfg.get("intensity", "to01") or "to01").lower() if ckpt_cfg else None
+        if ckpt_intensity is not None and ckpt_intensity != self.intensity:
+            raise ValueError(
+                f"[resume] checkpoint was trained with --intensity {ckpt_intensity}, "
+                f"but this run uses --intensity {self.intensity}."
+            )
+
         # Second pass (target device)
         blob = torch.load(resume_path, map_location=self.dev, weights_only=False)
         start_iter = int(blob.get("iter", 1))
+        if blob.get("intensity_normalizers") and getattr(self, "intensity_normalizers", None):
+            for normalizer, state in zip(self.intensity_normalizers, blob["intensity_normalizers"]):
+                normalizer.load_state_dict(state)
+            tqdm.write("[resume] restored intensity normalizers")
 
         # Optimizer
         #
@@ -2240,7 +2358,8 @@ class BaseLAMNrTrainer(abc.ABC):
                 for vi, m in enumerate(eval_models):
                     if tmpl[vi] is None:
                         continue
-                    _prime_if_needed(m, tmpl[vi])
+                    # tmpl comes from extract_view: already (B, C, *spatial).
+                    _prime_if_needed(m, tmpl[vi], spatial_dims=tmpl[vi].ndim - 2)
                     warmup_actnorm_with_real_batch(m, tmpl[vi])
                     cpu_state  = torch.random.get_rng_state()
                     cuda_states = (
