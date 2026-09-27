@@ -15,6 +15,7 @@ from antstorch.lamnr_flows.scripts.train_lamnr_flows_hybrid import (
     SignalNormalizer,
     _augment_image_group,
     _augment_signal_group,
+    _dequantize,
     _load_signal,
     _signal_augmentation_config,
     _build_args,
@@ -592,4 +593,68 @@ def test_hybrid_trainer_zero_mean_flow_view(tmp_path):
     assert 1.5 < recon[0].mean() < 4.5 and -3.5 < recon[1].mean() < -0.5  # original units
     blob = torch.load(tmp_path / "run" / "training_state.pt", map_location="cpu", weights_only=False)
     assert blob["normalizers"]["flow"]["kind"] == "image2d"
+
+
+# ---------------------------------------------------------------------------
+# dequantization of grid-valued image views (e.g. soft one-hot segmentations)
+# ---------------------------------------------------------------------------
+
+def test_dequantize_spec_validation():
+    spec = HybridViewSpec.from_dict({
+        "name": "seg", "type": "image2d", "path_column": "seg", "channels": 6,
+        "shape": [8, 8], "intensity": "none", "dequantize": 49,
+    })
+    assert spec.dequantize == 49
+    with pytest.raises(ValueError, match="requires an image view"):
+        HybridViewSpec.from_dict({
+            "name": "seg", "type": "image2d", "path_column": "seg",
+            "shape": [8, 8], "dequantize": 49,  # intensity defaults to to01
+        })
+    with pytest.raises(ValueError, match="requires an image view"):
+        HybridViewSpec.from_dict({
+            "name": "tau", "type": "tabular", "columns": ["a", "b"], "dequantize": 10,
+        })
+
+
+def test_dequantize_maps_grid_values_into_their_bins():
+    levels = 49
+    n = torch.arange(levels + 1, dtype=torch.float32)
+    x = (n / levels).repeat(20, 1)
+    torch.manual_seed(0)
+    stochastic = _dequantize(x, levels, stochastic=True)
+    assert torch.all(stochastic >= n / (levels + 1))
+    assert torch.all(stochastic < (n + 1) / (levels + 1))
+    assert stochastic.std(dim=0).min() > 0  # resampled noise
+    fixed = _dequantize(x, levels, stochastic=False)
+    torch.testing.assert_close(fixed[0], (n + 0.5) / (levels + 1))
+    assert float(fixed.min()) > 0 and float(fixed.max()) < 1
+
+
+def test_dequantize_is_stochastic_for_training_only(tmp_path):
+    grid = np.zeros((6, 8, 8), dtype="float32")
+    grid[1, 2:6, 3:5] = 1.0
+    grid[2, 0, 0] = 10 / 49
+    rows = []
+    for index in range(2):
+        path = tmp_path / f"seg_{index}.npy"
+        np.save(path, grid)
+        rows.append({"seg": str(path), "b1": 1.0 + index, "b2": 2.0})
+    frame = pd.DataFrame(rows)
+    views = [
+        HybridViewSpec.from_dict({
+            "name": "seg", "type": "image2d", "path_column": "seg", "channels": 6,
+            "shape": [8, 8], "intensity": "none", "dequantize": 49,
+        }),
+        HybridViewSpec.from_dict({"name": "tab", "type": "tabular", "columns": ["b1", "b2"]}),
+    ]
+    normalizer = TabularNormalizer("0mean").fit(frame[["b1", "b2"]].to_numpy())
+    train = HybridManifestDataset(frame, views, {"tab": normalizer},
+                                  stochastic_dequantization=True)
+    val = HybridManifestDataset(frame, views, {"tab": normalizer})
+    a, b = train[0][0][0], train[0][0][0]
+    assert not torch.equal(a, b)
+    assert float(a.min()) > 0 and float(a.max()) < 1
+    torch.testing.assert_close(val[0][0][0], val[0][0][0])
+    assert float(val[0][0][0][1, 3, 3]) == pytest.approx(49.5 / 50)
+    assert float(val[0][0][0][2, 0, 0]) == pytest.approx(10.5 / 50)
 

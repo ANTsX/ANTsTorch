@@ -583,6 +583,11 @@ def _build_args(argv=None) -> argparse.Namespace:
              "checkpoint (absolute intensities, e.g. CT in HU). 'none': raw values. "
              "Non-'to01' modes disable data augmentation and ImageDataset's "
              "per-image normalization. Inference tools currently require 'to01'.")
+    ap.add_argument("--dequantize", type=int, default=0, metavar="K",
+        help="Uniform dequantization for inputs on the grid {0, 1/K, ..., 1} "
+             "(e.g. K=255 for 8-bit images in [0, 1], K=49 for area fractions of "
+             "7x7 blocks): training sees (n + u)/(K + 1), u ~ U(0, 1); validation "
+             "uses u = 0.5. Requires --intensity none. 0 (default) disables it.")
     ap.add_argument("--intensity-fit-batches", type=int, default=64,
         help="Training batches used to fit the --intensity 0mean statistics.")
 
