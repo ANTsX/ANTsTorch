@@ -1427,7 +1427,8 @@ class HybridLAMNrTrainer:
         )
         for model in models:
             model.eval()
-        total = torch.zeros(2 + 2 * len(self.views), device=self.dev, dtype=torch.float64)
+        acc_dtype = torch.float32 if self.dev.type == "mps" else torch.float64
+        total = torch.zeros(2 + 2 * len(self.views), device=self.dev, dtype=acc_dtype)
         for batch_index, batch in enumerate(self.val_loader):
             with torch.amp.autocast(
                 device_type=self.dev.type, dtype=self.amp_dtype,
@@ -1437,7 +1438,7 @@ class HybridLAMNrTrainer:
                     batch, iteration, models=models, projectors=projectors
                 )
             if torch.isfinite(loss):
-                total[0] += loss.double()
+                total[0] += loss.to(acc_dtype)
                 total[1] += 1
             for vi, bpd in enumerate(bpds):
                 if math.isfinite(bpd):
