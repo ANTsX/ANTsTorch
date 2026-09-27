@@ -8,7 +8,14 @@ This script retains only 2D-specific concerns:
   - 2D data loading via build_loaders_from_globs()
   - PNGMultiViewDataset for PNG inputs
   - LAMNrGlow2DTrainer.build_models()  → create_glow_normalizing_flow_model_2d
-  - LAMNrGlow2DTrainer.extract_view()  → 2D slice view extraction + to01
+  - LAMNrGlow2DTrainer.extract_view()  → 2D slice view extraction + --intensity
+
+Inputs: PNG (read as RGB in [0, 1]), NIfTI (via ANTs) or channels-first
+``.npy`` / ``.pt`` arrays ``(C, H, W)`` (e.g. decoded optical flow ``(u, v)``).
+``--intensity 0mean`` (or ``none``) keeps signed/absolute values: it disables
+the data augmentation (flip, noise, clamp to [0, 1], ANTs spatial and
+intensity augmentation, per-image min-max) and, for ``0mean``, standardizes
+each channel with statistics fit on the training batches.
 
 All shared logic (training loop, gradient accumulation, alignment losses,
 memory management, checkpoint save/load) lives in train_lamnr_glow_base.py.
@@ -156,7 +163,13 @@ def build_loaders_from_globs(
     is_ddp: bool = False,
     rank: int = 0,
     world_size: int = 1,
+    intensity: str = "to01",
 ):
+    raw_intensity = str(intensity).lower() != "to01"
+    if raw_intensity:
+        # Signed / absolute values: no flip, noise, clamp or ANTs augmentation.
+        do_aug = False
+
     def _expand_globs_per_view(view_specs):
         import glob, os
         per_view_files = []
@@ -201,6 +214,24 @@ def build_loaders_from_globs(
         import ants
         import numpy as np
         from PIL import Image
+
+        if path.suffix.lower() in (".npy", ".pt", ".pth"):
+            import torch.nn.functional as F
+
+            if path.suffix.lower() == ".npy":
+                arr = torch.from_numpy(np.load(path, allow_pickle=False))
+            else:
+                arr = torch.load(path, map_location="cpu", weights_only=True)
+            arr = torch.as_tensor(arr, dtype=torch.float32)
+            if arr.ndim == 2:
+                arr = arr.unsqueeze(0)
+            if arr.ndim != 3:
+                raise ValueError(f"{path}: expected (C, H, W) or (H, W); got {tuple(arr.shape)}.")
+            if tuple(arr.shape[1:]) != (H, W):
+                arr = F.interpolate(
+                    arr.unsqueeze(0), size=(H, W), mode="bilinear", align_corners=False
+                ).squeeze(0)
+            return arr.contiguous()
 
         if path.suffix.lower() == ".png":
             pil_img = Image.open(path).convert("RGB") # Force le mode monocanal (Grayscale)
@@ -289,6 +320,7 @@ def build_loaders_from_globs(
             data_augmentation_sd_histogram_warping=0.025,
             number_of_samples=int(train_samples),
             aug_scheduler=aug_sched_fn,
+            normalize_intensity=not raw_intensity,
         )
         val_ds = antstorch.ImageDataset(
             # val_frac=0.0 -> no held-out subjects; reuse the full training
@@ -298,7 +330,8 @@ def build_loaders_from_globs(
             # so it scores near-clean reconstructions of every subject.
             images=(images_val if images_val else images_train),
             template=tmpl,
-            do_data_augmentation=True,
+            do_data_augmentation=not raw_intensity,
+            normalize_intensity=not raw_intensity,
             data_augmentation_transform_type="affineAndDeformation",
             data_augmentation_sd_affine=0.0,
             data_augmentation_sd_deformation=0.0,
@@ -459,6 +492,7 @@ class LAMNrGlow2DTrainer(BaseLAMNrTrainer):
             val_frac=float(args.val_frac),
             subject_limit=(args.subject_limit if args.subject_limit > 0 else None),
             do_aug=True,
+            intensity=str(getattr(args, "intensity", "to01")),
             aug_schedules=(args.aug_schedules if not args.disable_aug_anneal else None),
             disable_aug_anneal=args.disable_aug_anneal,
             seed=args.seed,
@@ -489,17 +523,21 @@ class LAMNrGlow2DTrainer(BaseLAMNrTrainer):
     def extract_view(
         self, batch: object, vi: int, dev: torch.device
     ) -> torch.Tensor:
-        """Extract view vi from a 2D batch and normalize to [0, 1]."""
+        """Extract view vi from a 2D batch and apply --intensity.
+
+        With the default ``to01`` the batch is returned as loaded (PNG and
+        ImageDataset inputs are already in [0, 1]), as before.
+        """
         xs = _extract_views_from_batch(batch, num_views=self.args.num_views)
         x_v = xs[vi].to(dev, dtype=torch.float32)
-        return x_v       
+        return self.apply_intensity(x_v, vi)
 
 
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
-def _build_args() -> argparse.Namespace:
+def _build_args(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser("LAMNr Glow 2D trainer")
 
     # Input data
@@ -628,6 +666,14 @@ def _build_args() -> argparse.Namespace:
             "sd_histogram_warping:exp:0.05->0.00@120k"
         ))
     ap.add_argument("--disable-aug-anneal", action="store_true")
+    ap.add_argument("--intensity", default="to01", choices=["to01", "0mean", "none"],
+        help="Intensity handling. 'to01' (default): historical behavior. "
+             "'0mean': per-channel z-score fit on training batches and saved in "
+             "the checkpoint (use for signed fields such as optical flow (u, v) "
+             "stored as .npy). 'none': raw values. Non-'to01' modes disable data "
+             "augmentation. Inference tools currently require 'to01' checkpoints.")
+    ap.add_argument("--intensity-fit-batches", type=int, default=64,
+        help="Training batches used to fit the --intensity 0mean statistics.")
 
     # Previews
     ap.add_argument("--sample-mode", default="model", choices=["model","data","off"])
@@ -658,7 +704,7 @@ def _build_args() -> argparse.Namespace:
     ap.add_argument("--cca-ridge",     type=float, default=1e-3)
     ap.add_argument("--prefilter-frac",type=float, default=0.5)
 
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     args.num_views = len(args.view)
 
     # Normalise K and hidden

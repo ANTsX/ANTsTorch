@@ -37,6 +37,19 @@ views; set ``model.scale_cap`` to override it. ``model.alignment_pool_size``
 (default ``min(16, length)``) sets the number of temporal bins kept by
 ``--alignment-latents all-pooled``.
 
+Image views accept ``"intensity"``: ``"to01"`` (default; per-sample min-max
+to [0, 1], the historical behavior), ``"0mean"`` (per-channel z-score fit on
+the training split and saved in the checkpoint) or ``"none"``. Use ``"0mean"``
+for signed, multichannel fields such as decoded optical flow ``(u, v)``,
+where a per-sample min-max would destroy the sign and the u/v ratio::
+
+    {"name": "flow", "type": "image2d", "path_column": "FlowFile",
+     "channels": 2, "shape": [64, 64], "intensity": "0mean",
+     "augmentation": {"enabled": false}}
+
+Spatial augmentation moves pixels without rotating vectors (and a horizontal
+flip does not negate u), so disable it for vector-field views as above.
+
 Signal views have their own training augmentation, off by default and
 independent of the image augmentation CLI (``--disable-augmentation`` still
 turns it off)::
@@ -88,6 +101,7 @@ from tqdm.auto import tqdm
 
 import antstorch
 
+from antstorch.lamnr_flows.misc.channel_normalizer import ChannelNormalizer
 from antstorch.lamnr_flows.architectures.create_normalizing_flow_model import (
     create_glow_normalizing_flow_model_2d,
     create_glow_normalizing_flow_model_3d,
@@ -117,6 +131,7 @@ VIEW_TYPES = {"tabular", "image2d", "image3d", "signal1d"}
 SIGNAL_LAYOUTS = {"auto", "CL", "LC"}
 SIGNAL_RESAMPLE_MODES = {"linear", "cubic", "periodic"}
 SIGNAL_DEFAULT_POOL_SIZE = 16
+IMAGE_INTENSITY_MODES = {"to01", "0mean", "none"}
 SIGNAL_AUGMENTATION_DEFAULTS = {"max_roll": 0, "roll_prob": 1.0, "noise_std": 0.0}
 SIGNAL_AUGMENTATION_KEYS = set(SIGNAL_AUGMENTATION_DEFAULTS) | {"schedules"}
 
@@ -174,6 +189,7 @@ class HybridViewSpec:
     key_column: Optional[str] = None
     layout: str = "auto"
     resample: str = "linear"
+    intensity: str = "to01"
 
     @classmethod
     def from_dict(cls, raw: Dict[str, Any]) -> "HybridViewSpec":
@@ -208,7 +224,18 @@ class HybridViewSpec:
             key_column=raw.get("key_column"),
             layout=str(raw.get("layout", "auto")),
             resample=str(raw.get("resample", "linear")),
+            intensity=str(raw.get("intensity", "to01")).lower(),
         )
+        if "intensity" in raw and kind not in ("image2d", "image3d"):
+            raise ValueError(
+                f"View {name!r}: 'intensity' only applies to image views; use "
+                "'normalization' for tabular and signal1d views."
+            )
+        if spec.intensity not in IMAGE_INTENSITY_MODES:
+            raise ValueError(
+                f"View {name!r}: intensity must be one of {sorted(IMAGE_INTENSITY_MODES)}; "
+                f"got {spec.intensity!r}."
+            )
         if kind == "tabular":
             if not spec.columns:
                 raise ValueError(f"Tabular view {name!r} requires a non-empty 'columns' list.")
@@ -544,67 +571,8 @@ def _load_signal(path: str, spec: HybridViewSpec) -> torch.Tensor:
     return tensor.contiguous()
 
 
-class SignalNormalizer:
-    """Per-channel scaler for ``(channels, length)`` signal views.
-
-    Statistics are pooled over samples and time points of the training split.
-    Modes mirror ``TabularNormalizer``: '0mean' (z-score), '01' (min-max) and
-    'none'. The state is saved in the checkpoint with the tabular normalizers.
-    """
-
-    def __init__(self, mode: str = "0mean"):
-        mode = str(mode).lower()
-        if mode not in ("0mean", "01", "none"):
-            raise ValueError(f"SignalNormalizer mode must be '0mean', '01' or 'none'; got {mode!r}.")
-        self.mode = mode
-        self._shift: Optional[np.ndarray] = None
-        self._scale: Optional[np.ndarray] = None
-        self._fitted = False
-
-    def fit(self, signals: Sequence[torch.Tensor]) -> "SignalNormalizer":
-        if self.mode != "none":
-            stacked = torch.stack([s.double() for s in signals])  # (N, C, L)
-            per_channel = stacked.transpose(0, 1).reshape(stacked.shape[1], -1).numpy()
-            if self.mode == "0mean":
-                shift = per_channel.mean(axis=1)
-                scale = per_channel.std(axis=1)
-            else:
-                shift = per_channel.min(axis=1)
-                scale = per_channel.max(axis=1) - shift
-            self._shift = shift.astype(np.float32)
-            self._scale = np.where(scale > 1e-8, scale, 1.0).astype(np.float32)
-        self._fitted = True
-        return self
-
-    def transform(self, signal: torch.Tensor) -> torch.Tensor:
-        if self.mode == "none" or self._shift is None:
-            return signal.float()
-        shift = torch.from_numpy(self._shift).to(signal.device)[:, None]
-        scale = torch.from_numpy(self._scale).to(signal.device)[:, None]
-        return ((signal.float() - shift) / scale).float()
-
-    def inverse_transform(self, signal: torch.Tensor) -> torch.Tensor:
-        signal = signal.detach().cpu().float()
-        if self.mode == "none" or self._shift is None:
-            return signal
-        shift = torch.from_numpy(self._shift)[:, None]
-        scale = torch.from_numpy(self._scale)[:, None]
-        return signal * scale + shift
-
-    def state_dict(self) -> dict:
-        return {
-            "kind": "signal1d",
-            "mode": self.mode,
-            "shift": self._shift.tolist() if self._shift is not None else None,
-            "scale": self._scale.tolist() if self._scale is not None else None,
-            "fitted": self._fitted,
-        }
-
-    def load_state_dict(self, d: dict) -> None:
-        self.mode = d["mode"]
-        self._shift = np.array(d["shift"], dtype=np.float32) if d.get("shift") is not None else None
-        self._scale = np.array(d["scale"], dtype=np.float32) if d.get("scale") is not None else None
-        self._fitted = bool(d.get("fitted", False))
+# Backward-compatible name (signal1d views, ANTsTorch PR #65).
+SignalNormalizer = ChannelNormalizer
 
 
 def _default_augmentation_config(args: argparse.Namespace) -> Dict[str, Any]:
@@ -900,6 +868,9 @@ class HybridManifestDataset(Dataset):
                 augmented = _augment_signal_group([values[i] for i in indices], configs)
                 for vi, tensor in zip(indices, augmented):
                     values[vi] = tensor
+        for vi, spec in enumerate(self.views):
+            if spec.kind in ("image2d", "image3d") and masks[vi] and spec.intensity == "0mean":
+                values[vi] = self.normalizers[spec.name].transform(values[vi])
         return values, torch.tensor(masks, dtype=torch.bool)
 
 
@@ -1022,7 +993,15 @@ class HybridLAMNrTrainer:
             if view.kind == "signal1d":
                 paths = train_frame.loc[available, view.path_column]
                 signals = [_load_signal(str(path), view) for path in paths]
-                self.normalizers[view.name] = SignalNormalizer(view.normalization).fit(signals)
+                self.normalizers[view.name] = ChannelNormalizer(
+                    view.normalization, kind="signal1d"
+                ).fit(signals)
+                continue
+            if view.kind in ("image2d", "image3d") and view.intensity == "0mean":
+                paths = train_frame.loc[available, view.path_column]
+                self.normalizers[view.name] = ChannelNormalizer(
+                    "0mean", kind=view.kind
+                ).fit(_load_image(str(path), view) for path in paths)
                 continue
             if view.kind != "tabular":
                 continue
@@ -1333,6 +1312,8 @@ class HybridLAMNrTrainer:
             else:
                 add(f"view[{index}] shape / channels", f"{view.shape} / {view.channels}")
                 add(f"view[{index}] augmentation group", view.augmentation_group)
+                if view.kind in ("image2d", "image3d"):
+                    add(f"view[{index}] intensity", view.intensity)
                 if view.kind == "signal1d":
                     add(
                         f"view[{index}] signal augmentation",
@@ -1463,7 +1444,7 @@ class HybridLAMNrTrainer:
 
     def _prepare(self, tensor: torch.Tensor, view: HybridViewSpec) -> torch.Tensor:
         tensor = tensor.to(device=self.dev, dtype=torch.float32)
-        if view.kind in ("tabular", "signal1d"):
+        if view.kind in ("tabular", "signal1d") or view.intensity != "to01":
             return tensor
         return to01(tensor)
 
@@ -2189,8 +2170,8 @@ class HybridLAMNrTrainer:
                     view_dir.mkdir(parents=True, exist_ok=True)
                     remaining = max(0, self.args.export_max_samples - len(image_records[view.name]))
                     recon_cpu = recon.detach().float().cpu()
-                    if view.kind == "signal1d" and view.name in self.normalizers:
-                        # Export signals in their original units (e.g. pixels).
+                    if view.name in self.normalizers:
+                        # Export signals / normalized images in original units.
                         recon_cpu = torch.stack([
                             self.normalizers[view.name].inverse_transform(item)
                             for item in recon_cpu

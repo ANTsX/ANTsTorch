@@ -56,6 +56,25 @@ matplotlib.use("Agg")
 
 _orig_double = torch.Tensor.double
 
+def _require_to01_intensity(cfg: Dict[str, Any], ckpt_path) -> None:
+    """Refuse checkpoints trained with --intensity other than 'to01'.
+
+    These tools normalize inputs and outputs with to01(). A model trained
+    with '0mean' or 'none' (train_lamnr_glow_2d/3d.py --intensity) expects
+    differently scaled inputs, so running it here would silently produce
+    wrong encodings and reconstructions.
+    """
+    mode = str((cfg or {}).get("intensity", "to01") or "to01").lower()
+    if mode != "to01":
+        raise NotImplementedError(
+            f"{ckpt_path}: trained with --intensity {mode!r}; the LAMNr Glow tools "
+            "currently support only 'to01' checkpoints. The per-view normalizers "
+            "are stored in the checkpoint under 'intensity_normalizers' "
+            "(antstorch.lamnr_flows.misc.ChannelNormalizer) if you need to apply "
+            "them manually."
+        )
+
+
 def _mps_safe_double(self, *args, **kwargs):
     """Downgrade float64 → float32 on Apple Silicon (MPS does not support float64)."""
     if self.device.type == "mps":
@@ -1863,6 +1882,7 @@ class GlowToolBase(ABC):
         ckpt_path = resolve_ckpt_path(Path(args.ckpt))
         blob      = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
         cfg       = blob.get("config", blob.get("cfg", {}))
+        _require_to01_intensity(cfg, ckpt_path)
         cfg_views = cfg.get("views", None)
         target_size = self._get_target_size(args, cfg)
 
@@ -2352,6 +2372,7 @@ class GlowToolBase(ABC):
         ckpt_path = resolve_ckpt_path(Path(args.ckpt))
         blob      = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
         cfg       = blob.get("config", blob.get("cfg", {}))
+        _require_to01_intensity(cfg, ckpt_path)
         cfg_views = cfg.get("views", None)
         target_size = self._get_target_size(args, cfg)
 
@@ -2600,6 +2621,7 @@ class GlowToolBase(ABC):
         ckpt_path = resolve_ckpt_path(Path(args.ckpt))
         blob      = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
         cfg       = blob.get("config", blob.get("cfg", {}))
+        _require_to01_intensity(cfg, ckpt_path)
         cfg_views = cfg.get("views", None)
         target_size = self._get_target_size(args, cfg)
 
@@ -2745,6 +2767,7 @@ class GlowToolBase(ABC):
         ckpt_path = resolve_ckpt_path(Path(args.ckpt))
         blob      = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
         cfg       = blob.get("config", blob.get("cfg", {}))
+        _require_to01_intensity(cfg, ckpt_path)
         cfg_views = cfg.get("views", None)
         target_size = self._get_target_size(args, cfg)
 
@@ -2997,6 +3020,7 @@ class GlowToolBase(ABC):
         ckpt_path = resolve_ckpt_path(Path(args.ckpt))
         blob      = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
         cfg       = blob.get("config", blob.get("cfg", {}))
+        _require_to01_intensity(cfg, ckpt_path)
         cfg_views = cfg.get("views", None)
         target_size = self._get_target_size(args, cfg)
 
@@ -3209,6 +3233,7 @@ class GlowToolBase(ABC):
         ckpt_path = resolve_ckpt_path(Path(args.ckpt))
         blob      = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
         cfg       = blob.get("config", blob.get("cfg", {}))
+        _require_to01_intensity(cfg, ckpt_path)
         cfg_views = cfg.get("views", None)
         target_size = self._get_target_size(args, cfg)
 
@@ -3301,6 +3326,7 @@ class GlowToolBase(ABC):
         ckpt_path = resolve_ckpt_path(Path(args.ckpt))
         blob      = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
         cfg       = blob.get("config", blob.get("cfg", {}))
+        _require_to01_intensity(cfg, ckpt_path)
         cfg_views = cfg.get("views", None)
         target_size = self._get_target_size(args, cfg)
 
@@ -3467,6 +3493,7 @@ class GlowToolBase(ABC):
         ckpt_path = resolve_ckpt_path(Path(args.ckpt))
         blob      = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
         cfg       = blob.get("config", blob.get("cfg", {}))
+        _require_to01_intensity(cfg, ckpt_path)
         cfg_views = cfg.get("views", None)
         target_size = self._get_target_size(args, cfg)
 
@@ -3711,6 +3738,7 @@ class GlowToolBase(ABC):
         ckpt_path = resolve_ckpt_path(Path(args.ckpt))
         blob      = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
         cfg       = blob.get("config", blob.get("cfg", {}))
+        _require_to01_intensity(cfg, ckpt_path)
         cfg_views = cfg.get("views", None)
         target_size = self._get_target_size(args, cfg)
 
