@@ -202,3 +202,91 @@ def test_tools_refuse_non_to01_checkpoints():
     _require_to01_intensity({"intensity": "to01"}, "ok.pt")
     with pytest.raises(NotImplementedError, match="'0mean'"):
         _require_to01_intensity({"intensity": "0mean"}, "flow.pt")
+
+
+# ---------------------------------------------------------------------------
+# --dequantize (Glow 2D/3D)
+# ---------------------------------------------------------------------------
+
+def _grid_fields(tmp_path, levels=49, n_subjects=6, size=16, channels=3):
+    """Two views of soft one-hot-like maps whose values lie on {0, 1/K, ..., 1}."""
+    rng = np.random.default_rng(4)
+    for view in ("a", "b"):
+        (tmp_path / view).mkdir()
+        for s in range(n_subjects):
+            counts = rng.integers(0, levels + 1, size=(channels, size, size))
+            counts[:, :4] = 0  # plenty of exact zeros, like background
+            np.save(tmp_path / view / f"s{s:02d}_seg.npy", (counts / levels).astype("float32"))
+    return [[str(tmp_path / "a" / "*.npy")], [str(tmp_path / "b" / "*.npy")]]
+
+
+def test_dequantize_deterministic_mapping_and_training_jitter():
+    class Args:
+        num_views = 1
+        intensity = "none"
+        dequantize = 49
+
+    trainer = glow2d.LAMNrGlow2DTrainer()
+    trainer.args = Args()
+    n = torch.arange(50, dtype=torch.float32)
+    batch = [(n / 49).view(1, 1, 1, 50).repeat(64, 1, 1, 1)]
+    x = trainer.extract_view(batch, 0, torch.device("cpu"))
+    torch.testing.assert_close(x[0, 0, 0], (n + 0.5) / 50)
+    torch.manual_seed(0)
+    jittered = trainer.jitter_dequantization(x)
+    assert torch.all(jittered >= n / 50) and torch.all(jittered < (n + 1) / 50)
+    assert jittered.std(dim=0).min() > 0
+
+    trainer.args.dequantize = 0
+    assert torch.equal(trainer.jitter_dequantization(x), x)  # disabled -> no-op
+
+    trainer.args.dequantize = 49
+    trainer.args.intensity = "to01"
+    with pytest.raises(ValueError, match="requires --intensity none"):
+        trainer.extract_view(batch, 0, torch.device("cpu"))
+
+
+def test_dequantize_rejects_values_outside_unit_interval():
+    class Args:
+        num_views = 1
+        intensity = "none"
+        dequantize = 255
+
+    trainer = glow2d.LAMNrGlow2DTrainer()
+    trainer.args = Args()
+    with pytest.raises(ValueError, match=r"expects view values on \[0, 1\]"):
+        trainer._check_dequantization_range([[torch.full((2, 1, 4, 4), 200.0)]], num_views=1)
+    trainer._check_dequantization_range([[torch.rand(2, 1, 4, 4)]], num_views=1)
+
+
+def test_2d_trainer_dequantize_end_to_end_and_resume_guard(tmp_path):
+    views = _grid_fields(tmp_path)
+    out = tmp_path / "run"
+    trainer = glow2d.LAMNrGlow2DTrainer()
+    trainer.setup(_tiny_2d_args(views, out, "none", ["--dequantize", "49"]))
+    x = trainer.extract_view(next(iter(trainer.train_loader)), 0, torch.device("cpu"))
+    assert float(x.min()) >= 0.5 / 50 - 1e-6 and float(x.max()) <= 49.5 / 50 + 1e-6
+    trainer.train()
+    blob = torch.load(out / "training_state.pt", map_location="cpu", weights_only=False)
+    assert blob["config"]["dequantize"] == 49
+    summary = (out / "run_config.txt").read_text()
+    assert "dequantize (levels)" in summary
+    with pytest.raises(ValueError, match="--dequantize 49"):
+        glow2d.LAMNrGlow2DTrainer().setup(
+            _tiny_2d_args(views, out, "none", ["--auto-resume", "--max-iter", "3"])
+        )
+
+
+def test_3d_extract_view_dequantize():
+    class Args:
+        num_views = 1
+        intensity = "none"
+        dequantize = 255
+
+    trainer = LAMNrGlow3DTrainer()
+    trainer.args = Args()
+    trainer.model_dtype = torch.float32
+    trainer.input_shape = (1, 4, 4, 4)
+    batch = torch.randint(0, 256, (2, 1, 4, 4, 4)).float() / 255
+    x = trainer.extract_view(batch, 0, torch.device("cpu"))
+    torch.testing.assert_close(x, (torch.round(batch * 255) + 0.5) / 256)

@@ -50,6 +50,17 @@ where a per-sample min-max would destroy the sign and the u/v ratio::
 Spatial augmentation moves pixels without rotating vectors (and a horizontal
 flip does not negate u), so disable it for vector-field views as above.
 
+Image views with ``"intensity": "none"`` whose values lie on a grid
+``{0, 1/K, ..., 1}`` (e.g. area fractions of a K-pixel block, or 8-bit
+intensities with K = 255) accept ``"dequantize": K``: each value n/K becomes
+``(n + u) / (K + 1)``, with ``u ~ U(0, 1)`` resampled at every training draw
+and ``u = 0.5`` for validation/export. Without it, exact zeros make the
+continuous density degenerate (negative bits/dim that keep decreasing)::
+
+    {"name": "seg", "type": "image2d", "path_column": "seg", "channels": 6,
+     "shape": [64, 64], "intensity": "none", "dequantize": 49,
+     "augmentation": {"enabled": false}}
+
 Signal views have their own training augmentation, off by default and
 independent of the image augmentation CLI (``--disable-augmentation`` still
 turns it off)::
@@ -190,6 +201,7 @@ class HybridViewSpec:
     layout: str = "auto"
     resample: str = "linear"
     intensity: str = "to01"
+    dequantize: int = 0
 
     @classmethod
     def from_dict(cls, raw: Dict[str, Any]) -> "HybridViewSpec":
@@ -225,7 +237,16 @@ class HybridViewSpec:
             layout=str(raw.get("layout", "auto")),
             resample=str(raw.get("resample", "linear")),
             intensity=str(raw.get("intensity", "to01")).lower(),
+            dequantize=int(raw.get("dequantize", 0) or 0),
         )
+        if spec.dequantize:
+            if kind not in ("image2d", "image3d") or spec.intensity != "none":
+                raise ValueError(
+                    f"View {name!r}: 'dequantize' requires an image view with "
+                    "\"intensity\": \"none\" (values on a [0, 1] grid)."
+                )
+            if spec.dequantize < 1:
+                raise ValueError(f"View {name!r}: dequantize must be a positive number of levels.")
         if "intensity" in raw and kind not in ("image2d", "image3d"):
             raise ValueError(
                 f"View {name!r}: 'intensity' only applies to image views; use "
@@ -773,6 +794,7 @@ class HybridManifestDataset(Dataset):
         augmentation_groups: Optional[Dict[str, Dict[str, Any]]] = None,
         do_augmentation: bool = False,
         number_of_samples: Optional[int] = None,
+        stochastic_dequantization: bool = False,
     ) -> None:
         self.frame = frame.reset_index(drop=True)
         self.views = list(views)
@@ -781,6 +803,7 @@ class HybridManifestDataset(Dataset):
         self.tabular_noise_std = float(tabular_noise_std)
         self.augmentation_groups = augmentation_groups or {}
         self.do_augmentation = bool(do_augmentation)
+        self.stochastic_dequantization = bool(stochastic_dequantization)
         self.number_of_samples = (
             len(self.frame) if number_of_samples is None else int(number_of_samples)
         )
@@ -871,7 +894,18 @@ class HybridManifestDataset(Dataset):
         for vi, spec in enumerate(self.views):
             if spec.kind in ("image2d", "image3d") and masks[vi] and spec.intensity == "0mean":
                 values[vi] = self.normalizers[spec.name].transform(values[vi])
+            if spec.kind in ("image2d", "image3d") and masks[vi] and spec.dequantize:
+                values[vi] = _dequantize(
+                    values[vi], spec.dequantize, stochastic=self.stochastic_dequantization
+                )
         return values, torch.tensor(masks, dtype=torch.bool)
+
+
+def _dequantize(x: torch.Tensor, levels: int, stochastic: bool) -> torch.Tensor:
+    """Map values on the grid {0, 1/K, ..., 1} to (n + u) / (K + 1)."""
+    n = torch.clamp(torch.round(x.float() * levels), 0, levels)
+    u = torch.rand_like(n) if stochastic else torch.full_like(n, 0.5)
+    return (n + u) / (levels + 1)
 
 
 def hybrid_collate(samples):
@@ -1054,6 +1088,7 @@ class HybridLAMNrTrainer:
             augmentation_groups=self.augmentation_groups,
             do_augmentation=not args.disable_augmentation,
             number_of_samples=(args.train_samples or None),
+            stochastic_dequantization=True,
         )
         self.val_dataset = HybridManifestDataset(
             val_frame, self.views, self.normalizers,
@@ -1314,6 +1349,8 @@ class HybridLAMNrTrainer:
                 add(f"view[{index}] augmentation group", view.augmentation_group)
                 if view.kind in ("image2d", "image3d"):
                     add(f"view[{index}] intensity", view.intensity)
+                    if view.dequantize:
+                        add(f"view[{index}] dequantize (levels)", view.dequantize)
                 if view.kind == "signal1d":
                     add(
                         f"view[{index}] signal augmentation",

@@ -723,6 +723,7 @@ def screen_dump_run_config(
 
     # Data & Augmentation
     add("intensity", cfg.get("intensity", "to01"))
+    add("dequantize (levels)", cfg.get("dequantize", 0) or None)
     add("slice_idx", cfg.get("slice_idx"))
     add("val_frac", cfg.get("val_frac"))
     add("subject_limit", cfg.get("subject_limit") or None)
@@ -793,6 +794,15 @@ class BaseLAMNrTrainer(abc.ABC):
     disabled for non-``to01`` modes) and saves it in the checkpoint; ``none``
     feeds the raw values. Subclasses route their output through
     ``apply_intensity``.
+
+    Dequantization (``--dequantize K``, requires ``--intensity none``)
+    ------------------------------------------------------------------
+    For inputs on the grid {0, 1/K, ..., 1} (e.g. 8-bit images scaled to
+    [0, 1] with K = 255, or area fractions of a k x k block with K = k*k),
+    each value n/K becomes (n + u)/(K + 1). ``apply_intensity`` applies the
+    deterministic u = 0.5 everywhere (validation, priming, checks); only the
+    training step adds the uniform jitter (``jitter_dequantization``), so the
+    training input is exactly (n + u)/(K + 1) with u ~ U(0, 1).
     """
 
     # ------------------------------------------------------------------
@@ -809,19 +819,64 @@ class BaseLAMNrTrainer(abc.ABC):
             raise ValueError(f"--intensity must be one of {self.INTENSITY_MODES}; got {mode!r}.")
         return mode
 
+    @property
+    def dequantize_levels(self) -> int:
+        args = getattr(self, "args", None)
+        levels = int(getattr(args, "dequantize", 0) or 0)
+        if levels < 0:
+            raise ValueError("--dequantize must be >= 0.")
+        if levels and self.intensity != "none":
+            raise ValueError(
+                "--dequantize requires --intensity none (with 'to01' the per-image "
+                "min-max would undo it; with '0mean' values are no longer on a grid)."
+            )
+        return levels
+
+    def jitter_dequantization(self, x: torch.Tensor) -> torch.Tensor:
+        """Training-only: turn the deterministic (n + 0.5)/(K + 1) into (n + u)/(K + 1)."""
+        levels = self.dequantize_levels
+        if not levels:
+            return x
+        return x + (torch.rand_like(x) - 0.5) / (levels + 1)
+
     def apply_intensity(self, x: torch.Tensor, vi: int, to01_fn=None) -> torch.Tensor:
         """Map one extracted view batch (B, C, ...) to model space."""
         if getattr(self, "_intensity_bypass", False):
             return x
         mode = self.intensity
+        levels = self.dequantize_levels  # also validates the --intensity/--dequantize combination
         if mode == "to01":
             return to01_fn(x) if to01_fn is not None else x
         if mode == "none":
+            if levels:
+                n = torch.clamp(torch.round(x.float() * levels), 0, levels)
+                return (n + 0.5) / (levels + 1)
             return x
         normalizers = getattr(self, "intensity_normalizers", None)
         if not normalizers:
             raise RuntimeError("--intensity 0mean: normalizers have not been fit yet.")
         return normalizers[vi].transform_batch(x)
+
+    @torch.no_grad()
+    def _check_dequantization_range(self, loader, num_views: int) -> None:
+        """--dequantize expects values on [0, 1]; fail early on e.g. raw 0..255 data."""
+        try:
+            batch = next(iter(loader))
+        except StopIteration:
+            return
+        self._intensity_bypass = True
+        try:
+            for vi in range(num_views):
+                x = self.extract_view(batch, vi, torch.device("cpu"))
+                lo, hi = float(x.min()), float(x.max())
+                if lo < -1e-6 or hi > 1.0 + 1e-6:
+                    raise ValueError(
+                        f"--dequantize expects view values on [0, 1] (a grid of "
+                        f"{self.dequantize_levels} levels); view {vi} spans [{lo:.4g}, {hi:.4g}]. "
+                        "Rescale the inputs (e.g. 8-bit data / 255) or drop --dequantize."
+                    )
+        finally:
+            self._intensity_bypass = False
 
     def _spatial_dims(self) -> Optional[int]:
         shape = getattr(self, "input_shape", None)
@@ -973,6 +1028,8 @@ class BaseLAMNrTrainer(abc.ABC):
         self.intensity_normalizers: Optional[List[ChannelNormalizer]] = None
         if self.intensity == "0mean":
             self.fit_intensity_normalizers(self.train_loader, len(self.models))
+        if self.dequantize_levels:
+            self._check_dequantization_range(self.train_loader, len(self.models))
 
         # ActNorm warmup with real data
         with torch.no_grad():
@@ -1302,6 +1359,12 @@ class BaseLAMNrTrainer(abc.ABC):
             raise ValueError(
                 f"[resume] checkpoint was trained with --intensity {ckpt_intensity}, "
                 f"but this run uses --intensity {self.intensity}."
+            )
+        ckpt_dequantize = int(ckpt_cfg.get("dequantize", 0) or 0) if ckpt_cfg else None
+        if ckpt_dequantize is not None and ckpt_dequantize != self.dequantize_levels:
+            raise ValueError(
+                f"[resume] checkpoint was trained with --dequantize {ckpt_dequantize}, "
+                f"but this run uses --dequantize {self.dequantize_levels}."
             )
 
         # Second pass (target device)
@@ -1711,7 +1774,7 @@ class BaseLAMNrTrainer(abc.ABC):
                 with amp_ctx:
                     bad_batch = False
                     for vi, m in enumerate(models):
-                        x_v = self.extract_view(x, vi, dev)
+                        x_v = self.jitter_dequantization(self.extract_view(x, vi, dev))
 
                         # Diagnostic only (does not alter control flow).
                         #
