@@ -15,6 +15,12 @@ On MPS, the default is now `ANTSTORCH_MPS_GRID_SAMPLE=auto`:
 3. If neither supports the call, retain the existing CPU fallback (or CPU
    relocation for registration capability probes).
 
+The capability probe treats PyTorch's own MPS CPU fallback (`PYTORCH_ENABLE_MPS_FALLBACK=1`) as unavailable rather than native: that
+setting turns an unimplemented op into a `UserWarning` plus a silent CPU
+run instead of a raised exception, which would otherwise be misread as
+native support. The probe forces the variable off and promotes any
+`UserWarning` raised during its own two-op check to an error, independent
+of the caller's environment.
 Explicit `native`, `metal`, and `torch` overrides remain available. The portable
 Torch backend is never selected automatically. Invalid values raise an error.
 Set overrides before starting Python because capability probes are cached.

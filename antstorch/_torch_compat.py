@@ -7,18 +7,41 @@ import torch
 from ._grid_sample_3d import grid_sample_3d
 from torch.nn import functional as F
 
+# PyTorch's silent CPU fallback (PYTORCH_ENABLE_MPS_FALLBACK=1) turns an
+# unimplemented-on-MPS op into a UserWarning ("... is not currently
+# supported on the MPS backend and will fall back to run on the CPU")
+# instead of a raised exception. A capability probe that only catches
+# exceptions would then misreport the op as natively available. _available()
+# promotes any UserWarning raised during its narrow probe body to an error
+# so a silent CPU fallback is never mistaken for native MPS support.
+
 
 @lru_cache(maxsize=128)
 def _available(backend, dtype, mode, padding_mode, align_corners, backward):
-    """Exercise both coordinate and image derivatives when required."""
+    """Exercise both coordinate and image derivatives when required.
+
+    Forces PYTORCH_ENABLE_MPS_FALLBACK off and promotes PyTorch's MPS
+    CPU-fallback warning to an error for the duration of the probe, so a
+    user who has that variable set globally still gets an honest answer:
+    a silent CPU fallback must never be reported as native support.
+    """
     if backend == "metal" and (dtype != torch.float32 or not hasattr(torch.mps, "compile_shader")):
         return False
+    previous_fallback_env = os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK")
+    os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "0"
     try:
         sampler = F.grid_sample
         if backend == "metal":
             from ._grid_sample_3d_metal import grid_sample_3d_metal
             sampler = grid_sample_3d_metal
-        with torch.enable_grad():
+        with torch.enable_grad(), warnings.catch_warnings():
+            # warnings.filterwarnings' `message` filter only matches a regex
+            # anchored at the *start* of the text, so it cannot key off a
+            # substring like "not currently supported"; promote every
+            # UserWarning instead -- the probe body is two ops, so any
+            # UserWarning raised here is the MPS CPU-fallback warning (or
+            # something equally worth treating as "not really native").
+            warnings.simplefilter("error", UserWarning)
             image = torch.ones(1, 1, 3, 3, 3, device="mps", dtype=dtype, requires_grad=backward)
             grid = torch.full((1, 1, 1, 1, 3), 0.17, device="mps", dtype=dtype, requires_grad=backward)
             output = sampler(image, grid, mode=mode, padding_mode=padding_mode, align_corners=align_corners)
@@ -26,8 +49,13 @@ def _available(backend, dtype, mode, padding_mode, align_corners, backward):
                 torch.autograd.grad(output.sum(), (image, grid))
             torch.mps.synchronize()
         return True
-    except (RuntimeError, NotImplementedError, SyntaxError):
+    except (RuntimeError, NotImplementedError, SyntaxError, UserWarning):
         return False
+    finally:
+        if previous_fallback_env is None:
+            os.environ.pop("PYTORCH_ENABLE_MPS_FALLBACK", None)
+        else:
+            os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = previous_fallback_env
 
 
 def grid_sample_for_probe(input, grid, **kwargs):
