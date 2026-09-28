@@ -72,8 +72,8 @@ def pearson_multi(views_feats: List[torch.Tensor]) -> torch.Tensor:
             v_j = views_feats[j].to(torch.float32)
 
             # Standardisation avec un epsilon de sécurité (1e-6)
-            v_i = (v_i - v_i.mean(dim=0)) / (v_i.std(dim=0) + 1e-6)
-            v_j = (v_j - v_j.mean(dim=0)) / (v_j.std(dim=0) + 1e-6)
+            v_i = (v_i - v_i.mean(dim=0)) / (v_i.std(dim=0, correction=0) + 1e-6)
+            v_j = (v_j - v_j.mean(dim=0)) / (v_j.std(dim=0, correction=0) + 1e-6)
 
             # Corrélation croisée
             c_ij = torch.matmul(v_i.T, v_j) / (v_i.shape[0] - 1)
@@ -254,11 +254,11 @@ def barlow_twins_multi(views_feats: List[torch.Tensor], lam: float = 5e-3) -> to
     losses = []
     eye_cache = None
     for i in range(len(views_feats)):
-        Zi = (views_feats[i] - views_feats[i].mean(0)) / (views_feats[i].std(0) + 1e-5)
+        Zi = (views_feats[i] - views_feats[i].mean(0)) / (views_feats[i].std(0, correction=0) + 1e-5)
         Zi = torch.nan_to_num(Zi)
         for j in range(i+1, len(views_feats)):
             Zi = torch.nan_to_num(Zi)
-            Zj = (views_feats[j] - views_feats[j].mean(0)) / (views_feats[j].std(0) + 1e-5)
+            Zj = (views_feats[j] - views_feats[j].mean(0)) / (views_feats[j].std(0, correction=0) + 1e-5)
             Zj = torch.nan_to_num(Zj)
             C = (Zi.t() @ Zj) / max(B, 1)
             C = torch.nan_to_num(C)
@@ -413,7 +413,13 @@ def vicreg_multi(views_feats: List[torch.Tensor],
     for v in range(V):
         z = views_feats[v]
         # variance
-        std = z.std(dim=0) + eps
+        # correction=0 (population, not sample, std): with dim=0 the
+        # reduction is over the batch, and a batch of size 1 (or a
+        # masked/screened intersection that thins to 1 row) makes the
+        # default correction=1 estimator's degrees of freedom hit zero,
+        # which is undefined and only ever emits a UserWarning plus a
+        # NaN/Inf std. correction=0 stays well-defined (std=0) at B=1.
+        std = z.std(dim=0, correction=0) + eps
         var = torch.relu(gamma - std).pow(2).mean()
         var_acc = var_acc + var
         # covariance

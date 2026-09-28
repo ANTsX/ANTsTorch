@@ -158,7 +158,7 @@ def _screen_hsic(
     r = max(1, int(round(D * keep_frac)))
     k_pref = max(1, int(round(D * prefilter_frac)))
     Z = [
-        (Fv - Fv.mean(dim=0, keepdim=True)) / (Fv.std(dim=0, keepdim=True) + 1e-6)
+        (Fv - Fv.mean(dim=0, keepdim=True)) / (Fv.std(dim=0, keepdim=True, correction=0) + 1e-6)
         for Fv in feats
     ]
     pearson_scores = [
@@ -468,7 +468,9 @@ class LatentAlignmentLossManager:
                     if vi < len(args.vicreg_gamma)
                     else args.vicreg_gamma[0]
                 )
-                std = torch.sqrt(feat.var(dim=0) + 1e-4)
+                # correction=0: see alignment_losses.vicreg_multi for why the
+                # default sample-variance correction is unsafe at batch size 1.
+                std = torch.sqrt(feat.var(dim=0, correction=0) + 1e-4)
                 L_var = L_var + w_var_v * torch.mean(F.relu(gamma_v - std))
             return L_inv_cov + L_var
 
