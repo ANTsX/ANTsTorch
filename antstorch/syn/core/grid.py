@@ -10,6 +10,7 @@ order, and tensor spatial axes are the PyTorch-reversed ``(z, y, x)``.
 import numpy as np
 import torch
 import torch.nn.functional as F
+from ..._torch_compat import grid_sample
 
 
 def grid_sample_bspline_torch(
@@ -168,7 +169,7 @@ class AnalyticalGridSample(torch.autograd.Function):
         ctx.save_for_backward(input, grid)
         if input.dtype != grid.dtype:
             input = input.to(grid.dtype)
-        return F.grid_sample(input, grid, mode=mode, padding_mode=padding_mode, align_corners=align_corners)
+        return grid_sample(input, grid, mode=mode, padding_mode=padding_mode, align_corners=align_corners)
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -186,7 +187,7 @@ class AnalyticalGridSample(torch.autograd.Function):
 
         # 2. Sample source gradients at the grid lookup coordinates.
         grad_I_flat = grad_I.view(B, C * dim, *spatial_shape).to(dtype=grid.dtype)
-        grad_I_sampled = F.grid_sample(grad_I_flat, grid, mode=mode, padding_mode=padding_mode, align_corners=align_corners)
+        grad_I_sampled = grid_sample(grad_I_flat, grid, mode=mode, padding_mode=padding_mode, align_corners=align_corners)
         grad_I_sampled = grad_I_sampled.view(B, C, dim, *grid.shape[1:-1])  # (B, C, dim, *spatial_grid)
 
         # 3. Inner product with the incoming loss gradient.
@@ -243,7 +244,7 @@ def grid_sample_nd(input, grid, mode='bilinear', padding_mode='border', align_co
         input = input.to(grid.dtype)
     if use_analytical_gradients and grid.requires_grad and not input.requires_grad:
         return AnalyticalGridSample.apply(input, grid, mode, padding_mode, align_corners)
-    return F.grid_sample(input, grid, mode=mode, padding_mode=padding_mode, align_corners=align_corners)
+    return grid_sample(input, grid, mode=mode, padding_mode=padding_mode, align_corners=align_corners)
 
 
 def compose_grids(grid1: torch.Tensor, grid2: torch.Tensor) -> torch.Tensor:
@@ -261,7 +262,7 @@ def compose_grids(grid1: torch.Tensor, grid2: torch.Tensor) -> torch.Tensor:
         ``grid1``'s locations.
     """
     grid1_cf = torch.movedim(grid1, -1, 1)
-    composed_cf = F.grid_sample(grid1_cf, grid2, mode='bilinear', padding_mode='border', align_corners=True)
+    composed_cf = grid_sample(grid1_cf, grid2, mode='bilinear', padding_mode='border', align_corners=True)
     return torch.movedim(composed_cf, 1, -1)
 
 

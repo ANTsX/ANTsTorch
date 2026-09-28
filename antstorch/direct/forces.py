@@ -7,27 +7,32 @@ from ..syn.core.smoothing import separable_gaussian_filter
 
 
 def binary_contour(mask: Tensor) -> Tensor:
-    """Return the face-connected inner contour of a binary image."""
+    """Return the fully connected inner contour of a binary image."""
     if mask.ndim not in (4, 5) or mask.shape[1] != 1:
         raise ValueError("mask must have shape (N, 1, *spatial)")
     binary = mask > 0
     eroded = binary.clone()
-    spatial_dims = mask.ndim - 2
+    # ITK BinaryContourImageFilter uses FullyConnected=true in DiReCT.
+    # Erode along each axis in sequence to include diagonal neighbours too.
+    # Replicated edges match ITK's zero-flux boundary condition.
     for axis in range(2, mask.ndim):
+        source = eroded
+        updated = source.clone()
         for offset in (-1, 1):
-            shifted = torch.roll(binary, shifts=offset, dims=axis)
+            shifted = torch.roll(source, shifts=offset, dims=axis)
             boundary = [slice(None)] * binary.ndim
             boundary[axis] = 0 if offset == 1 else -1
-            shifted[tuple(boundary)] = False
-            eroded &= shifted
+            shifted[tuple(boundary)] = source[tuple(boundary)]
+            updated &= shifted
+        eroded = updated
     return (binary & ~eroded).to(mask.dtype)
 
 
-def gaussian_scalar(image: Tensor, sigma, spacing=None, sigma_mode="voxel") -> Tensor:
+def gaussian_scalar(image: Tensor, sigma, spacing=None, sigma_mode="voxel", maximum_error=None) -> Tensor:
     """Apply the shared separable Gaussian implementation to a scalar image."""
     field = image.movedim(1, -1)
     return separable_gaussian_filter(
-        field, sigma=sigma, spacing=spacing, sigma_mode=sigma_mode
+        field, sigma=sigma, spacing=spacing, sigma_mode=sigma_mode, maximum_error=maximum_error
     ).movedim(-1, 1)
 
 
@@ -38,7 +43,12 @@ def normalized_probability_gradient(
     spacing,
     epsilon: float = 1e-3,
 ) -> Tensor:
-    """GradientRecursiveGaussian analogue with ITK-order vector components."""
+    """Approximate smoothed gradient with ITK-order vector components.
+
+    Unlike ITK's recursive Gaussian derivative, this smooths with a discrete
+    Gaussian and then takes finite differences. See direct/README.md for
+    the analytical direction test and limits of ANTs equivalence.
+    """
     smoothed = gaussian_scalar(probability, sigma, spacing=spacing, sigma_mode="physical")
     spacing_torch = tuple(reversed(tuple(float(v) for v in spacing)))
     derivatives = torch.gradient(smoothed, spacing=spacing_torch, dim=tuple(range(2, smoothed.ndim)))

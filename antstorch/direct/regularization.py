@@ -35,8 +35,10 @@ def regularize_velocity(
     if variance <= 0 or mode == "none":
         return stationary_boundary(field)
     channel_last = field.movedim(1, -1)
+    # Match ANTs GaussianSmoothDisplacementField cutoff and low-variance blend;
+    # alternative regularizers are separate variants (see direct/README.md).
     if mode == "gaussian":
-        smoothed = separable_gaussian_filter(channel_last, sigma=math.sqrt(variance))
+        smoothed = separable_gaussian_filter(channel_last, sigma=math.sqrt(variance), maximum_error=0.001)
     elif mode == "sobolev":
         smoothed = apply_sobolev_green_operator(
             channel_last, fluid_sigma=variance, alpha=variance, spacing=spacing
@@ -45,4 +47,7 @@ def regularize_velocity(
         smoothed = apply_dsti_green_operator(channel_last, fluid_sigma=variance, alpha=variance)
     else:
         raise ValueError("regularizer must be 'gaussian', 'sobolev', 'dsti', or 'none'")
+    if mode == "gaussian" and variance < 0.5:
+        weight = 1.0 - variance / 0.5
+        smoothed = weight * smoothed + (1.0 - weight) * channel_last
     return stationary_boundary(smoothed.movedim(-1, 1))

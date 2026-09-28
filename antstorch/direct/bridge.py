@@ -24,7 +24,13 @@ def kelly_kapowski(
     device=None,
     verbose: bool = False,
 ):
-    """ANTsImage-compatible DiReCT entry point implemented with PyTorch."""
+    """ANTsImage-compatible DiReCT entry point implemented with PyTorch.
+
+    Agreement with ANTs KellyKapowski is tested, but numerical identity is
+    not guaranteed. Gradient construction, reduction order and interpolation
+    can differ. See direct/README.md, "Differences from ANTs KellyKapowski",
+    for the validation scope, optional variants and MPS CPU fallback behaviour.
+    """
     if segmentation.dimension not in (2, 3):
         raise ValueError("kelly_kapowski supports 2-D and 3-D images")
     for name, image in (("gray_matter", gray_matter), ("white_matter", white_matter)):

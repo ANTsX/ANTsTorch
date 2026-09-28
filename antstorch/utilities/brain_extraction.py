@@ -92,7 +92,7 @@ def brain_extraction(image,
     input_images = []
     if channel_size == 1:
         if modality in ("t1hemi", "t1lobes"):
-            bext = brain_extraction(image, modality="t1threetissue", verbose=verbose)
+            bext = brain_extraction(image, modality="t1threetissue", device=device, verbose=verbose)
             mask = ants.threshold_image(bext['segmentation_image'], 1, 1, 1, 0)
             input_images.append(image * mask)
         else:
@@ -275,4 +275,3 @@ def brain_extraction(image,
         prob_img_template = prob_images_template[-1]
         probability_image = xfrm_inv.apply_to_image(prob_img_template, input_images[0])
         return probability_image
-

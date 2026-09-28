@@ -11,6 +11,7 @@ import torch
 from torch import Tensor
 from torch.nn import functional as F
 
+from .._torch_compat import grid_sample
 from .bspline_domain import ImageDomain
 
 
@@ -134,7 +135,7 @@ def warp_image(
     if moving.shape[0] != displacement.shape[0]:
         raise ValueError("moving image and displacement batch sizes must match")
     grid = displacement_to_sampling_grid(displacement, fixed_domain, moving_domain)
-    return F.grid_sample(
+    return grid_sample(
         moving, grid, mode=mode, padding_mode=padding_mode, align_corners=ALIGN_CORNERS
     )
 
