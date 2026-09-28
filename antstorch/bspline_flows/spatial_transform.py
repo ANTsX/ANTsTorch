@@ -166,7 +166,16 @@ def jacobian_determinant(displacement: Tensor, domain: ImageDomain) -> Tensor:
     identity = identity.reshape((1, domain.dimension, domain.dimension) + (1,) * domain.dimension)
     jacobian = du_dp + identity
     permutation = (0,) + tuple(range(3, 3 + domain.dimension)) + (1, 2)
-    return torch.linalg.det(jacobian.permute(permutation))
+    # .contiguous(): the permute moves the (i, j) matrix axes to the end
+    # while keeping the batch/spatial axes in between, so the batched 3x3
+    # blocks torch.linalg.det operates on are non-contiguous. On that
+    # layout, det's forward (which flattens the batch to run a single
+    # batched LU) and its backward (which writes into the original,
+    # unflattened shape) have been observed to reuse the same internal
+    # buffer across the two differently-shaped calls, triggering a
+    # deprecated implicit-resize UserWarning. A contiguous input keeps det
+    # on its standard code path.
+    return torch.linalg.det(jacobian.permute(permutation).contiguous())
 
 
 def folding_count(displacement: Tensor, domain: ImageDomain) -> Tensor:

@@ -49,3 +49,11 @@ pythonpath = ["."]
 markers = [
     "slow: marks tests as slow (deselect with -m \"not slow\")",
 ]
+filterwarnings = [
+    # tqdm's own progress-bar formatting uses the Python-3.12-deprecated
+    # datetime.utcfromtimestamp(); tracked upstream as fixed in
+    # https://github.com/tqdm/tqdm/issues/1517, but still present in some
+    # installed versions. Scoped to tqdm.std so it never masks a
+    # DeprecationWarning raised by our own code.
+    "ignore:datetime\\.datetime\\.utcfromtimestamp\\(\\) is deprecated:DeprecationWarning:tqdm\\.std",
+]

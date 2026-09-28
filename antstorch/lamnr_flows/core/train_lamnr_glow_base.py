@@ -1009,8 +1009,16 @@ class BaseLAMNrTrainer(abc.ABC):
             else:
                 self.amp_dtype = torch.float16
 
+        # torch.amp.GradScaler defaults to device="cuda"; on a CPU/MPS run
+        # that silently forces enabled=False anyway, but not before emitting
+        # "GradScaler is enabled, but CUDA is not available. Disabling." on
+        # every run that isn't on CUDA. Passing the real device avoids both
+        # the false-premise check and the warning; gating `enabled` on
+        # dev.type == "cuda" keeps behavior identical to what it forced
+        # itself to before (fp16 grad scaling is a CUDA-autocast concept).
         self.scaler = torch.amp.GradScaler(
-            enabled=(self.amp_enabled and self.amp_dtype == torch.float16),
+            device=dev.type,
+            enabled=(self.amp_enabled and self.amp_dtype == torch.float16 and dev.type == "cuda"),
             init_scale=2.0 ** 12,
             growth_factor=2.0,
             backoff_factor=0.5,
