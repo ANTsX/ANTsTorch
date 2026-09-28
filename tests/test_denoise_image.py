@@ -141,10 +141,11 @@ def test_denoise_image_parameter_parsing(synthetic_2d):
     assert np.allclose(res_str.numpy(), res_int.numpy())
 
 
-def test_denoise_image_mps_device(r16_image):
+@pytest.mark.parametrize("noise_model", ["Gaussian", "Rician"])
+def test_denoise_image_mps_device(r16_image, noise_model):
     if torch.backends.mps.is_available():
-        res_cpu = denoise_image(r16_image, device="cpu", noise_model="Gaussian")
-        res_mps = denoise_image(r16_image, device="mps", noise_model="Gaussian")
+        res_cpu = denoise_image(r16_image, device="cpu", noise_model=noise_model)
+        res_mps = denoise_image(r16_image, device="mps", noise_model=noise_model)
         corr = np.corrcoef(res_cpu.numpy().ravel(), res_mps.numpy().ravel())[0, 1]
         assert corr > 0.99999
 

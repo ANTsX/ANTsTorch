@@ -126,8 +126,12 @@ def _calculate_correction_factor(snr: torch.Tensor) -> torch.Tensor:
     """
     z = snr ** 2
     z_quarter = 0.25 * z
-    i0e = torch.special.i0e(z_quarter)
-    i1e = torch.special.i1e(z_quarter)
+    # MPS lacks these scaled Bessel kernels. Transfer their shared input once
+    # and evaluate only these operations on CPU; the remaining work stays on
+    # the requested device. This does not require global MPS fallback.
+    bessel_input = z_quarter.cpu() if snr.device.type == "mps" else z_quarter
+    i0e = torch.special.i0e(bessel_input).to(snr.device)
+    i1e = torch.special.i1e(bessel_input).to(snr.device)
     part = (2.0 + z) * i0e + z * i1e
     val = 2.0 + z - 0.125 * math.pi * (part ** 2)
     val = torch.where((val < 0.001) | (val > 10.0), torch.ones_like(val), val)
