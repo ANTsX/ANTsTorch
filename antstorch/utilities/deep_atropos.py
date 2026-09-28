@@ -121,7 +121,7 @@ def deep_atropos(
             verbose=verbose
         )
         if i == 0:
-            t1_bext = _brain_extraction(input_images[0], modality="t1threetissue", verbose=verbose)
+            t1_bext = _brain_extraction(input_images[0], modality="t1threetissue", device=device, verbose=verbose)
             t1_mask = ants.threshold_image(t1_bext['segmentation_image'], 1, 1, 1, 0)
             n4 = n4 * t1_mask
             reg = ants.registration(hcp_t1_template, n4,

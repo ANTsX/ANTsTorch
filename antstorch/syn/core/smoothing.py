@@ -27,7 +27,7 @@ _gaussian_kernel_cache = {}
 _tensor_kernel_cache = {}
 
 
-def get_cached_gaussian_kernel_1d(sig: float, device, dtype):
+def get_cached_gaussian_kernel_1d(sig: float, device, dtype, maximum_error=None):
     """Return a cached 1-D discrete Gaussian kernel (modified Bessel weights).
 
     The kernel radius is chosen so that the truncated tail contributes less
@@ -40,6 +40,9 @@ def get_cached_gaussian_kernel_1d(sig: float, device, dtype):
         Kernel sigma, in voxels.
     device, dtype : torch.device, torch.dtype
         Target tensor device/dtype for the cached kernel.
+    maximum_error : float, optional
+        Truncate by retained mass (at least 1 - maximum_error), as in ITK,
+        instead of the legacy coefficient cutoff.
 
     Returns
     -------
@@ -47,24 +50,34 @@ def get_cached_gaussian_kernel_1d(sig: float, device, dtype):
         Kernel of shape ``(1, 1, 2 * radius + 1)``.
     """
     sig_key = round(float(sig), 5)
-    cache_key = (sig_key, str(device), str(dtype))
+    kernel_key = (sig_key, maximum_error)
+    cache_key = (kernel_key, str(device), str(dtype))
     if cache_key not in _tensor_kernel_cache:
-        if sig_key not in _gaussian_kernel_cache:
+        if kernel_key not in _gaussian_kernel_cache:
             from scipy.special import ive
             variance = float(sig_key) ** 2
-            radius = 0
-            while ive(radius, variance) > 0.005:
-                radius += 1
+            if maximum_error is None:
+                radius = 0
+                while ive(radius, variance) > 0.005:
+                    radius += 1
+            else:
+                if not 0 < maximum_error < 1:
+                    raise ValueError("maximum_error must be between zero and one")
+                radius = 1
+                mass = ive(0, variance) + 2 * ive(1, variance)
+                while mass < 1 - maximum_error:
+                    radius += 1
+                    mass += 2 * ive(radius, variance)
             offsets = np.arange(-radius, radius + 1)
             k_np = np.array([ive(abs(k), variance) for k in offsets], dtype=np.float32)
             k_np /= k_np.sum()
-            _gaussian_kernel_cache[sig_key] = k_np
-        k_np = _gaussian_kernel_cache[sig_key]
+            _gaussian_kernel_cache[kernel_key] = k_np
+        k_np = _gaussian_kernel_cache[kernel_key]
         _tensor_kernel_cache[cache_key] = torch.from_numpy(k_np).to(device=device, dtype=dtype).view(1, 1, -1)
     return _tensor_kernel_cache[cache_key]
 
 
-def separable_gaussian_filter(grid: torch.Tensor, sigma, spacing=None, sigma_mode='voxel') -> torch.Tensor:
+def separable_gaussian_filter(grid: torch.Tensor, sigma, spacing=None, sigma_mode='voxel', maximum_error=None) -> torch.Tensor:
     """Apply separable Gaussian filtering along each spatial dimension.
 
     Parameters
@@ -82,6 +95,8 @@ def separable_gaussian_filter(grid: torch.Tensor, sigma, spacing=None, sigma_mod
         ``'voxel'`` (default) uses ``sigma`` directly in voxels;
         ``'physical'`` scales the voxel sigma per axis by ``spacing``
         (clamped to ``[0.5, 10.0]`` voxels for numerical stability).
+    maximum_error : float, optional
+        ITK-style omitted-mass tolerance. None preserves the legacy cutoff.
 
     Returns
     -------
@@ -118,7 +133,7 @@ def separable_gaussian_filter(grid: torch.Tensor, sigma, spacing=None, sigma_mod
         for i, sig in enumerate(sigma_list):
             if sig <= 0.0:
                 continue
-            kernel_1d = get_cached_gaussian_kernel_1d(sig, device, dtype).squeeze(0)
+            kernel_1d = get_cached_gaussian_kernel_1d(sig, device, dtype, maximum_error=maximum_error).squeeze(0)
             pad = kernel_1d.shape[-1] // 2
 
             if i == 0:
@@ -137,7 +152,7 @@ def separable_gaussian_filter(grid: torch.Tensor, sigma, spacing=None, sigma_mod
         if sig <= 0.0:
             continue
 
-        kernel = get_cached_gaussian_kernel_1d(sig, device, dtype)
+        kernel = get_cached_gaussian_kernel_1d(sig, device, dtype, maximum_error=maximum_error)
         kernel_size = kernel.shape[-1]
         pad_size = kernel_size // 2
 

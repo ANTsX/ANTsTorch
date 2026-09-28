@@ -20,6 +20,32 @@ def _synthetic_tensors(size=12):
     return segmentation, gray_probability, white_probability
 
 
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS unavailable")
+def test_direct_mps_without_native_3d_sampling(monkeypatch):
+    monkeypatch.setenv("ANTSTORCH_MPS_GRID_SAMPLE", "native")
+    from antstorch import _torch_compat
+
+    original = _torch_compat.F.grid_sample
+
+    def missing_mps_kernel(input, grid, **kwargs):
+        if input.device.type == "mps" and input.ndim == 5:
+            raise NotImplementedError("aten::grid_sampler_3d is unavailable")
+        return original(input, grid, **kwargs)
+
+    monkeypatch.setattr(_torch_compat.F, "grid_sample", missing_mps_kernel)
+    images = _synthetic_tensors()
+    domain = ImageDomain((12, 12, 12))
+    options = dict(iterations=2, integration_points=2, inverse_iterations=2)
+    expected = direct_cortical_thickness(*images, domain, **options)
+    with pytest.warns(RuntimeWarning, match="interpolation on CPU"):
+        actual = direct_cortical_thickness(
+            *(image.to("mps") for image in images), domain, **options
+        )
+    assert actual.thickness.device.type == "mps"
+    assert torch.isfinite(actual.thickness).all()
+    torch.testing.assert_close(actual.thickness.cpu(), expected.thickness, atol=1e-4, rtol=1e-3)
+
+
 def test_binary_contour_is_inner_boundary():
     mask = torch.zeros(1, 1, 7, 7)
     mask[:, :, 1:6, 1:6] = 1
@@ -73,3 +99,78 @@ def test_ant_image_bridge_preserves_output_geometry():
     assert result.spacing == seg_image.spacing
     assert result.origin == seg_image.origin
     assert np.isfinite(result.numpy()).all()
+
+
+@pytest.mark.parametrize("dimension", [2, 3])
+def test_binary_contour_includes_diagonal_neighbors(dimension):
+    mask = torch.ones((1, 1) + (5,) * dimension)
+    mask[(0, 0) + (1,) * dimension] = 0
+    contour = binary_contour(mask)
+    assert contour[(0, 0) + (2,) * dimension] == 1
+    assert contour[(0, 0) + (4,) * dimension] == 0
+    assert not binary_contour(torch.ones_like(mask)).any()
+
+
+@pytest.mark.parametrize("dimension", [2, 3])
+def test_binary_contour_matches_full_neighborhood_erosion(dimension):
+    from scipy.ndimage import binary_erosion
+
+    mask = np.random.default_rng(42).random((7,) * dimension) > 0.1
+    expected = mask & ~binary_erosion(
+        mask, structure=np.ones((3,) * dimension), border_value=1
+    )
+    actual = binary_contour(torch.from_numpy(mask.astype(np.float32))[None, None])
+    np.testing.assert_array_equal(actual.numpy()[0, 0], expected)
+
+
+@pytest.mark.parametrize('variance', [0.25, 1.0, 2.0])
+def test_scalar_smoothing_matches_ants(variance):
+    import ants
+    from antstorch.direct.forces import gaussian_scalar
+    array = np.random.default_rng(10).random((11, 13, 15)).astype(np.float32)
+    expected = ants.smooth_image(ants.from_numpy(array), variance ** 0.5,
+                                sigma_in_physical_coordinates=False).numpy()
+    tensor = torch.from_numpy(array.transpose(2, 1, 0).copy())[None, None]
+    actual = gaussian_scalar(tensor, variance ** 0.5, maximum_error=0.01)
+    np.testing.assert_allclose(actual.numpy()[0, 0].transpose(2, 1, 0), expected,
+                               atol=3e-7, rtol=1e-6)
+
+
+@pytest.mark.parametrize('spacing', [(1.0, 1.0), (0.7, 1.4)])
+def test_probability_gradient_direction_against_smoothed_sinusoid(spacing):
+    import math
+    from antstorch.direct.forces import normalized_probability_gradient
+    y, x = torch.meshgrid(torch.arange(96) * spacing[1],
+                          torch.arange(96) * spacing[0], indexing='ij')
+    kx, ky = 0.12, 0.20
+    probability = (torch.cos(kx * x) + 0.7 * torch.sin(ky * y))[None, None]
+    # Continuous Gaussian smoothing of each Fourier mode has an exact response.
+    expected = torch.stack((-kx * math.exp(-kx*kx/2) * torch.sin(kx*x),
+                            0.7 * ky * math.exp(-ky*ky/2) * torch.cos(ky*y)))[None]
+    expected /= torch.linalg.vector_norm(expected, dim=1, keepdim=True)
+    actual = normalized_probability_gradient(probability, sigma=1.0, spacing=spacing)
+    # Exclude padding effects; measure direction because DiReCT normalizes it.
+    cosine = (expected * actual).sum(1)[:, 12:-12, 12:-12].clamp(-1, 1)
+    angle = torch.rad2deg(torch.acos(cosine))
+    assert angle.max() < 0.5
+
+
+@pytest.mark.parametrize('amplitude', [0.05, 0.3])
+def test_direct_inverse_matches_ants_stopping(amplitude):
+    import ants
+    from antstorch.direct.core import _invert
+    n = 17
+    x, y, z = np.meshgrid(*[np.arange(n)] * 3, indexing='ij')
+    field = np.zeros((n, n, n, 3), np.float32)
+    field[..., 0] = amplitude * np.exp(-((x-8)**2 + (y-8)**2 + (z-8)**2) / 8)
+    expected = ants.invert_displacement_field(
+        ants.from_numpy(field, has_components=True),
+        ants.from_numpy(np.zeros_like(field), has_components=True),
+        maximum_number_of_iterations=20,
+        max_error_tolerance_threshold=0.1,
+        mean_error_tolerance_threshold=0.001,
+    ).numpy()
+    tensor = torch.from_numpy(field.transpose(3, 2, 1, 0).copy())[None]
+    actual = _invert(tensor, torch.zeros_like(tensor), ImageDomain((n, n, n)), 20)
+    np.testing.assert_allclose(actual.numpy()[0].transpose(3, 2, 1, 0), expected,
+                               atol=1e-7, rtol=1e-5)

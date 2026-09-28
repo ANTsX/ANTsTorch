@@ -152,6 +152,14 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="ANTsTorch device, e.g. cpu, mps, or cuda (default: configured device).",
     )
+    parser.add_argument(
+        "--preprocessing-device", default=None,
+        help="Deep Atropos device (default: same as --device). Use cpu for MPS builds lacking 3-D pooling.",
+    )
+    parser.add_argument(
+        "--reuse-inputs", type=Path,
+        help="Reuse t1 and shared segmentation/probabilities from a previous output directory; skip Deep Atropos.",
+    )
     parser.add_argument("--iterations", type=int, default=45)
     parser.add_argument("--gradient-step", type=float, default=0.025)
     parser.add_argument("--velocity-smoothing-variance", type=float, default=1.5)
@@ -171,6 +179,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--gradient-step must be positive")
     if args.velocity_smoothing_variance <= 0:
         parser.error("--velocity-smoothing-variance must be positive")
+    if args.reuse_inputs is not None and args.image is not None:
+        parser.error("image and --reuse-inputs are mutually exclusive")
     return args
 
 
@@ -182,27 +192,38 @@ def main() -> None:
     if device.type == "mps" and not torch.backends.mps.is_available():
         raise RuntimeError("MPS was requested, but it is not available")
 
-    input_path = args.image or antstorch.get_antstorch_data("S_template3")
+    input_path = str(args.reuse_inputs / "t1.nii.gz") if args.reuse_inputs else (args.image or antstorch.get_antstorch_data("S_template3"))
     t1 = ants.image_read(input_path).clone("float")
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Input: {input_path}")
-    print("Running Deep Atropos once for the shared inputs...")
-    _synchronize(device)
-    start = time.perf_counter()
-    atropos = antstorch.deep_atropos(
-        [t1, None, None],
-        do_preprocessing=True,
-        device=device,
-        verbose=args.verbose,
-    )
-    _synchronize(device)
-    atropos_seconds = time.perf_counter() - start
+    preprocessing_device = torch.device(args.preprocessing_device) if args.preprocessing_device else device
+    if args.reuse_inputs:
+        print(f"Reusing shared inputs from {args.reuse_inputs}; skipping Deep Atropos.")
+        segmentation = ants.image_read(str(args.reuse_inputs / "direct_segmentation.nii.gz"))
+        gray_matter = ants.image_read(str(args.reuse_inputs / "gray_matter_probability.nii.gz"))
+        white_matter = ants.image_read(str(args.reuse_inputs / "white_matter_probability.nii.gz"))
+        for name, image in (("segmentation", segmentation), ("gray matter", gray_matter), ("white matter", white_matter)):
+            if image.shape != t1.shape or not ants.image_physical_space_consistency(t1, image):
+                raise ValueError(f"Reused {name} geometry differs from the T1 image")
+        atropos_seconds = 0.0
+    else:
+        print(f"Running Deep Atropos once on {preprocessing_device} for the shared inputs...")
+        _synchronize(preprocessing_device)
+        start = time.perf_counter()
+        atropos = antstorch.deep_atropos(
+            [t1, None, None],
+            do_preprocessing=True,
+            device=preprocessing_device,
+            verbose=args.verbose,
+        )
+        _synchronize(preprocessing_device)
+        atropos_seconds = time.perf_counter() - start
 
-    segmentation = ants.image_clone(atropos["segmentation_image"])
-    segmentation[segmentation == 4] = 3
-    gray_matter = atropos["probability_images"][2]
-    white_matter = atropos["probability_images"][3] + atropos["probability_images"][4]
+        segmentation = ants.image_clone(atropos["segmentation_image"])
+        segmentation[segmentation == 4] = 3
+        gray_matter = atropos["probability_images"][2]
+        white_matter = atropos["probability_images"][3] + atropos["probability_images"][4]
 
     print("Running ANTs KellyKapowski...")
     start = time.perf_counter()
@@ -270,6 +291,8 @@ def main() -> None:
     results = {
         "input": str(input_path),
         "device": str(device),
+        "preprocessing_device": None if args.reuse_inputs else str(preprocessing_device),
+        "reused_inputs": str(args.reuse_inputs.resolve()) if args.reuse_inputs else None,
         "parameters": {
             "iterations": args.iterations,
             "gradient_step": args.gradient_step,

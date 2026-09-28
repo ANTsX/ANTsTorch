@@ -55,6 +55,7 @@ import torch.nn.functional as F
 from ..ants_transform_io import write_affine_transform
 from .bridge import ants_image_to_tensor
 from .core.affine import get_rotation_matrix, parse_ants_affine
+from .._torch_compat import grid_sample, grid_sample_for_probe
 from .core.grid import grid_sample_nd
 from .core.losses import mattes_mi_loss_nd, parzen_weights
 from .core.utils import normalize_image
@@ -94,7 +95,7 @@ def _mps_grid_sample_backward_available(dim: int) -> bool:
         grid_shape = (1,) + (2,) * dim + (dim,)
         probe_image = torch.zeros(shape, device="mps", requires_grad=True)
         probe_grid = torch.zeros(grid_shape, device="mps")
-        warped = F.grid_sample(probe_image, probe_grid, align_corners=True)
+        warped = grid_sample_for_probe(probe_image, probe_grid, align_corners=True)
         warped.sum().backward()
         return True
     except (NotImplementedError, RuntimeError):
@@ -128,7 +129,7 @@ def _mps_grid_sample_forward_available(dim: int) -> bool:
         grid_shape = (1,) + (2,) * dim + (dim,)
         probe_image = torch.zeros(shape, device="mps")
         probe_grid = torch.zeros(grid_shape, device="mps")
-        F.grid_sample(probe_image, probe_grid, align_corners=True)
+        grid_sample_for_probe(probe_image, probe_grid, align_corners=True)
         return True
     except (NotImplementedError, RuntimeError):
         return False

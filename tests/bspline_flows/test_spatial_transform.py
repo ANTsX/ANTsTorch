@@ -19,6 +19,44 @@ def test_zero_displacement_is_identity(size):
     torch.testing.assert_close(warp_image(image, zero, domain), image, rtol=0, atol=2e-15)
 
 
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS unavailable")
+@pytest.mark.parametrize("padding_mode", ["zeros", "border", "reflection"])
+def test_mps_3d_interpolation_fallback(monkeypatch, padding_mode):
+    monkeypatch.setenv("ANTSTORCH_MPS_GRID_SAMPLE", "native")
+    from antstorch.bspline_flows import spatial_transform
+
+    domain = ImageDomain((7, 6, 5))
+    image = torch.randn(1, 2, *domain.torch_size)
+    displacement = torch.full((1, 3, *domain.torch_size), 0.4)
+    expected = warp_image(image, displacement, domain, padding_mode=padding_mode)
+    original = spatial_transform.F.grid_sample
+
+    def unavailable_on_mps(input, grid, **kwargs):
+        if input.device.type == "mps":
+            raise NotImplementedError("aten::grid_sampler_3d is unavailable")
+        return original(input, grid, **kwargs)
+
+    monkeypatch.setattr(spatial_transform.F, "grid_sample", unavailable_on_mps)
+    with pytest.warns(RuntimeWarning, match="interpolation on CPU"):
+        actual = warp_image(image.to("mps"), displacement.to("mps"), domain,
+                            padding_mode=padding_mode)
+    assert actual.device.type == "mps"
+    torch.testing.assert_close(actual.cpu(), expected, atol=2e-5, rtol=2e-5)
+
+
+def test_cpu_interpolation_errors_are_not_suppressed(monkeypatch):
+    from antstorch.bspline_flows import spatial_transform
+
+    def unavailable(*args, **kwargs):
+        raise NotImplementedError("aten::grid_sampler_3d is unavailable")
+
+    monkeypatch.setattr(spatial_transform.F, "grid_sample", unavailable)
+    domain = ImageDomain((7, 6, 5))
+    with pytest.raises(NotImplementedError):
+        warp_image(torch.zeros(1, 1, *domain.torch_size),
+                   torch.zeros(1, 3, *domain.torch_size), domain)
+
+
 def test_image_impulse_translation_sign():
     domain = ImageDomain((9, 7))
     moving = torch.zeros(1, 1, 7, 9, dtype=torch.double)

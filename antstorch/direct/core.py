@@ -29,6 +29,7 @@ def _invert(field: Tensor, initial: Tensor, domain: ImageDomain, iterations: int
         reversed_initial,
         steps=iterations,
         method="fixed_point",
+        convergence_criterion="either",
         spacing=domain.spacing,
         origin=domain.origin,
         direction=domain.direction,
@@ -125,8 +126,10 @@ def direct_cortical_thickness(
             integrated = _invert(inverse_field, integrated, domain, inverse_iterations)
             inverse_field = _invert(integrated, inverse_field, domain, inverse_iterations)
 
-        smooth_hit = gaussian_scalar(hit, smoothing_sigma)
-        smooth_total = gaussian_scalar(total, smoothing_sigma)
+        # ANTs uses this parameter as variance here, but sigma for the gradient.
+        # See direct/README.md for the distinct smoothing conventions.
+        smooth_hit = gaussian_scalar(hit, smoothing_sigma ** 0.5, maximum_error=0.01)
+        smooth_total = gaussian_scalar(total, smoothing_sigma ** 0.5, maximum_error=0.01)
         estimate = torch.where(
             smooth_hit > 0.001,
             (smooth_total / smooth_hit.clamp_min(0.001)).clamp_min(0),
@@ -148,6 +151,8 @@ def direct_cortical_thickness(
             velocity, mode=regularizer, variance=velocity_smoothing_variance, spacing=domain.spacing
         )
 
+        # Tensor reduction order differs from ANTs sequential float accumulation.
+        # Energy agreement alone is not a thickness-parity check (direct/README.md).
         gm_count = gray_mask.sum().clamp_min(1)
         current_energy = float((energy / (gm_count * integration_points)).item())
         energy_history.append(current_energy)
