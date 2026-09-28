@@ -37,6 +37,7 @@ Usage & Performance Guidance
 from __future__ import annotations
 
 import math
+import os
 from typing import Optional, Tuple, Union, List
 
 import numpy as np
@@ -542,15 +543,28 @@ def denoise_image(
     Performance & Hardware Guidance
     -------------------------------
     - **GPU Acceleration**:
-      - Apple Silicon (MPS): Ideal for 2D slices ($<0.02\text{s}$) and 3D volumes ($0.03\text{s} - 0.58\text{s}$).
-      - NVIDIA CUDA: Vectorized convolution and elementwise kernels execute with maximum memory bandwidth.
+      - NVIDIA CUDA: Vectorized convolution and elementwise kernels execute with maximum memory
+        bandwidth; on real clinical volumes (~200^3), faster than ANTs' multi-threaded CPU
+        reference (measured ~1.7x on an 8-core-equivalent comparison).
+      - Apple Silicon (MPS): ``_denoise_core``'s per-offset search is a Python loop issuing many
+        small ops; on real volumes this is consistently *slower* than ANTs' CPU reference
+        (measured ~3x slower on a 197x233x189 volume at the default ``r=2``, still ~2.5x slower
+        at ``r=1``), not the sub-second figures a synthetic small-volume test might suggest.
+        Because CPU and GPU share physical memory on Apple Silicon, ``device="mps"`` computes
+        on CPU internally by default and returns on the requested device -- see
+        ``ANTSTORCH_MPS_DENOISE`` below.
+    - **ANTSTORCH_MPS_DENOISE** (env var, default ``"cpu"``): on ``device="mps"``, redirects the
+      actual computation to CPU (fast, and a cheap round trip given unified memory) while still
+      returning a tensor on the device you requested. Set to ``"native"`` to force unconditional
+      on-device MPS execution instead.
     - **Determinism**:
       - ANTsPy C++ multi-threaded execution suffers from an internal ITK race condition when
         threads accumulate into overlapping patches. `antstorch.denoise_image` is strictly
         deterministic on both CPU and GPU.
     - **Zero-Copy In-Place Execution**:
-      - When passing a `torch.Tensor` already located on a GPU device, all computations remain
-        in GPU VRAM without host-to-device transfers.
+      - When passing a `torch.Tensor` already located on a CUDA device, all computations remain
+        in GPU VRAM without host-to-device transfers. On MPS, see ``ANTSTORCH_MPS_DENOISE`` above --
+        the default trades a cheap unified-memory round trip for a large real-world speedup.
 
     Examples
     --------
@@ -768,6 +782,25 @@ def denoise_image(
             device = torch.device(device)
         img_t = torch.from_numpy(image.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)
 
+    # On Apple Silicon, _denoise_core's per-offset Python loop issues far more
+    # small MPS dispatches than the CPU reference has per-iteration overhead,
+    # so the MPS path is consistently slower than CPU here despite identical
+    # results (see tools/benchmarks/README.md benchmark notes). CPU and MPS
+    # share physical memory on Apple Silicon, so redirecting the computation
+    # itself to CPU and returning on the originally requested device is a
+    # cheap round trip, not a PCIe-style transfer -- unlike on a discrete
+    # (e.g. CUDA) GPU, where this redirect is skipped because ANTsTorch's MPS
+    # slowdown does not apply and the transfer really would cost something.
+    # ANTSTORCH_MPS_DENOISE=native restores unconditional on-device execution.
+    compute_device = device
+    if device.type == "mps":
+        mps_denoise_policy = os.environ.get("ANTSTORCH_MPS_DENOISE", "cpu")
+        if mps_denoise_policy not in ("cpu", "native"):
+            raise ValueError("ANTSTORCH_MPS_DENOISE must be cpu or native")
+        if mps_denoise_policy == "cpu":
+            compute_device = torch.device("cpu")
+            img_t = img_t.to(compute_device)
+
     # Parse patch radius p
     if isinstance(p, str):
         p_parts = [int(x) for x in p.split("x")]
@@ -796,14 +829,14 @@ def denoise_image(
     mask_t = None
     if mask is not None:
         if ants is not None and isinstance(mask, ants.ANTsImage):
-            mask_t = torch.from_numpy(mask.numpy().astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)
+            mask_t = torch.from_numpy(mask.numpy().astype(np.float32)).unsqueeze(0).unsqueeze(0).to(compute_device)
         elif isinstance(mask, torch.Tensor):
             if mask.ndim > 3 and mask.shape[0] == 1 and mask.shape[1] == 1:
-                mask_t = mask.float().to(device)
+                mask_t = mask.float().to(compute_device)
             else:
-                mask_t = mask.float().unsqueeze(0).unsqueeze(0).to(device)
+                mask_t = mask.float().unsqueeze(0).unsqueeze(0).to(compute_device)
         elif isinstance(mask, np.ndarray):
-            mask_t = torch.from_numpy(mask.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)
+            mask_t = torch.from_numpy(mask.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(compute_device)
 
     shrink = int(shrink_factor)
     if shrink < 1:
@@ -868,7 +901,7 @@ def denoise_image(
         )
         return out_img.clone(ants_ref.pixeltype)
     elif is_torch_tensor:
-        res_t = denoised_t.to(dtype=orig_tensor.dtype)
+        res_t = denoised_t.to(device=device, dtype=orig_tensor.dtype)
         if orig_tensor.ndim <= len(orig_shape):
             return res_t.squeeze(0).squeeze(0)
         return res_t
