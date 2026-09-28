@@ -180,3 +180,15 @@ def test_update_inverse_field_nd_max_iters_alias_overrides_steps():
     inv_via_steps = update_inverse_field_nd(W_cl, -W_cl.clone(), steps=3, method='anderson')
     inv_via_alias = update_inverse_field_nd(W_cl, -W_cl.clone(), steps=999, max_iters=3, method='anderson')
     torch.testing.assert_close(inv_via_alias, inv_via_steps, atol=1e-10, rtol=0)
+
+
+def test_fixed_point_stopping_option_preserves_physical_default():
+    field = _constant_translation_field([0.05, 0.0])
+    options = dict(method='fixed_point', steps=20, spacing=_SPACING,
+                   origin=_ORIGIN, direction=_DIRECTION)
+    initial = torch.zeros_like(field)
+    default = update_inverse_field_nd(field, initial, **options)
+    both = update_inverse_field_nd(field, initial, convergence_criterion='both', **options)
+    either = update_inverse_field_nd(field, initial, convergence_criterion='either', **options)
+    torch.testing.assert_close(default, both, atol=0, rtol=0)
+    assert not torch.allclose(default, either)

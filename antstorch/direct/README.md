@@ -63,7 +63,7 @@ and `WarpImage`. These observations describe the implementation inspected on
 | Hit/total smoothing | Discrete Gaussian, voxel-space variance, maximum error 0.01 | Same variance and retained-mass cutoff conventions; shared Torch filter implementation. |
 | Velocity smoothing | Discrete Gaussian, voxel-space variance, maximum error 0.001; stationary boundary and blending below variance 0.5 | Same cutoff, boundary and blending conventions; shared Torch filter implementation. |
 | Scalar interpolation | ITK linear interpolation with edge padding zero | `grid_sample`: border padding for white-matter probabilities, zero padding for contour/thickness images. Boundary semantics are not established as equivalent. |
-| Field inversion | ITK `InvertDisplacementFieldImageFilter` | Shared tensor fixed-point inversion in `syn/core/inverse.py`, using the same requested iteration limit and error tolerances. Full numerical equivalence remains unverified. |
+| Field inversion | ITK `InvertDisplacementFieldImageFilter` | Shared tensor fixed-point inversion in `syn/core/inverse.py`, using the same requested iteration limit and error tolerances, and stopping when either tolerance is met (`convergence_criterion="either"`), as in ITK. Full numerical equivalence remains unverified. |
 | Stopping | Supports convergence monitoring | Runs the requested number of outer iterations. The comparison script disables ANTs convergence stopping with `x=0`. |
 
 The public `smoothing_sigma` argument follows the historical use of one value
@@ -139,3 +139,13 @@ PYTHONPATH="$PWD" python tools/benchmarks/compare_cortical_thickness.py \
   --device cpu --iterations 45 \
   --output-dir /path/to/new_results --verbose
 ```
+
+### Follow-up compatibility audit
+
+The [synthetic compatibility audit](COMPATIBILITY_AUDIT.md) confirms differences
+in inverse-field stopping and half-voxel interpolation boundary semantics.
+It records isolated numerical comparisons and proposed validation steps;
+the inversion stopping criterion is now aligned for future DiReCT runs. The
+already-running 45-iteration comparison uses the earlier loaded implementation;
+its results must be labelled as preceding this stopping-rule change. Boundary
+semantics remain unchanged.

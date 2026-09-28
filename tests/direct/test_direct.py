@@ -152,3 +152,24 @@ def test_probability_gradient_direction_against_smoothed_sinusoid(spacing):
     cosine = (expected * actual).sum(1)[:, 12:-12, 12:-12].clamp(-1, 1)
     angle = torch.rad2deg(torch.acos(cosine))
     assert angle.max() < 0.5
+
+
+@pytest.mark.parametrize('amplitude', [0.05, 0.3])
+def test_direct_inverse_matches_ants_stopping(amplitude):
+    import ants
+    from antstorch.direct.core import _invert
+    n = 17
+    x, y, z = np.meshgrid(*[np.arange(n)] * 3, indexing='ij')
+    field = np.zeros((n, n, n, 3), np.float32)
+    field[..., 0] = amplitude * np.exp(-((x-8)**2 + (y-8)**2 + (z-8)**2) / 8)
+    expected = ants.invert_displacement_field(
+        ants.from_numpy(field, has_components=True),
+        ants.from_numpy(np.zeros_like(field), has_components=True),
+        maximum_number_of_iterations=20,
+        max_error_tolerance_threshold=0.1,
+        mean_error_tolerance_threshold=0.001,
+    ).numpy()
+    tensor = torch.from_numpy(field.transpose(3, 2, 1, 0).copy())[None]
+    actual = _invert(tensor, torch.zeros_like(tensor), ImageDomain((n, n, n)), 20)
+    np.testing.assert_allclose(actual.numpy()[0].transpose(3, 2, 1, 0), expected,
+                               atol=1e-7, rtol=1e-5)

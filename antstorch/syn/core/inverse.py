@@ -570,6 +570,7 @@ def update_inverse_field_nd(
     direction=None,
     X_phys=None,
     max_iters=None,
+    convergence_criterion=None,
     **kwargs
 ) -> torch.Tensor:
     """Dimension-agnostic inversion of a displacement field.
@@ -610,11 +611,26 @@ def update_inverse_field_nd(
         Alias for ``steps`` (accepted for interface parity with ``syntx``);
         overrides ``steps`` when given.
 
+    convergence_criterion : {None, 'both', 'either'}
+        Fixed-point stopping rule. 'either' matches ITK: stop when either
+        tolerance is satisfied. None preserves historical defaults ('both'
+        for physical coordinates, 'either' for normalized coordinates).
+        Explicit values require method='fixed_point'.
+
     Returns
     -------
     torch.Tensor
         The estimated inverse displacement field, same shape as ``W_disp``.
     """
+    if convergence_criterion not in (None, "both", "either"):
+        raise ValueError("convergence_criterion must be None, 'both', or 'either'")
+    if convergence_criterion is not None and method != "fixed_point":
+        raise ValueError("convergence_criterion requires method='fixed_point'")
+
+    def converged(maximum, mean, default):
+        checks = (maximum <= max_error_threshold, mean <= mean_error_threshold)
+        return any(checks) if (convergence_criterion or default) == "either" else all(checks)
+
     channels_first = False
     if W_disp.dim() >= 3 and W_disp.shape[1] in (2, 3) and W_disp.shape[-1] not in (2, 3):
         channels_first = True
@@ -670,7 +686,7 @@ def update_inverse_field_nd(
         mean_error_norm = float('inf')
 
         for iteration in range(steps):
-            if max_error_norm <= max_error_threshold and mean_error_norm <= mean_error_threshold:
+            if converged(max_error_norm, mean_error_norm, "both"):
                 break
 
             coords_phys = X_phys + W_inv_disp
@@ -715,7 +731,7 @@ def update_inverse_field_nd(
         mean_error_norm = float('inf')
 
         for iteration in range(steps):
-            if max_error_norm <= max_error_threshold or mean_error_norm <= mean_error_threshold:
+            if converged(max_error_norm, mean_error_norm, "either"):
                 break
 
             coords = identity + W_inv_disp
