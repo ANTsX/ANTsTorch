@@ -22,6 +22,7 @@ def _synthetic_tensors(size=12):
 
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS unavailable")
 def test_direct_mps_without_native_3d_sampling(monkeypatch):
+    monkeypatch.setenv("ANTSTORCH_MPS_GRID_SAMPLE", "native")
     from antstorch import _torch_compat
 
     original = _torch_compat.F.grid_sample

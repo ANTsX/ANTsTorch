@@ -65,6 +65,7 @@ from .bridge import (
     metadata_tensors_from_dict,
     tensor_to_ants_image,
 )
+from .._torch_compat import grid_sample, grid_sample_for_probe
 from .core.grid import (
     get_physical_grid_torch,
     physical_to_normalized_torch_cached,
@@ -303,7 +304,7 @@ def _eulerian_update(warp: Tensor, delta: Tensor, X_phys: Tensor, meta_t: Dict[s
     coords_norm = physical_to_normalized_torch_cached(
         coords_phys, meta_t["shape_t"], meta_t["spacing_t"], meta_t["origin_t"], meta_t["direction_t"]
     )
-    sampled = F.grid_sample(warp.movedim(-1, 1), coords_norm, mode="bilinear", padding_mode="border", align_corners=True)
+    sampled = grid_sample(warp.movedim(-1, 1), coords_norm, mode="bilinear", padding_mode="border", align_corners=True)
     return sampled.movedim(1, -1) - delta
 
 
@@ -313,7 +314,7 @@ def _compose_fixed_grid(first: Tensor, second: Tensor, X_phys: Tensor, meta_t: D
     coords_norm = physical_to_normalized_torch_cached(
         coords_phys, meta_t["shape_t"], meta_t["spacing_t"], meta_t["origin_t"], meta_t["direction_t"]
     )
-    sampled = F.grid_sample(second.movedim(-1, 1), coords_norm, mode="bilinear", padding_mode="border", align_corners=True)
+    sampled = grid_sample(second.movedim(-1, 1), coords_norm, mode="bilinear", padding_mode="border", align_corners=True)
     return first + sampled.movedim(1, -1)
 
 
@@ -1194,7 +1195,7 @@ def syn_registration(
     )
     total_inverse = _compose_fixed_grid(affine_inverse_displacement, syn_inverse, X_phys_full, fixed_meta_t_full)
 
-    warpedmovout = F.grid_sample(
+    warpedmovout = grid_sample(
         ants_image_to_tensor(moving, resolved_device, dtype, normalize=False),
         physical_to_normalized_torch_cached(
             X_phys_full + total_forward,
@@ -1203,7 +1204,7 @@ def syn_registration(
         ),
         mode="bilinear", padding_mode=padding_mode, align_corners=True,
     )
-    warpedfixout = F.grid_sample(
+    warpedfixout = grid_sample(
         ants_image_to_tensor(fixed, resolved_device, dtype, normalize=False),
         physical_to_normalized_torch_cached(
             X_phys_full + total_inverse,

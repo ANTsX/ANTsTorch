@@ -1,10 +1,17 @@
 """Device selection and image-to-tensor preprocessing utilities.
 
+With ANTSTORCH_MPS_GRID_SAMPLE=torch or metal, the capability probes below
+test the selected experimental sampler instead of native grid_sample. Historical
+native-kernel limitations described below apply to the default backend.
+See antstorch/GRID_SAMPLE_3D.md.
+
 Ported from ``syntx.core.pipeline`` (PyTorch backend only). These helpers
 bridge ``ants.ANTsImage`` inputs to the normalized, permuted tensors that
 the rest of ``antstorch.syn.core`` operates on, and provide GPU/MPS memory
 hygiene for iterative registration loops.
 """
+
+from ..._torch_compat import grid_sample_for_probe
 
 import functools
 import gc
@@ -52,8 +59,8 @@ def mps_grid_sample_3d_available() -> bool:
         return False
     try:
         probe_image = torch.zeros(1, 1, 2, 2, 2, device="mps", requires_grad=True)
-        probe_grid = torch.zeros(1, 2, 2, 2, 3, device="mps")
-        warped = torch.nn.functional.grid_sample(probe_image, probe_grid, align_corners=True)
+        probe_grid = torch.zeros(1, 2, 2, 2, 3, device="mps", requires_grad=True)
+        warped = grid_sample_for_probe(probe_image, probe_grid, align_corners=True)
         warped.sum().backward()
         return True
     except (NotImplementedError, RuntimeError):
@@ -97,7 +104,7 @@ def mps_grid_sample_3d_forward_available() -> bool:
     try:
         probe_image = torch.zeros(1, 1, 2, 2, 2, device="mps")
         probe_grid = torch.zeros(1, 2, 2, 2, 3, device="mps")
-        torch.nn.functional.grid_sample(probe_image, probe_grid, align_corners=True)
+        grid_sample_for_probe(probe_image, probe_grid, align_corners=True)
         return True
     except (NotImplementedError, RuntimeError):
         return False

@@ -149,3 +149,13 @@ the inversion stopping criterion is now aligned for future DiReCT runs. The
 already-running 45-iteration comparison uses the earlier loaded implementation;
 its results must be labelled as preceding this stopping-rule change. Boundary
 semantics remain unchanged.
+
+
+### Automatic MPS sampler selection
+
+The default sampler policy is now `auto`: use native MPS when the required
+capabilities are available, then the float32 fused Metal backend, otherwise
+the existing CPU fallback. `ANTSTORCH_MPS_GRID_SAMPLE=native` restores the
+previous native/CPU policy; `metal` and `torch` force the corresponding engines.
+See [GRID_SAMPLE_3D.md](../GRID_SAMPLE_3D.md) for tests and limitations. Historical
+mixed CPU/MPS timing observations above predate this automatic selection.

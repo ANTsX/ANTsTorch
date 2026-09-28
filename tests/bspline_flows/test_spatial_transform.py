@@ -22,6 +22,7 @@ def test_zero_displacement_is_identity(size):
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS unavailable")
 @pytest.mark.parametrize("padding_mode", ["zeros", "border", "reflection"])
 def test_mps_3d_interpolation_fallback(monkeypatch, padding_mode):
+    monkeypatch.setenv("ANTSTORCH_MPS_GRID_SAMPLE", "native")
     from antstorch.bspline_flows import spatial_transform
 
     domain = ImageDomain((7, 6, 5))
