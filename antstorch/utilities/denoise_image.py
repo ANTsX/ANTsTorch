@@ -76,6 +76,34 @@ def _get_itk_neighborhood_offsets(radius: Tuple[int, ...]) -> List[Tuple[int, ..
     return offsets
 
 
+def _box_filter_sum(x: torch.Tensor, radius: Tuple[int, ...]) -> torch.Tensor:
+    """
+    Separable box-sum filter via direct sliding-window addition.
+
+    Equivalent to convolving `x` with an all-ones kernel of size `2*r+1` per
+    spatial axis under 'valid' padding (i.e. `F.conv2d`/`F.conv3d` with a box
+    kernel, where `x` is already padded by `radius` on each side). PyTorch's
+    MPS backend has very high per-call overhead for conv3d on this problem
+    size (tens of ms/call); summing `2*r+1` shifted views per axis is O(r)
+    work per output element per axis and avoids the convolution op entirely,
+    which is ~10x faster on MPS for the box radii used here. Unlike a
+    cumsum/prefix-sum formulation, this never differences two large
+    accumulated sums, so it does not suffer float32 cancellation error.
+    """
+    out = x
+    for i, r in enumerate(radius):
+        if r == 0:
+            continue
+        axis = 2 + i
+        window = 2 * r + 1
+        out_len = out.shape[axis] - window + 1
+        acc = out.narrow(axis, 0, out_len).clone()
+        for k in range(1, window):
+            acc += out.narrow(axis, k, out_len)
+        out = acc
+    return out
+
+
 def _discrete_gaussian_nd(
     tensor: torch.Tensor,
     variance: float = 2.0,
@@ -159,19 +187,14 @@ def _denoise_core(
     dim = len(tensor.shape) - 2
     shape = tensor.shape[2:]
 
-    # 1. Local mean and variance: single convolution for sum_val and sum_sq
-    kernel_size = [3] * dim
+    # 1. Local mean and variance: separable box-sum for sum_val and sum_sq
     box_elements = 3 ** dim
-    box_kernel = torch.ones(1, 1, *kernel_size, device=device)
+    box_radius = tuple([1] * dim)
 
     pad_box = [1] * (2 * dim)
     p_t = F.pad(tensor, pad_box, mode="replicate")
-    if dim == 2:
-        sum_val = F.conv2d(p_t, box_kernel)
-        sum_sq = F.conv2d(p_t ** 2, box_kernel)
-    else:
-        sum_val = F.conv3d(p_t, box_kernel)
-        sum_sq = F.conv3d(p_t ** 2, box_kernel)
+    sum_val = _box_filter_sum(p_t, box_radius)
+    sum_sq = _box_filter_sum(p_t ** 2, box_radius)
 
     mean_t = sum_val / float(box_elements)
     var_t = (sum_sq - (sum_val ** 2) / float(box_elements)) / float(box_elements - 1)
@@ -192,10 +215,6 @@ def _denoise_core(
     c_valid = (tensor > 0) & (mean_t > epsilon) & (var_t > epsilon)
     if mask_tensor is not None:
         c_valid = c_valid & (mask_tensor > 0)
-
-    # Patch kernel for box-filtering residuals
-    patch_kernel_shape = [2 * r + 1 for r in p_rad]
-    patch_kernel = torch.ones(1, 1, *patch_kernel_shape, device=device)
 
     # Separable 1D patch counts for local_noise_var (avoids full 2D/3D convolution on ones)
     counts_1d = []
@@ -220,10 +239,7 @@ def _denoise_core(
     res = tensor - mean_t
     p_diff_sq_buf[p_c_full] = res ** 2
 
-    if dim == 2:
-        patch_sum_res_sq = F.conv2d(p_diff_sq_buf, patch_kernel)
-    else:
-        patch_sum_res_sq = F.conv3d(p_diff_sq_buf, patch_kernel)
+    patch_sum_res_sq = _box_filter_sum(p_diff_sq_buf, p_rad)
 
     local_noise_var = patch_sum_res_sq / patch_count_separable
 
@@ -379,10 +395,7 @@ def _denoise_core(
         p_diff_sq_buf.zero_()
         p_diff_sq_buf[p_c_slices] = (res[s_idx] - res[c_idx]) ** 2
 
-        if dim == 2:
-            sum_diff = F.conv2d(p_diff_sq_buf, patch_kernel)[c_idx]
-        else:
-            sum_diff = F.conv3d(p_diff_sq_buf, patch_kernel)[c_idx]
+        sum_diff = _box_filter_sum(p_diff_sq_buf, p_rad)[c_idx]
 
         avg_dist = sum_diff / cnt_diff
         min_d_s = min_dist[c_idx]
