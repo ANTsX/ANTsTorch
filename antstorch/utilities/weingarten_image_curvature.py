@@ -4,6 +4,7 @@ from typing import Optional, Union
 import numpy as np
 import torch
 import torch.nn.functional as F
+from .._torch_compat import grid_sample
 import ants
 
 from .device_manager import get_default_device
@@ -320,7 +321,7 @@ def weingarten_image_curvature(
             grid = torch.stack([grid_w, grid_h, grid_d], dim=-1).view(1, -1, 27, 1, 3)
 
             # Sample gradients simultaneously for all 3 components: (1, 3, M, 27, 1)
-            sampled = F.grid_sample(
+            sampled = grid_sample(
                 grad_vol,
                 grid,
                 mode="bilinear",
