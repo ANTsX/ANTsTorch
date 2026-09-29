@@ -966,7 +966,16 @@ class HybridLAMNrTrainer:
                 raise RuntimeError("Hybrid DDP currently requires CUDA/NCCL.")
             torch.cuda.set_device(self.local_rank)
             if not dist.is_initialized():
-                dist.init_process_group(backend="nccl", init_method="env://")
+                device = torch.device(f"cuda:{self.local_rank}")
+                try:
+                    # Binding the process group to this rank's GPU (torch >= 2.3)
+                    # also silences the barrier() "using the device under
+                    # current context" warning.
+                    dist.init_process_group(
+                        backend="nccl", init_method="env://", device_id=device
+                    )
+                except TypeError:  # older torch without device_id
+                    dist.init_process_group(backend="nccl", init_method="env://")
             self.dev = torch.device(f"cuda:{self.local_rank}")
         elif args.devices == "mps" and torch.backends.mps.is_available():
             self.dev = torch.device("mps")

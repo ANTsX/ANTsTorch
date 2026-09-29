@@ -967,9 +967,16 @@ class BaseLAMNrTrainer(abc.ABC):
             self.rank       = int(os.environ["RANK"])
             self.local_rank = int(os.environ["LOCAL_RANK"])
             self.world_size = int(os.environ["WORLD_SIZE"])
-            if not dist.is_initialized():
-                dist.init_process_group(backend="nccl")
+            # Select this rank's GPU before creating the process group, and bind
+            # the group to it (torch >= 2.3), which also silences the barrier()
+            # "using the device under current context" warning.
             torch.cuda.set_device(self.local_rank)
+            if not dist.is_initialized():
+                device = torch.device(f"cuda:{self.local_rank}")
+                try:
+                    dist.init_process_group(backend="nccl", device_id=device)
+                except TypeError:  # older torch without device_id
+                    dist.init_process_group(backend="nccl")
             dev = torch.device(f"cuda:{self.local_rank}")
             tqdm.write(
                 f"[ddp] rank {self.rank}/{self.world_size} bound to "
