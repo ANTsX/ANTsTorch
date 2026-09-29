@@ -33,11 +33,15 @@ Deterministic single-threaded ANTs reference with timing over 5 runs::
 """
 
 import argparse
+import base64
+import datetime
+import io
 import os
 import time
 from pathlib import Path
 
 import numpy as np
+
 
 
 def synchronize(device) -> None:
@@ -93,7 +97,12 @@ def parse_args() -> argparse.Namespace:
         nargs="?",
         help="Input 2-D or 3-D image. When omitted, ants.get_ants_data('r16') is used.",
     )
-    parser.add_argument("--device", default="cpu", help="PyTorch device: cpu, cuda or mps")
+    default_device = os.environ.get("DEVICE", "cpu")
+    parser.add_argument(
+        "--device",
+        default=default_device,
+        help=f"PyTorch device: cpu, cuda or mps (default: DEVICE env var or cpu, currently '{default_device}')",
+    )
     parser.add_argument("--noise-model", choices=("Rician", "Gaussian"), default="Rician")
     parser.add_argument("-p", "--patch-radius", type=parse_radius, default=1,
                         help="Patch radius, e.g. 1 or 1x1x1 (default: 1)")
@@ -124,11 +133,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repeats", type=int, default=1,
                         help="Timed runs per implementation; the median is reported (default: 1)")
     parser.add_argument("--no-warmup", action="store_true",
-                        help="Skip the untimed ANTsTorch warm-up run")
+                        help="Skip the lightweight pipeline warm-up run")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--output-dir", type=Path, default=Path("."),
                         help="Directory for output images; created if needed (default: current directory)")
     parser.add_argument("--output-prefix", default="denoise_comparison")
+    parser.add_argument("--no-report", action="store_true",
+                        help="Skip generating an HTML comparison report")
     return parser.parse_args()
 
 
@@ -175,6 +186,427 @@ def print_metrics(label: str, values: dict) -> None:
     print(f"  Correlation:     {values['correlation']:.10f}")
 
 
+def warmup_pipeline(device, dimension: int, noise_model: str, verbose: bool = False):
+    """Prime ITK thread pool and accelerator kernel/allocator caches using a tiny dummy grid.
+
+    Returns (ants_warmup_seconds, torch_warmup_seconds).
+    """
+    import ants
+    import antstorch
+
+    dummy_shape = (16, 16, 16) if dimension == 3 else (32, 32)
+    dummy_arr = np.ones(dummy_shape, dtype=np.float32) * 100.0
+    dummy_img = ants.from_numpy(dummy_arr)
+
+    if verbose:
+        print(f"Priming ANTs and {device.type.upper()} pipelines with lightweight dummy grid {dummy_shape}...")
+
+    # ANTs warm-up: primes ITK global thread pool & filter structures
+    start_ants = time.perf_counter()
+    ants.denoise_image(dummy_img, p=1, r=1, noise_model=noise_model)
+    ants_warmup_time = time.perf_counter() - start_ants
+
+    # ANTsTorch warm-up: primes PyTorch JIT, kernel compilation & allocator
+    synchronize(device)
+    start_torch = time.perf_counter()
+    antstorch.denoise_image(dummy_img, p=1, r=1, noise_model=noise_model, device=device)
+    synchronize(device)
+    torch_warmup_time = time.perf_counter() - start_torch
+
+    if verbose:
+        print(
+            f"Pipeline warm-up complete: ANTs={ants_warmup_time:.4f} s, "
+            f"ANTsTorch ({device})={torch_warmup_time:.4f} s"
+        )
+    return ants_warmup_time, torch_warmup_time
+
+
+def format_run_times(times: list) -> str:
+    """Format single run or multi-run timing breakdown."""
+    if len(times) == 1:
+        return f"{times[0]:.4f} s"
+    steady = times[1:]
+    return (
+        f"{np.median(times):.4f} s median of {len(times)} "
+        f"(run 1 [cold]: {times[0]:.4f} s, runs 2..{len(times)}: min {min(steady):.4f} s, max {max(steady):.4f} s)"
+    )
+
+
+def render_slice_b64(image, cmap: str = "gray", title: str = "", is_diff: bool = False) -> str:
+    """Render 2D or 3D orthogonal montage into a base64 PNG string adhering to medical viewing rules."""
+    import ants
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if image.dimension == 2:
+        fig, ax = plt.subplots(figsize=(3.5, 3.5), dpi=120)
+        arr = image.numpy()
+        aspect = float(image.spacing[1] / image.spacing[0])
+        im = ax.imshow(arr.T, cmap=cmap, aspect=aspect, origin="lower")
+        ax.set_title(title, fontsize=11, fontweight="bold", pad=6)
+        ax.axis("off")
+        if is_diff:
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0.02)
+        plt.close(fig)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
+    # 3D: Reorient to standard RAI (Radiological convention)
+    # Axial: A top, P bottom, Patient R on viewer L
+    # Coronal: S top, I bottom, Patient R on viewer L
+    # Sagittal: S top, I bottom, Anterior on viewer L
+    image_rai = ants.reorient_image2(image, "RAI")
+    arr = image_rai.numpy()
+    sp = image_rai.spacing
+    nx, ny, nz = arr.shape
+
+    fig, axes = plt.subplots(1, 3, figsize=(10, 3.2), dpi=120, layout="constrained")
+
+    # 1. Axial (cut along z)
+    axial_slice = arr[:, :, nz // 2].T
+    axes[0].imshow(axial_slice, cmap=cmap, aspect=float(sp[1] / sp[0]), origin="upper")
+    axes[0].set_title(f"{title} - Axial\n(R-L / A-P)", fontsize=9, fontweight="bold")
+    axes[0].axis("off")
+
+    # 2. Coronal (cut along y)
+    coronal_slice = arr[:, ny // 2, ::-1].T
+    axes[1].imshow(coronal_slice, cmap=cmap, aspect=float(sp[2] / sp[0]), origin="upper")
+    axes[1].set_title(f"{title} - Coronal\n(R-L / S-I)", fontsize=9, fontweight="bold")
+    axes[1].axis("off")
+
+    # 3. Sagittal (cut along x)
+    sagittal_slice = arr[nx // 2, :, ::-1].T
+    im2 = axes[2].imshow(sagittal_slice, cmap=cmap, aspect=float(sp[2] / sp[1]), origin="upper")
+    axes[2].set_title(f"{title} - Sagittal\n(A-P / S-I)", fontsize=9, fontweight="bold")
+    axes[2].axis("off")
+
+    if is_diff:
+        fig.colorbar(im2, ax=axes, fraction=0.02, pad=0.04)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def generate_html_report(
+    report_path: Path,
+    image,
+    ants_denoised,
+    torch_denoised,
+    ants_noise,
+    torch_noise,
+    diff_img,
+    ants_times: list,
+    torch_times: list,
+    ants_warmup,
+    torch_warmup,
+    device,
+    threads,
+    options: dict,
+    input_path: str,
+    denoised_metrics: dict,
+    noise_metrics: dict,
+    ants_spread=None,
+    torch_spread=None,
+    cuda_peak_mb=None,
+) -> None:
+    """Generate a comprehensive visual HTML report with embedded slice montages."""
+    img_b64 = render_slice_b64(image, cmap="gray", title="Input Image")
+    ants_den_b64 = render_slice_b64(ants_denoised, cmap="gray", title="ANTs Denoised")
+    torch_den_b64 = render_slice_b64(torch_denoised, cmap="gray", title="ANTsTorch Denoised")
+    ants_noise_b64 = render_slice_b64(ants_noise, cmap="gray", title="ANTs Removed Noise")
+    torch_noise_b64 = render_slice_b64(torch_noise, cmap="gray", title="ANTsTorch Removed Noise")
+    import ants
+
+    diff_abs_img = ants.from_numpy(
+        np.abs(diff_img.numpy()).astype(np.float32),
+        origin=diff_img.origin,
+        spacing=diff_img.spacing,
+        direction=diff_img.direction,
+    )
+    diff_b64 = render_slice_b64(diff_abs_img, cmap="inferno", title="|ANTsTorch - ANTs|", is_diff=True)
+
+    median_ants = float(np.median(ants_times))
+    median_torch = float(np.median(torch_times))
+    speedup = median_ants / median_torch if median_torch > 0 else 0.0
+
+    ants_steady = ants_times[1:] if len(ants_times) > 1 else ants_times
+    torch_steady = torch_times[1:] if len(torch_times) > 1 else torch_times
+    date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ANTs vs ANTsTorch Denoise Benchmark Report</title>
+<style>
+  :root {{
+    --bg: #0f172a;
+    --card-bg: #1e293b;
+    --card-border: #334155;
+    --text: #f8fafc;
+    --text-muted: #94a3b8;
+    --accent: #38bdf8;
+    --accent-green: #4ade80;
+    --accent-amber: #fbbf24;
+  }}
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.5;
+    padding: 24px;
+  }}
+  .container {{ max-width: 1200px; margin: 0 auto; }}
+  header {{
+    border-bottom: 1px solid var(--card-border);
+    padding-bottom: 20px;
+    margin-bottom: 24px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    gap: 16px;
+  }}
+  h1 {{ font-size: 26px; font-weight: 700; color: #fff; }}
+  .subtitle {{ color: var(--text-muted); font-size: 14px; margin-top: 4px; }}
+  .kpi-grid {{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin-bottom: 28px;
+  }}
+  .kpi-card {{
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    padding: 16px 20px;
+  }}
+  .kpi-label {{ font-size: 12px; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.05em; }}
+  .kpi-value {{ font-size: 26px; font-weight: 700; color: #fff; margin-top: 4px; }}
+  .kpi-sub {{ font-size: 12px; color: var(--text-muted); margin-top: 2px; }}
+  .section {{
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 20px 24px;
+    margin-bottom: 24px;
+  }}
+  .section-title {{ font-size: 18px; font-weight: 600; margin-bottom: 16px; color: var(--accent); }}
+  table {{
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+    text-align: left;
+  }}
+  th, td {{
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--card-border);
+  }}
+  th {{ color: var(--text-muted); font-weight: 600; text-transform: uppercase; font-size: 12px; }}
+  tr:last-child td {{ border-bottom: none; }}
+  .badge {{
+    display: inline-block;
+    padding: 3px 8px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+  }}
+  .badge-torch {{ background: rgba(56, 189, 248, 0.15); color: var(--accent); border: 1px solid rgba(56, 189, 248, 0.3); }}
+  .badge-ants {{ background: rgba(251, 191, 36, 0.15); color: var(--accent-amber); border: 1px solid rgba(251, 191, 36, 0.3); }}
+  .visual-grid {{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(520px, 1fr));
+    gap: 20px;
+  }}
+  .visual-card {{
+    background: #151f32;
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    padding: 14px;
+    text-align: center;
+  }}
+  .visual-card img {{
+    max-width: 100%;
+    height: auto;
+    border-radius: 6px;
+    margin-top: 8px;
+  }}
+  .footer {{
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+    margin-top: 32px;
+    padding-top: 16px;
+    border-top: 1px solid var(--card-border);
+  }}
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div>
+      <h1>Adaptive Non-Local Means Denoising Benchmark</h1>
+      <div class="subtitle">ANTs (ITK) vs ANTsTorch Comparison Report &bull; {date_str}</div>
+    </div>
+    <div>
+      <span class="badge badge-torch">Device: {device}</span>
+      <span class="badge badge-ants">Threads: {threads}</span>
+    </div>
+  </header>
+
+  <div class="kpi-grid">
+    <div class="kpi-card">
+      <div class="kpi-label">Speed Ratio</div>
+      <div class="kpi-value" style="color: {'#4ade80' if speedup >= 1.0 else '#fbbf24'};">{speedup:.2f}x</div>
+      <div class="kpi-sub">{'ANTsTorch faster' if speedup >= 1.0 else 'ANTs faster'}</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">ANTsTorch Runtime</div>
+      <div class="kpi-value">{median_torch:.3f} s</div>
+      <div class="kpi-sub">median of {len(torch_times)} run(s)</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">ANTs Runtime</div>
+      <div class="kpi-value">{median_ants:.3f} s</div>
+      <div class="kpi-sub">median of {len(ants_times)} run(s)</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Pearson Correlation</div>
+      <div class="kpi-value">{denoised_metrics['correlation']:.6f}</div>
+      <div class="kpi-sub">Image agreement metric</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Relative RMSE</div>
+      <div class="kpi-value">{100 * denoised_metrics['relative_rmse']:.3f} %</div>
+      <div class="kpi-sub">RMSE: {denoised_metrics['rmse']:.4g}</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Performance &amp; Timing Breakdown</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Implementation</th>
+          <th>Backend</th>
+          <th>Warm-up (dummy grid)</th>
+          <th>Run 1 (Cold)</th>
+          <th>Runs 2..{max(len(ants_times), 2)} (Steady)</th>
+          <th>Median Runtime</th>
+          <th>Speedup</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="badge badge-ants">ANTs (ITK)</span></td>
+          <td>CPU ({threads} threads)</td>
+          <td>{f"{ants_warmup:.4f} s" if ants_warmup is not None else "skipped"}</td>
+          <td>{ants_times[0]:.4f} s</td>
+          <td>{f"{min(ants_steady):.4f} - {max(ants_steady):.4f} s" if len(ants_times) > 1 else "N/A"}</td>
+          <td><strong>{median_ants:.4f} s</strong></td>
+          <td>1.00x</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-torch">ANTsTorch</span></td>
+          <td>PyTorch ({device})</td>
+          <td>{f"{torch_warmup:.4f} s" if torch_warmup is not None else "skipped"}</td>
+          <td>{torch_times[0]:.4f} s</td>
+          <td>{f"{min(torch_steady):.4f} - {max(torch_steady):.4f} s" if len(torch_times) > 1 else "N/A"}</td>
+          <td><strong>{median_torch:.4f} s</strong></td>
+          <td><strong style="color: {'#4ade80' if speedup >= 1.0 else '#fbbf24'};">{speedup:.2f}x</strong></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Accuracy &amp; Parity Metrics</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Comparison Target</th>
+          <th>RMSE</th>
+          <th>Relative RMSE (% range)</th>
+          <th>MAE</th>
+          <th>Max |Diff|</th>
+          <th>Pearson Correlation</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Denoised Image</strong></td>
+          <td>{denoised_metrics['rmse']:.6g}</td>
+          <td>{100 * denoised_metrics['relative_rmse']:.4f} %</td>
+          <td>{denoised_metrics['mae']:.6g}</td>
+          <td>{denoised_metrics['max_abs']:.6g}</td>
+          <td>{denoised_metrics['correlation']:.8f}</td>
+        </tr>
+        <tr>
+          <td><strong>Removed Noise Residual</strong></td>
+          <td>{noise_metrics['rmse']:.6g}</td>
+          <td>{100 * noise_metrics['relative_rmse']:.4f} %</td>
+          <td>{noise_metrics['mae']:.6g}</td>
+          <td>{noise_metrics['max_abs']:.6g}</td>
+          <td>{noise_metrics['correlation']:.8f}</td>
+        </tr>
+        {f'''<tr>
+          <td><strong>Run-to-Run Spread (Repeats)</strong></td>
+          <td colspan="5">ANTs max run-to-run diff: <code>{ants_spread:.6g}</code> &bull; ANTsTorch max run-to-run diff: <code>{torch_spread:.6g}</code></td>
+        </tr>''' if ants_spread is not None and torch_spread is not None else ''}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Visual Inspection (Physical Orientation Preserved)</div>
+    <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 16px;">
+      Adheres to radiological viewing conventions: Axial (A at top, P at bottom, Patient R on viewer L), Coronal (S at top, I at bottom, Patient R on viewer L), Sagittal (S at top, I at bottom, Anterior on viewer L). True anatomical aspect ratios strictly enforced.
+    </div>
+    <div class="visual-grid">
+      <div class="visual-card">
+        <div><strong>Input Image</strong></div>
+        <img src="data:image/png;base64,{img_b64}" alt="Input Image">
+      </div>
+      <div class="visual-card">
+        <div><strong>ANTs Denoised</strong></div>
+        <img src="data:image/png;base64,{ants_den_b64}" alt="ANTs Denoised">
+      </div>
+      <div class="visual-card">
+        <div><strong>ANTsTorch Denoised</strong></div>
+        <img src="data:image/png;base64,{torch_den_b64}" alt="ANTsTorch Denoised">
+      </div>
+      <div class="visual-card">
+        <div><strong>|ANTsTorch - ANTs| Absolute Difference</strong></div>
+        <img src="data:image/png;base64,{diff_b64}" alt="Absolute Difference">
+      </div>
+      <div class="visual-card">
+        <div><strong>ANTs Removed Noise</strong></div>
+        <img src="data:image/png;base64,{ants_noise_b64}" alt="ANTs Removed Noise">
+      </div>
+      <div class="visual-card">
+        <div><strong>ANTsTorch Removed Noise</strong></div>
+        <img src="data:image/png;base64,{torch_noise_b64}" alt="ANTsTorch Removed Noise">
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    Input: <code>{input_path}</code> &bull; Size: {image.shape} &bull; Spacing: {image.spacing} &bull; Noise model: {options['noise_model']} &bull; Radius: p={options['p']}, r={options['r']}
+  </div>
+</div>
+</body>
+</html>"""
+
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(html)
+
+
 def main() -> None:
     args = parse_args()
     if args.ants_threads is not None:
@@ -219,7 +651,14 @@ def main() -> None:
         "noise_model": args.noise_model,
     }
 
-    # ANTs reference runs.
+    # Lightweight symmetric warm-up (primes ITK thread pools & GPU kernel/allocator caches)
+    ants_warmup_time, torch_warmup_time = None, None
+    if not args.no_warmup:
+        ants_warmup_time, torch_warmup_time = warmup_pipeline(
+            device, image.dimension, args.noise_model, verbose=args.verbose
+        )
+
+    # ANTs reference runs
     ants_results, ants_times = [], []
     for run in range(args.repeats):
         if args.verbose:
@@ -228,12 +667,7 @@ def main() -> None:
         ants_results.append(ants.denoise_image(image, mask=mask, v=int(args.verbose), **options))
         ants_times.append(time.perf_counter() - start)
 
-    # ANTsTorch runs; the warm-up absorbs one-time kernel and allocator setup.
-    if not args.no_warmup:
-        if args.verbose:
-            print("Running ANTsTorch warm-up...")
-        antstorch.denoise_image(image, mask=mask, device=device, **options)
-        synchronize(device)
+    # ANTsTorch runs
     track_cuda_memory = device.type == "cuda" and reset_cuda_peak_memory(device)
     torch_results, torch_times = [], []
     for run in range(args.repeats):
@@ -261,7 +695,8 @@ def main() -> None:
     ants.image_write(torch_results[0], f"{prefix}_antstorch_denoised.nii.gz")
     ants.image_write(image - ants_results[0], f"{prefix}_ants_noise.nii.gz")
     ants.image_write(image - torch_results[0], f"{prefix}_antstorch_noise.nii.gz")
-    ants.image_write(torch_results[0] - ants_results[0], f"{prefix}_difference.nii.gz")
+    diff_image = torch_results[0] - ants_results[0]
+    ants.image_write(diff_image, f"{prefix}_difference.nii.gz")
 
     print(f"Input: {input_path}")
     print(f"Geometry: size={image.shape}, spacing={image.spacing}, origin={image.origin}")
@@ -273,22 +708,30 @@ def main() -> None:
         f"mask={'file' if args.mask else 'auto' if args.auto_mask else 'none'} "
         f"({int(region.sum())} voxels compared)"
     )
+    if ants_warmup_time is not None and torch_warmup_time is not None:
+        print(
+            f"Warm-up (dummy grid):  ANTs: {ants_warmup_time:.4f} s | "
+            f"ANTsTorch: {torch_warmup_time:.4f} s on {device}"
+        )
+    else:
+        print("Warm-up:               skipped (--no-warmup)")
+
     threads = args.ants_threads if args.ants_threads is not None else "ITK default"
-    print(f"ANTs runtime:      {np.median(ants_times):.4f} s median of {args.repeats} (threads: {threads})")
-    print(f"ANTsTorch runtime: {np.median(torch_times):.4f} s median of {args.repeats} on {device}"
-          f"{'' if args.no_warmup else ' (after warm-up)'}")
+    print(f"ANTs runtime:          {format_run_times(ants_times)} (threads: {threads})")
+    print(f"ANTsTorch runtime:     {format_run_times(torch_times)} on {device}")
     print(f"Speed ratio (ANTs / ANTsTorch): {np.median(ants_times) / np.median(torch_times):.2f}x")
     print(f"Input intensity range:     {input_array[region].min():.6g} to {input_array[region].max():.6g}")
     print(f"ANTs output range:         {ants_array[region].min():.6g} to {ants_array[region].max():.6g}")
     print(f"ANTsTorch output range:    {torch_array[region].min():.6g} to {torch_array[region].max():.6g}")
     print(f"Removed-noise std, ANTs:      {np.std((input_array - ants_array)[region]):.6g}")
     print(f"Removed-noise std, ANTsTorch: {np.std((input_array - torch_array)[region]):.6g}")
-    print_metrics("ANTsTorch vs ANTs (denoised image)", metrics(ants_array, torch_array, region))
-    print_metrics(
-        "ANTsTorch vs ANTs (removed noise)",
-        metrics(input_array - ants_array, input_array - torch_array, region),
-    )
 
+    denoised_metrics = metrics(ants_array, torch_array, region)
+    noise_metrics = metrics(input_array - ants_array, input_array - torch_array, region)
+    print_metrics("ANTsTorch vs ANTs (denoised image)", denoised_metrics)
+    print_metrics("ANTsTorch vs ANTs (removed noise)", noise_metrics)
+
+    ants_spread, torch_spread = None, None
     if args.repeats >= 2:
         ants_spread = max(
             float(np.max(np.abs(r.numpy().astype(np.float64) - ants_array))) for r in ants_results[1:]
@@ -299,11 +742,40 @@ def main() -> None:
         print(f"ANTs run-to-run max |diff|:      {ants_spread:.6g}")
         print(f"ANTsTorch run-to-run max |diff|: {torch_spread:.6g}")
 
+    peak_memory_mb = None
     if track_cuda_memory:
         peak_memory = cuda_peak_memory(device)
         if peak_memory is not None:
-            print(f"ANTsTorch CUDA peak memory: {peak_memory / 2**20:.1f} MiB")
+            peak_memory_mb = peak_memory / 2**20
+            print(f"ANTsTorch CUDA peak memory: {peak_memory_mb:.1f} MiB")
     print(f"Outputs written with prefix: {prefix}")
+
+    if not args.no_report:
+        report_path = Path(f"{prefix}_report.html")
+        generate_html_report(
+            report_path=report_path,
+            image=image,
+            ants_denoised=ants_results[0],
+            torch_denoised=torch_results[0],
+            ants_noise=image - ants_results[0],
+            torch_noise=image - torch_results[0],
+            diff_img=diff_image,
+            ants_times=ants_times,
+            torch_times=torch_times,
+            ants_warmup=ants_warmup_time,
+            torch_warmup=torch_warmup_time,
+            device=device,
+            threads=threads,
+            options=options,
+            input_path=str(input_path),
+            denoised_metrics=denoised_metrics,
+            noise_metrics=noise_metrics,
+            ants_spread=ants_spread,
+            torch_spread=torch_spread,
+            cuda_peak_mb=peak_memory_mb,
+        )
+        print(f"HTML comparison report generated: {report_path.resolve()}")
+        print(f"To view the HTML report, run: open \"{report_path.resolve()}\"")
 
 
 if __name__ == "__main__":
