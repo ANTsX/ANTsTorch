@@ -33,7 +33,7 @@ from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from statistics import NormalDist
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import ants
 import numpy as np
@@ -319,6 +319,104 @@ def _nlerp_on_typical_sphere(t: float, z0: np.ndarray, z1: np.ndarray,
     if norm <= 1e-12:
         raise ValueError("NLERP is undefined for antipodal endpoints at t=0.5.")
     return np.asarray(mu, dtype=np.float64) + float(radius) * direction / norm
+
+
+def _slerp_through_endpoints(t: float, z0: np.ndarray, z1: np.ndarray,
+                             mu: np.ndarray, dot_threshold: float = 0.9995
+                             ) -> np.ndarray:
+    """SLERP about ``mu`` that passes exactly through ``z0`` (t=0) and ``z1`` (t=1).
+
+    Unlike ``_slerp_on_typical_sphere``, the endpoints are not projected onto a
+    common radius: the direction follows the great circle between the centred
+    endpoints and the radius is interpolated linearly between their norms.
+    Near-parallel endpoints fall back to linear interpolation.
+    """
+    mu = np.asarray(mu, dtype=np.float64)
+    d0 = np.asarray(z0, dtype=np.float64) - mu
+    d1 = np.asarray(z1, dtype=np.float64) - mu
+    r0, r1 = float(np.linalg.norm(d0)), float(np.linalg.norm(d1))
+    if r0 <= 1e-12 or r1 <= 1e-12:
+        raise ValueError("SLERP is undefined for an endpoint at the centre mu.")
+    u0, u1 = d0 / r0, d1 / r1
+    dot = float(np.clip(np.dot(u0, u1), -1.0, 1.0))
+    if dot > dot_threshold:
+        return (1.0 - t) * np.asarray(z0, dtype=np.float64) + t * np.asarray(z1, dtype=np.float64)
+    if dot < -dot_threshold:
+        raise ValueError("SLERP is undefined for antipodal endpoints.")
+    theta = math.acos(dot)
+    direction = (math.sin((1.0 - t) * theta) * u0 + math.sin(t * theta) * u1) / math.sin(theta)
+    return mu + ((1.0 - t) * r0 + t * r1) * direction
+
+
+def _pullback_path_length(
+    decode_fn,
+    z0_levels: Sequence[np.ndarray],
+    z1_levels: Sequence[np.ndarray],
+    level_shapes: Sequence[Tuple[int, ...]],
+    steps: int = 8,
+    path: str = "lerp",
+    mu_levels: Optional[Sequence[np.ndarray]] = None,
+    chunk: int = 9,
+    device: Optional[torch.device] = None,
+) -> Tuple[float, float]:
+    """Image-space length of a latent path between two encodings (EXPERIMENTAL).
+
+    The path z(t), t in [0, 1], runs through all levels jointly (``lerp``: a
+    straight line; ``slerp``: a great circle about ``mu_levels`` with a linearly
+    interpolated radius). ``steps + 1`` points are decoded with ``decode_fn``
+    (a list of per-level tensors of shape (B, *level_shape) -> images (B, ...))
+    and the Euclidean distances between consecutive decoded images are summed.
+    This is a discrete estimate of the path length under the pullback of the
+    image-space Euclidean metric through the decoder, ||J_g dz||; it approaches
+    the continuous length as ``steps`` grows.
+
+    Returns ``(path_length, chord)`` where ``chord`` is the image-space distance
+    between the two decoded endpoints.
+    """
+    steps = int(steps)
+    if steps < 1:
+        raise ValueError("steps must be >= 1")
+    if path not in ("lerp", "slerp"):
+        raise ValueError(f"Unknown path '{path}' (expected 'lerp' or 'slerp').")
+    if path == "slerp" and mu_levels is None:
+        raise ValueError("path='slerp' requires mu_levels.")
+    ts = np.linspace(0.0, 1.0, steps + 1)
+
+    def _point(t: float) -> List[np.ndarray]:
+        out = []
+        for l in range(len(z0_levels)):
+            if path == "lerp":
+                out.append((1.0 - t) * np.asarray(z0_levels[l], dtype=np.float64)
+                           + t * np.asarray(z1_levels[l], dtype=np.float64))
+            else:
+                out.append(_slerp_through_endpoints(t, z0_levels[l], z1_levels[l], mu_levels[l]))
+        return out
+
+    length = 0.0
+    x_first = None
+    x_prev = None
+    chunk = max(1, int(chunk))
+    for start in range(0, len(ts), chunk):
+        pts = [_point(float(t)) for t in ts[start:start + chunk]]
+        z_list = []
+        for l, shp in enumerate(level_shapes):
+            zl = np.stack([p[l] for p in pts]).astype(np.float32).reshape(len(pts), *shp)
+            zt = torch.from_numpy(zl)
+            if device is not None:
+                zt = zt.to(device)
+            z_list.append(zt)
+        with torch.no_grad():
+            x = decode_fn(z_list)
+        x = x.detach().float().reshape(len(pts), -1).cpu()
+        if x_prev is not None:
+            x = torch.cat([x_prev, x], dim=0)
+        else:
+            x_first = x[0].clone()
+        length += float(torch.linalg.vector_norm(x[1:] - x[:-1], dim=1).sum())
+        x_prev = x[-1:].clone()
+        del z_list, x
+    chord = float(torch.linalg.vector_norm(x_prev[0] - x_first))
+    return length, chord
 
 
 # ---------------------------------------------------------------------------
@@ -3462,7 +3560,12 @@ class GlowToolBase(ABC):
     # ------------------------------------------------------------------
 
     def cmd_calc_distance(self, argv=None):
-        """Compute per-subject distances to the Gaussian mean or target images."""
+        """Compute per-subject distances to the Gaussian mean or target images.
+
+        ``--distance-metric pullback`` (experimental) measures the image-space
+        length of a latent path between the two encodings instead of a
+        distance in latent space; see ``_pullback_path_length``.
+        """
         ap = argparse.ArgumentParser("calc-distance")
         ap.add_argument("--ckpt",            type=str, required=True)
         ap.add_argument("--gauss",           type=str, required=True)
@@ -3474,7 +3577,19 @@ class GlowToolBase(ABC):
         ap.add_argument("--out",             type=str, required=True)
         ap.add_argument("--save-levels",     action=argparse.BooleanOptionalAction, default=True)
         ap.add_argument("--distance-metric", default="geodesic",
-                        choices=["euclidean", "mahalanobis", "geodesic"])
+                        choices=["euclidean", "mahalanobis", "geodesic", "pullback"],
+                        help="'pullback' (EXPERIMENTAL): image-space length of a latent "
+                             "path between the two encodings (see --path, --path-steps); "
+                             "decodes --path-steps + 1 images per pair.")
+        ap.add_argument("--path", default="lerp", choices=["lerp", "slerp"],
+                        help="pullback only: latent path between the endpoints. 'lerp' = "
+                             "straight line; 'slerp' = great circle about the Gaussian "
+                             "mean with a linearly interpolated radius (passes through "
+                             "both encodings).")
+        ap.add_argument("--path-steps", type=int, default=8,
+                        help="pullback only: number of path segments (K; K + 1 decodes).")
+        ap.add_argument("--path-chunk", type=int, default=9,
+                        help="pullback only: path points decoded per batch (memory bound).")
         ap.add_argument(
             "--level-aggregation", default="l2", choices=["l2", "sum"],
             help="Combine level distances by product-space L2 (default) or "
@@ -3592,6 +3707,11 @@ class GlowToolBase(ABC):
         rows = []
         v_idx_gauss = gauss_views.index(v_name) if v_name in gauss_views else vi
 
+        if args.distance_metric == "pullback" and args.path == "slerp" and target_paths is None:
+            raise RuntimeError(
+                "--path slerp requires --target-image: the Gaussian mean is the "
+                "centre of the sphere, not a point on it. Use --path lerp."
+            )
         if args.distance_metric == "geodesic" and target_paths is None:
             raise RuntimeError(
                 "Centred geodesic distance requires --target-image (an image or "
@@ -3599,11 +3719,15 @@ class GlowToolBase(ABC):
                 "mean is the centre, not a point on the typical-set sphere."
             )
 
+        latent_shapes: List[Tuple[int, ...]] = []
+
         # Helper pour encoder et convertir immédiatement en listes NumPy (optimisation RAM/VRAM)
         def _get_encoded_flat_np(img_p):
             x_img = self.read_image(img_p, target_size).unsqueeze(0).to(device)
             with torch.no_grad():
                 z_l = _encode_latents(model, x_img)
+            if not latent_shapes:
+                latent_shapes.extend(tuple(z.shape[1:]) for z in z_l)
             z_fl = _flatten_latents_by_level(z_l)
             
             np_levels = []
@@ -3648,6 +3772,27 @@ class GlowToolBase(ABC):
             else:
                 z_tgt_flat = None
                 row = {"path": str(src_p)}
+
+            if args.distance_metric == "pullback":
+                mu_levels, ref_levels = [], []
+                for l in range(L):
+                    a, b = _level_view_slice(gauss_blob, l, v_idx_gauss)
+                    mu_l = np.asarray(mu_list[l], dtype=np.float64).ravel()[a:b]
+                    mu_levels.append(mu_l)
+                    ref_levels.append(mu_l if z_tgt_flat is None else z_tgt_flat[l])
+                length, chord = _pullback_path_length(
+                    lambda zl: self.decode_latents(model, zl, target_size),
+                    z_src_flat, ref_levels, latent_shapes,
+                    steps=args.path_steps, path=args.path, mu_levels=mu_levels,
+                    chunk=args.path_chunk, device=device,
+                )
+                row["dist_total"] = length
+                row["image_chord"] = chord
+                row["path"] = args.path
+                row["path_steps"] = int(args.path_steps)
+                rows.append(row)
+                gc.collect()
+                continue
 
             level_distances = []
             for l in range(L):
