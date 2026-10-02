@@ -49,6 +49,7 @@ import warnings
 from typing import Dict, Optional, Sequence, Tuple, Union
 
 import ants
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import Tensor
@@ -131,10 +132,14 @@ def _gaussian_blur_image(image: Tensor, sigma: float) -> Tensor:
     return convolution(padded, kernel, groups=image.shape[1])
 
 
-def _downsample_metadata(meta: Dict[str, tuple], factor: int) -> Dict[str, tuple]:
+def _downsample_metadata(meta: Dict[str, tuple], factor: int, syntx_parity: bool = False) -> Dict[str, tuple]:
     if factor == 1:
         return meta
-    torch_shape = tuple(max(2, (size - 1) // factor + 1) for size in meta["torch_shape"])
+    if syntx_parity:
+        # syntx: F.interpolate(scale_factor=1/factor) -> floor(size / factor)
+        torch_shape = tuple(max(2, int(math.floor(size * (1.0 / factor)))) for size in meta["torch_shape"])
+    else:
+        torch_shape = tuple(max(2, (size - 1) // factor + 1) for size in meta["torch_shape"])
     shape_itk = tuple(reversed(torch_shape))
     extent = tuple((size - 1) * spacing for size, spacing in zip(meta["shape"], meta["spacing"]))
     spacing = tuple(e / max(size - 1, 1) for e, size in zip(extent, shape_itk))
@@ -145,13 +150,13 @@ def _downsample_metadata(meta: Dict[str, tuple], factor: int) -> Dict[str, tuple
     return new_meta
 
 
-def _downsample_image(image: Tensor, meta: Dict[str, tuple], factor: int) -> Tuple[Tensor, Dict[str, tuple]]:
+def _downsample_image(image: Tensor, meta: Dict[str, tuple], factor: int, syntx_parity: bool = False) -> Tuple[Tensor, Dict[str, tuple]]:
     """Gaussian-presmooth (``sigma = log2(factor)`` voxels) then resample, preserving physical extent."""
     if factor == 1:
         return image, meta
     sigma = math.log2(factor)
     blurred = _gaussian_blur_image(image, sigma)
-    new_meta = _downsample_metadata(meta, factor)
+    new_meta = _downsample_metadata(meta, factor, syntx_parity)
     mode = "bilinear" if len(new_meta["torch_shape"]) == 2 else "trilinear"
     resized = F.interpolate(blurred, size=new_meta["torch_shape"], mode=mode, align_corners=True)
     return resized, new_meta
@@ -240,6 +245,7 @@ def _apply_regularizer(
     enforce_stationary_boundary: bool = True,
     gaussian_sigma_mode: str = "physical",
     conservative_smooth: bool = False,
+    sobolev_alpha: Optional[float] = None,
 ) -> Tensor:
     if regularizer == "bspline":
         # Its own strength knob (mesh_size, ITK control-point count minus
@@ -280,11 +286,17 @@ def _apply_regularizer(
         # exactly this extra spatial pass. Pass this when comparing
         # numerically against syntx; see the gaussian branch above for why
         # this port does not do so by default.
-        result = (
-            apply_sobolev_green_operator(field, fluid_sigma=sigma, spacing=spacing_itk)
-            if regularizer == "sobolev"
-            else apply_dsti_green_operator(field, fluid_sigma=sigma)
-        )
+        # sobolev_alpha (opt-in): explicit Green's-operator alpha, as syntx's
+        # sobolev_alpha; the frequency grid is then in voxel units (syntx passes
+        # no spacing to its Green's operator). None keeps alpha = sigma/2 with
+        # spacing scaling (this port's own convention).
+        if regularizer == "sobolev":
+            if sobolev_alpha is not None:
+                result = apply_sobolev_green_operator(field, fluid_sigma=sigma, alpha=sobolev_alpha)
+            else:
+                result = apply_sobolev_green_operator(field, fluid_sigma=sigma, spacing=spacing_itk)
+        else:
+            result = apply_dsti_green_operator(field, fluid_sigma=sigma, **({"alpha": sobolev_alpha} if sobolev_alpha is not None else {}))
         if conservative_smooth:
             result = separable_gaussian_filter(result, sigma * 0.5, sigma_mode="voxel")
         return result
@@ -355,13 +367,25 @@ def _fit_syn_level(
     adam_eps: float = 1e-8,
     regadam_grad_sigma: float = 1.8,
     regadam_quotient_sigma: float = 0.8,
+    inverse_schedule: str = "per_iteration",
+    end_of_level_inverse_steps: int = 30,
+    syntx_parity: bool = False,
+    use_analytical_gradients: bool = True,
+    sobolev_alpha: Optional[float] = None,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor, list]:
     device, dtype = I_curr.device, I_curr.dtype
     fixed_meta_t = metadata_tensors_from_dict(fixed_meta, device, dtype)
     moving_meta_t = metadata_tensors_from_dict(moving_meta, device, dtype)
     X_phys = _physical_grid(fixed_meta, device, dtype)
     boundary_mask = get_boundary_mask(fixed_meta["torch_shape"], device, dtype)
-    level_cfl_voxels = grad_step * math.sqrt(float(shrink_factor))
+    if syntx_parity:
+        # syntx scales the CFL step by sqrt(curr_size/original_size) <= 1
+        # (coarse levels take SMALLER steps); the default here is the inverse.
+        level_cfl_voxels = grad_step * math.sqrt(1.0 / float(shrink_factor))
+    else:
+        level_cfl_voxels = grad_step * math.sqrt(float(shrink_factor))
+    best_loss = float("inf")
+    best_state = None
 
     # reg_adam: per-voxel Adam first/second moments, reset at the start of
     # every pyramid level (this function is called once per level) --
@@ -419,10 +443,16 @@ def _fit_syn_level(
             M_phys,
             t_phys,
             None,
+            use_analytical_gradients=use_analytical_gradients,
         )
         loss = _similarity_loss(similarity, I_mid, J_mid, in_bounds_mask, window_size, num_bins)
         if not torch.isfinite(loss):
             raise FloatingPointError(f"non-finite SyN loss at resolution level {level_index + 1}")
+        if syntx_parity and float(loss.detach().item()) < best_loss:
+            # syntx keeps the (pre-update) warps of the best loss seen.
+            best_loss = float(loss.detach().item())
+            best_state = (warp_l2r.detach().clone(), warp_r2l.detach().clone(),
+                          warp_l2r_inv.detach().clone(), warp_r2l_inv.detach().clone())
         loss.backward()
         grad_l = warp_l2r_leaf.grad
         grad_r = warp_r2l_leaf.grad
@@ -476,12 +506,14 @@ def _fit_syn_level(
             mesh_size=update_mesh_size_level, domain=bspline_domain,
             enforce_stationary_boundary=bspline_enforce_stationary_boundary,
             gaussian_sigma_mode=gaussian_sigma_mode, conservative_smooth=conservative_smooth,
+            sobolev_alpha=sobolev_alpha,
         )
         grad_r = _apply_regularizer(
             grad_r * boundary_mask, regularizer, flow_sigma, fixed_meta["spacing"],
             mesh_size=update_mesh_size_level, domain=bspline_domain,
             enforce_stationary_boundary=bspline_enforce_stationary_boundary,
             gaussian_sigma_mode=gaussian_sigma_mode, conservative_smooth=conservative_smooth,
+            sobolev_alpha=sobolev_alpha,
         )
 
         delta_l = _cfl_normalize(grad_l, fixed_meta_t["spacing_t"], level_cfl_voxels)
@@ -508,14 +540,22 @@ def _fit_syn_level(
             warp_l2r = separable_gaussian_filter(warp_l2r, total_sigma, spacing=fixed_meta["spacing"], sigma_mode="physical")
             warp_r2l = separable_gaussian_filter(warp_r2l, total_sigma, spacing=fixed_meta["spacing"], sigma_mode="physical")
 
-        warp_l2r_inv = update_inverse_field_nd(
-            warp_l2r, warp_l2r_inv, steps=in_loop_inverse_steps, method=inverse_method,
-            spacing=fixed_meta["spacing"], origin=fixed_meta["origin"], direction=fixed_meta["direction"], X_phys=X_phys,
-        )
-        warp_r2l_inv = update_inverse_field_nd(
-            warp_r2l, warp_r2l_inv, steps=in_loop_inverse_steps, method=inverse_method,
-            spacing=fixed_meta["spacing"], origin=fixed_meta["origin"], direction=fixed_meta["direction"], X_phys=X_phys,
-        )
+        # Nothing inside this loop reads warp_*_inv (prepare_mid_images_and_
+        # gradients_torch accepts them but never uses them); they only feed the
+        # final forward/inverse composition in syn_registration(). The default
+        # 'per_iteration' schedule keeps the historical warm-started chain of
+        # in_loop_inverse_steps solver steps after every iteration;
+        # 'end_of_level' skips it here and inverts once after the last level's
+        # iterations (see below).
+        if inverse_schedule == "per_iteration":
+            warp_l2r_inv = update_inverse_field_nd(
+                warp_l2r, warp_l2r_inv, steps=in_loop_inverse_steps, method=inverse_method,
+                spacing=fixed_meta["spacing"], origin=fixed_meta["origin"], direction=fixed_meta["direction"], X_phys=X_phys,
+            )
+            warp_r2l_inv = update_inverse_field_nd(
+                warp_r2l, warp_r2l_inv, steps=in_loop_inverse_steps, method=inverse_method,
+                spacing=fixed_meta["spacing"], origin=fixed_meta["origin"], direction=fixed_meta["direction"], X_phys=X_phys,
+            )
 
         current = float(loss.detach().item())
         history.append(current)
@@ -524,6 +564,40 @@ def _fit_syn_level(
                 f"  [SyN level {level_index + 1}/{num_levels}] iteration {iteration + 1:04d}/{iterations}: "
                 f"loss={current:.8g}"
             )
+        if syntx_parity and len(history) >= 10:
+            # syntx check_convergence(window=10, slope_threshold=1e-6)
+            y = np.asarray(history[-10:], dtype=np.float64)
+            x = np.arange(10, dtype=np.float64)
+            slope = float(np.sum((x - x.mean()) * (y - y.mean())) / np.sum((x - x.mean()) ** 2))
+            if abs(slope) <= 1e-6:
+                break
+
+    if syntx_parity and best_state is not None and len(history) > 0:
+        with torch.no_grad():
+            I_f, J_f, _, _, m_f = prepare_mid_images_and_gradients_torch(
+                warp_l2r, warp_r2l, warp_l2r_inv, warp_r2l_inv, I_curr, J_curr, X_phys,
+                fixed_meta_t["shape_t"], fixed_meta_t["spacing_t"], fixed_meta_t["origin_t"], fixed_meta_t["direction_t"],
+                moving_meta_t["shape_t"], moving_meta_t["spacing_t"], moving_meta_t["origin_t"], moving_meta_t["direction_t"],
+                fixed_meta["spacing"], moving_meta["spacing"], M_phys, t_phys, None,
+                use_analytical_gradients=False,
+            )
+            final_loss = float(_similarity_loss(similarity, I_f, J_f, m_f, window_size, num_bins).item())
+        if final_loss >= best_loss:
+            warp_l2r, warp_r2l, warp_l2r_inv, warp_r2l_inv = best_state
+
+    if inverse_schedule == "end_of_level" and level_index == num_levels - 1:
+        # Only the final level's inverse is consumed (by the final composition
+        # in syn_registration()); coarser levels' inverses would be discarded
+        # here anyway, so they are skipped. Solved from the first-order guess
+        # (-W) with end_of_level_inverse_steps steps.
+        warp_l2r_inv = update_inverse_field_nd(
+            warp_l2r, -warp_l2r, steps=end_of_level_inverse_steps, method=inverse_method,
+            spacing=fixed_meta["spacing"], origin=fixed_meta["origin"], direction=fixed_meta["direction"], X_phys=X_phys,
+        )
+        warp_r2l_inv = update_inverse_field_nd(
+            warp_r2l, -warp_r2l, steps=end_of_level_inverse_steps, method=inverse_method,
+            spacing=fixed_meta["spacing"], origin=fixed_meta["origin"], direction=fixed_meta["direction"], X_phys=X_phys,
+        )
 
     return warp_l2r.detach(), warp_r2l.detach(), warp_l2r_inv.detach(), warp_r2l_inv.detach(), history
 
@@ -587,6 +661,56 @@ def _fit_affine_from_ants(
     return matrix_xyz, translation_xyz, result
 
 
+# ---------------------------------------------------------------------------
+# syntx-aligned defaults
+# ---------------------------------------------------------------------------
+# ``syn_registration`` resolves every hyperparameter left at ``None`` from this
+# table, keyed by ``(regularizer, optimizer)``. The values reproduce the
+# ``--matched`` configuration of tools/benchmarks/compare_syntx_antstorch_mindboggle.py
+# (validated against syntx on Mindboggle-101): syntx treats ``flow_sigma`` as an
+# ITK *variance* (sigma = sqrt(flow_sigma)), antstorch uses it as sigma, hence the
+# sqrt() values below; cc2 similarity, (4, 2, 1) pyramid, voxel-unit gaussian
+# sigma, conservative post-filter for sobolev/dsti, and the end-of-level inverse
+# schedule (same Dice, ~20 % less time than the per-iteration chain).
+# Anything the table does not state keeps antstorch's previous default
+# (grad_step 0.5 for dsti and reg_adam, flow_sigma 3.0 where syntx has no
+# equivalent). ``syntx_defaults=False`` restores the previous defaults wholesale.
+_COMMON_SYNTX_DEFAULTS = dict(
+    syn_metric="cc2", levels=(4, 2, 1), gaussian_sigma_mode="voxel", inverse_schedule="end_of_level",
+)
+_SYNTX_DEFAULTS = {
+    ("gaussian", "gradient_descent"): dict(
+        _COMMON_SYNTX_DEFAULTS, grad_step=0.25, reg_iterations=(100, 100, 20),
+        flow_sigma=math.sqrt(3.0), conservative_smooth=False, sobolev_alpha=None),
+    ("sobolev", "gradient_descent"): dict(
+        _COMMON_SYNTX_DEFAULTS, grad_step=0.4, reg_iterations=(100, 100, 20),
+        flow_sigma=math.sqrt(2.4), conservative_smooth=True, sobolev_alpha=2.25),
+    ("bspline", "gradient_descent"): dict(
+        _COMMON_SYNTX_DEFAULTS, grad_step=0.25, reg_iterations=(100, 100, 20),
+        flow_sigma=3.0, conservative_smooth=False, sobolev_alpha=None),
+    ("dsti", "gradient_descent"): dict(
+        _COMMON_SYNTX_DEFAULTS, grad_step=0.5, reg_iterations=(100, 50, 10),
+        flow_sigma=math.sqrt(3.0), conservative_smooth=True, sobolev_alpha=None),
+    ("gaussian", "reg_adam"): dict(
+        _COMMON_SYNTX_DEFAULTS, grad_step=0.5, reg_iterations=(100, 100, 20),
+        flow_sigma=3.0, conservative_smooth=False, sobolev_alpha=None),
+    ("sobolev", "reg_adam"): dict(
+        _COMMON_SYNTX_DEFAULTS, grad_step=0.5, reg_iterations=(100, 100, 20),
+        flow_sigma=3.0, conservative_smooth=True, sobolev_alpha=None),
+    ("bspline", "reg_adam"): dict(
+        _COMMON_SYNTX_DEFAULTS, grad_step=0.5, reg_iterations=(100, 100, 20),
+        flow_sigma=3.0, conservative_smooth=False, sobolev_alpha=None),
+    ("dsti", "reg_adam"): dict(
+        _COMMON_SYNTX_DEFAULTS, grad_step=0.5, reg_iterations=(100, 50, 10),
+        flow_sigma=math.sqrt(3.0), conservative_smooth=True, sobolev_alpha=None),
+}
+_LEGACY_DEFAULTS = dict(
+    syn_metric="lncc", levels=(4, 2, 1), reg_iterations=(100, 100, 50), grad_step=0.5, flow_sigma=3.0,
+    gaussian_sigma_mode="physical", conservative_smooth=False, sobolev_alpha=None,
+    inverse_schedule="per_iteration",
+)
+
+
 def syn_registration(
     fixed,
     moving,
@@ -603,13 +727,13 @@ def syn_registration(
     affine_learning_rate: Union[float, Sequence[float]] = (0.05, 0.03, 0.02),
     affine_multi_start: bool = True,
     affine_center_of_mass_init: bool = True,
-    syn_metric: str = "lncc",
+    syn_metric: Optional[str] = None,
     neighborhood_radius: int = 2,
     num_bins: int = 32,
-    levels: Sequence[int] = (4, 2, 1),
-    reg_iterations: Sequence[int] = (100, 100, 50),
-    grad_step: float = 0.5,
-    flow_sigma: float = 3.0,
+    levels: Optional[Sequence[int]] = None,
+    reg_iterations: Optional[Sequence[int]] = None,
+    grad_step: Optional[float] = None,
+    flow_sigma: Optional[float] = None,
     total_sigma: float = 0.0,
     regularizer: str = "gaussian",
     optimizer: str = "gradient_descent",
@@ -624,9 +748,15 @@ def syn_registration(
     bspline_enforce_stationary_boundary: bool = True,
     inverse_method: str = "anderson",
     in_loop_inverse_steps: int = 6,
+    inverse_schedule: Optional[str] = None,
+    end_of_level_inverse_steps: int = 30,
+    syntx_defaults: bool = True,
+    syntx_parity: bool = False,
+    use_analytical_gradients: bool = True,
+    sobolev_alpha: Optional[float] = None,
     antisymmetric: bool = True,
-    gaussian_sigma_mode: str = "physical",
-    conservative_smooth: bool = False,
+    gaussian_sigma_mode: Optional[str] = None,
+    conservative_smooth: Optional[bool] = None,
     padding_mode: str = "zeros",
     outprefix: str = "",
     device: Optional[Union[str, torch.device]] = None,
@@ -651,6 +781,26 @@ def syn_registration(
     ``ants.apply_transforms(transformlist=...)`` or any other ANTsX tool
     that expects file-based transforms — see
     :mod:`antstorch.ants_transform_io` for the exact conventions matched.
+
+    **Defaults.** ``syn_metric``, ``levels``, ``reg_iterations``, ``grad_step``,
+    ``flow_sigma``, ``gaussian_sigma_mode``, ``conservative_smooth``,
+    ``sobolev_alpha`` and ``inverse_schedule`` default to ``None``, meaning
+    "use the syntx-aligned value for this ``(regularizer, optimizer)``" from
+    ``_SYNTX_DEFAULTS`` (e.g. ``'gaussian'``: cc2, ``grad_step`` 0.25,
+    ``levels`` (4, 2, 1), ``reg_iterations`` (100, 100, 20), ``flow_sigma``
+    sqrt(3) -- syntx's ``flow_sigma`` is an ITK variance, this function's is a
+    sigma -- voxel-unit sigma, ``inverse_schedule='end_of_level'``; ``'sobolev'``:
+    ``grad_step`` 0.4, ``flow_sigma`` sqrt(2.4), ``sobolev_alpha`` 2.25,
+    conservative post-filter; ``'dsti'``: ``reg_iterations`` (100, 50, 10),
+    ``flow_sigma`` sqrt(3), conservative post-filter). Any value passed
+    explicitly wins. ``syntx_defaults=False`` restores this port's previous
+    defaults (lncc, ``grad_step`` 0.5, ``flow_sigma`` 3.0, ``levels`` (4, 2, 1),
+    ``reg_iterations`` (100, 100, 50), ``'physical'`` sigma, spectral-only
+    sobolev/dsti, ``'per_iteration'`` inverses). With the syntx defaults,
+    ``sobolev_alpha=None`` cannot mean "no explicit alpha" for
+    ``regularizer='sobolev'``; use ``syntx_defaults=False`` for that.
+    ``levels`` and ``reg_iterations`` must be given together unless the
+    explicit one has the same length as the default one.
 
     ``type_of_transform`` selects the transform model:
 
@@ -717,13 +867,13 @@ def syn_registration(
     this port intentionally resolves differently from ``syntx.syn``'s own
     default path, found while comparing the two on real Mindboggle-101 pairs
     (project doc, "comparaison syntx/antstorch, écart gaussian/sobolev"):
-    ``gaussian_sigma_mode='physical'`` (default, this port's own choice)
+    ``gaussian_sigma_mode='physical'`` (this port's previous default; now ``'voxel'`` unless ``syntx_defaults=False``)
     scales ``'gaussian'``'s ``flow_sigma`` per axis by voxel spacing, so a
     given nominal sigma is a comparably strong filter regardless of
     anisotropy; pass ``'voxel'`` to apply it directly in voxels with no
     spacing scaling instead, matching ``syntx.syn``'s own default
-    ``'gaussian'`` behavior. ``conservative_smooth=False`` (default, this
-    port's own choice) applies only the spectral Green's-operator pass for
+    ``'gaussian'`` behavior. ``conservative_smooth=False`` (this
+    port's previous default; now ``True`` for ``'sobolev'``/``'dsti'`` unless ``syntx_defaults=False``) applies only the spectral Green's-operator pass for
     ``'sobolev'``/``'dsti'``; ``True`` additionally applies a second, spatial
     Bessel-kernel Gaussian pass afterward (at half the Green's-operator
     sigma, in voxel space), matching ``syntx.syn``'s own default
@@ -799,6 +949,18 @@ def syn_registration(
     ``fwdtransforms``/``invtransforms`` are built from algebraically (a
     half-warp-inverse swap), not from any generic post-hoc field inversion.
 
+    ``inverse_schedule`` chooses *when* those inverses are maintained. The
+    historical behavior described above is ``'per_iteration'`` (now used only with ``syntx_defaults=False``;
+    the syntx-aligned default is ``'end_of_level'``).
+    Nothing inside the SyN loop reads the inverses -- they only feed the final
+    composition -- so ``'end_of_level'`` skips the per-iteration updates and
+    inverts the final level's half-warps once, from the first-order guess
+    ``-W``, with ``end_of_level_inverse_steps`` solver steps (``inverse_method``
+    as usual). Intended as a large speed-up (the per-iteration chain was ~2/3
+    of the loop time on MPS); the final inverse accuracy depends on
+    ``end_of_level_inverse_steps`` rather than on the warm-started chain, so
+    check Dice / identity error on your data before relying on it.
+
     ``levels``/``reg_iterations`` define the multi-resolution pyramid
     (coarse to fine, e.g. ``levels=(4, 2, 1)``); unlike
     :func:`antstorch.bspline_flows.bspline_svf_registration.bspline_svf_registration`'s
@@ -822,6 +984,36 @@ def syn_registration(
         recording the configuration actually used, including the resolved
         ``outprefix``).
     """
+    _defaults = (
+        _SYNTX_DEFAULTS.get((regularizer, optimizer), _LEGACY_DEFAULTS) if syntx_defaults else _LEGACY_DEFAULTS
+    )
+    _levels_given, _iterations_given = levels is not None, reg_iterations is not None
+    if syn_metric is None:
+        syn_metric = _defaults["syn_metric"]
+    if levels is None:
+        levels = _defaults["levels"]
+    if reg_iterations is None:
+        reg_iterations = _defaults["reg_iterations"]
+    if _levels_given != _iterations_given and len(levels) != len(reg_iterations):
+        raise ValueError(
+            "levels and reg_iterations must be given together: the default for the one omitted has "
+            f"{len(_defaults['levels'])} entries (levels={tuple(_defaults['levels'])}, "
+            f"reg_iterations={tuple(_defaults['reg_iterations'])}) but the one given has "
+            f"{len(levels) if _levels_given else len(reg_iterations)}"
+        )
+    if grad_step is None:
+        grad_step = _defaults["grad_step"]
+    if flow_sigma is None:
+        flow_sigma = _defaults["flow_sigma"]
+    if inverse_schedule is None:
+        inverse_schedule = _defaults["inverse_schedule"]
+    if gaussian_sigma_mode is None:
+        gaussian_sigma_mode = _defaults["gaussian_sigma_mode"]
+    if conservative_smooth is None:
+        conservative_smooth = _defaults["conservative_smooth"]
+    if sobolev_alpha is None:
+        sobolev_alpha = _defaults["sobolev_alpha"]
+
     if fixed.dimension != moving.dimension:
         raise ValueError("fixed and moving must have the same dimension")
     if fixed.dimension not in (2, 3):
@@ -834,6 +1026,10 @@ def syn_registration(
         raise ValueError(f"regularizer must be one of {_REGULARIZERS}")
     if optimizer not in _OPTIMIZERS:
         raise ValueError(f"optimizer must be one of {_OPTIMIZERS}")
+    if inverse_schedule not in ("per_iteration", "end_of_level"):
+        raise ValueError("inverse_schedule must be 'per_iteration' or 'end_of_level'")
+    if end_of_level_inverse_steps < 1:
+        raise ValueError("end_of_level_inverse_steps must be >= 1")
     if update_field_mesh_size_at_base_level is not None and update_field_mesh_size_at_base_level < 0:
         raise ValueError("update_field_mesh_size_at_base_level must be >= 0")
     if total_field_mesh_size_at_base_level < 0:
@@ -1097,8 +1293,8 @@ def syn_registration(
     warp_l2r = warp_r2l = warp_l2r_inv = warp_r2l_inv = None
     level_loss_history = []
     for level_index, (factor, iteration_count) in enumerate(zip(levels, reg_iterations)):
-        I_level, fixed_meta_level = _downsample_image(I_full, fixed_meta_full, factor)
-        J_level, moving_meta_level = _downsample_image(J_full, moving_meta_full, factor)
+        I_level, fixed_meta_level = _downsample_image(I_full, fixed_meta_full, factor, syntx_parity)
+        J_level, moving_meta_level = _downsample_image(J_full, moving_meta_full, factor, syntx_parity)
         if warp_l2r is None:
             zeros = torch.zeros(
                 (1,) + fixed_meta_level["torch_shape"] + (dimension,), device=resolved_device, dtype=dtype
@@ -1158,6 +1354,11 @@ def syn_registration(
             antisymmetric=antisymmetric,
             inverse_method=inverse_method,
             in_loop_inverse_steps=in_loop_inverse_steps,
+            inverse_schedule=inverse_schedule,
+            end_of_level_inverse_steps=end_of_level_inverse_steps,
+            syntx_parity=syntx_parity,
+            use_analytical_gradients=use_analytical_gradients,
+            sobolev_alpha=sobolev_alpha,
             verbose=verbose,
             level_index=level_index,
             num_levels=num_levels,
@@ -1275,6 +1476,12 @@ def syn_registration(
             "bspline_enforce_stationary_boundary": bspline_enforce_stationary_boundary,
             "antisymmetric": antisymmetric,
             "inverse_method": inverse_method,
+            "inverse_schedule": inverse_schedule,
+            "end_of_level_inverse_steps": end_of_level_inverse_steps,
+            "syntx_parity": syntx_parity,
+            "sobolev_alpha": sobolev_alpha,
+            "syntx_defaults": syntx_defaults,
+            "use_analytical_gradients": use_analytical_gradients,
             "affine_fit": affine_result is not None,
             "device": str(resolved_device),
             "outprefix": resolved_outprefix,

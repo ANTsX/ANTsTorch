@@ -3,9 +3,13 @@
 
 Runs the same 4 SyN regularizer variants (gaussian, sobolev, dsti, bspline)
 through both libraries' own Mindboggle benchmark harnesses on the same
-pairs, using each library's own affine initialization and registration
-defaults (this is a library-vs-library comparison, not a forced-identical-
-hyperparameters comparison -- each side uses its own best-tuned pipeline).
+pairs, using each library's own affine initialization. antstorch's
+syn_registration() defaults are aligned with syntx's (cc2, grad_step /
+flow_sigma / sobolev_alpha / iteration schedule per regularizer, flow_sigma
+read as an ITK variance, voxel-unit gaussian sigma, conservative post-filter,
+end-of-level inverse schedule -- see _SYNTX_DEFAULTS in antstorch/syn/syn.py),
+so a bare ``python compare_syntx_antstorch_mindboggle.py`` is already the
+matched comparison; the options below are only overrides/ablations.
 
 Model-name mapping (see the project doc, this session's investigation):
   - gaussian, sobolev: 1:1 named models in both
@@ -51,6 +55,7 @@ and saved alongside the JSON.
 """
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -91,64 +96,27 @@ _ANTSTORCH_MODEL_NAME = {m: f"{m}_syn" for m in _BASE_MODELS}
 _ANTSTORCH_MODEL_NAME.update({f"{m}_regadam": f"{m}_regadam" for m in _BASE_MODELS})
 
 
-# --matched forces both harnesses onto the same grad_step/similarity-metric/
-# pyramid schedule for the 3 plain-gradient-descent regularizers (gaussian,
-# sobolev, bspline), so any remaining Dice gap reflects the regularizer
-# implementation itself rather than each harness's own out-of-the-box
-# defaults. Left at 0.25/cc2/[4,2,1]/[100,100,20] -- syntx's own gaussian/
-# sobolev branch defaults, since antstorch's syn_registration() accepts all
-# of these as overrides via kwargs but syntx's benchmark harness does not
-# expose reg_iterations/levels overrides as freely for every branch.
-# dsti is deliberately NOT given grad_step/metric/schedule overrides: syntx's
-# dsti arm uses a different optimizer entirely (reg_adam, not plain gradient
-# descent) -- forcing parity there would not make the comparison fairer, only
-# more confusing, since the optimizer itself already differs.
-#
-# gaussian_sigma_mode='voxel' / conservative_smooth=True are new
-# antstorch.syn.syn_registration() kwargs (see antstorch/syn/syn.py,
-# _apply_regularizer) added specifically to close two regularizer-formula
-# differences found by this comparison script: antstorch's 'gaussian'
-# regularizer scales sigma by physical voxel spacing by default (syntx's
-# does not); antstorch's 'sobolev'/'dsti' apply only the spectral Green's
-# operator by default (syntx's default "conservative mode" stacks a second
-# spatial pass on top). Both now default to antstorch's own original
-# behavior -- set here, under --matched, to instead reproduce syntx's.
-# conservative_smooth is set for dsti too (unlike grad_step/metric/schedule
-# above) since it is a regularizer-formula knob, independent of the
-# optimizer difference that keeps dsti's other settings unmatched.
-MATCHED_KWARGS = {
-    "gaussian": dict(grad_step=0.25, syn_metric="cc2", levels=(4, 2, 1), reg_iterations=(100, 100, 20),
-                      gaussian_sigma_mode="voxel"),
-    "sobolev": dict(grad_step=0.25, syn_metric="cc2", levels=(4, 2, 1), reg_iterations=(100, 100, 20),
-                     conservative_smooth=True),
-    "bspline": dict(grad_step=0.25, syn_metric="cc2", levels=(4, 2, 1), reg_iterations=(100, 100, 20)),
-    "dsti": dict(conservative_smooth=True),
-    # Each "_regadam" variant gets the SAME regularizer-formula matching as
-    # its base counterpart above (gaussian_sigma_mode="voxel" for gaussian,
-    # conservative_smooth=True for sobolev/dsti, nothing for bspline -- it
-    # has no such formula knob), but never the grad_step/metric/schedule
-    # overrides: the optimizer itself (reg_adam vs plain gradient descent)
-    # is intentionally left unmatched -- it's the very thing being tested --
-    # and is already forced by antstorch.benchmark.evaluate's
-    # _SYN_OPTIMIZER_OVERRIDE for every "*_regadam" model name, not by this
-    # script.
-    "gaussian_regadam": dict(gaussian_sigma_mode="voxel"),
-    "sobolev_regadam": dict(conservative_smooth=True),
-    "dsti_regadam": dict(conservative_smooth=True),
-    "bspline_regadam": dict(),
-}
-MATCHED_KWARGS_SYNTX = {
+# antstorch side: nothing to set here any more. The matched hyperparameters
+# (formerly MATCHED_KWARGS, validated against syntx on Mindboggle-101) are now
+# the defaults of antstorch.syn.syn_registration(), keyed by (regularizer,
+# optimizer) in _SYNTX_DEFAULTS; use --legacy-defaults for the previous ones.
+# syntx side: its gaussian/sobolev harness arms are pinned to cc2 and
+# (100,100,20) so both sides always run the same schedule.
+SYNTX_KWARGS = {
     "gaussian": dict(similarity_metric="cc2", reg_iterations=[100, 100, 20]),
     "sobolev": dict(similarity_metric="cc2", reg_iterations=[100, 100, 20]),
 }
 
 
-def _run_antstorch(reg, pair_idx, device, out_dir, matched=False):
+ANTSTORCH_EXTRA = {}  # set from CLI in main(); antstorch arms only (syntx arms are unaffected)
+
+
+def _run_antstorch(reg, pair_idx, device, out_dir, matched=True):  # `matched` kept for old callers; ignored
     sys.path.insert(0, ANTSTORCH_ROOT)
     from antstorch.benchmark.evaluate import evaluate_mindboggle_pair as antstorch_eval
 
     model = _ANTSTORCH_MODEL_NAME[reg]
-    extra = MATCHED_KWARGS.get(reg, {}) if matched else {}
+    extra = dict(ANTSTORCH_EXTRA)
     t0 = time.time()
     try:
         rec = antstorch_eval(
@@ -173,7 +141,7 @@ def _run_antstorch(reg, pair_idx, device, out_dir, matched=False):
     return rec
 
 
-def _run_syntx(reg, pair_idx, device, out_dir, matched=False):
+def _run_syntx(reg, pair_idx, device, out_dir, matched=True):  # `matched` kept for old callers; ignored
     sys.path.insert(0, os.path.join(SYNTX_ROOT, "src"))
     os.chdir(SYNTX_ROOT)  # syntx.benchmark.evaluate caches to "results/..." relative to cwd
     import syntx
@@ -185,13 +153,13 @@ def _run_syntx(reg, pair_idx, device, out_dir, matched=False):
     # original (unstripped) `reg`, so main()'s by_key grouping still pairs
     # this record against the matching antstorch "_regadam" record.
     base = _base_reg(reg)
-    extra = MATCHED_KWARGS_SYNTX.get(base, {}) if matched else {}
+    extra = SYNTX_KWARGS.get(base, {})
     t0 = time.time()
     try:
         if base == "bspline":
             # Already grad_step=0.25 / similarity_metric='cc2' /
             # reg_iterations=[100,100,20] by construction (see the function
-            # docstring) -- nothing further to force for --matched here.
+            # docstring) -- nothing further to force here.
             rec = _syntx_bspline_pair_eval(pair_idx=pair_idx, device=device, verbose=False)
         else:
             rec = syntx_eval(
@@ -315,43 +283,67 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--pairs", type=int, nargs="+", default=PAIR_INDICES_DEFAULT)
     ap.add_argument("--models", nargs="+", default=MODELS, choices=MODELS)
-    ap.add_argument("--device", default=None)
+    ap.add_argument("--device", default=None,
+                    help="cuda / mps / cpu. Default: auto-detect (cuda, then mps, then cpu), passed identically to both libraries.")
+    ap.add_argument("--inverse-schedule", choices=["per_iteration", "end_of_level"], default=None,
+                    help="When antstorch maintains the half-warp inverses (antstorch arms only). 'end_of_level' inverts once "
+                         "after the last level instead of after every iteration (see syn_registration docstring); "
+                         "validate Dice against a per_iteration run first.")
+    ap.add_argument("--end-of-level-inverse-steps", type=int, default=None,
+                    help="Solver steps for the single end-of-level inversion (default 30).")
+    ap.add_argument("--syntx-parity", action="store_true",
+                    help="antstorch only: mimic syntx's loop (CFL scaled by sqrt(curr/orig size), early stop on loss slope "
+                         "<=1e-6 over 10 its, restore best-loss warps).")
+    ap.add_argument("--no-analytical-gradients", action="store_true",
+                    help="antstorch only: use autograd through the image interpolation (as syntx's benchmark does, "
+                         "use_analytical_gradients=False) instead of antstorch's analytical image-gradient backward.")
+    ap.add_argument("--skip-syntx", action="store_true",
+                    help="Run only the antstorch arms (syntx records are left out; the summary shows '—' for syntx). "
+                         "Use for antstorch-only ablations such as --inverse-method, where the syntx arms would be identical "
+                         "to an earlier run.")
+    ap.add_argument("--inverse-method", choices=["anderson", "fixed_point", "hybrid_lm"], default=None,
+                    help="In-loop field-inversion solver for the ANTSTORCH arms only (default: antstorch's own, anderson). "
+                         "fixed_point measured ~2.2x faster than anderson on MPS at 6 steps (bench_inverse_field.py); "
+                         "syntx arms keep their own solver, so use this as an ablation, not the main comparison.")
     ap.add_argument("--out-dir", default=None)
-    ap.add_argument(
-        "--matched", action="store_true",
-        help="Force grad_step=0.25 / similarity_metric='cc2' / levels=(4,2,1) / "
-             "reg_iterations=(100,100,20) on both sides for gaussian/sobolev/bspline "
-             "(dsti and every *_regadam model left alone on those settings: the "
-             "syntx dsti arm -- also compared against every *_regadam model, see "
-             "module docstring -- uses a different optimizer, reg_adam, not plain "
-             "gradient descent, so forcing these wouldn't isolate anything there -- "
-             "only the regularizer-formula knob is matched for dsti/*_regadam, "
-             "i.e. conservative_smooth for sobolev_regadam/dsti_regadam/dsti, "
-             "gaussian_sigma_mode for gaussian_regadam, nothing extra for "
-             "bspline_regadam). Use this to "
-             "check whether a Dice gap seen "
-             "with each library's own out-of-the-box defaults survives once the "
-             "optimization settings are equalized -- i.e. whether it comes from "
-             "the regularizer/registration algorithm itself or just from the two "
-             "harnesses' differing defaults. Writes to a separate --out-dir suffix "
-             "('_matched') so it never overwrites an unmatched run.",
-    )
+    ap.add_argument("--legacy-defaults", action="store_true",
+                    help="antstorch only: restore antstorch's previous defaults (lncc, grad_step 0.5, flow_sigma 3.0, "
+                         "(100,100,50) iterations, physical sigma, per-iteration inverses) instead of the syntx-aligned ones "
+                         "(syn_registration(syntx_defaults=False)). Writes to an '_legacy' out-dir suffix.")
+    ap.add_argument("--matched", action="store_true", help=argparse.SUPPRESS)  # deprecated no-op: matched is the default
     args = ap.parse_args()
+    if args.device is None:
+        import torch
+        args.device = "cuda" if torch.cuda.is_available() else (
+            "mps" if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available() else "cpu")
     if args.out_dir is None:
         base = os.path.expanduser("~/Desktop/syntx_antstorch_mindboggle_comparison")
-        args.out_dir = base + ("_matched" if args.matched else "")
+        args.out_dir = base + ("_legacy" if args.legacy_defaults else "")
 
+    if args.legacy_defaults:
+        ANTSTORCH_EXTRA["syntx_defaults"] = False
+    if args.inverse_method:
+        ANTSTORCH_EXTRA["inverse_method"] = args.inverse_method
+    if args.inverse_schedule:
+        ANTSTORCH_EXTRA["inverse_schedule"] = args.inverse_schedule
+    if args.no_analytical_gradients:
+        ANTSTORCH_EXTRA["use_analytical_gradients"] = False
+    if args.syntx_parity:
+        ANTSTORCH_EXTRA["syntx_parity"] = True
+    if args.end_of_level_inverse_steps is not None:
+        ANTSTORCH_EXTRA["end_of_level_inverse_steps"] = args.end_of_level_inverse_steps
     os.makedirs(args.out_dir, exist_ok=True)
     results = []
     json_path = os.path.join(args.out_dir, "comparison_results.json")
 
-    total = len(args.pairs) * len(args.models) * 2
+    libs = (("antstorch", _run_antstorch),) if args.skip_syntx else (("antstorch", _run_antstorch), ("syntx", _run_syntx))
+    total = len(args.pairs) * len(args.models) * len(libs)
     done = 0
     for pair_idx in args.pairs:
         for reg in args.models:
-            for lib, fn in (("antstorch", _run_antstorch), ("syntx", _run_syntx)):
+            for lib, fn in libs:
                 print(f"[{done + 1}/{total}] {lib} / {reg} / pair {pair_idx} ...", flush=True)
-                rec = fn(reg, pair_idx, args.device, args.out_dir, matched=args.matched)
+                rec = fn(reg, pair_idx, args.device, args.out_dir)
                 results.append(rec)
                 done += 1
                 status = rec.get("_status")
@@ -375,7 +367,7 @@ def main():
             pair = by_key.get((pair_idx, reg), {})
             s, a = pair.get("syntx", {}), pair.get("antstorch", {})
             s_ok, a_ok = s.get("_status") == "SUCCESS", a.get("_status") == "SUCCESS"
-            s_dice = f"{s['dice_sym']:.4f}" if s_ok else "ÉCHEC"
+            s_dice = f"{s['dice_sym']:.4f}" if s_ok else ("—" if args.skip_syntx else "ÉCHEC")
             a_dice = f"{a['dice_sym']:.4f}" if a_ok else "ÉCHEC"
             delta = f"{(a['dice_sym'] - s['dice_sym']):+.4f}" if (s_ok and a_ok) else "—"
             s_t = f"{s.get('runtime_seconds', s.get('_wall_seconds', float('nan'))):.1f}" if s_ok else "—"
@@ -392,7 +384,10 @@ def main():
             table_lines.append(f"| {pair_idx} | {label} | {s_dice} | {a_dice} | {delta} | {s_t} | {a_t} |")
 
     md_lines = ["# Comparaison syntx vs antstorch — Mindboggle-101 (dense SyN)", "",
-                f"Paires : {args.pairs}  ", f"Modèles : {args.models}  ", f"Device : {args.device or 'auto'}", ""]
+                f"Paires : {args.pairs}  ", f"Modèles : {args.models}  ", f"Device : {args.device or 'auto'}  ", f"antstorch inverse_method : {args.inverse_method or 'default (anderson)'}  ", f"antstorch defaults : {'legacy' if args.legacy_defaults else 'syntx-aligned'}  ",
+                f"antstorch inverse_schedule : {args.inverse_schedule or ('per_iteration' if args.legacy_defaults else 'end_of_level')}"
+                + (f" ({args.end_of_level_inverse_steps or 30} steps)" if (args.inverse_schedule or ('per_iteration' if args.legacy_defaults else 'end_of_level')) == "end_of_level" else "") + "  ",
+                f"syntx arms : {'skipped' if args.skip_syntx else 'run'}", ""]
     md_lines.extend(table_lines)
     md_lines.append("")
     md_lines.append(f"Résultats bruts : `{json_path}`")
