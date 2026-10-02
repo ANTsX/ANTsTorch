@@ -107,9 +107,10 @@ def read_affine_transform(filename: str, dim: int) -> Tuple[np.ndarray, np.ndarr
 
     The exact inverse of :func:`write_affine_transform`: an ``AffineTransform``'s
     parameters are the row-major-raveled linear matrix followed by the
-    translation vector, ITK ``(x, y[, z])`` physical order — the fixed
-    parameters (rotation center) are ignored, matching
-    :func:`write_affine_transform` always leaving them at the origin.
+    translation vector, ITK ``(x, y[, z])`` physical order. The fixed
+    parameters (rotation center ``c``) are folded into the returned
+    translation (``t + c - M c``); :func:`write_affine_transform` always
+    leaves them at the origin, so for its own files this is a no-op.
 
     This is the format any consumer that shares the canonical affine as a
     file (rather than in-memory tensors) needs to bridge back into
@@ -145,6 +146,14 @@ def read_affine_transform(filename: str, dim: int) -> Tuple[np.ndarray, np.ndarr
     params = np.asarray(transform.parameters, dtype=np.float64)
     matrix = np.ascontiguousarray(params[: dim * dim].reshape(dim, dim))
     translation = np.ascontiguousarray(params[dim * dim: dim * dim + dim])
+    # ITK AffineTransform: y = M (x - c) + c + t, with c the fixed parameters
+    # (rotation center). Fold c into an equivalent pure (M, t_eff) pair:
+    # y = M x + (t + c - M c). Files written by antstorch have c = 0 (no-op);
+    # files from other tools (e.g. syntx.robust_affine) generally do not.
+    fixed = np.asarray(transform.fixed_parameters, dtype=np.float64).reshape(-1)
+    if fixed.size >= dim:
+        center = fixed[:dim]
+        translation = np.ascontiguousarray(translation + center - matrix @ center)
     return matrix, translation
 
 

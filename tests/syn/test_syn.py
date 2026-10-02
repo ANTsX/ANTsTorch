@@ -412,8 +412,70 @@ def test_syn_registration_default_provenance_records_syntx_parity_knob_defaults(
         fixed, moving, type_of_transform="SyNOnly",
         levels=(1,), reg_iterations=(5,), syn_metric="mse",
     )
-    assert result["provenance"]["gaussian_sigma_mode"] == "physical"
+    # syntx-aligned defaults (gaussian): voxel-unit sigma, no conservative post-filter.
+    assert result["provenance"]["gaussian_sigma_mode"] == "voxel"
     assert result["provenance"]["conservative_smooth"] is False
+    assert result["provenance"]["syntx_defaults"] is True
+
+
+def test_syn_registration_legacy_defaults_restore_previous_knob_values():
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    result = syn_registration(
+        fixed, moving, type_of_transform="SyNOnly",
+        levels=(1,), reg_iterations=(5,), syn_metric="mse", syntx_defaults=False,
+    )
+    prov = result["provenance"]
+    assert prov["gaussian_sigma_mode"] == "physical"
+    assert prov["conservative_smooth"] is False
+    assert prov["grad_step"] == 0.5
+    assert prov["flow_sigma"] == 3.0
+    assert prov["inverse_schedule"] == "per_iteration"
+    assert prov["syntx_defaults"] is False
+
+
+@pytest.mark.parametrize("regularizer, grad_step, flow_sigma, conservative, alpha, schedule_len", [
+    ("gaussian", 0.25, 3.0 ** 0.5, False, None, 3),
+    ("sobolev", 0.4, 2.4 ** 0.5, True, 2.25, 3),
+    ("dsti", 0.5, 3.0 ** 0.5, True, None, 3),
+    ("bspline", 0.25, 3.0, False, None, 3),
+])
+def test_syn_registration_resolves_syntx_defaults_per_regularizer(
+    regularizer, grad_step, flow_sigma, conservative, alpha, schedule_len,
+):
+    from antstorch.syn.syn import _SYNTX_DEFAULTS
+
+    d = _SYNTX_DEFAULTS[(regularizer, "gradient_descent")]
+    assert d["syn_metric"] == "cc2"
+    assert tuple(d["levels"]) == (4, 2, 1)
+    assert len(d["reg_iterations"]) == schedule_len
+    assert d["grad_step"] == pytest.approx(grad_step)
+    assert d["flow_sigma"] == pytest.approx(flow_sigma)
+    assert d["conservative_smooth"] is conservative
+    assert d["sobolev_alpha"] == alpha
+    assert d["inverse_schedule"] == "end_of_level"
+
+
+def test_syn_registration_provenance_shows_resolved_sobolev_defaults_and_explicit_values_win():
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    kw = dict(type_of_transform="SyNOnly", levels=(1,), reg_iterations=(3,), syn_metric="mse", regularizer="sobolev")
+    prov = syn_registration(fixed, moving, **kw)["provenance"]
+    assert prov["grad_step"] == pytest.approx(0.4)
+    assert prov["flow_sigma"] == pytest.approx(2.4 ** 0.5)
+    assert prov["sobolev_alpha"] == 2.25
+    assert prov["conservative_smooth"] is True
+    assert prov["inverse_schedule"] == "end_of_level"
+    prov = syn_registration(fixed, moving, grad_step=0.3, flow_sigma=2.0, sobolev_alpha=1.0,
+                            inverse_schedule="per_iteration", **kw)["provenance"]
+    assert prov["grad_step"] == 0.3
+    assert prov["flow_sigma"] == 2.0
+    assert prov["sobolev_alpha"] == 1.0
+    assert prov["inverse_schedule"] == "per_iteration"
+
+
+def test_syn_registration_levels_without_matching_reg_iterations_raises():
+    fixed, moving = _ants_pair_2d()
+    with pytest.raises(ValueError, match="given together"):
+        syn_registration(fixed, moving, type_of_transform="SyNOnly", syn_metric="mse", levels=(2, 1))
 
 
 def test_syn_registration_bspline_regularizer_supports_total_field_smoothing_too():

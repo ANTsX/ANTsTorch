@@ -612,6 +612,11 @@ def test_regadam_arm_differs_from_its_syn_counterpart(mock_mindboggle_dataset, t
         pair_idx=0, device="cpu", pairs_csv=pairs_csv, data_dir=data_dir,
         canonical_affine_dir=canonical_affine_dir, use_n4=False,
         reg_iterations=[3, 2, 1, 1],
+        # The mock volume is 24x28x24 (3x3x3 voxels at the coarsest level, 8x). On it,
+        # reg_adam with the syntx-aligned defaults (voxel-unit sigma) drifts globally and
+        # both arms end at Dice 0.0, which says nothing about the update rule. The previous
+        # defaults keep this test about what it is for: reg_adam != gradient descent.
+        syntx_defaults=False,
     )
     rec_syn = evaluate_mindboggle_pair(model=syn_model, **common)
     rec_regadam = evaluate_mindboggle_pair(model=regadam_model, **common)

@@ -97,6 +97,7 @@ run denoise_image \
 run n4_bias_field_correction \
     "${PYTHON}" tools/benchmarks/compare_n4_bias_field_correction.py ${IMAGE_ARGS[@]+"${IMAGE_ARGS[@]}"} \
         --device "${DEVICE}" \
+        --no-stable-accumulation \
         --output-dir "${OUT_DIR}/n4_bias_field_correction"
 
 run cortical_thickness \

@@ -20,6 +20,19 @@ import ants
 import pandas as pd
 
 
+def _dice_column(df):
+    """Column of ``ants.label_overlap_measures`` holding the true Sørensen-Dice.
+
+    ``MeanOverlap`` is 2|A∩B|/(|A|+|B|). ``TotalOrTargetOverlap`` is the
+    target overlap |A∩B|/|A| -- NOT Dice, and asymmetric in its arguments.
+    Matches ``syntx.deformation_metrics`` (which made the same fix).
+    """
+    for name in ('MeanOverlap', 'Dice', 'DiceCoefficient', 'SorensenDice'):
+        if name in df.columns:
+            return name
+    raise KeyError(f"Sørensen-Dice column ('MeanOverlap') not found; available: {list(df.columns)}")
+
+
 def compute_bidirectional_dice(fl, ml, fi, mi, fwdtransforms, invtransforms, whichtoinvert_inv=None):
     """Computes bidirectional fixed, moving, and symmetric mean Dice scores.
 
@@ -67,9 +80,16 @@ def compute_bidirectional_dice(fl, ml, fi, mi, fwdtransforms, invtransforms, whi
         transformlist=fwdtransforms,
         interpolator='nearestNeighbor'
     )
+    # Same physical space on both label maps (as syntx does).
+    fl.set_origin(fi.origin)
+    fl.set_spacing(fi.spacing)
+    fl.set_direction(fi.direction)
+    ml_warped.set_origin(fi.origin)
+    ml_warped.set_spacing(fi.spacing)
+    ml_warped.set_direction(fi.direction)
     ov_fixed = ants.label_overlap_measures(fl, ml_warped)
     df_fixed = ov_fixed[~ov_fixed['Label'].astype(str).isin(['All', '0', '0.0'])]
-    col_fixed = 'TotalOrTargetOverlap' if 'TotalOrTargetOverlap' in df_fixed.columns else 'TargetOverlap'
+    col_fixed = _dice_column(df_fixed)
     vals_fixed = pd.to_numeric(df_fixed[col_fixed], errors='coerce').to_numpy(dtype=np.float64)
     vals_fixed = vals_fixed[np.isfinite(vals_fixed) & (vals_fixed >= 0.0) & (vals_fixed <= 1.0)]
     dice_fixed = float(np.mean(vals_fixed)) if len(vals_fixed) > 0 else 0.0
@@ -81,9 +101,15 @@ def compute_bidirectional_dice(fl, ml, fi, mi, fwdtransforms, invtransforms, whi
         whichtoinvert=whichtoinvert_inv,
         interpolator='nearestNeighbor'
     )
+    ml.set_origin(mi.origin)
+    ml.set_spacing(mi.spacing)
+    ml.set_direction(mi.direction)
+    fl_warped.set_origin(mi.origin)
+    fl_warped.set_spacing(mi.spacing)
+    fl_warped.set_direction(mi.direction)
     ov_moving = ants.label_overlap_measures(ml, fl_warped)
     df_moving = ov_moving[~ov_moving['Label'].astype(str).isin(['All', '0', '0.0'])]
-    col_moving = 'TotalOrTargetOverlap' if 'TotalOrTargetOverlap' in df_moving.columns else 'TargetOverlap'
+    col_moving = _dice_column(df_moving)
     vals_moving = pd.to_numeric(df_moving[col_moving], errors='coerce').to_numpy(dtype=np.float64)
     vals_moving = vals_moving[np.isfinite(vals_moving) & (vals_moving >= 0.0) & (vals_moving <= 1.0)]
     dice_moving = float(np.mean(vals_moving)) if len(vals_moving) > 0 else 0.0

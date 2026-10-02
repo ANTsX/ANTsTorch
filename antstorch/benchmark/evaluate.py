@@ -665,11 +665,15 @@ def evaluate_mindboggle_pair(
         ``total_sigma`` (gaussian/sobolev/dsti, both ``_syn`` and
         ``_regadam``); ``gaussian_sigma_mode``/
         ``conservative_smooth`` (gaussian/sobolev/dsti, both ``_syn`` and
-        ``_regadam`` -- both default
-        to this port's own regularizer-formula conventions; pass
-        ``gaussian_sigma_mode="voxel"``/``conservative_smooth=True`` to instead
-        reproduce ``syntx.syn``'s own default numbers, see
-        :func:`antstorch.syn.syn_registration`); ``adam_betas``/``adam_eps``
+        ``_regadam`` -- both now default
+        to ``syntx.syn``'s conventions, via the syntx-aligned defaults of
+        :func:`antstorch.syn.syn_registration`; pass ``syntx_defaults=False``
+        to restore this port's previous defaults, or any single knob to
+        override it). With none of ``levels``/``reg_iterations``/``grad_step``/
+        ``flow_sigma``/``syn_metric`` given, every ``_syn``/``_regadam`` model
+        runs syn_registration()'s own per-regularizer syntx-aligned schedule
+        (the harness-wide ``DEFAULT_REG_ITERATIONS`` /
+        ``DEFAULT_REGISTRATION_LEVELS`` now only feed the non-SyN families); ``adam_betas``/``adam_eps``
         (any ``_regadam`` variant -- forwarded to
         :func:`antstorch.syn.syn_registration`'s own ``optimizer='reg_adam'``
         moment-decay parameters; ``optimizer`` itself is set internally via
@@ -743,18 +747,27 @@ def evaluate_mindboggle_pair(
             regularizer=regularizer,
             device=device,
             verbose=verbose,
-            levels=kwargs.get("levels", DEFAULT_REGISTRATION_LEVELS),
         )
         if registration_outprefix is not None:
             syn_kwargs["outprefix"] = registration_outprefix
-        syn_kwargs["reg_iterations"] = reg_iters
+        # levels / reg_iterations are NOT forced to the harness-wide defaults here:
+        # when the caller gives neither, syn_registration() resolves the syntx-aligned
+        # schedule for this regularizer/optimizer (e.g. (4,2,1) / (100,100,20) for
+        # gaussian). Only a lone ``reg_iterations`` with as many entries as the
+        # historical harness pyramid keeps the historical (8,4,2,1) levels, so
+        # callers/tests that pass a 4-entry reg_iterations keep working.
+        if "reg_iterations" in kwargs:
+            syn_kwargs["reg_iterations"] = reg_iters
+            if "levels" not in kwargs and len(reg_iters) == len(DEFAULT_REGISTRATION_LEVELS):
+                syn_kwargs["levels"] = DEFAULT_REGISTRATION_LEVELS
         for key in (
             "levels", "grad_step", "flow_sigma", "total_sigma",
             "update_field_mesh_size_at_base_level", "total_field_mesh_size_at_base_level",
             "update_field_spline_distance", "total_field_spline_distance",
             "bspline_enforce_stationary_boundary", "syn_metric", "neighborhood_radius",
             "antisymmetric", "inverse_method", "in_loop_inverse_steps", "padding_mode",
-            "gaussian_sigma_mode", "conservative_smooth",
+            "inverse_schedule", "end_of_level_inverse_steps", "syntx_parity", "use_analytical_gradients", "sobolev_alpha",
+            "gaussian_sigma_mode", "conservative_smooth", "syntx_defaults",
             "optimizer", "adam_betas", "adam_eps",
         ):
             if key in kwargs:

@@ -98,16 +98,15 @@ Documentation faisant autorité : docstring en tête de
 
 Aucun des quatre `*_regadam` n'a de contrepartie syntx propre : chacun est
 comparé au même bras syntx que son homologue de base (voir `_base_reg()`
-dans le script). `--matched` force `grad_step`/métrique de similarité/
-schedule de pyramide identiques des deux côtés pour `gaussian`/`sobolev`/
-`bspline` (les trois variantes à descente de gradient simple) ; `dsti` et
-les quatre `*_regadam` ne reçoivent que l'alignement de la formule du
-régularisateur (`conservative_smooth=True` pour sobolev/dsti,
-`gaussian_sigma_mode="voxel"` pour gaussian, rien pour bspline), pas
-l'alignement de schedule — puisque l'optimiseur syntx (`reg_adam`/TVF)
-diffère fondamentalement pour `dsti`, et que l'optimiseur `reg_adam` est
-précisément la variable testée pour les quatre `*_regadam`, forcer le reste
-n'isolerait rien. Voir projet §34 pour le détail de cette décision, et
+dans le script). Depuis le 2026-10-02, les défauts de `antstorch.syn.syn_registration()` sont alignés
+sur syntx (table `_SYNTX_DEFAULTS`, par couple régularisateur/optimiseur : métrique cc2,
+`grad_step`, `flow_sigma` = racine de la variance ITK de syntx, `sobolev_alpha`, schedule de pyramide,
+sigma gaussien en voxels, post-filtre conservateur pour sobolev/dsti, inverses en fin de
+niveau). La commande nue `python compare_syntx_antstorch_mindboggle.py` est donc la
+comparaison « matched » ; `--matched` est conservé comme option sans effet. Les
+`*_regadam` reçoivent le schedule et l'alignement de formule de leur homologue de base,
+mais gardent `grad_step=0.5` et l'optimiseur `reg_adam`. `--legacy-defaults` restaure les
+anciens défauts antstorch (`syntx_defaults=False`) pour reproduire les runs antérieurs. Voir projet §34 pour le détail de cette décision, et
 §40/§41 pour les bras `*_regadam` spécifiquement.
 
 ## Historique
