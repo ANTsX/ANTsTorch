@@ -1472,6 +1472,12 @@ class HybridLAMNrTrainer:
                     shift_cap=self._cfg(view, "shift_cap", None),
                     gen_clamp=float(self._cfg(view, "gen_clamp", 1.0e4)),
                 )
+                # Factorized (2+1)D options (first spatial axis = time). Only forwarded when set in the
+                # view's "model" block, so existing configs and older factories are unaffected.
+                for key in ("squeeze_time", "kernel_size", "temporal_init"):
+                    value = self._cfg(view, key, None)
+                    if value is not None:
+                        kwargs[key] = value
             model = factory(**kwargs)
         model = model.to(device=self.dev, dtype=torch.float32).train()
         if self.rank == 0:

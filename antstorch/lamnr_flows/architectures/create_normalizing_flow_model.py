@@ -159,6 +159,29 @@ def _check_power_of_two_divisibility(spatial: Sequence[int], L: int, dims: int) 
             f"Each spatial dim must be divisible by 2**L={req}. Got {spatial} with L={L}."
         )
 
+def _per_level_flags(value, L: int, name: str):
+    """A bool or a sequence of L bools -> list of L bools."""
+    if isinstance(value, (bool, int)):
+        return [bool(value)] * L
+    flags = [bool(v) for v in value]
+    if len(flags) != L:
+        raise ValueError(f"{name} must be a bool or a sequence of length L={L}; got {value!r}.")
+    return flags
+
+
+def _check_factorized_divisibility(spatial: Sequence[int], L: int, squeeze_time: Sequence[bool]) -> None:
+    """Axis 0 is squeezed only at the levels flagged True; axes 1 and 2 at every level."""
+    if len(spatial) != 3:
+        raise ValueError(f"Expected 3 spatial dims, got {len(spatial)}: {spatial}")
+    need = (2 ** sum(squeeze_time), 2 ** L, 2 ** L)
+    bad = [(s, r) for s, r in zip(spatial, need) if s % r]
+    if bad:
+        raise ValueError(
+            f"Spatial dims {tuple(spatial)} must be divisible by {need} for L={L} and "
+            f"squeeze_time={list(squeeze_time)} (first axis: 2**(levels that squeeze it))."
+        )
+
+
 @torch.no_grad()
 def _print_model_summary(model, input_shape, batch=2):
 
@@ -372,10 +395,20 @@ def create_glow_normalizing_flow_model_3d(
     grad_checkpoint: Optional[bool] = None,
     shift_cap: Optional[float] = None,
     gen_clamp: float = 1.0e4,
+    squeeze_time: Union[bool, Sequence[bool]] = True,
+    kernel_size: Optional[Sequence] = None,
+    temporal_init: Literal["default", "identity"] = "default",
     verbose: bool = False,
 ) -> nf.MultiscaleFlow:
     """
     Create a multiscale 3-D Glow model with bounded log-scales for numerical stability.
+
+    Factorized (2+1)D variant (``squeeze_time`` / ``kernel_size``): when the first spatial axis is time
+    (input ``(C, T, H, W)``, e.g. windows of consecutive frames), the defaults treat it like any other
+    axis (isotropic 3x3x3 kernels, 2x2x2 squeeze at every level). Setting ``squeeze_time=False`` at a level
+    squeezes only the last two axes there, so the time axis keeps its resolution and consecutive frames are
+    never packed into channels; with ``kernel_size=((1, 3, 3), (3, 1, 1), (1, 3, 3))`` the coupling networks
+    become spatial 3x3 / temporal / spatial 3x3. The default arguments reproduce the historical model exactly.
 
     The per-level forward ordering is **[GlowBlock3d] × K → Squeeze3d → Split** (with Squeeze3d packing
     2×2×2 neighborhoods, i.e., channels×8 and spatial dims halved). Consequently, on inverse each level
@@ -452,6 +485,23 @@ def create_glow_normalizing_flow_model_3d(
         is purely an inference-time numerical safety net, not a learned
         parameter, so it is safe to enable when loading an existing
         checkpoint without retraining.
+    squeeze_time : bool or Sequence[bool], default=True
+        Whether each level also squeezes the FIRST spatial axis (time for windows). One value per level
+        (index 0 = deepest level, as for ``K``), or a single bool for all levels. ``True`` everywhere is the
+        historical 2x2x2 squeeze (channels x8 per level before the split); ``False`` squeezes only the last
+        two axes (channels x4), which keeps that axis at full resolution there. With ``False`` the first axis
+        only needs to be divisible by ``2**(number of True levels)``; the other two by ``2**L``.
+        Channel plan: the channels entering a level are ``c_in``; its blocks see ``n * c_in`` (n = 8 or 4);
+        the latent peeled there has ``n * c_in / 2`` channels (``n * c_in`` at level 0), and the next level
+        receives ``n * c_in / 2``.
+    kernel_size : Sequence, optional
+        Kernel sizes of the three convolutions of every coupling network (first, middle, last); each entry an
+        int (isotropic) or a 3-sequence with one odd size per axis, e.g. ``((1, 3, 3), (3, 1, 1), (1, 3, 3))``
+        for a (2+1)D network when the first axis is time. None keeps the historical ``(3, 1, 3)``
+        (3x3x3, 1x1x1, 3x3x3). Forwarded to ``GlowBlock3d`` only when given.
+    temporal_init : {"default", "identity"}, default="default"
+        ``"identity"`` starts every purely temporal hidden convolution ((k, 1, 1), k > 1) as a per-frame
+        identity (see ``GlowBlock3d``). Forwarded to ``GlowBlock3d`` only when not "default".
     gen_clamp : float, default=1.0e4
         Forwarded to every GlowBlock3d (see its docstring): a symmetric
         nan_to_num+clamp bound applied to the block's output tensor after
@@ -485,19 +535,48 @@ def create_glow_normalizing_flow_model_3d(
     """
 
     C, H, W, D = input_shape
-    _check_power_of_two_divisibility((H, W, D), L=L, dims=3)
+    st = _per_level_flags(squeeze_time, L, "squeeze_time")
+    if all(st):
+        _check_power_of_two_divisibility((H, W, D), L=L, dims=3)   # historical check and message
+    else:
+        _check_factorized_divisibility((H, W, D), L=L, squeeze_time=st)
+    if temporal_init not in ("default", "identity"):
+        raise ValueError(f"temporal_init must be 'default' or 'identity', got {temporal_init!r}")
+    if kernel_size is not None:
+        kernel_size = [tuple(k) if isinstance(k, (list, tuple)) else int(k) for k in kernel_size]
+        if len(kernel_size) != 3:
+            raise ValueError(f"kernel_size needs 3 entries (first, middle, last conv), got {kernel_size!r}")
 
     if split_mode not in ("channel", "checkerboard"):
         raise ValueError(f"Unknown split_mode={split_mode!r}")
+
+    # Per-level plan, computed from the data side (level L-1) towards the deepest level (level 0).
+    # All-True squeeze_time gives c_in = C * 4**(L-1-i), blocks on 8 * c_in channels and latents of
+    # 4 * c_in channels (8 * c_in at level 0), i.e. the historical plan.
+    plan, c_cur, sp_cur = [None] * L, C, (H, W, D)
+    for i in reversed(range(L)):
+        f = (2 if st[i] else 1, 2, 2)
+        n = f[0] * f[1] * f[2]
+        sp_cur = (sp_cur[0] // f[0], sp_cur[1] // f[1], sp_cur[2] // f[2])
+        block_ch = n * c_cur
+        plan[i] = dict(factors=f, c_in=c_cur, block_ch=block_ch,
+                       lat_ch=(block_ch if i == 0 else block_ch // 2), spatial=sp_cur)
+        c_cur = block_ch // 2
+
+    block_kwargs = {}
+    if kernel_size is not None:
+        block_kwargs["kernel_size"] = kernel_size
+    if temporal_init != "default":
+        block_kwargs["temporal_init"] = temporal_init
 
     q0, flows, merges = [], [], []
 
     for i in range(L):
         # Channels entering level i in forward (top is i=L-1)
-        c_in = C * (4 ** (L - 1 - i))
+        c_in = plan[i]["c_in"]
 
         # Blocks actually run (in inverse) on post-unsqueeze activations
-        block_channels = 8 * c_in           # <-- key for 3-D
+        block_channels = plan[i]["block_ch"]   # <-- key for 3-D (8 * c_in with the full 2x2x2 squeeze)
 
         if split_mode == "channel" and (block_channels % 2 != 0):
             raise ValueError(f"Channel split needs even channels at level {i}, got {block_channels}.")
@@ -520,14 +599,16 @@ def create_glow_normalizing_flow_model_3d(
                 actnorm_s_cap=actnorm_scale_cap,
                 shift_cap=shift_cap,
                 gen_clamp=gen_clamp,
+                **block_kwargs,
             )
             for _ in range(k_level)
         ]
-        level_flows.append(nf.flows.Squeeze3d())
+        # Plain Squeeze3d() for the historical 2x2x2 squeeze (works with any antsnormflows version).
+        level_flows.append(nf.flows.Squeeze3d() if plan[i]["factors"] == (2, 2, 2)
+                           else nf.flows.Squeeze3d(factors=plan[i]["factors"]))
         flows.append(level_flows)
 
-        lat_ch = (8 * c_in) if i == 0 else (4 * c_in)
-        lat_shape = (lat_ch, H // (2 ** (L - i)), W // (2 ** (L - i)), D // (2 ** (L - i)))
+        lat_shape = (plan[i]["lat_ch"], *plan[i]["spatial"])
 
         q0.append(
             nfd.GlowBase(
