@@ -15,7 +15,7 @@ head. Projection heads map heterogeneous latent dimensions to the common
 Use one CSV row per biologically paired observation. Include a subject column
 so all visits from one participant remain in the same train/validation split.
 
-```csv
+```text
 SubjectID,TimepointID,T1MTLFile,T2MTLFile,Braak1_2,Braak3_4,Braak5_6
 OAS30001,d3746,/path/t1.nii.gz,/path/t2.nii.gz,1.153,1.163,1.259
 OAS30002,d1200,/path/t1.nii.gz,,,,

@@ -92,3 +92,7 @@ ENV/
 .mypy_cache/
 
 
+
+# Local documentation environment and example results
+.venv-docs/
+example_outputs/
