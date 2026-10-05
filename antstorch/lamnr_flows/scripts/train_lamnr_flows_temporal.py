@@ -41,6 +41,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from tqdm.auto import tqdm
 
 from antsnormflows.core import ConditionalNormalizingFlow
 from antsnormflows.distributions.base import ConditionalDiagGaussian
@@ -269,6 +270,8 @@ def main() -> None:
     p.add_argument("--ema-decay", type=float, default=0.995)
     p.add_argument("--eval-interval", type=int, default=100)
     p.add_argument("--patience-evals", type=int, default=0, help="stop after this many evaluations without improvement (0 = off)")
+    p.add_argument("--smooth-alpha", type=float, default=0.1, help="smoothing of the loss shown in the progress bar")
+    p.add_argument("--no-progress", action="store_true", help="disable the tqdm bar (periodic [val] lines are still printed)")
     p.add_argument("--resume", default="")
     p.add_argument("--auto-resume", action="store_true")
     # alignment (names as in the hybrid trainer)
@@ -348,8 +351,10 @@ def main() -> None:
     print(f"views {[v['name'] for v in views]} channels {[s[0].shape[0] for s in S]}; sequences train {len(tr_ix)}, val {len(va_ix)}; device {dev}")
 
     model = Temporal([s[0].shape[0] for s in S], a).to(dev)
-    print(f"parameters: {sum(q.numel() for q in model.parameters()) / 1e6:.2f} M; receptive field "
-          f"{1 + (ARCHS[a.arch][0] - 1) * sum(ARCHS[a.arch][1])} frames")
+    for vw, vm, pj in zip(views, model.views, model.proj):
+        n_par = sum(q.numel() for q in vm.parameters()) + sum(q.numel() for q in pj.parameters())
+        print(f"[init] {vw['name']} (temporal conditional signal1d): {n_par:,} parameters")
+    print(f"[init] receptive field {1 + (ARCHS[a.arch][0] - 1) * sum(ARCHS[a.arch][1])} frames; context dim {a.ctx_dim}; K {a.K}; arch {a.arch}")
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=a.weight_decay)
     ema = copy.deepcopy(model.state_dict()) if a.ema else None
     it, best, bad = 0, 1e9, 0
@@ -360,7 +365,7 @@ def main() -> None:
         opt.load_state_dict(ck["opt"])
         ema = ck.get("ema", ema)
         it, best = ck["it"], ck["best"]
-        print(f"resumed from {resume} at iteration {it}")
+        tqdm.write(f"[resume] from {resume} @ iter {it}")
 
     def lr_at(i):
         if i < a.warmup_iters:
@@ -380,6 +385,8 @@ def main() -> None:
     order, pos = rng.permutation(tr_ix), 0
     run_nll, run_align, run_n = np.zeros(len(S)), 0.0, 0
     t0 = time.time()
+    disp_loss = disp_align = None
+    pbar = tqdm(total=a.max_iter, initial=it, desc="train-temporal", disable=a.no_progress)
     while it < a.max_iter:
         model.train()
         for g in opt.param_groups:
@@ -412,6 +419,12 @@ def main() -> None:
         nn.utils.clip_grad_norm_(model.parameters(), a.grad_clip)
         opt.step()
         it += 1
+        pbar.update(1)
+        cur = float(loss.detach())
+        cur_align = run_align / max(run_n, 1)
+        disp_loss = cur if disp_loss is None else (1 - a.smooth_alpha) * disp_loss + a.smooth_alpha * cur
+        disp_align = cur_align if disp_align is None else (1 - a.smooth_alpha) * disp_align + a.smooth_alpha * cur_align
+        pbar.set_postfix(loss=f"{disp_loss:.4f}", align=f"{disp_align:.4f}")
         if ema is not None:
             with torch.no_grad():
                 for k, v in model.state_dict().items():
@@ -430,6 +443,7 @@ def main() -> None:
             if vt < best - 1e-4:
                 best, bad = vt, 0
                 save(out / "best.pt", weights, {"best_it": it})
+                tqdm.write(f"[ckpt] saved best.pt (iter {it}, val {vt:.6g})")
             else:
                 bad += 1
             save(out / "last.pt", weights)
@@ -437,13 +451,15 @@ def main() -> None:
                   [f"{x:.4f}" for x in vn] + [f"{vt:.4f}"]
             with open(log_path, "a") as f:
                 f.write(",".join(map(str, row)) + "\n")
-            print(f"it {it:6d}  lr {lr_at(it):.1e}  train " + " ".join(f"{n} {x / max(run_n, 1):.3f}" for n, x in zip(names, run_nll)) +
-                  f"  align {run_align / max(run_n, 1):.3f}  | val " + " ".join(f"{n} {x:.3f}" for n, x in zip(names, vn)) +
-                  f"  total {vt:.3f}  best {best:.3f}  [{(time.time() - t0) / 60:.1f} min]", flush=True)
+            tqdm.write(f"[val] iter={it} loss={vt:.6g} ({'EMA' if ema is not None else 'base'}; "
+                       + ", ".join(f"{n}={x:.4g}" for n, x in zip(names, vn)) + f"; best={best:.6g}; "
+                       + f"train " + ", ".join(f"{n}={x / max(run_n, 1):.4g}" for n, x in zip(names, run_nll))
+                       + f"; align={run_align / max(run_n, 1):.4g}; lr={lr_at(it):.2e}; {(time.time() - t0) / 60:.1f} min)")
             run_nll, run_align, run_n = np.zeros(len(S)), 0.0, 0
             if a.patience_evals and bad >= a.patience_evals:
-                print(f"early stop: no improvement for {bad} evaluations")
+                tqdm.write(f"[early-stop] no improvement for {bad} evaluations")
                 break
+    pbar.close()
     print(f"done. best validation NLL (sum over views) {best:.4f}; checkpoints in {out}")
 
 
