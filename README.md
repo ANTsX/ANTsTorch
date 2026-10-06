@@ -96,6 +96,12 @@ The ANTsTorch package is released under an [Apache License](https://github.com/A
 
 </details>
 
+## Documentation and examples
+
+- [Documentation guide](docs/index.md)
+- [Runnable examples](examples/README.md)
+- [Build the documentation and publish on Read the Docs](docs/publishing.md)
+
 ## Other resources
 
 - [Development tools](tools/README.md)

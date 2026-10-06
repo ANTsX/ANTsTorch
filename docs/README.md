@@ -29,3 +29,9 @@ The public Python API is exposed through the `antstorch` package. Application
 functions are available from the top-level namespace, while registration and
 benchmark functionality is organized under `antstorch.syn`,
 `antstorch.bspline_flows`, and `antstorch.benchmark`.
+
+## Documentation website
+
+- [Site contents](index.md)
+- [Runnable examples](examples/index.md)
+- [Build locally and publish on Read the Docs](publishing.md)
