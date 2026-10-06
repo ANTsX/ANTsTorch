@@ -58,7 +58,7 @@ from tqdm.auto import tqdm
 
 from antsnormflows.core import ConditionalNormalizingFlow
 from antsnormflows.distributions.base import ConditionalDiagGaussian, _clamp_log_scale
-from antsnormflows.flows import CoupledRationalQuadraticSpline, Permute
+from antsnormflows.flows import ActNorm, CoupledRationalQuadraticSpline, LULinearPermute, Permute
 from antstorch.lamnr_flows.misc.latent_alignment import LatentAlignmentLossManager, Projector
 
 try:                                                   # identical figures / grids to the hybrid trainer whenever it can be imported
@@ -124,7 +124,8 @@ except Exception:                                      # noqa: BLE001  (local co
         path.parent.mkdir(parents=True, exist_ok=True)
         canvas.save(path)
 
-ARCHS = {"long": (3, (1, 2, 4)), "mid": (3, (1, 2)), "short": (2, (1,))}      # (kernel, dilations): receptive field 15 / 7 / 2 frames
+ARCHS = {"long": (3, (1, 2, 4)), "mid": (3, (1, 2)), "short": (2, (1,)),      # (kernel, dilations): receptive field 15 / 7 / 2 frames
+         "lstm": (0, ())}                                                      # MoGlow-style recurrent context (whole past)
 LN2 = math.log(2.0)
 
 
@@ -219,14 +220,78 @@ class CausalTCN(nn.Module):
         return x
 
 
+class CausalLSTM(nn.Module):
+    """MoGlow-style recurrent context: LSTM over the past frames (B, C, T) -> (B, H, T); output j depends on x[..., :j+1] only."""
+
+    def __init__(self, c, h, layers=1):
+        super().__init__()
+        self.inp = nn.Linear(c, h)
+        self.rnn = nn.LSTM(h, h, layers, batch_first=True)
+
+    def forward(self, x):
+        y, _ = self.rnn(F.gelu(self.inp(x.transpose(1, 2))))
+        return y.transpose(1, 2)
+
+
+class NoCtx(nn.Module):
+    """Lets a context-free flow layer (ActNorm) sit in a ConditionalNormalizingFlow, which passes ``context=`` to every layer."""
+
+    def __init__(self, flow):
+        super().__init__()
+        self.flow = flow
+
+    def forward(self, z, context=None):
+        return self.flow(z)
+
+    def inverse(self, z, context=None):
+        return self.flow.inverse(z)
+
+
+class CondAffineCoupling(nn.Module):
+    """Glow/MoGlow affine coupling on vectors (B, C) with a context: the second half is scaled and shifted by an MLP of (first half, context).
+    Convention of antsnormflows: forward = latent -> data, inverse = data -> latent."""
+
+    def __init__(self, C, ctx, hidden, num_blocks, s_cap=2.0):
+        super().__init__()
+        self.c1, self.s_cap = (C + 1) // 2, s_cap
+        layers, d = [], self.c1 + ctx
+        for _ in range(max(num_blocks, 1)):
+            layers += [nn.Linear(d, hidden), nn.ReLU()]
+            d = hidden
+        last = nn.Linear(d, 2 * (C // 2))
+        nn.init.zeros_(last.weight)
+        nn.init.zeros_(last.bias)
+        self.net = nn.Sequential(*layers, last)
+
+    def _st(self, z1, context):
+        t, s = self.net(torch.cat([z1, context], -1)).chunk(2, -1)
+        return t, self.s_cap * torch.tanh(s / self.s_cap)
+
+    def forward(self, z, context=None):
+        z1, z2 = z[:, :self.c1], z[:, self.c1:]
+        t, s = self._st(z1, context)
+        return torch.cat([z1, z2 * torch.exp(s) + t], -1), s.sum(-1)
+
+    def inverse(self, x, context=None):
+        x1, x2 = x[:, :self.c1], x[:, self.c1:]
+        t, s = self._st(x1, context)
+        return torch.cat([x1, (x2 - t) * torch.exp(-s)], -1), -s.sum(-1)
+
+
 class ViewModel(nn.Module):
     def __init__(self, C, a):
         super().__init__()
-        k, dil = ARCHS[a.arch]
         self.C = C
-        self.enc = CausalTCN(C, a.ctx_dim, dil, k)
+        if a.arch == "lstm":
+            self.enc = CausalLSTM(C, a.ctx_dim)
+        else:
+            k, dil = ARCHS[a.arch]
+            self.enc = CausalTCN(C, a.ctx_dim, dil, k)
         flows = []
         for j in range(a.K):
+            if getattr(a, "coupling", "spline") == "affine":        # MoGlow-style block: ActNorm, invertible linear, affine coupling
+                flows += [NoCtx(ActNorm((C,))), LULinearPermute(C), CondAffineCoupling(C, a.ctx_dim, a.hidden, a.num_blocks)]
+                continue
             flows.append(CoupledRationalQuadraticSpline(C, a.num_blocks, a.hidden, num_context_channels=a.ctx_dim, num_bins=a.num_bins,
                                                         tail_bound=a.tail_bound, reverse_mask=bool(j % 2)))
             flows.append(Permute(C, mode="shuffle"))
@@ -327,6 +392,7 @@ class TemporalLAMNrTrainer:
             for k in ("arch", "ctx_dim", "K", "hidden", "num_blocks", "num_bins", "tail_bound", "proj_dim", "proj_hidden", "burn",
                       "noise", "noise_seed", "seed"):
                 setattr(args, k, cfg_a[k])
+            args.coupling = cfg_a.get("coupling", "spline")
             self.normalizers = ck["normalizers"]
             split = np.array(["test"] * len(self.meta))
         else:
@@ -337,6 +403,7 @@ class TemporalLAMNrTrainer:
                 if args.use_ckpt_config:
                     for k in ("arch", "ctx_dim", "K", "hidden", "num_blocks", "num_bins", "tail_bound", "proj_dim", "proj_hidden"):
                         setattr(args, k, ck["config"][k])
+                    args.coupling = ck["config"].get("coupling", "spline")
             split = self.meta.split.to_numpy().copy()
             if "val" not in set(split):
                 subs = np.array(sorted(set(self.meta.subject_id[split == "train"])))
@@ -463,7 +530,9 @@ class TemporalLAMNrTrainer:
         add("sample mode / temp", f"{args.sample_mode} / {args.sample_temp}")
         add("preview samples / columns", f"{args.preview_samples} / {args.preview_columns}")
         add("flow K / hidden / blocks / bins", f"{args.K} / {args.hidden} / {args.num_blocks} / {args.num_bins}")
-        add("encoder arch / ctx dim", f"{args.arch} / {args.ctx_dim}  (receptive field {1 + (ARCHS[args.arch][0] - 1) * sum(ARCHS[args.arch][1])} frames)")
+        rf = "whole past (LSTM)" if args.arch == "lstm" else f"{1 + (ARCHS[args.arch][0] - 1) * sum(ARCHS[args.arch][1])} frames"
+        add("encoder arch / ctx dim", f"{args.arch} / {args.ctx_dim}  (receptive field {rf})")
+        add("coupling", args.coupling)
         rows.append("-" * 72)
         for i, (view, model) in enumerate(zip(self.views, self.models)):
             add(f"view[{i}] name / type", f"{view['name']} / signal1d")
@@ -801,6 +870,8 @@ def _build_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--scale-cap", type=float, default=3.0)                            # accepted, unused
     # temporal model
     p.add_argument("--arch", default="long", choices=list(ARCHS))
+    p.add_argument("--coupling", default="spline", choices=["spline", "affine"],
+                   help="spline = rational-quadratic spline coupling; affine = MoGlow-style ActNorm + invertible linear + affine coupling")
     p.add_argument("--ctx-dim", type=int, default=64)
     p.add_argument("--K", type=int, default=6)
     p.add_argument("--hidden", type=int, default=128)
