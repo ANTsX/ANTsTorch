@@ -205,8 +205,8 @@ def save_grid_2d(
     x = _coerce_nchw_4d(x, target_hw=target_hw)
     x = to01(x, winsorize=winsorize)
     out_path = Path(out_path)
-    ext = "".join(out_path.suffixes).lower()
-    if ".nii" in ext:
+    name_lower = out_path.name.lower()
+    if name_lower.endswith(".nii") or name_lower.endswith(".nii.gz"):
         arr = x.detach().cpu().numpy()
         if arr.shape[0] > 1:
             arr_ants = np.transpose(arr.squeeze(1), (1, 2, 0))

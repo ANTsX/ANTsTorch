@@ -1070,7 +1070,11 @@ def _load_gaussian_model(gauss_path: Path) -> Dict[str, Any]:
     if "shapes_json" in keys:
         blob["shapes_by_view"]  = json.loads(str(np.array(npz["shapes_json"]).tolist()))
     if "slices_json" in keys:
-        blob["level_view_slices"] = json.loads(str(np.array(npz["slices_json"]).tolist()))
+        raw_slices = json.loads(str(np.array(npz["slices_json"]).tolist()))
+        blob["level_view_slices"] = [
+            {int(k): tuple(v) for k, v in row.items()} if isinstance(row, dict) else row
+            for row in raw_slices
+        ]
     if "typical_radii_json" in keys:
         blob["typical_radii_by_view"] = json.loads(
             str(np.array(npz["typical_radii_json"]).tolist())
@@ -2478,6 +2482,8 @@ class GlowToolBase(ABC):
         _validate_gauss_blob(gauss_blob)
         gauss_views = gauss_blob["views"]
         L = gauss_blob["L"]
+        if cfg_views is None:
+            cfg_views = gauss_views
 
         manifest_path = Path(args.manifest)
         cols = _read_manifest_csv(manifest_path)
@@ -2492,7 +2498,8 @@ class GlowToolBase(ABC):
         print(f"[gauss-impute] {N} subjects, obs={obs_names}, tgt={tgt_names}")
 
         # ── Encode observed views ────────────────────────────────────────
-        obs_latents_per_level: List[Optional[torch.Tensor]] = [None] * L
+        # obs_latents_by_view[v_name][l] has shape (N, D_v_l)
+        obs_latents_by_view: Dict[str, List[torch.Tensor]] = {}
         for v_name in obs_names:
             vi = view_names.index(v_name)
             model = self.build_model(cfg, device, target_size)
@@ -2504,16 +2511,17 @@ class GlowToolBase(ABC):
                 raise RuntimeError(f"Could not load weights for view '{v_name}'")
             self.prime_if_needed(model, target_size, device)
 
+            obs_latents_by_view[v_name] = [None] * L
             for i, img_path in enumerate(tqdm(per_view_paths[vi], desc=f"obs {v_name}")):
                 x = self.read_image(img_path, target_size).unsqueeze(0).to(device)
                 z_list = _encode_latents(model, x)
                 z_flat = _flatten_latents_by_level(z_list)
                 for l in range(L):
-                    if obs_latents_per_level[l] is None:
-                        obs_latents_per_level[l] = z_flat[l].cpu()
+                    if obs_latents_by_view[v_name][l] is None:
+                        obs_latents_by_view[v_name][l] = z_flat[l].cpu()
                     else:
-                        obs_latents_per_level[l] = torch.cat(
-                            [obs_latents_per_level[l], z_flat[l].cpu()], dim=0
+                        obs_latents_by_view[v_name][l] = torch.cat(
+                            [obs_latents_by_view[v_name][l], z_flat[l].cpu()], dim=0
                         )
                 del x, z_list, z_flat
                 gc.collect()
@@ -2534,58 +2542,93 @@ class GlowToolBase(ABC):
                 raise RuntimeError(f"Could not load weights for target view '{tgt_name}'")
             self.prime_if_needed(model, target_size, device)
 
+            # Precompute regression projection operators per level
+            level_ops = []
+            for l in range(L):
+                mu_l = np.asarray(gauss_blob["mu"][l], dtype=np.float64)
+                Sigma_l = gauss_blob["Sigma"][l]
+                obs_idx = np.concatenate([
+                    np.arange(*_level_view_slice(gauss_blob, l, gauss_views.index(ov)))
+                    for ov in obs_names
+                ])
+                tgt_idx = np.arange(*_level_view_slice(gauss_blob, l, tgt_vi_gauss))
+                shapes_l = gauss_blob["shapes_by_view"][tgt_vi_gauss][l]
+
+                if isinstance(Sigma_l, dict) and Sigma_l.get("type") == "lowrank":
+                    op = {
+                        "type": "lowrank",
+                        "U": np.asarray(Sigma_l["U"], dtype=np.float64),
+                        "eig": np.asarray(Sigma_l["eig"], dtype=np.float64),
+                        "sigma2": float(Sigma_l.get("sigma2", 0.0)),
+                        "obs_idx": obs_idx,
+                        "tgt_idx": tgt_idx,
+                        "mu_l": mu_l,
+                        "shapes_l": shapes_l,
+                    }
+                else:
+                    S = np.asarray(Sigma_l, dtype=np.float32)
+                    S_OO = torch.from_numpy(S[np.ix_(obs_idx, obs_idx)])
+                    S_TO = torch.from_numpy(S[np.ix_(tgt_idx, obs_idx)])
+                    ridge = max(1e-4 * float(torch.trace(S_OO)) / len(obs_idx), 1e-4)
+                    ridge_I = ridge * torch.eye(len(obs_idx), dtype=torch.float32)
+                    try:
+                        W_l = torch.linalg.solve(S_OO + ridge_I, S_TO.T).T
+                    except Exception:
+                        W_l = S_TO @ torch.linalg.pinv(S_OO)
+                    op = {
+                        "type": "full",
+                        "W_l": W_l,
+                        "obs_idx": obs_idx,
+                        "tgt_idx": tgt_idx,
+                        "mu_l": torch.from_numpy(mu_l.astype(np.float32)),
+                        "shapes_l": shapes_l,
+                    }
+                level_ops.append(op)
+
             for i in tqdm(range(N), desc=f"impute {tgt_name}"):
                 z_imputed = []
                 for l in range(L):
-                    mu_l      = np.asarray(gauss_blob["mu"][l], dtype=np.float64)
-                    Sigma_l   = gauss_blob["Sigma"][l]
-                    slices_l  = gauss_blob["level_view_slices"][l]
+                    op = level_ops[l]
+                    obs_idx = op["obs_idx"]
+                    tgt_idx = op["tgt_idx"]
+                    mu_l = op["mu_l"]
 
-                    # Observed indices
-                    obs_idx = np.concatenate([
-                        np.arange(*slices_l[gauss_views.index(ov)])
+                    # Concatenate observations across all observed views for subject i
+                    z_obs_parts = [
+                        obs_latents_by_view[ov][l][i].float().ravel()
                         for ov in obs_names
-                        if gauss_views.index(ov) in {int(k) for k in slices_l}
-                    ])
-                    tgt_idx = np.arange(*slices_l[tgt_vi_gauss])
+                    ]
+                    z_obs_i = torch.cat(z_obs_parts, dim=0) if len(z_obs_parts) > 1 else z_obs_parts[0]
 
-                    z_obs_i = obs_latents_per_level[l][i].float().numpy()
-                    z_obs_centered = z_obs_i[obs_idx] - mu_l[obs_idx]
-
-                    if isinstance(Sigma_l, dict) and Sigma_l.get("type") == "lowrank":
-                        U      = np.asarray(Sigma_l["U"], dtype=np.float64)
-                        eig    = np.asarray(Sigma_l["eig"], dtype=np.float64)
-                        sigma2 = float(Sigma_l.get("sigma2", 0.0))
+                    if op["type"] == "lowrank":
+                        z_obs_np = z_obs_i.numpy()
+                        mu_l_np = mu_l if isinstance(mu_l, np.ndarray) else mu_l.numpy()
+                        z_obs_centered = z_obs_np - mu_l_np[obs_idx]
                         cond_mean = _cond_mean_block_lowrank(
-                            U, eig, sigma2,
+                            op["U"], op["eig"], op["sigma2"],
                             idx_U=obs_idx, idx_T=tgt_idx,
-                            mu=mu_l, ZO=z_obs_centered[np.newaxis, :],
+                            mu=mu_l_np, ZO=z_obs_centered[np.newaxis, :],
                         ).ravel()
+                        z_tgt = mu_l_np[tgt_idx] + cond_mean * float(args.tau)
+                        z_tgt = np.clip(z_tgt, -20.0, 20.0)
+                        z_tgt_t = torch.from_numpy(z_tgt.astype(np.float32)).view(1, *op["shapes_l"]).to(device)
                     else:
-                        S = np.asarray(Sigma_l, dtype=np.float64)
-                        S_OO = S[np.ix_(obs_idx, obs_idx)]
-                        S_TO = S[np.ix_(tgt_idx, obs_idx)]
-                        try:
-                            S_OO_inv = np.linalg.solve(
-                                S_OO + 1e-6 * np.eye(len(obs_idx)),
-                                np.eye(len(obs_idx))
-                            )
-                        except np.linalg.LinAlgError:
-                            S_OO_inv = np.linalg.pinv(S_OO)
-                        cond_mean = S_TO @ S_OO_inv @ z_obs_centered
+                        z_obs_centered = z_obs_i - mu_l[obs_idx]
+                        cond_mean = op["W_l"] @ z_obs_centered
+                        z_tgt = mu_l[tgt_idx] + cond_mean * float(args.tau)
+                        z_tgt = torch.clamp(z_tgt, -20.0, 20.0)
+                        z_tgt_t = z_tgt.view(1, *op["shapes_l"]).to(device)
 
-                    z_tgt = mu_l[tgt_idx] + cond_mean * float(args.tau)
-                    z_tgt = np.clip(z_tgt, -20.0, 20.0)
-
-                    shapes_l = gauss_blob["shapes_by_view"][tgt_vi_gauss][l]
-                    z_tgt_t  = torch.from_numpy(
-                        z_tgt.astype(np.float32)
-                    ).view(1, *shapes_l).to(device)
                     z_imputed.append(z_tgt_t)
 
                 x_hat = self.decode_latents(model, z_imputed, target_size)
 
-                subj_stem = Path(per_view_paths[view_names.index(tgt_name)][i]).stem
+                subj_path = Path(per_view_paths[view_names.index(tgt_name)][i])
+                subj_stem = subj_path.name
+                for sfx in [".nii.gz", ".nii", ".png", ".jpg", ".jpeg"]:
+                    if subj_stem.endswith(sfx):
+                        subj_stem = subj_stem[:-len(sfx)]
+                        break
                 ext = f".{args.output_format}"
                 out_path = out_dir / f"{subj_stem}_{tgt_name}{ext}"
                 self.save_volume(x_hat, out_path)
@@ -2871,6 +2914,8 @@ class GlowToolBase(ABC):
 
         gauss_blob = _load_gaussian_model(Path(args.gauss))
         views, _, shapes_by_view, L = _validate_gauss_blob(gauss_blob)
+        if cfg_views is None:
+            cfg_views = views
 
         view_names = [v.strip() for v in args.views.split(",") if v.strip()]
         vi = int(args.view_index)
@@ -2905,9 +2950,13 @@ class GlowToolBase(ABC):
                     if v.dim() == len(shapes_by_view[v_idx_gauss][l]):
                         v = v.unsqueeze(0)
                     return v.to(device=device, dtype=torch.float32)
-                return torch.from_numpy(
-                    np.asarray(value, dtype=np.float32)
-                ).view(1, *shapes_by_view[v_idx_gauss][l]).to(device)
+                arr = np.asarray(value, dtype=np.float32).ravel()
+                shp = shapes_by_view[v_idx_gauss][l]
+                expected_len = int(np.prod(shp))
+                if arr.size != expected_len:
+                    a, b = _level_view_slice(gauss_blob, l, v_idx_gauss)
+                    arr = arr[a:b]
+                return torch.from_numpy(arr).view(1, *shp).to(device)
 
             def _build_z(source_per_level):
                 return [_to_z_tensor(source_per_level[l], l) for l in range(L)]
@@ -3031,12 +3080,13 @@ class GlowToolBase(ABC):
             for s_i in tqdm(range(mc_n), desc="MC samples"):
                 z_samp = []
                 for l in range(L):
-                    mu_l  = np.asarray(mu_list[l], dtype=np.float64)
-                    Sig_l = Sigma_list[l] if isinstance(Sigma_list, (list, tuple)) else Sigma_list
                     shp   = shapes_by_view[v_idx_gauss][l]
                     D_l   = int(np.prod(shp))
+                    a, b  = _level_view_slice(gauss_blob, l, v_idx_gauss)
+                    mu_l  = np.asarray(mu_list[l], dtype=np.float64).ravel()[a:b]
+                    Sig_l = Sigma_list[l] if isinstance(Sigma_list, (list, tuple)) else Sigma_list
                     if isinstance(Sig_l, dict) and Sig_l.get("type") == "lowrank":
-                        U      = np.asarray(Sig_l["U"], dtype=np.float64)
+                        U      = np.asarray(Sig_l["U"], dtype=np.float64)[a:b, :]
                         eig    = np.asarray(Sig_l["eig"], dtype=np.float64)
                         sigma2 = float(Sig_l.get("sigma2", 0.0))
                         xi = np.random.randn(U.shape[1]) * float(args.mc_temp)
@@ -3046,10 +3096,12 @@ class GlowToolBase(ABC):
                         S = np.asarray(Sig_l, dtype=np.float64)
                         noise = np.random.randn(D_l)
                         if S.ndim == 1:
-                            z_np = mu_l + noise * (S ** 0.5) * float(args.mc_temp)
+                            S_view = S[a:b]
+                            z_np = mu_l + noise * (S_view ** 0.5) * float(args.mc_temp)
                         else:
+                            S_view = S[a:b, a:b]
                             try:
-                                L_ch = np.linalg.cholesky(S + 1e-8 * np.eye(D_l))
+                                L_ch = np.linalg.cholesky(S_view + 1e-8 * np.eye(D_l))
                                 z_np = mu_l + L_ch @ noise * float(args.mc_temp)
                             except np.linalg.LinAlgError:
                                 z_np = mu_l
@@ -3430,6 +3482,8 @@ class GlowToolBase(ABC):
 
         gauss_blob = _load_gaussian_model(Path(args.gauss))
         gauss_views, _, shapes_by_view, L = _validate_gauss_blob(gauss_blob)
+        if cfg_views is None:
+            cfg_views = gauss_views
         mu_list = gauss_blob["mu"]
         Sigma_list = gauss_blob.get("Sigma", None)
 
@@ -3614,6 +3668,8 @@ class GlowToolBase(ABC):
 
         gauss_blob = _load_gaussian_model(Path(args.gauss))
         gauss_views, _, shapes_by_view, L = _validate_gauss_blob(gauss_blob)
+        if cfg_views is None:
+            cfg_views = gauss_views
         mu_list    = gauss_blob["mu"]
         Sigma_list = gauss_blob.get("Sigma", None)
 
