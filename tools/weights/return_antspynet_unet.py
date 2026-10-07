@@ -104,7 +104,9 @@ def return_antspynet_unet(
             if verbose:
                 print(f"Getting antspynet network weights:  {prefix}")
             import antspynet as _apn
-            resolved_weights = _apn.get_pretrained_network(prefix)
+            resolved_weights = _apn.get_pretrained_network(
+                prefix, **({"target_file_name": "brainExtractionPet.weights.h5"}
+                           if task == "brain_extraction_pet" else {}))
         else:
             resolved_weights = weights_file
 
