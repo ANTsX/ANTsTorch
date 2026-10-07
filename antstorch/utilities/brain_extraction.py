@@ -66,6 +66,7 @@ def brain_extraction(image,
                      verbose: bool = False):
     """
     Mirror antspynet brain_extraction() behavior with Torch backbone:
+      Supports PET with modality="pet" (brainExtractionPet_pytorch weights).
       - same modality routing and templates
       - same center-of-mass Euler3D alignment
       - same intensity normalization policy
@@ -124,6 +125,8 @@ def brain_extraction(image,
         weights_prefix = "brainExtractionRobustBOLD"; is_standard_network = True
     elif modality == "fa":
         weights_prefix = "brainExtractionRobustFA"; is_standard_network = True
+    elif modality == "pet":
+        weights_prefix = "brainExtractionPet"; is_standard_network = True
     elif modality == "mra":
         weights_prefix = "brainExtractionMra"; is_standard_network = True
     elif modality == "t1threetissue":
@@ -155,7 +158,12 @@ def brain_extraction(image,
         reorient_template = xfrm_tmp.apply_to_image(reorient_template)
     else:
         reorient_template = ants.image_read(get_antstorch_data("S_template3"))
-        if is_standard_network and (modality != "t1.v1" and modality != "mra"):
+        if modality == "pet":
+            reorient_template = ants.resample_image(
+                reorient_template, resample_params=(1.5, 1.5, 1.5))
+            reorient_template = ants.pad_or_crop_image_to_size(
+                reorient_template, (136, 176, 176))
+        elif is_standard_network and (modality != "t1.v1" and modality != "mra"):
             ants.set_spacing(reorient_template, (1.5, 1.5, 1.5))
     resampled_image_size = reorient_template.shape
 
@@ -191,6 +199,7 @@ def brain_extraction(image,
         strides=(2, 2, 2),
         dropout_rate=0.0,
         pad_crop="center",
+        additional_options=("kerasDeconvolutionStyle" if modality == "pet" else None),
         mode=mode)
 
     ret = model.load_state_dict(sd, strict=False)

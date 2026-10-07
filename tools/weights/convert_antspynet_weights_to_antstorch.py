@@ -375,9 +375,9 @@ def _find_main_out_keys(sd_view: Dict[str, torch.Tensor], number_of_outputs: int
 
 # ---------- Main conversion ----------
 
-def convert_task(task: str, out_prefix: str, deconv_flip: bool = False, verbose: bool = True, attention_gating: bool | None = None) -> str:
+def convert_task(task: str, out_prefix: str, deconv_flip: bool = False, verbose: bool = True, attention_gating: bool | None = None, weights_file: str | None = None) -> str:
     # Build models
-    kmodel, kspec = return_antspynet_unet(task, load_weights=True, verbose=verbose)
+    kmodel, kspec = return_antspynet_unet(task, load_weights=True, weights_file=weights_file, verbose=verbose)
     tmodel, tspec = return_antstorch_unet(task, weights_path=None, strict=False, verbose=verbose)
 
     dimension = int(tspec.get("dimension", 3))
@@ -637,6 +637,7 @@ def convert_task(task: str, out_prefix: str, deconv_flip: bool = False, verbose:
 
 def main():
     p = argparse.ArgumentParser()
+    p.add_argument("--weights-file", help="Local ANTsPyNet weights, including Keras 3 .weights.h5 files.")
     p.add_argument("--task", type=str, required=True)
     p.add_argument("--out-prefix", type=str, required=True)
     p.add_argument("--deconv-flip", type=str, default="noflip", choices=["flip", "noflip"])
@@ -646,7 +647,7 @@ def main():
 
     deconv_flip = (args.deconv_flip == "flip")
     attn_flag = None if args.attention_gating == "auto" else (args.attention_gating == "on")
-    convert_task(args.task, args.out_prefix, deconv_flip=deconv_flip, verbose=args.verbose, attention_gating=attn_flag)
+    convert_task(args.task, args.out_prefix, deconv_flip=deconv_flip, verbose=args.verbose, attention_gating=attn_flag, weights_file=args.weights_file)
 
 
 if __name__ == "__main__":
