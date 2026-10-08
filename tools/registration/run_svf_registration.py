@@ -55,6 +55,7 @@ import json
 import time
 from pathlib import Path
 
+import torch  # noqa: F401  (keep BEFORE `import ants`: OpenMP runtime load order, see tests/conftest.py)
 import ants
 import torch
 

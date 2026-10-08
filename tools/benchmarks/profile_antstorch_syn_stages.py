@@ -12,6 +12,7 @@ Does two things:
      seconds, % of wall. Iterations are shortened (default 10,10,5 / 10,10,5,1) -- ratios
      stay valid, runtime drops ~10x.
 """
+import torch  # noqa: F401  (keep BEFORE any `import ants`: OpenMP runtime load order, see tests/conftest.py)
 import argparse, collections, functools, os, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
