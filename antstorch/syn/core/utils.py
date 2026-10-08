@@ -3,6 +3,7 @@
 Ported from ``syntx.core.utils`` (PyTorch backend only).
 """
 
+import numpy as np
 import torch
 
 
@@ -285,3 +286,34 @@ def normalize_image(
         )
 
     return image.new_image_like(norm_arr) if is_ants else norm_arr
+
+
+def require_finite_images(**images) -> None:
+    """Raise ``ValueError`` when an input image holds NaN/Inf voxels.
+
+    Ported from ``syntx.core.utils.require_finite_images`` (2026-10-07 fix,
+    see project doc: a NaN voxel in fixed/moving made
+    :func:`antstorch.syn.robust_affine.robust_affine` return a ``SUCCESS``
+    status with a NaN affine, and :func:`antstorch.syn.syn_registration`
+    then failed downstream with a cryptic, unrelated-looking error -- this
+    checks at the entry point instead, with a clear, named error.
+
+    ``images`` maps the argument name (``'fixed'``, ``'moving'``, ...) to an
+    ``ants.ANTsImage``, a list/tuple of them (multi-channel), or ``None``;
+    non-image items (paths, arrays without a ``.numpy()`` method) are
+    skipped rather than raising, same as upstream.
+    """
+    for name, img in images.items():
+        items = img if isinstance(img, (list, tuple)) else [img]
+        for k, item in enumerate(items):
+            if item is None or not hasattr(item, "numpy"):
+                continue
+            arr = item.numpy()
+            n_bad = int(arr.size - np.count_nonzero(np.isfinite(arr)))
+            if n_bad:
+                label = f"{name}[{k}]" if isinstance(img, (list, tuple)) else name
+                raise ValueError(
+                    f"{label} contains {n_bad} non-finite voxel(s) (NaN/Inf) of {arr.size}; "
+                    "registration needs finite intensities -- mask them out or replace them "
+                    "(e.g. np.nan_to_num on the array, or ants.mask_image) before registering"
+                )

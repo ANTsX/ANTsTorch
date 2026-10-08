@@ -94,10 +94,12 @@ from .utils import (
     normalize_tensor,
     auto_select_intensity_percentiles,
     normalize_image,
+    require_finite_images,
 )
 
 __all__ = [
     'get_rotation_matrix',
+    'require_finite_images',
     'HierarchicalAffine',
     'grid_to_physical_affine_torch',
     'physical_to_grid_affine',

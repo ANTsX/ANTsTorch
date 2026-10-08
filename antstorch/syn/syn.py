@@ -132,14 +132,86 @@ def _gaussian_blur_image(image: Tensor, sigma: float) -> Tensor:
     return convolution(padded, kernel, groups=image.shape[1])
 
 
+def _shrunk_torch_shape(torch_shape: Tuple[int, ...], factor: int, syntx_parity: bool = False) -> Tuple[int, ...]:
+    """Per-axis spatial shape after shrinking ``torch_shape`` by ``factor``.
+
+    The exact formula ``_downsample_image``/``_fit_syn_level`` actually use to
+    build each pyramid level -- factored out so ``_validate_pyramid_levels``
+    (below) can predict every level's shape *before* any tensor work runs,
+    from metadata alone, without drifting from the real downsampling code.
+    """
+    if factor == 1:
+        return tuple(torch_shape)
+    if syntx_parity:
+        # syntx: F.interpolate(scale_factor=1/factor) -> floor(size / factor)
+        return tuple(max(2, int(math.floor(size * (1.0 / factor)))) for size in torch_shape)
+    return tuple(max(2, (size - 1) // factor + 1) for size in torch_shape)
+
+
+def _validate_pyramid_levels(
+    torch_shape: Tuple[int, ...],
+    levels: Sequence[int],
+    window_size: int,
+    syntx_parity: bool = False,
+) -> None:
+    """Reject a SyN resolution pyramid whose coarsest level(s) are too small
+    to support the local similarity window, for ANY ``regularizer``/
+    ``optimizer`` combination.
+
+    ``_fit_syn_level`` computes the similarity loss (``cc2``/``lncc``/etc.)
+    with a local window of ``window_size`` voxels on a side
+    (``2 * neighborhood_radius + 1``). When a pyramid level's shrunk shape
+    has an axis smaller than that window, the local-similarity computation
+    is asked to look at a neighborhood larger than the image itself -- a
+    degenerate level that can silently produce near-zero loss/gradient (and
+    hence a near-identity or garbage warp) regardless of which regularizer
+    or optimizer is in use; the fluid regularizers ('sobolev'/'dsti') make it
+    worse still, since 'dsti''s Dirichlet boundary condition forces the
+    field to zero at every face of a level that small, but the root problem
+    -- a pyramid level too small for the similarity metric -- is shared by
+    every ``regularizer``/``optimizer`` pair that reaches this loop (see the
+    project doc, "pyramide dégénérée / dsti dice=0.0").
+
+    This caught, concretely: an 8x-shrink level of a 24x28x24 test image
+    collapsing to (3, 4, 3) voxels against the default ``window_size=5``
+    (``neighborhood_radius=2``) -- ``gaussian``/``bspline`` degraded there
+    without raising (dice 0.10-0.31 on that fixture), ``dsti``/``sobolev``
+    collapsed to dice 0.0 because of the added Dirichlet-boundary/
+    conservative-smoothing passes, but all four were already operating on a
+    pyramid level that could not support the chosen similarity window.
+
+    Raises
+    ------
+    ValueError
+        Naming every offending level (1-indexed), its shrink factor, and the
+        resulting shape, with a suggestion to drop/soften that level.
+    """
+    offending = []
+    for level_index, factor in enumerate(levels):
+        shrunk = _shrunk_torch_shape(tuple(torch_shape), int(factor), syntx_parity)
+        if min(shrunk) < window_size:
+            offending.append((level_index, int(factor), shrunk))
+    if offending:
+        details = "; ".join(
+            f"level {idx + 1}/{len(levels)} (shrink_factor={factor}) -> shape {shape}"
+            for idx, factor, shape in offending
+        )
+        raise ValueError(
+            f"Pyramid level too small for the similarity window (window_size={window_size}, "
+            f"from neighborhood_radius): {details}. The fixed/moving image shape is "
+            f"{tuple(torch_shape)}; every resolution level's shrunk shape must have every axis "
+            f">= window_size. Use fewer/smaller shrink factors in 'levels' (and a matching "
+            "'reg_iterations'), or a smaller 'neighborhood_radius', for this image size. This "
+            "check applies regardless of 'regularizer'/'optimizer': a level this small produces "
+            "unreliable or degenerate registration (near-zero gradient, near-identity or "
+            "collapsed warp) for every combination, not only 'dsti'/'sobolev'."
+        )
+
+
 def _downsample_metadata(meta: Dict[str, tuple], factor: int, syntx_parity: bool = False) -> Dict[str, tuple]:
     if factor == 1:
         return meta
-    if syntx_parity:
-        # syntx: F.interpolate(scale_factor=1/factor) -> floor(size / factor)
-        torch_shape = tuple(max(2, int(math.floor(size * (1.0 / factor)))) for size in meta["torch_shape"])
-    else:
-        torch_shape = tuple(max(2, (size - 1) // factor + 1) for size in meta["torch_shape"])
+    torch_shape = _shrunk_torch_shape(meta["torch_shape"], factor, syntx_parity)
     shape_itk = tuple(reversed(torch_shape))
     extent = tuple((size - 1) * spacing for size, spacing in zip(meta["shape"], meta["spacing"]))
     spacing = tuple(e / max(size - 1, 1) for e, size in zip(extent, shape_itk))
@@ -1014,6 +1086,9 @@ def syn_registration(
     if sobolev_alpha is None:
         sobolev_alpha = _defaults["sobolev_alpha"]
 
+    from .core.utils import require_finite_images
+    require_finite_images(fixed=fixed, moving=moving)
+
     if fixed.dimension != moving.dimension:
         raise ValueError("fixed and moving must have the same dimension")
     if fixed.dimension not in (2, 3):
@@ -1289,6 +1364,13 @@ def syn_registration(
 
     window_size = 2 * int(neighborhood_radius) + 1
     num_levels = len(levels)
+
+    # Guard against a degenerate pyramid level before any per-level fitting
+    # runs, for every regularizer/optimizer combination alike -- see
+    # _validate_pyramid_levels's docstring for why this is not specific to
+    # 'dsti'/'sobolev' even though that is where it was first observed to
+    # silently produce dice=0.0.
+    _validate_pyramid_levels(fixed_meta_full["torch_shape"], levels, window_size, syntx_parity)
 
     warp_l2r = warp_r2l = warp_l2r_inv = warp_r2l_inv = None
     level_loss_history = []

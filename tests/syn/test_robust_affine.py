@@ -251,3 +251,18 @@ def test_compute_fov_center_is_geometric_center():
     center = compute_fov_center(fixed)
     assert abs(center[0] - 9.5) < 1e-6
     assert abs(center[1] - 14.5) < 1e-6
+
+
+def test_robust_affine_rejects_nan_voxel_in_fixed_or_moving():
+    """2026-10-07 fix (ported from syntx): a NaN voxel used to silently
+    produce a SUCCESS status with a NaN affine.mat; it must now raise
+    ValueError at the entry point instead, before any fitting runs."""
+    clean = ants.from_numpy(np.random.rand(16, 16).astype(np.float32))
+    bad_arr = np.random.rand(16, 16).astype(np.float32)
+    bad_arr[3, 3] = np.nan
+    bad = ants.from_numpy(bad_arr)
+
+    with pytest.raises(ValueError, match="non-finite"):
+        robust_affine(bad, clean, mode="com_only")
+    with pytest.raises(ValueError, match="non-finite"):
+        robust_affine(clean, bad, mode="com_only")
