@@ -2125,7 +2125,7 @@ class GlowToolBase(ABC):
             """
             if threshold is None:
                 threshold = 1e6
-            N_enc = min(len(latents_per_view[vi_][0]) for vi_ in range(V))
+            N_enc = min(sum(chunk.shape[0] for chunk in latents_per_view[vi_][0]) for vi_ in range(V))
             bad_indices = set()
             per_level_info = []
 
@@ -2190,7 +2190,7 @@ class GlowToolBase(ABC):
 
 
         if args.no_scrub:
-            N_enc = min(len(latents_per_view[vi_][0]) for vi_ in range(V))
+            N_enc = min(sum(chunk.shape[0] for chunk in latents_per_view[vi_][0]) for vi_ in range(V))
             keep_idx = list(range(N_enc))
             print(f"[gauss-fit] no-scrub active: forcing all {len(keep_idx)} subjects.")
         else:
@@ -3068,7 +3068,9 @@ class GlowToolBase(ABC):
                     import ants as _ants
                     arr = x_mu.squeeze().cpu().numpy()
                     img = _ants.from_numpy(arr)
-                    arr2 = _ants.iMath_sharpen(img).numpy()
+                    # Match the historical 2D template smoothing before sharpening.
+                    smooth = _ants.smooth_image(img, 1.0) if self.ndim == 4 else img
+                    arr2 = _ants.iMath_sharpen(smooth).numpy()
                     x_mu = torch.from_numpy(arr2).view_as(x_mu)
                 except Exception as e:
                     print(f"[warn] sharpen failed: {e}")

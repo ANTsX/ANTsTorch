@@ -969,6 +969,9 @@ def robust_affine(
         not ``'pytorch'``.
     """
     import ants
+    from .core.utils import require_finite_images
+
+    require_finite_images(fixed=fixed, moving=moving)
 
     if backend != "pytorch":
         raise ValueError(f"backend={backend!r} is not supported; antstorch.syn.robust_affine is PyTorch-only")

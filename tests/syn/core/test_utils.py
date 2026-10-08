@@ -6,6 +6,7 @@ from antstorch.syn.core import (
     normalize_tensor,
     auto_select_intensity_percentiles,
     normalize_image,
+    require_finite_images,
 )
 
 
@@ -102,3 +103,43 @@ def test_normalize_image_does_not_short_circuit_unnormalized_input():
     normalized = normalize_image(array, method='minmax')
     assert normalized.min() == pytest.approx(0.0, abs=1e-6)
     assert normalized.max() == pytest.approx(1.0, abs=1e-6)
+
+
+def test_require_finite_images_accepts_clean_images():
+    import ants
+    clean = ants.from_numpy(np.ones((4, 4), dtype=np.float32))
+    require_finite_images(fixed=clean, moving=clean)  # must not raise
+
+
+def test_require_finite_images_rejects_nan_voxel():
+    import ants
+    arr = np.ones((4, 4), dtype=np.float32)
+    arr[1, 1] = np.nan
+    bad = ants.from_numpy(arr)
+    clean = ants.from_numpy(np.ones((4, 4), dtype=np.float32))
+    with pytest.raises(ValueError, match="non-finite"):
+        require_finite_images(fixed=bad, moving=clean)
+
+
+def test_require_finite_images_rejects_inf_voxel_and_names_the_argument():
+    import ants
+    arr = np.ones((4, 4), dtype=np.float32)
+    arr[0, 0] = np.inf
+    bad = ants.from_numpy(arr)
+    clean = ants.from_numpy(np.ones((4, 4), dtype=np.float32))
+    with pytest.raises(ValueError, match="moving"):
+        require_finite_images(fixed=clean, moving=bad)
+
+
+def test_require_finite_images_checks_multichannel_list_and_reports_index():
+    import ants
+    arr = np.ones((4, 4), dtype=np.float32)
+    arr[2, 2] = np.nan
+    bad = ants.from_numpy(arr)
+    clean = ants.from_numpy(np.ones((4, 4), dtype=np.float32))
+    with pytest.raises(ValueError, match=r"moving\[1\]"):
+        require_finite_images(fixed=clean, moving=[clean, bad])
+
+
+def test_require_finite_images_skips_none_and_non_image_values():
+    require_finite_images(fixed=None, moving="not_an_image", other=42)  # must not raise

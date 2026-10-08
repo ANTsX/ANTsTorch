@@ -51,6 +51,15 @@ def test_evaluate_mindboggle_pair_syn_regularizers(mock_mindboggle_dataset, tmp_
         data_dir=data_dir,
         canonical_affine_dir=str(tmp_path / "canonical_affines"),
         use_n4=False,
+        # 'levels' pinned to a shallower pyramid (max shrink 4x, not the
+        # harness default DEFAULT_REGISTRATION_LEVELS=(8, 4, 2, 1)): on this
+        # fixture's small volume (conftest.py), an 8x-shrink coarsest level
+        # collapses below the similarity window and antstorch.syn
+        # .syn_registration()'s _validate_pyramid_levels guard now rejects it
+        # for every regularizer/optimizer, by design (see that guard's
+        # docstring and the project doc, "pyramide dégénérée / dsti
+        # dice=0.0") -- real Mindboggle-101 volumes never approach this edge.
+        levels=[4, 2, 1, 1],
         reg_iterations=[2, 2, 1, 1],
     )
     _assert_valid_success_record(rec, model)
@@ -251,6 +260,10 @@ def test_warped_moving_labels_written_and_valid(mock_mindboggle_dataset, tmp_pat
         canonical_affine_dir=str(tmp_path / "canonical_affines"),
         registration_output_dir=str(registration_output_dir),
         use_n4=False,
+        # See test_evaluate_mindboggle_pair_syn_regularizers's comment: only
+        # consumed by the 'gaussian_syn' case here, but harmless to pass for
+        # the two SVF models (not in their forwarded-kwargs allowlist).
+        levels=[4, 2, 1, 1],
         reg_iterations=[1, 1, 1, 1],
     )
     if model == "gaussian_svf":
@@ -575,7 +588,7 @@ def test_evaluate_mindboggle_pair_shares_canonical_affine_across_models(mock_min
         pair_idx=0, model="gaussian_syn", device="cpu",
         pairs_csv=pairs_csv, data_dir=data_dir,
         canonical_affine_dir=canonical_affine_dir, use_n4=False,
-        reg_iterations=[2, 2, 1, 1],
+        levels=[4, 2, 1, 1], reg_iterations=[2, 2, 1, 1],
     )
     affine_path = os.path.join(canonical_affine_dir, "pair_000_0GenericAffine.mat")
     assert os.path.exists(affine_path)
@@ -585,7 +598,7 @@ def test_evaluate_mindboggle_pair_shares_canonical_affine_across_models(mock_min
         pair_idx=0, model="sobolev_syn", device="cpu",
         pairs_csv=pairs_csv, data_dir=data_dir,
         canonical_affine_dir=canonical_affine_dir, use_n4=False,
-        reg_iterations=[2, 2, 1, 1],
+        levels=[4, 2, 1, 1], reg_iterations=[2, 2, 1, 1],
     )
     assert os.path.getmtime(affine_path) == mtime_after_first
     assert rec1["affine_dice_sym"] == pytest.approx(rec2["affine_dice_sym"], abs=1e-9)
@@ -611,11 +624,19 @@ def test_regadam_arm_differs_from_its_syn_counterpart(mock_mindboggle_dataset, t
     common = dict(
         pair_idx=0, device="cpu", pairs_csv=pairs_csv, data_dir=data_dir,
         canonical_affine_dir=canonical_affine_dir, use_n4=False,
-        reg_iterations=[3, 2, 1, 1],
-        # The mock volume is 24x28x24 (3x3x3 voxels at the coarsest level, 8x). On it,
-        # reg_adam with the syntx-aligned defaults (voxel-unit sigma) drifts globally and
-        # both arms end at Dice 0.0, which says nothing about the update rule. The previous
-        # defaults keep this test about what it is for: reg_adam != gradient descent.
+        # 'levels' pinned to a shallower pyramid -- see
+        # test_evaluate_mindboggle_pair_syn_regularizers's comment. (This
+        # used to be blamed on reg_adam's own voxel-unit-sigma defaults
+        # drifting on a tiny domain, with syntx_defaults=False as the
+        # workaround below; the actual cause, confirmed via direct repro, was
+        # the harness's shrink-8 coarsest pyramid level collapsing below the
+        # similarity window for every regularizer/optimizer alike -- not a
+        # reg_adam-specific issue. antstorch.syn.syn_registration()'s
+        # _validate_pyramid_levels guard now rejects that level outright;
+        # syntx_defaults=False is left in place since it is still a valid,
+        # narrower way to keep this particular test about the update rule
+        # rather than the hyperparameter table.)
+        levels=[4, 2, 1, 1], reg_iterations=[3, 2, 1, 1],
         syntx_defaults=False,
     )
     rec_syn = evaluate_mindboggle_pair(model=syn_model, **common)

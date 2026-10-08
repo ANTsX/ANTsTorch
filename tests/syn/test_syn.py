@@ -73,6 +73,64 @@ def test_syn_registration_rejects_mismatched_pyramid_lengths():
         syn_registration(fixed, moving, type_of_transform="SyNOnly", levels=(2, 1), reg_iterations=(10,))
 
 
+def test_syn_registration_rejects_nan_voxel_in_fixed_or_moving():
+    # 2026-10-07 fix (ported from syntx): a NaN/Inf voxel used to propagate
+    # silently into a NaN affine/warp; it must now raise ValueError at the
+    # entry point instead, before any fitting runs.
+    fixed, moving = _ants_pair_2d()
+    bad = ants.from_numpy(np.ascontiguousarray(np.array(fixed.numpy())))
+    bad_arr = bad.numpy()
+    bad_arr[0, 0] = np.nan
+    bad = bad.new_image_like(bad_arr)
+
+    with pytest.raises(ValueError, match="non-finite"):
+        syn_registration(bad, moving, type_of_transform="SyNOnly")
+    with pytest.raises(ValueError, match="non-finite"):
+        syn_registration(fixed, bad, type_of_transform="SyNOnly")
+
+
+@pytest.mark.parametrize("regularizer,optimizer", [
+    ("gaussian", "gradient_descent"),
+    ("sobolev", "gradient_descent"),
+    ("dsti", "gradient_descent"),
+    ("bspline", "gradient_descent"),
+    ("dsti", "reg_adam"),
+])
+def test_syn_registration_rejects_degenerate_pyramid_level_for_every_regularizer(regularizer, optimizer):
+    # Regression test for the mock-benchmark-fixture investigation (project
+    # doc, "pyramide dégénérée / dsti dice=0.0"): a pyramid level whose
+    # shrunk shape has an axis smaller than the local similarity window
+    # (window_size = 2 * neighborhood_radius + 1) must raise up front,
+    # before any per-level fitting runs, for EVERY regularizer/optimizer
+    # combination -- not only 'dsti'/'sobolev', which is where this was
+    # first caught because their Dirichlet-boundary/conservative-smoothing
+    # passes turn the degenerate level into an outright dice_sym == 0.0
+    # rather than the merely-degraded result 'gaussian'/'bspline' silently
+    # produced on the same input.
+    fixed, moving = _ants_pair_2d(size=(30, 28))
+    with pytest.raises(ValueError, match="Pyramid level too small"):
+        syn_registration(
+            fixed, moving, type_of_transform="SyNOnly",
+            regularizer=regularizer, optimizer=optimizer,
+            levels=(8, 4, 2, 1), reg_iterations=(2, 2, 1, 1),
+        )
+
+
+def test_syn_registration_accepts_pyramid_level_once_window_fits():
+    # Same shrink-8 pyramid and image size that
+    # test_syn_registration_rejects_degenerate_pyramid_level_for_every_regularizer
+    # rejects at the default window_size=5 (shrunk shape (4, 4)); shrinking
+    # neighborhood_radius to 1 (window_size=3) brings that same level back
+    # under the threshold, so the guard must let it through.
+    fixed, moving = _ants_pair_2d(size=(30, 28))
+    res = syn_registration(
+        fixed, moving, type_of_transform="SyNOnly",
+        regularizer="gaussian", neighborhood_radius=1,  # window_size=3
+        levels=(8, 4, 2, 1), reg_iterations=(2, 2, 1, 1),
+    )
+    assert res["warpedmovout"] is not None
+
+
 def test_syn_registration_rejects_mismatched_dimensions():
     fixed, _ = _ants_pair_2d()
     moving3d, _ = _ants_pair_3d()
