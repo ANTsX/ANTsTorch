@@ -1,5 +1,11 @@
 # tests/conftest.py
 
+# torch must be imported BEFORE ants anywhere in the process. On macOS with conda,
+# importing ants first loads a second OpenMP runtime (libomp via scikit-learn) and
+# multithreaded torch ops then segfault (observed: F.pad(mode='replicate') on
+# torch 2.2.2, Intel iMac). pytest loads this file before any test module.
+import torch  # noqa: F401
+
 def pytest_addoption(parser):
     parser.addoption(
         "--dump-aug-samples",

@@ -53,6 +53,7 @@ Output: writes a JSON file with one record per (pair, model, library), plus
 a Markdown summary table with syntx vs antstorch deltas, printed to stdout
 and saved alongside the JSON.
 """
+import torch  # noqa: F401  (keep BEFORE any `import ants`: OpenMP runtime load order, see tests/conftest.py)
 import argparse
 import json
 import math

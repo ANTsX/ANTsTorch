@@ -75,6 +75,7 @@ compare_syntx_antstorch_mindboggle.py) -- confirmed present on cerulean
 under `/Users/ntustison/Pkg/fireants` as of 2026-09-22; clone it in the
 same place on any other machine (e.g. hyperwolf) before running there.
 """
+import torch  # noqa: F401  (keep BEFORE any `import ants`: OpenMP runtime load order, see tests/conftest.py)
 import argparse
 import importlib.util
 import json

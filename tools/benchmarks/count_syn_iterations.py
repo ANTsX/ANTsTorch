@@ -6,6 +6,7 @@ does syntx really run fewer iterations than antstorch?
 
   python tools/benchmarks/count_syn_iterations.py --reg gaussian --pair 0 --device mps
 """
+import torch  # noqa: F401  (keep BEFORE any `import ants`: OpenMP runtime load order, see tests/conftest.py)
 import argparse, json, os, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))

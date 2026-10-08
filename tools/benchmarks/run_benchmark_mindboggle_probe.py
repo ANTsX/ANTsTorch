@@ -80,6 +80,7 @@ the syntx harness, as a rough order of magnitude)::
         --pair-idx $(seq 0 89) --device mps
 """
 
+import torch  # noqa: F401  (keep BEFORE any `import ants`: OpenMP runtime load order, see tests/conftest.py)
 import argparse
 import json
 import re
