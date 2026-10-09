@@ -1840,13 +1840,16 @@ class BaseLAMNrTrainer(abc.ABC):
                         if isinstance(m, (GlowDataParallel, GlowDDP)):
                             logp_v, zflat = m(x_v.float())
                         else:
-                            logp_v = m.log_prob(x_v.float())
-                            z_v, _ = m.inverse_and_log_det(x_v.float())
-                            zflat = flatten_latents(
-                                z_v,
-                                target_pool_size=args.alignment_pool_size,
-                                strategy=args.alignment_latents,
-                            )
+                            # Single pass through inverse_and_log_det, as under
+                            # DDP (GlowStepWrapper.forward). MultiscaleFlow
+                            # .log_prob() bypasses gradient checkpointing, and
+                            # calling it next to inverse_and_log_det() ran the
+                            # forward twice and kept an un-checkpointed graph.
+                            logp_v, zflat = GlowStepWrapper(
+                                m,
+                                alignment_latents=args.alignment_latents,
+                                alignment_pool_size=args.alignment_pool_size,
+                            )(x_v.float())
 
                         if not torch.isfinite(logp_v).all():
                             tqdm.write(f"[nan] non-finite logp at view {vi}, iter {it}")
