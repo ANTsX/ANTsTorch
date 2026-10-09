@@ -122,6 +122,14 @@ class ImageDataset(Dataset):
         with ants.iMath_normalize. Set to False to keep the original
         intensities (the caller is then responsible for normalization).
 
+    channels_per_view : optional int
+        Group consecutive modalities into views and return {"views": [tensor]}.
+        Channels within each view keep their input order. The default returns
+        the legacy packed tensor. All modalities share spatial augmentation.
+
+    sampling : string
+        "random" (default) or "sequential" for deterministic held-out traversal.
+
     Returns
     -------
 
@@ -145,12 +153,20 @@ class ImageDataset(Dataset):
                  duplicate_channels=None,
                  number_of_samples=1,
                  aug_scheduler: Optional[Callable[[int], Dict[str, float]]] = None,
-                 normalize_intensity: bool = True):
+                 normalize_intensity: bool = True,
+                 channels_per_view: Optional[int] = None,
+                 sampling: str = "random"):
 
         self.images = images
         self.number_of_modalities = 1
         if isinstance(self.images[0], list):
             self.number_of_modalities = len(self.images[0])
+        if sampling not in ("random", "sequential"):
+            raise ValueError("sampling must be random or sequential")
+        if channels_per_view is not None and (channels_per_view < 1 or self.number_of_modalities % channels_per_view):
+            raise ValueError("channels_per_view must divide the number of modalities")
+        self.channels_per_view = channels_per_view
+        self.sampling = sampling
         self.outputs = outputs
         self.template = template
         self.do_data_augmentation = do_data_augmentation
@@ -182,7 +198,8 @@ class ImageDataset(Dataset):
         if torch.is_tensor(idx):
             idx = idx.tolist()
 
-        random_index = random.sample(list(range(len(self.images))), 1)[0]
+        random_index = (int(idx) % len(self.images) if self.sampling == "sequential"
+                        else random.sample(list(range(len(self.images))), 1)[0])
         image = list()
         if isinstance(self.images[random_index], list):
             if ants.is_image(self.images[random_index][0]):     
@@ -197,6 +214,10 @@ class ImageDataset(Dataset):
             else:
                 image.append(ants.image_read(self.images[random_index]))
 
+        if self.channels_per_view is not None:
+            for modality in image[1:]:
+                if not ants.image_physical_space_consistency(image[0], modality) or image[0].shape != modality.shape:
+                    raise ValueError("Channel images must share a physical grid before augmentation")
         output = None
         if self.is_output_segmentation: 
             if ants.is_image(self.outputs[random_index]):
@@ -309,12 +330,16 @@ class ImageDataset(Dataset):
             del img
         del image
 
+        if self.channels_per_view is not None:
+            image_tensor = {"views": list(torch.split(image_tensor.float(), self.channels_per_view, dim=0))}
+        else:
+            image_tensor = image_tensor.clone()
         if output_tensor is not None:
             del output
-            return image_tensor.clone(), output_tensor.clone()
+            return image_tensor, output_tensor.clone()
         elif self.outputs is None:
             if output is not None:
                 del output
-            return image_tensor.clone()
+            return image_tensor
         else:
-            return image_tensor.clone(), output
+            return image_tensor, output

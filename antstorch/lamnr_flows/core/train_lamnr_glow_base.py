@@ -421,6 +421,9 @@ def _coerce_nchw_4d(
         x = x.unsqueeze(0)
     if x.dim() == 4 and x.shape[-1] in (1, 3) and x.shape[1] not in (1, 3):
         x = x.permute(0, 3, 1, 2).contiguous()
+    if x.dim() == 4 and x.size(1) == 2:
+        # Two ordered scalar channels are displayed as consecutive gray tiles.
+        x = x.reshape(-1, 1, x.shape[-2], x.shape[-1])
     if x.dim() == 4 and x.size(1) not in (1, 3):
         mid = x.shape[axis] // 2
         x = torch.select(x, dim=axis, index=mid)
@@ -1053,7 +1056,7 @@ class BaseLAMNrTrainer(abc.ABC):
                 xs = _extract_views_from_batch(warm_batch, num_views=len(self.models))
                 for vi, m in enumerate(self.models):
                     if self.intensity == "to01":
-                        _prime_if_needed(m, xs[vi])
+                        _prime_if_needed(m, xs[vi], spatial_dims=self._spatial_dims())
                     else:
                         # Prime ActNorm on exactly what training will see.
                         _prime_if_needed(
@@ -2482,7 +2485,7 @@ class BaseLAMNrTrainer(abc.ABC):
             for batch in self.train_loader:
                 all_batches.append(batch)
                 # Calcule la taille du batch (générique)
-                b_size = batch[0].shape[0] if isinstance(batch, (list, tuple)) else batch.shape[0]
+                b_size = _extract_views_from_batch(batch, num_views=n_views)[0].shape[0]
                 total_count += b_size
                 if total_count >= 100:
                     break

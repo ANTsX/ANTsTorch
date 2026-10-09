@@ -164,7 +164,20 @@ def build_loaders_from_globs(
     rank: int = 0,
     world_size: int = 1,
     intensity: str = "to01",
+    channels_per_view: int = 1,
+    split_manifest=None,
+    allow_missing: bool = False,
 ):
+    if channels_per_view != 1 or split_manifest:
+        from antstorch.lamnr_flows.core.image_channel_loaders import build_channel_loaders
+        return build_channel_loaders(
+            view_specs=view_specs, size=(H, W),
+            train_samples=train_samples, val_samples=val_samples, batch=batch,
+            num_workers=num_workers, val_frac=val_frac, subject_limit=subject_limit,
+            channels_per_view=channels_per_view, split_manifest=split_manifest,
+            allow_missing=allow_missing, slice_idx=slice_idx,
+            do_aug=do_aug, aug_schedules=aug_schedules, disable_aug_anneal=disable_aug_anneal,
+            seed=seed, is_ddp=is_ddp, rank=rank, world_size=world_size, intensity=intensity)
     raw_intensity = str(intensity).lower() != "to01"
     if raw_intensity:
         # Signed / absolute values: no flip, noise, clamp or ANTs augmentation.
@@ -387,7 +400,7 @@ def build_loaders_from_globs(
     )
     val_loader = DataLoader(
         val_ds, batch_size=min(16, batch), shuffle=False,
-        num_workers=max(1, num_workers // 2), pin_memory=use_pin_memory,
+        num_workers=max(0, num_workers // 2), pin_memory=use_pin_memory,
     )
     return train_loader, val_loader, global_step
 
@@ -483,6 +496,9 @@ class LAMNrGlow2DTrainer(BaseLAMNrTrainer):
     def build_loaders(self, args):
         train_loader, val_loader, global_step = build_loaders_from_globs(
             view_specs=args.view,
+            channels_per_view=getattr(args, "channels_per_view", 1),
+            split_manifest=getattr(args, "split_manifest", None),
+            allow_missing=getattr(args, "allow_missing", False),
             H=args.H, W=args.W,
             train_samples=args.train_samples,
             val_samples=args.val_samples,
@@ -518,6 +534,9 @@ class LAMNrGlow2DTrainer(BaseLAMNrTrainer):
         args.C            = C
         args.channels     = C
         args.input_shape  = self.input_shape
+        from antstorch.lamnr_flows.core.image_channel_loaders import record_channel_selection
+        record_channel_selection(args, getattr(train_loader, "dataset", None),
+                                 getattr(val_loader, "dataset", None), self.rank)
         return train_loader, val_loader, global_step
 
     def extract_view(
@@ -543,6 +562,14 @@ def _build_args(argv=None) -> argparse.Namespace:
     # Input data
     ap.add_argument("--view", action="append", nargs="+", required=True,
         help="Path patterns for each modality. Use one --view per modality.")
+    ap.add_argument("--channels-per-view", type=int, default=1,
+        help="Group consecutive --view inputs as ordered channels of each model view.")
+    ap.add_argument("--split-manifest", type=str, default=None,
+        help="CSV with subject_id and training/validation/testing split; testing is excluded.")
+    ap.add_argument("--allow-missing", action="store_true",
+        help="Explicitly skip incomplete channel sets instead of failing.")
+    ap.add_argument("--check-data", action="store_true",
+        help="Build/check loaders without creating a model or launching training.")
     ap.add_argument("--H", type=int, default=128, help="Target image height (pixels).")
     ap.add_argument("--W", type=int, default=128, help="Target image width (pixels).")
 
@@ -710,7 +737,9 @@ def _build_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--prefilter-frac",type=float, default=0.5)
 
     args = ap.parse_args(argv)
-    args.num_views = len(args.view)
+    if args.channels_per_view < 1 or len(args.view) % args.channels_per_view:
+        ap.error("--channels-per-view must divide the number of --view inputs")
+    args.num_views = len(args.view) // args.channels_per_view
 
     # Normalise K and hidden
     if isinstance(args.K, list):
@@ -735,6 +764,13 @@ def _build_args(argv=None) -> argparse.Namespace:
 def main():
     args    = _build_args()
     trainer = LAMNrGlow2DTrainer()
+    if args.check_data:
+        trainer.rank = 0
+        trainer.world_size = 1
+        trainer.is_ddp = False
+        trainer.build_loaders(args)
+        print("Data checks passed; no training launched.")
+        return
     trainer.setup(args)
     trainer.train()
 
