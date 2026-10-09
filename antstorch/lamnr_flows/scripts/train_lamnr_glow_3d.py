@@ -71,8 +71,21 @@ def build_loaders_from_globs_3d(
     rank: int = 0,
     world_size: int = 1,
     intensity: str = "to01",
+    channels_per_view: int = 1,
+    split_manifest=None,
+    allow_missing: bool = False,
 ):
     """Load 3D ANTs volumes for multi-view training."""
+    if channels_per_view != 1 or split_manifest:
+        from antstorch.lamnr_flows.core.image_channel_loaders import build_channel_loaders
+        return build_channel_loaders(
+            view_specs=view_specs, size=(H, W, D),
+            train_samples=train_samples, val_samples=val_samples, batch=batch,
+            num_workers=num_workers, val_frac=val_frac, subject_limit=subject_limit,
+            channels_per_view=channels_per_view, split_manifest=split_manifest,
+            allow_missing=allow_missing,
+            do_aug=do_aug, aug_schedules=aug_schedules, disable_aug_anneal=disable_aug_anneal,
+            seed=seed, is_ddp=is_ddp, rank=rank, world_size=world_size, intensity=intensity)
     raw_intensity = str(intensity).lower() != "to01"
     if raw_intensity:
         do_aug = False
@@ -188,7 +201,7 @@ def build_loaders_from_globs_3d(
     global_step = Value("i", 0)
 
     train_ds = antstorch.ImageDataset(
-        images=images_train, template=tmpl,
+        images=images_train, template=tmpl, channels_per_view=1,
         do_data_augmentation=do_aug,
         data_augmentation_transform_type="affineAndDeformation",
         data_augmentation_sd_affine=0.05,
@@ -213,7 +226,7 @@ def build_loaders_from_globs_3d(
         # images, since val's sd_* below are 0, so val scores near-clean
         # reconstructions of every subject rather than one noisy sample).
         images=(images_val if images_val else images_train),
-        template=tmpl,
+        template=tmpl, channels_per_view=1,
         do_data_augmentation=not raw_intensity,
         normalize_intensity=not raw_intensity,
         data_augmentation_transform_type="affineAndDeformation",
@@ -258,7 +271,7 @@ def build_loaders_from_globs_3d(
     )
     val_loader = DataLoader(
         val_ds, batch_size=min(16, batch), shuffle=False,
-        num_workers=max(1, num_workers // 2), pin_memory=use_pin_memory,
+        num_workers=max(0, num_workers // 2), pin_memory=use_pin_memory,
     )
     return train_loader, val_loader, global_step
 
@@ -369,6 +382,9 @@ class LAMNrGlow3DTrainer(BaseLAMNrTrainer):
     def build_loaders(self, args):
         train_loader, val_loader, global_step = build_loaders_from_globs_3d(
             view_specs=args.view,
+            channels_per_view=getattr(args, "channels_per_view", 1),
+            split_manifest=getattr(args, "split_manifest", None),
+            allow_missing=getattr(args, "allow_missing", False),
             H=args.H, W=args.W, D=args.D,
             train_samples=args.train_samples,
             val_samples=args.val_samples,
@@ -385,8 +401,11 @@ class LAMNrGlow3DTrainer(BaseLAMNrTrainer):
             rank=self.rank,
             world_size=self.world_size,
         )
-        # 3D volumes: shape is always (C=1, H, W, D)
-        C = 1
+        sample_views = _extract_views_from_batch(next(iter(train_loader)), num_views=args.num_views)
+        counts = [int(view.shape[1]) for view in sample_views]
+        if len(set(counts)) != 1:
+            raise ValueError(f"All 3D views must have equal channel counts: {counts}")
+        C = counts[0]
         if args.spatial_dims == 2:
             self.input_shape = (C, args.H, args.W)
         else:
@@ -394,6 +413,9 @@ class LAMNrGlow3DTrainer(BaseLAMNrTrainer):
         args.C           = C
         args.channels    = C
         args.input_shape = self.input_shape
+        from antstorch.lamnr_flows.core.image_channel_loaders import record_channel_selection
+        record_channel_selection(args, getattr(train_loader, "dataset", None),
+                                 getattr(val_loader, "dataset", None), self.rank)
         return train_loader, val_loader, global_step
 
     def extract_view(
@@ -403,7 +425,9 @@ class LAMNrGlow3DTrainer(BaseLAMNrTrainer):
         Extract view vi from a 3D batch and guarantee strict 5D format (B, 1, H, W, D)
         required by multi-scale Glow 3D coupling and squeeze operations.
         """
-        if torch.is_tensor(batch):
+        if isinstance(batch, dict) and "views" in batch:
+            x_v = batch["views"][vi].to(dev)
+        elif torch.is_tensor(batch):
             x_v = batch[:, vi : vi + 1, ...].to(dev, dtype=self.model_dtype)
         else:
             xs  = _extract_views_from_batch(batch, num_views=self.args.num_views)
@@ -450,6 +474,14 @@ def _build_args(argv=None) -> argparse.Namespace:
     # Input data
     ap.add_argument("--view", action="append", nargs="+", required=True,
         help="Path patterns for each modality. Use one --view per modality.")
+    ap.add_argument("--channels-per-view", type=int, default=1,
+        help="Group consecutive --view inputs as ordered channels of each model view.")
+    ap.add_argument("--split-manifest", type=str, default=None,
+        help="CSV with subject_id and training/validation/testing split; testing is excluded.")
+    ap.add_argument("--allow-missing", action="store_true",
+        help="Explicitly skip incomplete channel sets instead of failing.")
+    ap.add_argument("--check-data", action="store_true",
+        help="Build/check loaders without creating a model or launching training.")
     ap.add_argument("--H", type=int, default=128, help="Target height (voxels).")
     ap.add_argument("--W", type=int, default=128, help="Target width  (voxels).")
     ap.add_argument("--D", type=int, default=128, help="Target depth  (voxels, 3D only).")
@@ -620,7 +652,9 @@ def _build_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--prefilter-frac", type=float, default=0.5)
 
     args = ap.parse_args(argv)
-    args.num_views = len(args.view)
+    if args.channels_per_view < 1 or len(args.view) % args.channels_per_view:
+        ap.error("--channels-per-view must divide the number of --view inputs")
+    args.num_views = len(args.view) // args.channels_per_view
 
     if isinstance(args.K, list):
         if len(args.K) == 1:
@@ -647,6 +681,13 @@ def _build_args(argv=None) -> argparse.Namespace:
 def main():
     args    = _build_args()
     trainer = LAMNrGlow3DTrainer()
+    if args.check_data:
+        trainer.rank = 0
+        trainer.world_size = 1
+        trainer.is_ddp = False
+        trainer.build_loaders(args)
+        print("Data checks passed; no training launched.")
+        return
     trainer.setup(args)  # already dumps run_config.json/.txt internally
     trainer.train()
 
