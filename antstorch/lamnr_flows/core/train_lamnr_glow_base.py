@@ -1859,6 +1859,28 @@ class BaseLAMNrTrainer(abc.ABC):
                             gc.collect()
                             break
 
+                        _spike_thr = os.environ.get("LAMNR_SPIKE_DEBUG")
+                        if _spike_thr:
+                            # Opt-in diagnostic (export LAMNR_SPIKE_DEBUG=<bpd threshold>,
+                            # e.g. 100): when any sample of this batch exceeds the
+                            # threshold, print per-sample bpd and per-channel input
+                            # statistics to tell a bad input from a model-side blow-up.
+                            with torch.no_grad():
+                                _per = bits_per_dim(logp_v.detach(), n_dims).float().flatten()
+                                if float(_per.max()) > float(_spike_thr):
+                                    _xf = x_v.detach().float().flatten(2)
+                                    for _b in range(_xf.shape[0]):
+                                        _chan = "; ".join(
+                                            f"c{_c}: min={float(_xf[_b, _c].min()):.3g} "
+                                            f"max={float(_xf[_b, _c].max()):.3g} "
+                                            f"mean={float(_xf[_b, _c].mean()):.3g} "
+                                            f"frac>0.05={float((_xf[_b, _c] > 0.05).float().mean()):.3g}"
+                                            for _c in range(_xf.shape[1])
+                                        )
+                                        tqdm.write(
+                                            f"[spike-debug] rank={getattr(self, 'rank', 0)} iter={it} view={vi} "
+                                            f"sample={_b} bpd={float(_per[_b]):.4g} | {_chan}"
+                                        )
                         bpd_v = bits_per_dim(logp_v, n_dims).mean()
                         L_nll = L_nll + bpd_v
                         curr_bpd_views.append(bpd_v.item())
