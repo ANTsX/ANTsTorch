@@ -42,6 +42,7 @@ from torch.utils.data.distributed import DistributedSampler
 
 from antstorch.lamnr_flows.core.train_lamnr_glow_base import (
     BaseLAMNrTrainer,
+    add_stability_args,
     GlowDataParallel,
     GlowDDP,
     GlowStepWrapper,
@@ -449,7 +450,11 @@ class LAMNrGlow3DTrainer(BaseLAMNrTrainer):
         disk-space warning, since 3D checkpoints are large.
         """
         if keep_every is None:
-            keep_every = int(getattr(self.args, "eval_interval", 1000)) or 1000
+            keep_every = (
+                int(getattr(self.args, "keep_every", 0) or 0)
+                or int(getattr(self.args, "eval_interval", 1000))
+                or 1000
+            )
         for f in self.run_dir.glob("training_state_it*.pt"):
             try:
                 it_num = int(f.stem.split("it")[-1])
@@ -636,6 +641,7 @@ def _build_args(argv=None) -> argparse.Namespace:
         help="Enable torch.autograd.set_detect_anomaly(True) to pinpoint the "
              "exact forward op responsible for a NaN/Inf gradient (much "
              "slower — use for a short diagnostic run only, not full training).")
+    add_stability_args(ap)
     ap.add_argument("--grad-checkpoint", default="auto", choices=["auto", "on", "off"],
         help="Control torch.utils.checkpoint on each level's flow sequence "
              "(trades compute for activation memory). 'auto' (default) "

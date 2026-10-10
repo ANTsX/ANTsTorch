@@ -259,9 +259,13 @@ def _copy_actnorm_state(src: nn.Module, dst: nn.Module) -> None:
 
 @torch.no_grad()
 def _prime_if_needed(
-    model: nn.Module, x: torch.Tensor, spatial_dims: Optional[int] = None
+    model: nn.Module,
+    x: torch.Tensor,
+    spatial_dims: Optional[int] = None,
+    n_samples: int = 1,
 ) -> None:
-    x1 = x[:1]
+    # Data-dependent ActNorm init sees the first `n_samples` volumes of x.
+    x1 = x[:max(1, int(n_samples))]
     if spatial_dims is not None:
         # Caller knows the layout: only add a missing channel axis. This
         # avoids the heuristic below, which treats a 2-channel 2D batch
@@ -757,6 +761,9 @@ def screen_dump_run_config(
     add("sample_chunk_size", cfg.get("sample_chunk_size"))
     add("grad_checkpoint", cfg.get("grad_checkpoint"))
     add("smooth_alpha", cfg.get("smooth_alpha"))
+    add("skip_bpd / spike_debug_bpd", f"{cfg.get('skip_bpd')} / {cfg.get('spike_debug_bpd')}")
+    add("keep_every / actnorm_init_n", f"{cfg.get('keep_every')} / {cfg.get('actnorm_init_samples')}")
+    add("no_abort_without_ckpt", cfg.get("no_abort_without_ckpt"))
     add("scale_map / scale_cap", f"{cfg.get('scale_map')} / {cfg.get('scale_cap')}")
     add("actnorm_scale_cap", cfg.get("actnorm_scale_cap"))
     add(
@@ -779,6 +786,31 @@ def screen_dump_run_config(
 # ---------------------------------------------------------------------------
 # BaseLAMNrTrainer
 # ---------------------------------------------------------------------------
+
+def add_stability_args(ap) -> None:
+    """Register the divergence-protection options shared by the Glow trainers."""
+    g = ap.add_argument_group("stability")
+    g.add_argument("--skip-bpd", type=float, default=None, metavar="BPD",
+        help="Reject (do not apply) any step in which a sample's bits/dim "
+             "exceeds BPD. Healthy values are ~0.5-5; isolated spikes of "
+             "1e2-1e6 have been seen to wreck the weights irrecoverably. "
+             "Default: only the 1e7 sanity limit applies.")
+    g.add_argument("--spike-debug-bpd", type=float, default=None, metavar="BPD",
+        help="Diagnostic: print per-sample bpd and per-channel input "
+             "statistics whenever a sample's bpd exceeds BPD.")
+    g.add_argument("--no-abort-without-ckpt", action="store_true",
+        help="Keep skipping steps indefinitely when the rollback watchdog "
+             "has no checkpoint to reload. By default training aborts after "
+             f"{BaseLAMNrTrainer.ROLLBACK_WATCHDOG_LIMIT} consecutive "
+             "rejected steps in that situation.")
+    g.add_argument("--keep-every", type=int, default=0, metavar="N",
+        help="Keep only checkpoints whose iteration is a multiple of N "
+             "(the 'latest' state is still written every --eval-interval). "
+             "0 (default): keep one per --eval-interval.")
+    g.add_argument("--actnorm-init-samples", type=int, default=1, metavar="N",
+        help="Number of volumes used for the data-dependent ActNorm "
+             "initialisation (default 1).")
+
 
 class BaseLAMNrTrainer(abc.ABC):
     """
@@ -1056,12 +1088,16 @@ class BaseLAMNrTrainer(abc.ABC):
                 xs = _extract_views_from_batch(warm_batch, num_views=len(self.models))
                 for vi, m in enumerate(self.models):
                     if self.intensity == "to01":
-                        _prime_if_needed(m, xs[vi], spatial_dims=self._spatial_dims())
+                        _prime_if_needed(
+                            m, xs[vi], spatial_dims=self._spatial_dims(),
+                            n_samples=getattr(args, "actnorm_init_samples", 1),
+                        )
                     else:
                         # Prime ActNorm on exactly what training will see.
                         _prime_if_needed(
                             m, self.extract_view(warm_batch, vi, dev),
                             spatial_dims=self._spatial_dims(),
+                            n_samples=getattr(args, "actnorm_init_samples", 1),
                         )
             except StopIteration:
                 pass
@@ -1285,7 +1321,11 @@ class BaseLAMNrTrainer(abc.ABC):
         the 3D override for space monitoring).
         """
         if keep_every is None:
-            keep_every = int(getattr(self.args, "eval_interval", 1000)) or 1000
+            keep_every = (
+                int(getattr(self.args, "keep_every", 0) or 0)
+                or int(getattr(self.args, "eval_interval", 1000))
+                or 1000
+            )
         for f in self.run_dir.glob("training_state_it*.pt"):
             try:
                 it_num = int(f.stem.split("it")[-1])
@@ -1685,9 +1725,19 @@ class BaseLAMNrTrainer(abc.ABC):
             else:
                 tqdm.write(
                     f"[watchdog] {rollback_streak} consecutive rollbacks "
-                    f"and no checkpoint on disk yet to fall back to -- "
-                    f"continuing to skip and hoping for recovery."
+                    f"and no checkpoint on disk yet to fall back to."
                 )
+                # Nothing to fall back to: continuing only burns GPU time
+                # (a run once skipped >6000 steps this way). Abort loudly;
+                # all ranks reach this point together because the streak is
+                # driven by synchronised flags / all-reduced gradients.
+                # --no-abort-without-ckpt restores the old "keep skipping".
+                if not getattr(self.args, "no_abort_without_ckpt", False):
+                    raise RuntimeError(
+                        f"Training diverged: {rollback_streak} consecutive "
+                        f"rejected steps and no checkpoint to reload. "
+                        f"Restart with a new --out-dir."
+                    )
         return rollback_streak, lr_backoff
 
     def train(self) -> None:  # noqa: C901
@@ -1791,6 +1841,7 @@ class BaseLAMNrTrainer(abc.ABC):
 
                 with amp_ctx:
                     bad_batch = False
+                    batch_max_bpd = 0.0
                     for vi, m in enumerate(models):
                         x_v = self.jitter_dequantization(self.extract_view(x, vi, dev))
 
@@ -1859,9 +1910,9 @@ class BaseLAMNrTrainer(abc.ABC):
                             gc.collect()
                             break
 
-                        _spike_thr = os.environ.get("LAMNR_SPIKE_DEBUG")
-                        if _spike_thr:
-                            # Opt-in diagnostic (export LAMNR_SPIKE_DEBUG=<bpd threshold>,
+                        _spike_thr = getattr(args, "spike_debug_bpd", None)
+                        if _spike_thr is not None:
+                            # Opt-in diagnostic (--spike-debug-bpd <threshold>,
                             # e.g. 100): when any sample of this batch exceeds the
                             # threshold, print per-sample bpd and per-channel input
                             # statistics to tell a bad input from a model-side blow-up.
@@ -1881,6 +1932,9 @@ class BaseLAMNrTrainer(abc.ABC):
                                             f"[spike-debug] rank={getattr(self, 'rank', 0)} iter={it} view={vi} "
                                             f"sample={_b} bpd={float(_per[_b]):.4g} | {_chan}"
                                         )
+                        with torch.no_grad():
+                            _bmax = float(bits_per_dim(logp_v.detach(), n_dims).float().max())
+                        batch_max_bpd = max(batch_max_bpd, _bmax)
                         bpd_v = bits_per_dim(logp_v, n_dims).mean()
                         L_nll = L_nll + bpd_v
                         curr_bpd_views.append(bpd_v.item())
@@ -1892,7 +1946,18 @@ class BaseLAMNrTrainer(abc.ABC):
                         # Note: z_v and bpd_v are referenced by the computation graph;
                         # del here only drops Python refs — backward() is still intact.
 
-                local_bad = bad_batch or not torch.isfinite(L_nll) or abs(L_nll.item()) > 1e7
+                # --skip-bpd <x>: reject the step when any sample's bpd
+                # exceeds x (healthy values here are ~0.5-5; observed spikes
+                # >700). Such an accepted step has been seen to wreck the
+                # weights irrecoverably. Unset -> previous 1e7 behaviour.
+                _skip_arg = getattr(args, "skip_bpd", None)
+                _skip_bpd = float("inf") if _skip_arg is None else float(_skip_arg)
+                local_bad = (
+                    bad_batch
+                    or not torch.isfinite(L_nll)
+                    or abs(L_nll.item()) > 1e7
+                    or batch_max_bpd > _skip_bpd
+                )
                 if self._sync_skip_flag(local_bad):
                     tqdm.write(
                         f"[anomaly] skipping iter {it} "
