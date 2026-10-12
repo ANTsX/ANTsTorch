@@ -2399,26 +2399,34 @@ class BaseLAMNrTrainer(abc.ABC):
                         (1.0 - a) * ema_bpd_views_disp[i] + a * curr_bpd_views[i]
                     )
 
-            postfix = {
-                "iter":  it,
-                "loss":  f"{curr_loss:.4f}",
-                "loss~": f"{ema_loss_disp:.4f}",
-                "bpd":   f"{sum_bpd:.3f}",
-                "bpd~":  f"{ema_sum_bpd_disp:.3f}",
-                "lr":    f"{lr_now:.2e}",
-                "align": f"{L_align_log:.4f}",
-                "mode":  args.align,
-                "w_nll": f"{w_nll:.2f}",
-                "w_aln": f"{w_align:.2f}",
-            }
-            for i in range(n_views):
-                postfix[f"v{i}"] = f"{curr_bpd_views[i]:.3f}/{ema_bpd_views_disp[i]:.3f}"
+            # Keep the bar short enough for a normal terminal: fields that
+            # are constant or duplicate another one are shown only when
+            # they carry information (an over-wide bar wraps, so every
+            # redraw lands on its own line).
+            use_align = args.align != "none"
+            postfix = {"iter": it}
+            if use_align or n_views > 1:
+                # Without alignment and with a single view, loss == bpd.
+                postfix["loss"] = f"{curr_loss:.4f}"
+                postfix["loss~"] = f"{ema_loss_disp:.4f}"
+            postfix["bpd"] = f"{sum_bpd:.3f}"
+            postfix["bpd~"] = f"{ema_sum_bpd_disp:.3f}"
+            postfix["lr"] = f"{lr_now:.2e}"
+            if use_align:
+                postfix["align"] = f"{L_align_log:.4f}"
+                postfix["mode"] = args.align
+                postfix["w_nll"] = f"{w_nll:.2f}"
+                postfix["w_aln"] = f"{w_align:.2f}"
+            if n_views > 1:
+                for i in range(n_views):
+                    postfix[f"v{i}"] = f"{curr_bpd_views[i]:.3f}/{ema_bpd_views_disp[i]:.3f}"
             # Progress bar, file writes (input grids, CSV, samples, plots,
             # checkpoints) are rank-0-only under DDP: every rank computes an
             # identical (synced-gradient) update, so having every rank also
             # write the same files would just race/duplicate for no benefit.
             if self.rank == 0:
-                pbar.set_postfix(postfix)
+                # refresh=False: update(1) below redraws the bar once per iteration.
+                pbar.set_postfix(postfix, refresh=False)
                 pbar.update(1)
 
                 # One-time input data grid
