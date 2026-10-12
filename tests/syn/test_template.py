@@ -284,6 +284,31 @@ class TestOptions:
         assert np.isfinite(out["template"].numpy()).all()
 
 
+class TestAffineNotReapplied:
+    """The cached iteration-0 affine must not be averaged into the template again at later iterations."""
+
+    def test_mean_affine_only_at_iteration_zero(self, tmp_path):
+        build_template(
+            image_list=_cohort(offsets=((-2, 0), (2, 0))), iterations=3, output_dir=str(tmp_path), **FAST
+        )
+        assert (tmp_path / "avgAffine_0.mat").exists()
+        assert not (tmp_path / "avgAffine_1.mat").exists()
+        assert not (tmp_path / "avgAffine_2.mat").exists()
+        # the dense warp still recentres the template at every iteration
+        assert all((tmp_path / f"avgWarp_{i}.nii.gz").exists() for i in range(3))
+
+    def test_affine_every_iteration_averages_each_time(self, tmp_path):
+        build_template(
+            image_list=_cohort(offsets=((-2, 0), (2, 0))),
+            iterations=2,
+            affine_every_iteration=True,
+            output_dir=str(tmp_path),
+            **FAST,
+        )
+        assert (tmp_path / "avgAffine_0.mat").exists()
+        assert (tmp_path / "avgAffine_1.mat").exists()
+
+
 def test_identical_images_are_a_fixed_point():
     """Registering identical images leaves the template (almost) unchanged and the mean warp tiny."""
     yy, xx = np.mgrid[0:48, 0:48].astype(np.float64)

@@ -211,7 +211,13 @@ def build_template(
             )
             has_field = w1["jacobian"] is not None  # dense stage ran
             # fwdtransforms = [warp, affine] (SyN), [warp] (SyNOnly, no affine) or [affine] (linear only)
-            if w1["fwdtransforms"][-1].endswith(".mat"):
+            # An affine passed in as ``initial_affine`` (cached from iteration 0) is not new
+            # information: the template was already recentred by its average, so averaging
+            # it again every iteration would compound the same scale/shear change on the
+            # template (observed: identical avgAffine_k files, 4 iterations, ~10% scale drift).
+            # From iteration 1 on only the dense warp therefore recentres the template, as in
+            # syntx (where the mean affine is the identity after iteration 0).
+            if w1["fwdtransforms"][-1].endswith(".mat") and "initial_affine" not in reg_kw:
                 affine_files.append(w1["fwdtransforms"][-1])
             if iter_tot != "SyNOnly" and w1["affine_matrix"] is not None:
                 image_affine[k] = (w1["affine_matrix"], w1["affine_translation"])
