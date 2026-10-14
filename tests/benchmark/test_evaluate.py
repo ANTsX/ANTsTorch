@@ -644,3 +644,22 @@ def test_regadam_arm_differs_from_its_syn_counterpart(mock_mindboggle_dataset, t
     _assert_valid_success_record(rec_syn, syn_model)
     _assert_valid_success_record(rec_regadam, regadam_model)
     assert rec_syn["dice_sym"] != pytest.approx(rec_regadam["dice_sym"], abs=1e-9)
+
+
+def test_affine_time_is_cached_and_reported_separately(mock_mindboggle_dataset, tmp_path):
+    # The canonical affine's fit time is stored next to the cached transform and returned on every cache
+    # hit, so every model variant of a pair reports the same affine_seconds (like syntx's syntx_affine_time),
+    # and runtime_seconds == affine_seconds + deformable_seconds.
+    pairs_csv, data_dir = mock_mindboggle_dataset
+    common = dict(
+        pair_idx=0, device="cpu", pairs_csv=pairs_csv, data_dir=data_dir,
+        canonical_affine_dir=str(tmp_path / "canonical_affines"), use_n4=False,
+        reg_iterations=[2, 1, 1, 1], levels=[4, 2, 1, 1], syntx_defaults=False,
+    )
+    first = evaluate_mindboggle_pair(model="gaussian_syn", **common)
+    second = evaluate_mindboggle_pair(model="sobolev_syn", **common)
+    assert first["affine_seconds"] > 0.0
+    assert second["affine_seconds"] == pytest.approx(first["affine_seconds"])
+    for rec in (first, second):
+        assert rec["deformable_seconds"] >= 0.0
+        assert rec["runtime_seconds"] == pytest.approx(rec["affine_seconds"] + rec["deformable_seconds"])

@@ -536,6 +536,39 @@ def test_syn_registration_levels_without_matching_reg_iterations_raises():
         syn_registration(fixed, moving, type_of_transform="SyNOnly", syn_metric="mse", levels=(2, 1))
 
 
+@pytest.mark.parametrize("regularizer", ["sobolev", "dsti"])
+def test_syn_reg_adam_optimizer_reduces_loss_and_records_provenance(regularizer):
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    result = syn_registration(
+        fixed, moving, type_of_transform="SyNOnly", levels=(1,), reg_iterations=(12,), syn_metric="mse",
+        regularizer=regularizer, optimizer="syn_reg_adam", optimizer_lr=1.0,
+    )
+    assert result["loss_history"][-1] < result["loss_history"][0]
+    assert result["provenance"]["optimizer"] == "syn_reg_adam"
+    assert result["provenance"]["optimizer_lr"] == 1.0
+
+
+def test_syn_reg_adam_optimizer_differs_from_gradient_descent_and_lr_scales_the_step():
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    kw = dict(type_of_transform="SyNOnly", levels=(1,), reg_iterations=(6,), syn_metric="mse", regularizer="dsti")
+    gd = syn_registration(fixed, moving, optimizer="gradient_descent", **kw)
+    full = syn_registration(fixed, moving, optimizer="syn_reg_adam", optimizer_lr=1.0, **kw)
+    half = syn_registration(fixed, moving, optimizer="syn_reg_adam", optimizer_lr=0.5, **kw)
+    assert abs(full["loss_history"][-1] - gd["loss_history"][-1]) > 1e-9
+    # the lr multiplies the (CFL-clamped) step, so a smaller lr moves the loss less from its start
+    drop_full = full["loss_history"][0] - full["loss_history"][-1]
+    drop_half = half["loss_history"][0] - half["loss_history"][-1]
+    assert drop_half < drop_full
+
+
+@pytest.mark.parametrize("regularizer", ["gaussian", "bspline"])
+def test_syn_reg_adam_optimizer_rejects_non_spectral_regularizers(regularizer):
+    fixed, moving = _ants_pair_2d()
+    with pytest.raises(ValueError, match="syn_reg_adam"):
+        syn_registration(fixed, moving, type_of_transform="SyNOnly", levels=(1,), reg_iterations=(2,),
+                         syn_metric="mse", regularizer=regularizer, optimizer="syn_reg_adam")
+
+
 def test_syn_registration_bspline_regularizer_supports_total_field_smoothing_too():
     fixed, moving = _ants_pair_2d(ramp=0.3)
     result = syn_registration(

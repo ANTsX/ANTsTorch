@@ -58,6 +58,7 @@ import argparse
 import json
 import math
 import os
+import shutil
 import sys
 import time
 import traceback
@@ -111,13 +112,38 @@ SYNTX_KWARGS = {
 
 ANTSTORCH_EXTRA = {}  # set from CLI in main(); antstorch arms only (syntx arms are unaffected)
 
+# --- "fair" mode (default of the CLI; module default False so tools importing _run_* keep their behavior) ---
+# Isolates the dense-SyN algorithm: (1) antstorch starts from the SAME affine file syntx used (copied from the
+# syntx result, see _share_affine); (2) antstorch runs syntx's loop: in-loop inverses of both half-warps at every
+# iteration with in_loop_inv_steps=10 (syntx.syn()/registration() default, passed to SyNTo in all three arms),
+# syntx's CFL scale / slope early stop / best-state restore / floor pyramid (syntx_parity), and autograd through
+# the image interpolation (use_analytical_gradients=False, as every syntx benchmark arm); (3) "dsti" is compared
+# with antstorch's 'syn_reg_adam' optimizer, a port of syntx.syn()'s reg_adam (syntx's dsti arm = reg_adam + dsti1,
+# sobolev_alpha 1.0, in_loop_inv_steps 10);
+# (4) times compared are DEFORMABLE-ONLY on both sides (affine time reported separately).
+FAIR = False
+FAIR_ANTSTORCH_KWARGS = dict(
+    inverse_schedule="per_iteration", in_loop_inverse_steps=10, syntx_parity=True, use_analytical_gradients=False,
+)
+FAIR_MODEL_OVERRIDES = {  # reg -> (antstorch evaluate model name, extra kwargs)
+    "dsti": ("dsti_syn", dict(optimizer="syn_reg_adam")),  # syntx.syn()'s reg_adam; alpha 1.0 from the defaults table
+}
+DEFAULT_MODELS = ["gaussian", "sobolev", "dsti"]
+_SHARED_AFFINE_DONE = set()
+
 
 def _run_antstorch(reg, pair_idx, device, out_dir, matched=True):  # `matched` kept for old callers; ignored
     sys.path.insert(0, ANTSTORCH_ROOT)
     from antstorch.benchmark.evaluate import evaluate_mindboggle_pair as antstorch_eval
 
     model = _ANTSTORCH_MODEL_NAME[reg]
-    extra = dict(ANTSTORCH_EXTRA)
+    extra = {}
+    if FAIR:
+        extra.update(FAIR_ANTSTORCH_KWARGS)
+        if reg in FAIR_MODEL_OVERRIDES:
+            model, model_extra = FAIR_MODEL_OVERRIDES[reg]
+            extra.update(model_extra)
+    extra.update(ANTSTORCH_EXTRA)
     t0 = time.time()
     try:
         rec = antstorch_eval(
@@ -132,6 +158,8 @@ def _run_antstorch(reg, pair_idx, device, out_dir, matched=True):  # `matched` k
         rec["_wall_seconds"] = time.time() - t0
         rec["_library"] = "antstorch"
         rec["_regularizer"] = reg
+        rec["_antstorch_model"] = model
+        rec["_deformable_seconds"] = rec.get("deformable_seconds", rec["runtime_seconds"] - rec.get("affine_seconds", 0.0))
         rec["_status"] = "SUCCESS"
     except Exception as e:
         rec = {
@@ -175,6 +203,10 @@ def _run_syntx(reg, pair_idx, device, out_dir, matched=True):  # `matched` kept 
         rec["_wall_seconds"] = time.time() - t0
         rec["_library"] = "syntx"
         rec["_regularizer"] = reg
+        # syntx's runtime_seconds = deformable + the (possibly cached) affine time; our own bspline wrapper
+        # (_syntx_bspline_pair_eval) reports the deformable time alone.
+        rec["_deformable_seconds"] = (rec["runtime_seconds"] if base == "bspline"
+                                      else rec["runtime_seconds"] - rec.get("syntx_affine_time", 0.0))
         rec["_status"] = "SUCCESS"
     except Exception as e:
         rec = {
@@ -280,10 +312,83 @@ def _syntx_bspline_pair_eval(pair_idx, device=None, verbose=False, seed=42):
     }
 
 
+def _share_affine(syntx_rec, pair_idx, out_dir):
+    """Copy the affine syntx used for this pair into antstorch's canonical-affine cache (once per pair), so the
+    antstorch arms start from exactly the same transform; the affine's fit time is stored beside it."""
+    key = (os.path.abspath(out_dir), pair_idx)
+    if key in _SHARED_AFFINE_DONE:
+        return True
+    try:
+        src = [t for t in syntx_rec["transforms"]["fwdtransforms"] if str(t).endswith(".mat")][-1]
+        dst_dir = os.path.join(out_dir, "antstorch_canonical_affines")
+        os.makedirs(dst_dir, exist_ok=True)
+        shutil.copyfile(src, os.path.join(dst_dir, f"pair_{pair_idx:03d}_0GenericAffine.mat"))
+        import json as _json
+        with open(os.path.join(dst_dir, f"pair_{pair_idx:03d}_affine_info.json"), "w") as f:
+            _json.dump({"runtime_seconds": float(syntx_rec.get("syntx_affine_time", 0.0)), "pair_idx": int(pair_idx),
+                        "source": "syntx"}, f)
+        _SHARED_AFFINE_DONE.add(key)
+        return True
+    except Exception as e:  # noqa: BLE001 - never let affine sharing kill a long run
+        print(f"    !! could not share syntx's affine for pair {pair_idx} ({e}); antstorch will fit its own", flush=True)
+        return False
+
+
+def _run_pair_model(reg, pair_idx, device, out_dir, libs):
+    """One (pair, model): libs run in the given order; in fair mode syntx goes first and shares its affine."""
+    recs = []
+    for lib, fn in libs:
+        rec = fn(reg, pair_idx, device, out_dir)
+        if FAIR and lib == "syntx" and rec.get("_status") == "SUCCESS":
+            rec["_affine_shared"] = _share_affine(rec, pair_idx, out_dir)
+        if FAIR and lib == "antstorch" and rec.get("_status") == "SUCCESS":
+            gap = None
+            for r in recs:
+                if r.get("_library") == "syntx" and r.get("_status") == "SUCCESS":
+                    gap = abs(rec["affine_dice_sym"] - r["syntx_affine_dice_sym"])
+            rec["_affine_dice_gap_vs_syntx"] = gap
+            if gap is not None and gap > 1e-3:
+                print(f"    !! affine Dice differs between libraries by {gap:.4f}: the shared affine was not used", flush=True)
+        recs.append(rec)
+    return recs
+
+
+def _aggregate(results, models, skip_syntx):
+    """Paired statistics over the pairs where both libraries succeeded (deformable-only times)."""
+    import numpy as np
+    lines = ["| Modèle | n | Dice syntx | Dice antstorch | Δ moyen ± ES | Δ médian | antstorch gagne | t déf. syntx (s) | t déf. antstorch (s) | rapport | repli. % syntx / antstorch (médiane) |",
+             "|---|---|---|---|---|---|---|---|---|---|---|"]
+    by = {}
+    for r in results:
+        if r.get("_status") == "SUCCESS":
+            by.setdefault((r["_regularizer"], r["_library"]), {})[r["pair_idx"]] = r
+    for reg in models:
+        A, S = by.get((reg, "antstorch"), {}), by.get((reg, "syntx"), {})
+        pairs = sorted(set(A) & set(S)) if not skip_syntx else sorted(A)
+        if not pairs:
+            continue
+        da = np.array([A[p]["dice_sym"] for p in pairs])
+        ta = np.array([A[p]["_deformable_seconds"] for p in pairs])
+        fa = np.median([A[p]["folding_pct"] for p in pairs])
+        if skip_syntx:
+            lines.append(f"| {reg} | {len(pairs)} | — | {da.mean():.4f} | — | — | — | — | {ta.mean():.1f} | — | — / {fa:.4f} |")
+            continue
+        ds = np.array([S[p]["dice_sym"] for p in pairs])
+        ts = np.array([S[p]["_deformable_seconds"] for p in pairs])
+        fs = np.median([S[p]["folding_pct"] for p in pairs])
+        d = da - ds
+        se = d.std(ddof=1) / np.sqrt(len(d)) if len(d) > 1 else float("nan")
+        lines.append(f"| {reg} | {len(pairs)} | {ds.mean():.4f} | {da.mean():.4f} | {d.mean():+.4f} ± {se:.4f} | {np.median(d):+.4f} | "
+                     f"{int((d > 0).sum())}/{len(d)} | {ts.mean():.1f} | {ta.mean():.1f} | {ta.mean() / ts.mean():.2f}× | {fs:.4f} / {fa:.4f} |")
+    return lines
+
+
 def main():
+    global FAIR
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--pairs", type=int, nargs="+", default=PAIR_INDICES_DEFAULT)
-    ap.add_argument("--models", nargs="+", default=MODELS, choices=MODELS)
+    ap.add_argument("--models", nargs="+", default=DEFAULT_MODELS, choices=MODELS,
+                    help="Default: gaussian sobolev dsti (the arms with a syntx counterpart of the same algorithm).")
     ap.add_argument("--device", default=None,
                     help="cuda / mps / cpu. Default: auto-detect (cuda, then mps, then cpu), passed identically to both libraries.")
     ap.add_argument("--inverse-schedule", choices=["per_iteration", "end_of_level"], default=None,
@@ -312,6 +417,13 @@ def main():
                          "(100,100,50) iterations, physical sigma, per-iteration inverses) instead of the syntx-aligned ones "
                          "(syn_registration(syntx_defaults=False)). Writes to an '_legacy' out-dir suffix.")
     ap.add_argument("--matched", action="store_true", help=argparse.SUPPRESS)  # deprecated no-op: matched is the default
+    ap.add_argument("--own-defaults", action="store_true",
+                    help="Disable the fair mode: antstorch runs with its own defaults (end-of-level inverses, analytical "
+                         "gradients, no syntx parity) and fits its own affine, as before 2026-10-14. Default (fair): syntx runs "
+                         "first, antstorch starts from the same affine file and runs syntx's loop (per-iteration inverses with "
+                         "10 steps, syntx parity, autograd; dsti with syntx.syn()'s reg_adam), and times compared are deformable-only.")
+    ap.add_argument("--no-warmup", action="store_true",
+                    help="Skip the throwaway first run per library (device/kernel initialisation) that is excluded from the timings.")
     args = ap.parse_args()
     if args.device is None:
         import torch
@@ -319,7 +431,11 @@ def main():
             "mps" if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available() else "cpu")
     if args.out_dir is None:
         base = os.path.expanduser("~/Desktop/syntx_antstorch_mindboggle_comparison")
-        args.out_dir = base + ("_legacy" if args.legacy_defaults else "")
+        args.out_dir = base + ("_legacy" if args.legacy_defaults else "") + ("_own" if args.own_defaults or args.legacy_defaults else "")
+    FAIR = not (args.own_defaults or args.legacy_defaults)
+    if FAIR and args.skip_syntx:
+        print("!! --skip-syntx with the fair mode: syntx's affine is unavailable, antstorch will use/fit its own affine "
+              "(the Dice comparison is then no longer on a shared start).", flush=True)
 
     if args.legacy_defaults:
         ANTSTORCH_EXTRA["syntx_defaults"] = False
@@ -337,20 +453,36 @@ def main():
     results = []
     json_path = os.path.join(args.out_dir, "comparison_results.json")
 
-    libs = (("antstorch", _run_antstorch),) if args.skip_syntx else (("antstorch", _run_antstorch), ("syntx", _run_syntx))
+    if args.skip_syntx:
+        libs = (("antstorch", _run_antstorch),)
+    elif FAIR:
+        libs = (("syntx", _run_syntx), ("antstorch", _run_antstorch))  # syntx first: it produces the shared affine
+    else:
+        libs = (("antstorch", _run_antstorch), ("syntx", _run_syntx))
+
+    if not args.no_warmup and args.pairs and args.models:
+        # Throwaway run of every library on the first pair/model so CUDA/MPS initialisation, kernel compilation and
+        # allocator warm-up are not charged to the first timed pair. Results are discarded.
+        warm_dir = os.path.join(args.out_dir, "_warmup")
+        os.makedirs(warm_dir, exist_ok=True)
+        print(f"[warm-up] pair {args.pairs[0]} / {args.models[0]} (not recorded) ...", flush=True)
+        _run_pair_model(args.models[0], args.pairs[0], args.device, warm_dir, libs)
+        _SHARED_AFFINE_DONE.clear()
+
     total = len(args.pairs) * len(args.models) * len(libs)
     done = 0
     for pair_idx in args.pairs:
         for reg in args.models:
-            for lib, fn in libs:
-                print(f"[{done + 1}/{total}] {lib} / {reg} / pair {pair_idx} ...", flush=True)
-                rec = fn(reg, pair_idx, args.device, args.out_dir)
+            print(f"pair {pair_idx} / {reg} ...", flush=True)
+            for lib_pos, rec in enumerate(_run_pair_model(reg, pair_idx, args.device, args.out_dir, libs)):
+                lib = libs[lib_pos][0]
+                print(f"[{done + 1}/{total}] {lib} / {reg} / pair {pair_idx}", flush=True)
                 results.append(rec)
                 done += 1
                 status = rec.get("_status")
                 dice = rec.get("dice_sym", float("nan"))
-                secs = rec.get("_wall_seconds", float("nan"))
-                print(f"    -> {status} dice_sym={dice:.4f} wall={secs:.1f}s" if status == "SUCCESS"
+                secs = rec.get("_deformable_seconds", float("nan"))
+                print(f"    -> {status} dice_sym={dice:.4f} deformable={secs:.1f}s" if status == "SUCCESS"
                       else f"    -> {status}: {rec.get('_error')}", flush=True)
                 # Write incrementally so a partial run is never lost.
                 with open(json_path, "w") as f:
@@ -361,7 +493,7 @@ def main():
     for r in results:
         by_key.setdefault((r.get("pair_idx"), r["_regularizer"]), {})[r["_library"]] = r
 
-    table_lines = ["| Paire | Modèle | syntx dice_sym | antstorch dice_sym | Δ (antstorch − syntx) | syntx t(s) | antstorch t(s) |",
+    table_lines = ["| Paire | Modèle | syntx dice_sym | antstorch dice_sym | Δ (antstorch − syntx) | syntx t déf. (s) | antstorch t déf. (s) |",
                    "|---|---|---|---|---|---|---|"]
     for pair_idx in args.pairs:
         for reg in args.models:
@@ -371,8 +503,8 @@ def main():
             s_dice = f"{s['dice_sym']:.4f}" if s_ok else ("—" if args.skip_syntx else "ÉCHEC")
             a_dice = f"{a['dice_sym']:.4f}" if a_ok else "ÉCHEC"
             delta = f"{(a['dice_sym'] - s['dice_sym']):+.4f}" if (s_ok and a_ok) else "—"
-            s_t = f"{s.get('runtime_seconds', s.get('_wall_seconds', float('nan'))):.1f}" if s_ok else "—"
-            a_t = f"{a.get('runtime_seconds', a.get('_wall_seconds', float('nan'))):.1f}" if a_ok else "—"
+            s_t = f"{s.get('_deformable_seconds', float('nan')):.1f}" if s_ok else "—"
+            a_t = f"{a.get('_deformable_seconds', float('nan')):.1f}" if a_ok else "—"
             base = _base_reg(reg)
             if reg == "bspline":
                 label = reg + " (non-officiel)"
@@ -384,11 +516,19 @@ def main():
                 label = reg
             table_lines.append(f"| {pair_idx} | {label} | {s_dice} | {a_dice} | {delta} | {s_t} | {a_t} |")
 
+    _eff_schedule = args.inverse_schedule or ("per_iteration" if (FAIR or args.legacy_defaults) else "end_of_level")
     md_lines = ["# Comparaison syntx vs antstorch — Mindboggle-101 (dense SyN)", "",
-                f"Paires : {args.pairs}  ", f"Modèles : {args.models}  ", f"Device : {args.device or 'auto'}  ", f"antstorch inverse_method : {args.inverse_method or 'default (anderson)'}  ", f"antstorch defaults : {'legacy' if args.legacy_defaults else 'syntx-aligned'}  ",
-                f"antstorch inverse_schedule : {args.inverse_schedule or ('per_iteration' if args.legacy_defaults else 'end_of_level')}"
-                + (f" ({args.end_of_level_inverse_steps or 30} steps)" if (args.inverse_schedule or ('per_iteration' if args.legacy_defaults else 'end_of_level')) == "end_of_level" else "") + "  ",
+                f"Paires : {args.pairs}  ", f"Modèles : {args.models}  ", f"Device : {args.device or 'auto'}  ", f"antstorch inverse_method : {args.inverse_method or 'default (anderson)'}  ", f"Mode : {'JUSTE — affine syntx partagée ; antstorch iso-algorithme (inverses par itération 10 pas, parité syntx, autograd ; dsti = syn_reg_adam) ; temps déformable seul' if FAIR else 'défauts propres de chaque bibliothèque (affines propres)'}  ",
+                f"antstorch defaults : {'legacy' if args.legacy_defaults else 'syntx-aligned'}  ",
+f"antstorch inverse_schedule : {_eff_schedule}"
+                + (f" ({args.end_of_level_inverse_steps or 30} steps)" if _eff_schedule == "end_of_level" else "") + "  ",
                 f"syntx arms : {'skipped' if args.skip_syntx else 'run'}", ""]
+    md_lines.append("## Résumé apparié (paires où les deux bibliothèques ont réussi ; temps = partie déformable seule)")
+    md_lines.append("")
+    md_lines.extend(_aggregate(results, args.models, args.skip_syntx))
+    md_lines.append("")
+    md_lines.append("## Détail par paire")
+    md_lines.append("")
     md_lines.extend(table_lines)
     md_lines.append("")
     md_lines.append(f"Résultats bruts : `{json_path}`")

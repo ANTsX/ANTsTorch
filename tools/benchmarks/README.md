@@ -102,8 +102,22 @@ dans le script). Depuis le 2026-10-02, les défauts de `antstorch.syn.syn_regist
 sur syntx (table `_SYNTX_DEFAULTS`, par couple régularisateur/optimiseur : métrique cc2,
 `grad_step`, `flow_sigma` = racine de la variance ITK de syntx, `sobolev_alpha`, schedule de pyramide,
 sigma gaussien en voxels, post-filtre conservateur pour sobolev/dsti, inverses en fin de
-niveau). La commande nue `python compare_syntx_antstorch_mindboggle.py` est donc la
-comparaison « matched » ; `--matched` est conservé comme option sans effet. Les
+niveau). La commande nue `python compare_syntx_antstorch_mindboggle.py` lance le
+**mode juste** (modèles `gaussian`, `sobolev`, `dsti`), qui ajoute à ces défauts :
+- *même affine pour les deux bibliothèques* : syntx tourne en premier, son affine mise en
+  cache est copiée dans le cache d'antstorch (avertissement si l'écart de Dice des affines
+  dépasse 1e-3) ;
+- *iso-algorithme* : antstorch utilise `inverse_schedule="per_iteration"`,
+  `in_loop_inverse_steps=10`, `syntx_parity=True`, `use_analytical_gradients=False` ; le bras
+  `dsti` utilise `dsti_syn` avec `optimizer="syn_reg_adam"` (reproduction du `reg_adam` de
+  `syntx.syn()`, distinct du `reg_adam` de `greedy.py` porté plus tôt) ;
+- *temps comparés hors affine des deux côtés* (`deformable_seconds`) ; un essai de chauffe par
+  bibliothèque (première paire, résultat jeté) sauf avec `--no-warmup` ;
+- un tableau agrégé (écart apparié moyen ± erreur-type, médiane, taux de victoire, rapport de
+  temps déformable, médianes de repliement) dans le fichier Markdown.
+
+`--own-defaults` désactive ces réglages (défauts propres d'antstorch, affines séparées) ;
+`--matched` est conservé comme option sans effet. Les
 `*_regadam` reçoivent le schedule et l'alignement de formule de leur homologue de base,
 mais gardent `grad_step=0.5` et l'optimiseur `reg_adam`. `--legacy-defaults` restaure les
 anciens défauts antstorch (`syntx_defaults=False`) pour reproduire les runs antérieurs. Voir projet §34 pour le détail de cette décision, et

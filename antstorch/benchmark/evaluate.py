@@ -172,7 +172,10 @@ def _fit_or_load_canonical_affine(fi, mi, pair_idx, canonical_affine_dir, device
         ``initial_affine`` to either ``syn_registration()`` or
         ``bspline_svf_registration()``.
     runtime_seconds : float
-        Time spent fitting (0.0 when loaded from cache).
+        Time the affine took to fit. Stored next to the cached transform
+        (``pair_NNN_affine_info.json``) and returned again on every cache hit, so
+        every model variant of a pair reports the same affine time (like syntx's
+        ``syntx_affine_time``); 0.0 only when the cache has no timing file.
     affine_path : str
         Path to the written/cached ``...0GenericAffine.mat`` file.
     """
@@ -181,11 +184,18 @@ def _fit_or_load_canonical_affine(fi, mi, pair_idx, canonical_affine_dir, device
     affine_path = f"{outprefix}0GenericAffine.mat"
     dimension = fi.dimension
 
+    info_path = f"{outprefix}affine_info.json"
     if os.path.exists(affine_path):
         matrix_np, translation_np = read_affine_transform(affine_path, dimension)
         matrix = torch.from_numpy(matrix_np).to(dtype=torch.float32)
         translation = torch.from_numpy(translation_np).to(dtype=torch.float32)
-        return matrix, translation, 0.0, affine_path
+        cached_seconds = 0.0
+        try:
+            with open(info_path, "r", encoding="utf-8") as stream:
+                cached_seconds = float(json.load(stream).get("runtime_seconds", 0.0))
+        except (OSError, ValueError):
+            pass
+        return matrix, translation, cached_seconds, affine_path
 
     t0 = time.time()
     aff_res = syn_registration(
@@ -198,6 +208,11 @@ def _fit_or_load_canonical_affine(fi, mi, pair_idx, canonical_affine_dir, device
     runtime_seconds = time.time() - t0
     matrix = aff_res["affine_matrix"].to(dtype=torch.float32)
     translation = aff_res["affine_translation"].to(dtype=torch.float32)
+    try:
+        with open(info_path, "w", encoding="utf-8") as stream:
+            json.dump({"runtime_seconds": float(runtime_seconds), "pair_idx": int(pair_idx), "source": "antstorch"}, stream)
+    except OSError:
+        pass
     return matrix, translation, runtime_seconds, affine_path
 
 
@@ -768,7 +783,7 @@ def evaluate_mindboggle_pair(
             "antisymmetric", "inverse_method", "in_loop_inverse_steps", "padding_mode",
             "inverse_schedule", "end_of_level_inverse_steps", "syntx_parity", "use_analytical_gradients", "sobolev_alpha",
             "gaussian_sigma_mode", "conservative_smooth", "syntx_defaults",
-            "optimizer", "adam_betas", "adam_eps",
+            "optimizer", "optimizer_lr", "adam_betas", "adam_eps",
         ):
             if key in kwargs:
                 syn_kwargs[key] = kwargs[key]
@@ -838,7 +853,8 @@ def evaluate_mindboggle_pair(
             "this harness's shared canonical affine."
         )
 
-    t_reg = time.time() - t0_reg + t_aff
+    t_deformable = time.time() - t0_reg
+    t_reg = t_deformable + t_aff
 
     warped_image_path = None
     if registration_output_dir is not None:
@@ -905,7 +921,9 @@ def evaluate_mindboggle_pair(
         "dice_moving": float(df_moving),
         "folding_pct": float(jac["folding_pct"]),
         "min_jacobian": float(jac["min"]),
-        "runtime_seconds": float(t_reg),
+        "runtime_seconds": float(t_reg),  # deformable + affine, as syntx reports it
+        "affine_seconds": float(t_aff),
+        "deformable_seconds": float(t_deformable),
         "transforms": {
             "fwdtransforms": [str(x) for x in fwd_tx],
             "invtransforms": [str(x) for x in inv_tx],

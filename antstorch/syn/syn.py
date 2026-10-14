@@ -100,7 +100,7 @@ _REGULARIZERS = ("gaussian", "sobolev", "dsti", "bspline")
 # whether syntx's own dsti-arm advantage comes from its Adam-momentum
 # optimizer rather than from the full time-varying-velocity-field (TVF)
 # architecture its benchmark harness actually routes 'dsti' through.
-_OPTIMIZERS = ("gradient_descent", "reg_adam")
+_OPTIMIZERS = ("gradient_descent", "reg_adam", "syn_reg_adam")
 
 
 def _level_values(value, levels: int, name: str) -> tuple:
@@ -444,6 +444,7 @@ def _fit_syn_level(
     syntx_parity: bool = False,
     use_analytical_gradients: bool = True,
     sobolev_alpha: Optional[float] = None,
+    optimizer_lr: float = 1.0,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor, list]:
     device, dtype = I_curr.device, I_curr.dtype
     fixed_meta_t = metadata_tensors_from_dict(fixed_meta, device, dtype)
@@ -471,6 +472,13 @@ def _fit_syn_level(
     if use_reg_adam:
         adam_state_l = None
         adam_state_r = None
+    # 'syn_reg_adam': syntx.syn()/SyNTo's own reg_adam (NOT the greedy.py path ported above). Moments are
+    # per-level, like syntx (self._adam_* are re-created at the start of each level).
+    use_syn_reg_adam = optimizer == "syn_reg_adam"
+    if use_syn_reg_adam:
+        adam_beta1, adam_beta2 = adam_betas
+        adam_t = 0
+        adam_m_l = adam_m_r = adam_v_l = adam_v_r = None
 
     # ITK's BSplineSyN doubles the update/total-field control-point mesh
     # (like any TransformParametersAdaptor) from the coarsest pyramid level
@@ -573,23 +581,69 @@ def _fit_syn_level(
                 grad_l = separable_gaussian_filter(grad_l, regadam_quotient_sigma, sigma_mode="voxel")
                 grad_r = separable_gaussian_filter(grad_r, regadam_quotient_sigma, sigma_mode="voxel")
 
-        grad_l = _apply_regularizer(
-            grad_l * boundary_mask, regularizer, flow_sigma, fixed_meta["spacing"],
-            mesh_size=update_mesh_size_level, domain=bspline_domain,
-            enforce_stationary_boundary=bspline_enforce_stationary_boundary,
-            gaussian_sigma_mode=gaussian_sigma_mode, conservative_smooth=conservative_smooth,
-            sobolev_alpha=sobolev_alpha,
-        )
-        grad_r = _apply_regularizer(
-            grad_r * boundary_mask, regularizer, flow_sigma, fixed_meta["spacing"],
-            mesh_size=update_mesh_size_level, domain=bspline_domain,
-            enforce_stationary_boundary=bspline_enforce_stationary_boundary,
-            gaussian_sigma_mode=gaussian_sigma_mode, conservative_smooth=conservative_smooth,
-            sobolev_alpha=sobolev_alpha,
-        )
+        if use_syn_reg_adam:
+            # syntx.syn() / SyNTo reg_adam update, step by step (syntx/syn.py, optimizer_type == 'reg_adam'):
+            #  1. the raw half-warp gradient is regularized exactly as in the plain-CFL path (Green operator,
+            #     plus the sigma/2 Gaussian post-filter when conservative_smooth) -- this happens BEFORE Adam;
+            #  2. bias-corrected Adam quotient of that regularized gradient (moments reset every level);
+            #  3. the quotient is smoothed by the Green operator AGAIN (no post-filter, no boundary mask);
+            #  4. one CFL scale shared by both half-warps, clamped to <= 1 (steps are only ever shrunk), times
+            #     optimizer_lr; the norm is taken in the field's own units, as syntx does.
+            grad_l = _apply_regularizer(
+                grad_l * boundary_mask, regularizer, flow_sigma, fixed_meta["spacing"],
+                gaussian_sigma_mode=gaussian_sigma_mode, conservative_smooth=conservative_smooth,
+                sobolev_alpha=sobolev_alpha,
+            )
+            grad_r = _apply_regularizer(
+                grad_r * boundary_mask, regularizer, flow_sigma, fixed_meta["spacing"],
+                gaussian_sigma_mode=gaussian_sigma_mode, conservative_smooth=conservative_smooth,
+                sobolev_alpha=sobolev_alpha,
+            )
+            if adam_m_l is None:
+                adam_m_l, adam_m_r = torch.zeros_like(grad_l), torch.zeros_like(grad_r)
+                adam_v_l, adam_v_r = torch.zeros_like(grad_l), torch.zeros_like(grad_r)
+            adam_t += 1
+            bias1 = 1.0 - adam_beta1 ** adam_t
+            bias2 = 1.0 - adam_beta2 ** adam_t
+            bias2_sqrt = math.sqrt(bias2)
+            step_size = bias2_sqrt / bias1
+            eps_scaled = adam_eps * bias2_sqrt
+            adam_m_l.mul_(adam_beta1).add_(grad_l, alpha=1.0 - adam_beta1)
+            adam_v_l.mul_(adam_beta2).addcmul_(grad_l, grad_l, value=1.0 - adam_beta2)
+            u_raw_l = (adam_m_l * step_size).div_(adam_v_l.sqrt().add_(eps_scaled))
+            adam_m_r.mul_(adam_beta1).add_(grad_r, alpha=1.0 - adam_beta1)
+            adam_v_r.mul_(adam_beta2).addcmul_(grad_r, grad_r, value=1.0 - adam_beta2)
+            u_raw_r = (adam_m_r * step_size).div_(adam_v_r.sqrt().add_(eps_scaled))
+            u_reg_l = _apply_regularizer(
+                u_raw_l, regularizer, flow_sigma, fixed_meta["spacing"],
+                gaussian_sigma_mode=gaussian_sigma_mode, conservative_smooth=False, sobolev_alpha=sobolev_alpha,
+            )
+            u_reg_r = _apply_regularizer(
+                u_raw_r, regularizer, flow_sigma, fixed_meta["spacing"],
+                gaussian_sigma_mode=gaussian_sigma_mode, conservative_smooth=False, sobolev_alpha=sobolev_alpha,
+            )
+            max_u = torch.maximum(torch.linalg.norm(u_reg_l, dim=-1).max(), torch.linalg.norm(u_reg_r, dim=-1).max()).clamp_min(1e-4)
+            cfl_scale = (level_cfl_voxels / max_u).clamp_max(1.0)
+            delta_l = (cfl_scale * float(optimizer_lr)) * u_reg_l
+            delta_r = (cfl_scale * float(optimizer_lr)) * u_reg_r
+        else:
+            grad_l = _apply_regularizer(
+                grad_l * boundary_mask, regularizer, flow_sigma, fixed_meta["spacing"],
+                mesh_size=update_mesh_size_level, domain=bspline_domain,
+                enforce_stationary_boundary=bspline_enforce_stationary_boundary,
+                gaussian_sigma_mode=gaussian_sigma_mode, conservative_smooth=conservative_smooth,
+                sobolev_alpha=sobolev_alpha,
+            )
+            grad_r = _apply_regularizer(
+                grad_r * boundary_mask, regularizer, flow_sigma, fixed_meta["spacing"],
+                mesh_size=update_mesh_size_level, domain=bspline_domain,
+                enforce_stationary_boundary=bspline_enforce_stationary_boundary,
+                gaussian_sigma_mode=gaussian_sigma_mode, conservative_smooth=conservative_smooth,
+                sobolev_alpha=sobolev_alpha,
+            )
 
-        delta_l = _cfl_normalize(grad_l, fixed_meta_t["spacing_t"], level_cfl_voxels)
-        delta_r = _cfl_normalize(grad_r, fixed_meta_t["spacing_t"], level_cfl_voxels)
+            delta_l = _cfl_normalize(grad_l, fixed_meta_t["spacing_t"], level_cfl_voxels)
+            delta_r = _cfl_normalize(grad_r, fixed_meta_t["spacing_t"], level_cfl_voxels)
         if antisymmetric:
             common_mode = delta_l + delta_r
             delta_l = delta_l - 0.5 * common_mode
@@ -772,6 +826,14 @@ _SYNTX_DEFAULTS = {
     ("bspline", "reg_adam"): dict(
         _COMMON_SYNTX_DEFAULTS, grad_step=0.5, reg_iterations=(100, 100, 20),
         flow_sigma=3.0, conservative_smooth=False, sobolev_alpha=None),
+    ("sobolev", "syn_reg_adam"): dict(
+        _COMMON_SYNTX_DEFAULTS, grad_step=0.4, reg_iterations=(100, 100, 20),
+        flow_sigma=math.sqrt(2.4), conservative_smooth=True, sobolev_alpha=2.25),
+    # syntx's 'syn_dsti1' benchmark arm: reg_adam + dsti1, grad_step 0.5, flow_sigma 3.0 (a variance, and only an
+    # on/off gate there: the kernel is set by sobolev_alpha 1.0), (100, 50, 10), in_loop_inv_steps 10.
+    ("dsti", "syn_reg_adam"): dict(
+        _COMMON_SYNTX_DEFAULTS, grad_step=0.5, reg_iterations=(100, 50, 10),
+        flow_sigma=math.sqrt(3.0), conservative_smooth=True, sobolev_alpha=1.0),
     ("dsti", "reg_adam"): dict(
         _COMMON_SYNTX_DEFAULTS, grad_step=0.5, reg_iterations=(100, 50, 10),
         flow_sigma=math.sqrt(3.0), conservative_smooth=True, sobolev_alpha=None),
@@ -826,6 +888,7 @@ def syn_registration(
     syntx_parity: bool = False,
     use_analytical_gradients: bool = True,
     sobolev_alpha: Optional[float] = None,
+    optimizer_lr: float = 1.0,
     antisymmetric: bool = True,
     gaussian_sigma_mode: Optional[str] = None,
     conservative_smooth: Optional[bool] = None,
@@ -933,6 +996,13 @@ def syn_registration(
     sigmas are no-ops (skipped) when ``optimizer='gradient_descent'``, and
     each can be set to ``0`` to disable that one stage independently while
     keeping ``'reg_adam'`` active.
+
+    ``optimizer='syn_reg_adam'`` reproduces the ``reg_adam`` update of ``syntx.syn()`` (SyNTo) -- which is a
+    different algorithm from the greedy.py path that ``'reg_adam'`` ports: the half-warp gradient is first
+    regularized as in the plain CFL path, then fed to bias-corrected Adam moments (reset every level), the
+    quotient is smoothed again by the Green operator (no post-filter), and one CFL scale shared by both
+    half-warps, clamped to <= 1 and multiplied by ``optimizer_lr`` (default 1.0, syntx's), sets the step.
+    Only for ``regularizer='sobolev'``/``'dsti'`` (the cases syntx's benchmark runs).
 
     ``gaussian_sigma_mode`` and ``conservative_smooth`` tune two
     ``'gaussian'``/``'sobolev'``/``'dsti'`` regularizer-formula details that
@@ -1101,6 +1171,11 @@ def syn_registration(
         raise ValueError(f"regularizer must be one of {_REGULARIZERS}")
     if optimizer not in _OPTIMIZERS:
         raise ValueError(f"optimizer must be one of {_OPTIMIZERS}")
+    if optimizer == "syn_reg_adam" and regularizer not in ("sobolev", "dsti"):
+        raise ValueError(
+            "optimizer='syn_reg_adam' reproduces syntx.syn()'s reg_adam for the spectral regularizers only "
+            "('sobolev', 'dsti'); syntx smooths the Adam quotient differently for 'gaussian'/'bspline'"
+        )
     if inverse_schedule not in ("per_iteration", "end_of_level"):
         raise ValueError("inverse_schedule must be 'per_iteration' or 'end_of_level'")
     if end_of_level_inverse_steps < 1:
@@ -1449,6 +1524,7 @@ def syn_registration(
             optimizer=optimizer,
             adam_betas=adam_betas,
             adam_eps=adam_eps,
+            optimizer_lr=optimizer_lr,
             regadam_grad_sigma=regadam_grad_sigma,
             regadam_quotient_sigma=regadam_quotient_sigma,
         )
@@ -1563,6 +1639,7 @@ def syn_registration(
             "syntx_parity": syntx_parity,
             "sobolev_alpha": sobolev_alpha,
             "syntx_defaults": syntx_defaults,
+            "optimizer_lr": optimizer_lr,
             "use_analytical_gradients": use_analytical_gradients,
             "affine_fit": affine_result is not None,
             "device": str(resolved_device),
