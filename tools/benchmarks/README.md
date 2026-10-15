@@ -1,10 +1,17 @@
-# Registration benchmarks — `tools/benchmarks/`
+# Benchmarks — `tools/benchmarks/`
+
+- **[Registration](#1-overview-what-is-borrowed-from-syntx)** — ANTsTorch vs syntx and FireANTs on Mindboggle-101
+  (sections 1–7; model and script catalogue in [Reference](#reference))
+- **[Primitives](#primitive-comparisons-n4-denoising-cortical-thickness-b-spline-fitting)** — ANTs vs ANTsTorch:
+  N4 bias-field correction, denoising, cortical thickness (KellyKapowski) and B-spline scattered-data
+  approximation (launcher: `run_primitive_benchmarks.py`)
 
 This directory benchmarks ANTsTorch registration against [syntx](https://github.com/stnava/syntx) and
 [FireANTs](https://github.com/rohitrango/FireANTs) on the Mindboggle-101 data. The first half of this file
 (sections 1–6) is the guide to the registration work; the second half (**Reference**) is the catalogue of
 every model name and script. Non-registration comparisons (N4, denoising, cortical thickness, scattered-data
-B-splines) are listed in the script table of the reference part.
+B-splines) have their own section, [Primitive comparisons](#primitive-comparisons-n4-denoising-cortical-thickness-b-spline-fitting),
+between the two halves, and are listed in the script table of the reference part.
 
 **Contents**
 
@@ -15,6 +22,8 @@ B-splines) are listed in the script table of the reference part.
 5. [FireANTs](#5-fireants)
 6. [Results](#6-results) — Dice, time, Jacobian
 7. [Reproducing the runs](#7-reproducing-the-runs)
+
+Not registration: [Primitive comparisons: N4, denoising, cortical thickness, B-spline fitting](#primitive-comparisons-n4-denoising-cortical-thickness-b-spline-fitting)
 
 ## 1. Overview: what is borrowed from syntx
 
@@ -157,6 +166,100 @@ python tools/benchmarks/compare_syntx_antstorch_mindboggle.py --fireants --devic
 ```
 
 More run recipes: the Reference subsection "Suggested runs".
+
+---
+
+# Primitive comparisons: N4, denoising, cortical thickness, B-spline fitting
+
+These comparisons are **not registration benchmarks** and are kept apart from the Mindboggle results above.
+Each one runs an ANTsPy routine and its ANTsTorch counterpart on the same input and reports run time and
+agreement of the outputs. They are launched together by `run_primitive_benchmarks.py`
+(`--device` defaults to `antstorch.get_default_device()`; each comparison writes its own `log.txt`, and the
+run writes `run_info.txt` and `summary.txt`):
+
+```
+python tools/benchmarks/run_primitive_benchmarks.py --out-dir <dir>                   # default device
+python tools/benchmarks/run_primitive_benchmarks.py --device cuda:0 --out-dir <dir>
+python tools/benchmarks/run_primitive_benchmarks.py --only n4_bias_field_correction --device mps
+```
+
+## Runs of 2026-10-15
+
+| | MPS | CUDA |
+|---|---|---|
+| Host | Mac (Apple silicon, `mps`) | `hyperwolf`, `cuda:0` = NVIDIA RTX A6000 (49 GB; a second A6000 was present but unused) |
+| Python / ANTsTorch commit | 3.11.15 / `73ee932` | 3.11.9 / `2769e40` |
+| Input | `S_template3` (136×176×176, ~1.5 mm) for denoising, N4 and cortical thickness; synthetic data for B-spline fitting | same |
+| Result files | `other_primitives_evaluation_mps/` | `other_primitives_evaluation_cuda/` |
+
+How to read the numbers:
+
+- ANTs always runs on the **CPU of the host it ran on**, and the two hosts differ (ANTs denoising: 5.7 s on the
+  Mac, 11.4 s on `hyperwolf`; ANTs N4: 8.1 s vs 25.2 s). Speed ratios are therefore meaningful **within** a
+  column, not between MPS and CUDA.
+- The two runs used different ANTsTorch commits.
+- MPS has no float64. `compare_bspline_scattered_data.py` runs ANTsTorch in float32 on MPS and in float64
+  elsewhere; N4, denoising and cortical thickness use the library's own dtype handling.
+- Ratio = ANTs time / ANTsTorch time; above 1 favours ANTsTorch.
+
+### Run time
+
+| Comparison | Device | ANTs (s) | ANTsTorch (s) | Ratio |
+|---|---|---:|---:|---:|
+| Denoising (`denoise_image`, median of 3) | MPS | 5.687 | 7.127 | 0.80× (ANTs faster) |
+| | CUDA | 11.421 | 1.110 | 10.29× |
+| N4 bias-field correction (corrected image + bias field) | MPS | 8.086 | 5.089 | 1.59× |
+| | CUDA | 25.174 | 1.201 | 20.96× |
+| Cortical thickness (KellyKapowski vs DiReCT, 45 iterations) | MPS | 283.756 | 211.614 | 1.34× |
+| | CUDA | 607.950 | 17.418 | 34.90× |
+
+- Cortical thickness: Deep Atropos is run once and shared by both engines; it is excluded from these times
+  (60.7 s on MPS, 101.0 s on CUDA).
+- Peak ANTsTorch CUDA memory: 3332 MiB (denoising), 552.5 MiB (N4).
+- B-spline fitting is not in the table: the problems are tiny (ANTs 1–8 ms; ANTsTorch 8–400 ms), so its times
+  measure start-up overhead rather than throughput.
+
+### Agreement with ANTs
+
+| Comparison | Metric | MPS | CUDA |
+|---|---|---:|---:|
+| Denoising | RMSE (% of intensity range) | 0.01306 (0.18 %) | 0.01306 (0.18 %) |
+| | MAE | 0.00209 | 0.00209 |
+| | Max \|diff\| | 1.7295 | 1.7295 |
+| | Correlation, denoised image | 0.99997 | 0.99997 |
+| | Correlation, removed noise | 0.99401 | 0.99401 |
+| N4 | Corrected-image RMSE | 0.003338 | 0.000475 |
+| | Scale-aligned corrected-image RMSE | 0.001652 | 0.000446 |
+| | Normalized log-bias MAE | 0.001320 | 0.000570 |
+| | Normalized log-bias correlation | 0.99998254 | 0.99999517 |
+| Cortical thickness (GM voxels) | MAE (mm) | 0.1537 | 0.1453 |
+| | RMSE (mm) | 0.2033 | 0.1931 |
+| | 95th percentile \|error\| (mm) | 0.3969 | 0.3733 |
+| | Pearson correlation | 0.99634 | 0.99649 |
+| | GM voxels compared | 140258 | 140245 |
+
+Observations:
+
+- **Denoising:** the two devices give the same agreement to the printed precision; the run-to-run difference
+  is 0 for both ANTs and ANTsTorch. The maximum difference (1.73, for an intensity range of about 8.7) is far
+  above the RMSE, so a few voxels disagree strongly. This has not been investigated.
+- **N4:** the corrected-image RMSE is about 7× lower on CUDA than on MPS (2–4× lower for the scale-aligned RMSE
+  and the log-bias MAE). The launcher passes `--no-stable-accumulation` in both runs.
+- **Cortical thickness:** agreement is similar on both devices (MAE ≈ 0.15 mm, r ≈ 0.996). The GM voxel
+  counts differ slightly because each run computes its own Deep Atropos segmentation.
+
+### B-spline fitting on scattered data
+
+Synthetic 2-D data, 4 fitting levels; RMSE against ANTsPy.
+
+| Comparison | MPS (float32) | CUDA (float64) |
+|---|---:|---:|
+| `fit_bspline_object_to_scattered_data` (1920 points, mesh 4) | 3.45e-6 | 3.22e-6 |
+| `fit_bspline_displacement_field`, scattered points, component 0 / 1 | 8.20e-5 / 7.87e-5 | 8.19e-5 / 7.85e-5 |
+| `fit_bspline_displacement_field`, dense field, component 0 / 1 | 1.33e-6 / 6.68e-7 | 1.33e-6 / 6.68e-7 |
+
+The correlation is ≥ 0.99999999 in every case. The float32 run on MPS is within about 7 % of the float64 run
+on CUDA, so the remaining difference from ANTs is not float32 round-off.
 
 ---
 
