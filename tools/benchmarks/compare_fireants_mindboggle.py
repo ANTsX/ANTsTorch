@@ -201,6 +201,57 @@ def _run_fireants(pair_idx, device, out_dir, data_dir):
     return rec
 
 
+SWEEP_GRID = (
+    [dict(smooth_warp_sigma=sg, cc_kernel_size=k) for sg in (0.25, 0.5, 1.0, 2.0) for k in (5, 7, 9)]
+    + [dict(smooth_warp_sigma=0.5, cc_kernel_size=7, optimizer_lr=lr) for lr in (0.1, 0.25, 1.0)]
+)
+
+
+def _run_sweep(pairs, device, out_dir, data_dir):
+    """FireANTs-only hyper-parameter sweep (no syntx / ANTsTorch): full nominal budget (no early stop), the shared
+    syntx affines already cached in `out_dir/antstorch_canonical_affines` by a previous run of this script."""
+    global FIREANTS_OVERRIDES, FIREANTS_TOLERANCE
+    import numpy as np
+    missing = [p for p in pairs if _affine_source(out_dir, p) != "syntx"]
+    if missing:
+        sys.exit(f"--fireants-sweep needs syntx's cached affines in '{out_dir}/antstorch_canonical_affines' "
+                 f"(pairs without one: {missing}). Point --out-dir at a directory from an earlier run of this script "
+                 f"that covered these pairs.")
+    FIREANTS_TOLERANCE = 1e9
+    rows, raw = [], []
+    for cfg in SWEEP_GRID:
+        FIREANTS_OVERRIDES = dict(cfg)
+        recs = [_run_fireants(p, device, out_dir, data_dir) for p in pairs]
+        raw.append({"config": cfg, "records": recs})
+        ok = [r for r in recs if r.get("_status") == "SUCCESS"]
+        print(f"  {cfg}: " + (f"dice_sym={np.mean([r['dice_sym'] for r in ok]):.4f} "
+                              f"dice_fixed={np.mean([r['dice_fixed'] for r in ok]):.4f} (n={len(ok)}/{len(recs)})"
+                              if ok else "all failed"), flush=True)
+        if ok:
+            last = [r["_fireants_loss_first_last"][-1][1] for r in ok if r.get("_fireants_loss_first_last")
+                    and r["_fireants_loss_first_last"][-1]]
+            rows.append((cfg, len(ok), len(recs), np.mean([r["dice_sym"] for r in ok]), np.mean([r["dice_fixed"] for r in ok]),
+                         np.mean([r["_deformable_seconds"] for r in ok]), float(np.mean(last)) if last else float("nan"),
+                         float(np.median([r["folding_pct"] for r in ok]))))
+        with open(os.path.join(out_dir, "fireants_sweep.json"), "w") as f:
+            json.dump(raw, f, indent=2)
+    md = ["# FireANTs hyper-parameter sweep (full budget, no early stop; shared syntx affine)", "",
+          f"Pairs: {pairs}; schedule: {_FIREANTS_KWARGS[FIREANTS_SCHEDULE]['iterations']}; other settings: scripts defaults.", "",
+          "| smooth_warp_sigma | cc_kernel_size | optimizer_lr | n | Dice sym | Dice fixed | t déf. (s) | final-level loss | folding % (median) |",
+          "|---|---|---|---|---|---|---|---|---|"]
+    base = _FIREANTS_KWARGS[FIREANTS_SCHEDULE]
+    for cfg, n, tot, ds, df, t, ll, fo in sorted(rows, key=lambda r: -r[4]):
+        md.append(f"| {cfg.get('smooth_warp_sigma', 1.0)} | {cfg.get('cc_kernel_size', base['cc_kernel_size'])} | "
+                  f"{cfg.get('optimizer_lr', base['optimizer_lr'])} | {n}/{tot} | {ds:.4f} | {df:.4f} | {t:.1f} | {ll:.4f} | {fo:.4f} |")
+    md.append("")
+    md.append("Sorted by Dice fixed (forward warp only; FireANTs' inverse is imperfect). For reference, the syntx / ANTsTorch "
+              "Dice and the affine-only Dice of these pairs are in the comparison_summary.md of the run that produced the affines.")
+    path = os.path.join(out_dir, "fireants_sweep.md")
+    with open(path, "w") as f:
+        f.write("\n".join(md) + "\n")
+    print("\n" + "\n".join(md) + f"\n\nMarkdown: {path}")
+
+
 def _aggregate3(results, models, pairs):
     """Paired statistics on pairs where syntx, antstorch AND fireants all succeeded (deformable-only times)."""
     import numpy as np
@@ -255,6 +306,10 @@ def main():
     ap.add_argument("--fireants-warp-sigma", type=float, default=None,
                     help="Diagnostic: FireANTs smooth_warp_sigma (this script's default 1.0; FireANTs' own default 0.5).")
     ap.add_argument("--fireants-cc-kernel", type=int, default=None, help="Diagnostic: FireANTs cc_kernel_size (default 5).")
+    ap.add_argument("--fireants-sweep", action="store_true",
+                    help="FireANTs-only sweep of smooth_warp_sigma x cc_kernel_size (and the learning rate), full budget, "
+                         "on --pairs. Reuses the syntx affines cached in --out-dir by an earlier run (syntx / ANTsTorch are "
+                         "NOT run). Writes fireants_sweep.md / fireants_sweep.json.")
     ap.add_argument("--own-defaults", action="store_true",
                     help="Disable the fair mode for syntx/antstorch (see the sibling script). The affine is then NOT shared.")
     ap.add_argument("--no-warmup", action="store_true")
@@ -282,6 +337,9 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
 
     sib = _load_sibling_module()
+    if args.fireants_sweep:
+        _run_sweep(args.pairs, args.device, args.out_dir, sib.DATA_DIR)
+        return
     sib.FAIR = not args.own_defaults
     libs = (("syntx", sib._run_syntx), ("antstorch", sib._run_antstorch)) if sib.FAIR \
         else (("antstorch", sib._run_antstorch), ("syntx", sib._run_syntx))
