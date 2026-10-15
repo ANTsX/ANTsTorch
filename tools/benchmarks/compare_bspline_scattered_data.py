@@ -78,6 +78,12 @@ def vector_to_ants_order(array: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(np.moveaxis(reordered, 0, -1))
 
 
+def working_dtype(device: torch.device) -> torch.dtype:
+    """float64 where supported; MPS has no float64, so it runs in float32 and
+    its differences from ANTs (float64) include float32 round-off."""
+    return torch.float32 if device.type == "mps" else torch.float64
+
+
 def synchronize(device: torch.device) -> None:
     """Wait for asynchronous accelerator work before timing boundaries."""
     if device.type == "cuda":
@@ -175,11 +181,11 @@ def compare_object_to_scattered_data(args, rng: np.random.Generator, device: tor
     synchronize(torch_device)
     start = time.perf_counter()
     torch_dense = antstorch.fit_bspline_object_to_scattered_data(
-        scattered_data, parametric_data, data_weights=weights, device=torch_device, dtype=torch.float64, **kwargs
+        scattered_data, parametric_data, data_weights=weights, device=torch_device, dtype=working_dtype(torch_device), **kwargs
     )
     synchronize(torch_device)
     torch_seconds = time.perf_counter() - start
-    torch_array = reverse_axes(torch_dense[0, 0].detach().cpu().numpy())
+    torch_array = reverse_axes(torch_dense[0, 0].detach().cpu().numpy().astype(np.float64))
 
     print(f"  points={scattered_data.shape[0]}, size={size}, mesh_size={kwargs['mesh_size']}, levels={kwargs['number_of_fitting_levels']}")
     print(f"  ANTs runtime:      {ants_seconds:.3f} s")
@@ -238,15 +244,15 @@ def compare_displacement_field_from_points(args, rng: np.random.Generator, devic
     synchronize(torch_device)
     start = time.perf_counter()
     torch_dense = antstorch.fit_bspline_displacement_field(
-        displacement_origins=torch.as_tensor(points, device=torch_device),
-        displacements=torch.as_tensor(deltas, device=torch_device),
-        displacement_weights=None if weights is None else torch.as_tensor(weights, device=torch_device),
+        displacement_origins=torch.as_tensor(points, dtype=working_dtype(torch_device), device=torch_device),
+        displacements=torch.as_tensor(deltas, dtype=working_dtype(torch_device), device=torch_device),
+        displacement_weights=None if weights is None else torch.as_tensor(weights, dtype=working_dtype(torch_device), device=torch_device),
         domain=domain,
         **kwargs,
     )
     synchronize(torch_device)
     torch_seconds = time.perf_counter() - start
-    torch_array = vector_to_ants_order(torch_dense[0].detach().cpu().numpy())
+    torch_array = vector_to_ants_order(torch_dense[0].detach().cpu().numpy().astype(np.float64))
 
     print(f"  points={point_count}, size={size}, mesh_size={kwargs['mesh_size']}, levels={kwargs['number_of_fitting_levels']}")
     print(f"  ANTs runtime:      {ants_seconds:.3f} s")
@@ -301,7 +307,7 @@ def compare_displacement_field_from_dense_field(args, rng: np.random.Generator, 
         field, (field.ndim - 1,) + tuple(range(field.ndim - 2, -1, -1))
     )
     field_torch = torch.as_tensor(
-        np.ascontiguousarray(component_first_reversed), device=torch_device
+        np.ascontiguousarray(component_first_reversed), dtype=working_dtype(torch_device), device=torch_device
     ).unsqueeze(0)
     domain = antstorch.ImageDomain(size=size, spacing=(1.0,) * dimension, origin=(0.0,) * dimension)
     synchronize(torch_device)
@@ -309,7 +315,7 @@ def compare_displacement_field_from_dense_field(args, rng: np.random.Generator, 
     torch_dense = antstorch.fit_bspline_displacement_field(displacement_field=field_torch, domain=domain, **kwargs)
     synchronize(torch_device)
     torch_seconds = time.perf_counter() - start
-    torch_array = vector_to_ants_order(torch_dense[0].detach().cpu().numpy())
+    torch_array = vector_to_ants_order(torch_dense[0].detach().cpu().numpy().astype(np.float64))
 
     print(f"  size={size}, mesh_size={kwargs['mesh_size']}, levels={kwargs['number_of_fitting_levels']}")
     print(f"  ANTs runtime:      {ants_seconds:.3f} s")
@@ -346,6 +352,8 @@ def main() -> None:
     if device.type == "mps" and not torch.backends.mps.is_available():
         raise RuntimeError("--device mps was requested, but MPS is not available")
     rng = np.random.default_rng(args.seed)
+    if working_dtype(device) == torch.float32:
+        print(f"NOTE: {device} does not support float64; ANTsTorch runs in float32, ANTs in float64.")
 
     if not args.skip_object_to_scattered_data:
         compare_object_to_scattered_data(args, rng, device)
