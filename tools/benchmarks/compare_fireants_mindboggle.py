@@ -51,6 +51,12 @@ _FIREANTS_KWARGS = {
     "tutorial": dict(scales=[4, 2, 1], iterations=[200, 100, 25], cc_kernel_size=5, optimizer_lr=0.5),
 }
 FIREANTS_SCHEDULE = "matched"
+# Preset = the "Tuned Greedy Compositive" configuration of syntx's examples/compare_fireants_vs_syntx.py / docs/v_fire_ants/README.md
+# (grad=2.0, warp=0.35, lr=0.4, iterations [100,100,50], CC window 5). That document reports 3.7 % folded voxels for it.
+FIREANTS_PRESETS = {
+    "syntx-doc": dict(smooth_warp_sigma=0.35, smooth_grad_sigma=2.0, optimizer_lr=0.4, cc_kernel_size=5, iterations=[100, 100, 50]),
+}
+FIREANTS_NORMALIZE = True  # feed FireANTs the same auto-normalised images syntx's benchmark registers (see _run_fireants)
 FIREANTS_OVERRIDES = {}  # optional diagnostic overrides of _FIREANTS_KWARGS entries (set from the CLI)
 FIREANTS_TOLERANCE = None  # None: FireANTs' own early-stop setting (tolerance 1e-6 on the loss slope, 10 iterations)
 FIREANTS_LABEL = "fireants"
@@ -117,8 +123,16 @@ def _run_fireants(pair_idx, device, out_dir, data_dir):
         os.makedirs(pair_out_dir, exist_ok=True)
         fixed_path = os.path.join(pair_out_dir, "fixed.nii.gz")
         moving_path = os.path.join(pair_out_dir, "moving.nii.gz")
-        ants.image_write(fi_ants, fixed_path)
-        ants.image_write(mi_ants, moving_path)
+        if FIREANTS_NORMALIZE:
+            # syntx's benchmark registers images normalised with normalize_image(method='auto') (entropy-optimal foreground
+            # percentile clip to [0, 1]); antstorch.syn.core.utils.normalize_image is the same function (checked numerically).
+            # Scoring below still uses the original images: only the intensities fed to FireANTs change.
+            from antstorch.syn.core.utils import normalize_image
+            ants.image_write(normalize_image(fi_ants, method="auto"), fixed_path)
+            ants.image_write(normalize_image(mi_ants, method="auto"), moving_path)
+        else:
+            ants.image_write(fi_ants, fixed_path)
+            ants.image_write(mi_ants, moving_path)
         fixed_batch = BatchedImages([Image.load_file(fixed_path, device=device)])
         moving_batch = BatchedImages([Image.load_file(moving_path, device=device)])
 
@@ -130,6 +144,7 @@ def _run_fireants(pair_idx, device, out_dir, data_dir):
         kw = dict(_FIREANTS_KWARGS[FIREANTS_SCHEDULE])
         kw.update(FIREANTS_OVERRIDES)
         smooth_warp_sigma = float(kw.pop("smooth_warp_sigma", 1.0))
+        smooth_grad_sigma = float(kw.pop("smooth_grad_sigma", 1.0))
         extra_kw = {} if FIREANTS_TOLERANCE is None else dict(tolerance=float(FIREANTS_TOLERANCE))
         _sync(device)
         t_start = time.time()
@@ -139,7 +154,7 @@ def _run_fireants(pair_idx, device, out_dir, data_dir):
             loss_type="cc", cc_kernel_size=kw["cc_kernel_size"],
             deformation_type="compositive",
             optimizer="adam", optimizer_lr=kw["optimizer_lr"],
-            smooth_warp_sigma=smooth_warp_sigma, smooth_grad_sigma=1.0,
+            smooth_warp_sigma=smooth_warp_sigma, smooth_grad_sigma=smooth_grad_sigma,
             init_affine=init_affine, **extra_kw,
         )
         # Count the iterations FireANTs really runs per pyramid level: its ConvergenceMonitor can stop a level early
@@ -181,7 +196,7 @@ def _run_fireants(pair_idx, device, out_dir, data_dir):
             "min_jacobian": float(jac.get("min", float("nan"))),
             "runtime_seconds": deformable_seconds, "_deformable_seconds": deformable_seconds,
             "_wall_seconds": time.time() - t0, "_affine_source": affine_source,
-            "_fireants_schedule": FIREANTS_SCHEDULE,
+            "_fireants_schedule": FIREANTS_SCHEDULE, "_fireants_normalized": bool(FIREANTS_NORMALIZE),
             "_fireants_iterations_run": list(iters_run), "_fireants_iterations_nominal": list(kw["iterations"]),
             "_fireants_tolerance": FIREANTS_TOLERANCE,
             # loss (negative local CC, lower is better) at the first / last iteration of each pyramid level
@@ -201,10 +216,18 @@ def _run_fireants(pair_idx, device, out_dir, data_dir):
     return rec
 
 
-SWEEP_GRID = (
-    [dict(smooth_warp_sigma=sg, cc_kernel_size=k) for sg in (0.25, 0.5, 1.0, 2.0) for k in (5, 7, 9)]
-    + [dict(smooth_warp_sigma=0.5, cc_kernel_size=7, optimizer_lr=lr) for lr in (0.1, 0.25, 1.0)]
-)
+SWEEP_GRIDS = {
+    # set 1: smoothing x CC window, then the learning rate at (0.5, 7)
+    1: ([dict(smooth_warp_sigma=sg, cc_kernel_size=k) for sg in (0.25, 0.5, 1.0, 2.0) for k in (5, 7, 9)]
+        + [dict(smooth_warp_sigma=0.5, cc_kernel_size=7, optimizer_lr=lr) for lr in (0.1, 0.25, 1.0)]),
+    # set 2 (after set 1: Dice kept rising with the learning rate up to 1.0): larger learning rates x smoothing, window 7
+    2: [dict(smooth_warp_sigma=sg, cc_kernel_size=7, optimizer_lr=lr) for lr in (1.0, 2.0, 4.0) for sg in (0.35, 0.5, 0.75)],
+    # set 3: gradient smoothing (never varied in sets 1-2, fixed at 1.0) x warp smoothing, at syntx's documented lr 0.4 / window 5
+    3: [dict(smooth_grad_sigma=g, smooth_warp_sigma=w, optimizer_lr=0.4, cc_kernel_size=5)
+        for g in (1.0, 2.0, 3.0) for w in (0.25, 0.35, 0.5)],
+}
+FOLDING_LIMIT_PCT = 0.01  # a FireANTs setting is only "comparable" to syntx / ANTsTorch if its median folding stays below this
+SWEEP_SET = 1
 
 
 def _run_sweep(pairs, device, out_dir, data_dir):
@@ -219,7 +242,7 @@ def _run_sweep(pairs, device, out_dir, data_dir):
                  f"that covered these pairs.")
     FIREANTS_TOLERANCE = 1e9
     rows, raw = [], []
-    for cfg in SWEEP_GRID:
+    for cfg in SWEEP_GRIDS[SWEEP_SET]:
         FIREANTS_OVERRIDES = dict(cfg)
         recs = [_run_fireants(p, device, out_dir, data_dir) for p in pairs]
         raw.append({"config": cfg, "records": recs})
@@ -237,12 +260,20 @@ def _run_sweep(pairs, device, out_dir, data_dir):
             json.dump(raw, f, indent=2)
     md = ["# FireANTs hyper-parameter sweep (full budget, no early stop; shared syntx affine)", "",
           f"Pairs: {pairs}; schedule: {_FIREANTS_KWARGS[FIREANTS_SCHEDULE]['iterations']}; other settings: scripts defaults.", "",
-          "| smooth_warp_sigma | cc_kernel_size | optimizer_lr | n | Dice sym | Dice fixed | t déf. (s) | final-level loss | folding % (median) |",
-          "|---|---|---|---|---|---|---|---|---|"]
+          "| smooth_warp_sigma | smooth_grad_sigma | cc_kernel_size | optimizer_lr | n | Dice sym | Dice fixed | t déf. (s) | final-level loss | folding % (median) |",
+          "|---|---|---|---|---|---|---|---|---|---|"]
     base = _FIREANTS_KWARGS[FIREANTS_SCHEDULE]
     for cfg, n, tot, ds, df, t, ll, fo in sorted(rows, key=lambda r: -r[4]):
-        md.append(f"| {cfg.get('smooth_warp_sigma', 1.0)} | {cfg.get('cc_kernel_size', base['cc_kernel_size'])} | "
+        md.append(f"| {cfg.get('smooth_warp_sigma', 1.0)} | {cfg.get('smooth_grad_sigma', 1.0)} | {cfg.get('cc_kernel_size', base['cc_kernel_size'])} | "
                   f"{cfg.get('optimizer_lr', base['optimizer_lr'])} | {n}/{tot} | {ds:.4f} | {df:.4f} | {t:.1f} | {ll:.4f} | {fo:.4f} |")
+    md.append("")
+    ok_rows = [r for r in rows if r[7] < FOLDING_LIMIT_PCT]
+    if ok_rows:
+        b = max(ok_rows, key=lambda r: r[4])
+        md.append(f"**Best setting with median folding < {FOLDING_LIMIT_PCT} %** (comparable regularity to syntx / ANTsTorch): "
+                  f"{b[0]} -> Dice fixed {b[4]:.4f}, Dice sym {b[3]:.4f}, folding {b[7]:.4f} %.")
+    else:
+        md.append(f"No setting kept the median folding below {FOLDING_LIMIT_PCT} %.")
     md.append("")
     md.append("Sorted by Dice fixed (forward warp only; FireANTs' inverse is imperfect). For reference, the syntx / ANTsTorch "
               "Dice and the affine-only Dice of these pairs are in the comparison_summary.md of the run that produced the affines.")
@@ -255,10 +286,10 @@ def _run_sweep(pairs, device, out_dir, data_dir):
 def _aggregate3(results, models, pairs):
     """Paired statistics on pairs where syntx, antstorch AND fireants all succeeded (deformable-only times)."""
     import numpy as np
-    lines = ["| Modèle | n | Dice affine (syntx) | Dice syntx | Dice antstorch | Dice fireants (sym / fixe) | Δ antstorch−syntx (moy ± ES) | "
+    lines = ["| Modèle | n | Dice affine (syntx) | Dice syntx | Dice antstorch | Dice fireants (sym / fixe) | Dice fixe syntx / antstorch | Δ antstorch−syntx (moy ± ES) | "
              "Δ fireants−syntx (moy ± ES) | t déf. syntx | t déf. antstorch | t déf. fireants (s) | "
              "repli. % médiane s / a / f |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     by = {}
     for r in results:
         if r.get("_status") == "SUCCESS":
@@ -280,6 +311,8 @@ def _aggregate3(results, models, pairs):
         aff = np.array([S[p].get("syntx_affine_dice_sym", float("nan")) for p in ps], dtype=float)
         lines.append(
             f"| {reg} | {len(ps)} | {np.nanmean(aff):.4f} | {ds.mean():.4f} | {da.mean():.4f} | {df.mean():.4f} / {dff.mean():.4f} | "
+            f"{np.nanmean([S[p].get('dice_fixed', float('nan')) for p in ps]):.4f} / "
+            f"{np.nanmean([A[p].get('dice_fixed', float('nan')) for p in ps]):.4f} | "
             f"{xa.mean():+.4f} ± {se(xa):.4f} | {xf.mean():+.4f} ± {se(xf):.4f} | {ts.mean():.1f} | {ta.mean():.1f} | "
             f"{tf.mean():.1f} | {fm[0]:.4f} / {fm[1]:.4f} / {fm[2]:.4f} |")
     return lines
@@ -302,6 +335,13 @@ def main():
                     help="Diagnostic: override FireANTs' per-level iterations (one value per pyramid level, 3). "
                          "'1 1 1' (almost no optimisation) tests the affine export/scoring chain: the resulting Dice should "
                          "be close to the affine-only Dice reported in the summary.")
+    ap.add_argument("--fireants-preset", choices=sorted(FIREANTS_PRESETS), default=None,
+                    help="Start from a named FireANTs configuration; explicit --fireants-* options still override it. "
+                         "'syntx-doc' = the tuned greedy-compositive setting of syntx's docs/v_fire_ants (which reports 3.7 %% folding).")
+    ap.add_argument("--fireants-grad-sigma", type=float, default=None,
+                    help="Diagnostic: FireANTs smooth_grad_sigma (this script's default 1.0).")
+    ap.add_argument("--no-normalize", action="store_true",
+                    help="Feed FireANTs the raw images instead of the auto-normalised ones syntx registers (earlier behaviour).")
     ap.add_argument("--fireants-lr", type=float, default=None, help="Diagnostic: FireANTs Adam learning rate (default 0.5).")
     ap.add_argument("--fireants-warp-sigma", type=float, default=None,
                     help="Diagnostic: FireANTs smooth_warp_sigma (this script's default 1.0; FireANTs' own default 0.5).")
@@ -310,6 +350,10 @@ def main():
                     help="FireANTs-only sweep of smooth_warp_sigma x cc_kernel_size (and the learning rate), full budget, "
                          "on --pairs. Reuses the syntx affines cached in --out-dir by an earlier run (syntx / ANTsTorch are "
                          "NOT run). Writes fireants_sweep.md / fireants_sweep.json.")
+    ap.add_argument("--sweep-set", type=int, choices=sorted(SWEEP_GRIDS), default=1,
+                    help="Which grid --fireants-sweep runs: 1 = smoothing x CC window (+ small lr set); "
+                         "2 = larger learning rates (1, 2, 4) x smoothing (0.35, 0.5, 0.75); "
+                         "3 = gradient smoothing (1, 2, 3) x warp smoothing (0.25, 0.35, 0.5) at lr 0.4, window 5.")
     ap.add_argument("--own-defaults", action="store_true",
                     help="Disable the fair mode for syntx/antstorch (see the sibling script). The affine is then NOT shared.")
     ap.add_argument("--no-warmup", action="store_true")
@@ -321,9 +365,15 @@ def main():
         sys.exit(f"FireANTs benchmark needs a CUDA GPU (got --device {args.device!r}, "
                  f"cuda available: {torch.cuda.is_available()}). Run it on the GPU machine (e.g. hyperwolf).")
 
-    global FIREANTS_SCHEDULE, FIREANTS_TOLERANCE, FIREANTS_OVERRIDES
+    global FIREANTS_SCHEDULE, FIREANTS_TOLERANCE, FIREANTS_OVERRIDES, SWEEP_SET, FIREANTS_NORMALIZE
+    SWEEP_SET = args.sweep_set
     FIREANTS_SCHEDULE = "tutorial" if args.tutorial_schedule else "matched"
     FIREANTS_TOLERANCE = 1e9 if args.fireants_no_early_stop else None
+    FIREANTS_NORMALIZE = not args.no_normalize
+    if args.fireants_preset:
+        FIREANTS_OVERRIDES.update(FIREANTS_PRESETS[args.fireants_preset])
+    if args.fireants_grad_sigma is not None:
+        FIREANTS_OVERRIDES["smooth_grad_sigma"] = args.fireants_grad_sigma
     if args.fireants_iterations is not None:
         FIREANTS_OVERRIDES["iterations"] = list(args.fireants_iterations)
     if args.fireants_lr is not None:
