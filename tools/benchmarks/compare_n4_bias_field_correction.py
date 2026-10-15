@@ -3,11 +3,11 @@
 
 Examples
 --------
-Use the bundled 2-D ``r16`` image::
+Use ANTsTorch's bundled 3-D ``S_template3`` image::
 
     python tools/benchmarks/compare_n4_bias_field_correction.py
 
-Use another 2-D or 3-D image and CUDA, if available::
+Use another 2-D or 3-D image (e.g. ANTsPy's 2-D ``r16``) and CUDA, if available::
 
     python tools/benchmarks/compare_n4_bias_field_correction.py image.nii.gz --device cuda
 
@@ -71,16 +71,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "image",
         nargs="?",
-        help="Input image. When omitted, ants.get_ants_data('r16') is used.",
+        help="Input image. When omitted, antstorch.get_antstorch_data('S_template3') is used.",
     )
-    parser.add_argument("--device", default="cpu", help="PyTorch device, e.g. cpu or cuda")
+    parser.add_argument("--device", default=None, help="PyTorch device, e.g. cpu, mps or cuda (default: antstorch.get_default_device()).")
     parser.add_argument("--shrink-factor", type=int, default=4)
     parser.add_argument(
         "--iterations",
         type=int,
         nargs="+",
         default=[50, 50, 50, 50],
-        help="Iterations at each fitting level (default: 20 20)",
+        help="Iterations at each fitting level (default: 50 50 50 50)",
     )
     parser.add_argument("--tolerance", type=float, default=0.0)
     parser.add_argument(
@@ -117,13 +117,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    device = torch.device(args.device)
+    device = torch.device(args.device) if args.device else antstorch.get_default_device()
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("--device cuda was requested, but CUDA is not available")
     if device.type == "mps" and not torch.backends.mps.is_available():
         raise RuntimeError("--device mps was requested, but MPS is not available")
 
-    input_path = args.image or ants.get_ants_data("r16")
+    input_path = args.image or antstorch.get_antstorch_data("S_template3")
     t1 = ants.image_read(input_path).clone("float")
     mask = t1 * 0 + 1
     mesh_size = args.mesh_size or [4] * t1.dimension
@@ -210,7 +210,7 @@ def main() -> None:
     print(f"ANTs runtime:      {ants_seconds:.3f} s (correction + bias-field run)")
     print(f"ANTsTorch runtime: {torch_seconds:.3f} s on {device} (correction + bias-field run)")
     print(f"ANTs intensity range: {corrected_ants_array.min():.6g} to {corrected_ants_array.max():.6g}")
-    print(f"ANTsTorch intensity range: {corrected_torch_array.min():.6g} to {corrected_torch_array.max():.6g}") 
+    print(f"ANTsTorch intensity range: {corrected_torch_array.min():.6g} to {corrected_torch_array.max():.6g}")
     print(f"ANTs bias-field range: {normalized_ants_bias.min():.6g} to {normalized_ants_bias.max():.6g}")
     print(f"ANTsTorch bias-field range: {normalized_torch_bias.min():.6g} to {normalized_torch_bias.max():.6g}")
     print(

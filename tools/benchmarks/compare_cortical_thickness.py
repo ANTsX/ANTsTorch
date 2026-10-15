@@ -150,7 +150,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--device",
         default=None,
-        help="ANTsTorch device, e.g. cpu, mps, or cuda (default: configured device).",
+        help="ANTsTorch device, e.g. cpu, mps or cuda (default: antstorch.get_default_device()).",
     )
     parser.add_argument(
         "--preprocessing-device", default=None,

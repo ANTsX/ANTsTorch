@@ -14,7 +14,7 @@ is the floor below which ANTs/ANTsTorch differences are not meaningful.
 
 Examples
 --------
-Use the bundled 2-D ``r16`` image::
+Use ANTsTorch's bundled 3-D ``S_template3`` image::
 
     python tools/benchmarks/compare_denoise_image.py
 
@@ -41,7 +41,6 @@ import time
 from pathlib import Path
 
 import numpy as np
-
 
 
 def synchronize(device) -> None:
@@ -95,13 +94,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "image",
         nargs="?",
-        help="Input 2-D or 3-D image. When omitted, ants.get_ants_data('r16') is used.",
+        help="Input 2-D or 3-D image. When omitted, antstorch.get_antstorch_data('S_template3') is used.",
     )
-    default_device = os.environ.get("DEVICE", "cpu")
     parser.add_argument(
         "--device",
-        default=default_device,
-        help=f"PyTorch device: cpu, cuda or mps (default: DEVICE env var or cpu, currently '{default_device}')",
+        default=None,
+        help="PyTorch device, e.g. cpu, mps or cuda (default: antstorch.get_default_device()).",
     )
     parser.add_argument("--noise-model", choices=("Rician", "Gaussian"), default="Rician")
     parser.add_argument("-p", "--patch-radius", type=parse_radius, default=1,
@@ -311,16 +309,15 @@ def generate_html_report(
     noise_metrics: dict,
     ants_spread=None,
     torch_spread=None,
-    cuda_peak_mb=None,
 ) -> None:
     """Generate a comprehensive visual HTML report with embedded slice montages."""
+    import ants
+
     img_b64 = render_slice_b64(image, cmap="gray", title="Input Image")
     ants_den_b64 = render_slice_b64(ants_denoised, cmap="gray", title="ANTs Denoised")
     torch_den_b64 = render_slice_b64(torch_denoised, cmap="gray", title="ANTsTorch Denoised")
     ants_noise_b64 = render_slice_b64(ants_noise, cmap="gray", title="ANTs Removed Noise")
     torch_noise_b64 = render_slice_b64(torch_noise, cmap="gray", title="ANTsTorch Removed Noise")
-    import ants
-
     diff_abs_img = ants.from_numpy(
         np.abs(diff_img.numpy()).astype(np.float32),
         origin=diff_img.origin,
@@ -618,7 +615,7 @@ def main() -> None:
 
     import antstorch
 
-    device = torch.device(args.device)
+    device = torch.device(args.device) if args.device else antstorch.get_default_device()
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("--device cuda was requested, but CUDA is not available")
     if device.type == "mps" and not torch.backends.mps.is_available():
@@ -626,7 +623,7 @@ def main() -> None:
     if args.repeats < 1:
         raise ValueError("--repeats must be at least 1")
 
-    input_path = args.image or ants.get_ants_data("r16")
+    input_path = args.image or antstorch.get_antstorch_data("S_template3")
     image = ants.image_read(input_path).clone("float")
     if image.dimension not in (2, 3) or image.components != 1:
         raise ValueError("This comparison expects a scalar 2-D or 3-D image")
@@ -693,8 +690,10 @@ def main() -> None:
         ants.image_write(image, f"{prefix}_input_noisy.nii.gz")
     ants.image_write(ants_results[0], f"{prefix}_ants_denoised.nii.gz")
     ants.image_write(torch_results[0], f"{prefix}_antstorch_denoised.nii.gz")
-    ants.image_write(image - ants_results[0], f"{prefix}_ants_noise.nii.gz")
-    ants.image_write(image - torch_results[0], f"{prefix}_antstorch_noise.nii.gz")
+    ants_noise = image - ants_results[0]
+    torch_noise = image - torch_results[0]
+    ants.image_write(ants_noise, f"{prefix}_ants_noise.nii.gz")
+    ants.image_write(torch_noise, f"{prefix}_antstorch_noise.nii.gz")
     diff_image = torch_results[0] - ants_results[0]
     ants.image_write(diff_image, f"{prefix}_difference.nii.gz")
 
@@ -742,12 +741,10 @@ def main() -> None:
         print(f"ANTs run-to-run max |diff|:      {ants_spread:.6g}")
         print(f"ANTsTorch run-to-run max |diff|: {torch_spread:.6g}")
 
-    peak_memory_mb = None
     if track_cuda_memory:
         peak_memory = cuda_peak_memory(device)
         if peak_memory is not None:
-            peak_memory_mb = peak_memory / 2**20
-            print(f"ANTsTorch CUDA peak memory: {peak_memory_mb:.1f} MiB")
+            print(f"ANTsTorch CUDA peak memory: {peak_memory / 2**20:.1f} MiB")
     print(f"Outputs written with prefix: {prefix}")
 
     if not args.no_report:
@@ -757,8 +754,8 @@ def main() -> None:
             image=image,
             ants_denoised=ants_results[0],
             torch_denoised=torch_results[0],
-            ants_noise=image - ants_results[0],
-            torch_noise=image - torch_results[0],
+            ants_noise=ants_noise,
+            torch_noise=torch_noise,
             diff_img=diff_image,
             ants_times=ants_times,
             torch_times=torch_times,
@@ -772,7 +769,6 @@ def main() -> None:
             noise_metrics=noise_metrics,
             ants_spread=ants_spread,
             torch_spread=torch_spread,
-            cuda_peak_mb=peak_memory_mb,
         )
         print(f"HTML comparison report generated: {report_path.resolve()}")
         print(f"To view the HTML report, run: open \"{report_path.resolve()}\"")

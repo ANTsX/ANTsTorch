@@ -171,7 +171,7 @@ def compare_object_to_scattered_data(args, rng: np.random.Generator, device: tor
     ants_seconds = time.perf_counter() - start
     ants_array = ants_result.numpy().astype(np.float64)
 
-    torch_device = torch.device(args.device)
+    torch_device = device
     synchronize(torch_device)
     start = time.perf_counter()
     torch_dense = antstorch.fit_bspline_object_to_scattered_data(
@@ -233,7 +233,7 @@ def compare_displacement_field_from_points(args, rng: np.random.Generator, devic
     ants_seconds = time.perf_counter() - start
     ants_array = ants_result.numpy().astype(np.float64)
 
-    torch_device = torch.device(args.device)
+    torch_device = device
     domain = antstorch.ImageDomain(size=size, spacing=(1.0,) * dimension, origin=(0.0,) * dimension)
     synchronize(torch_device)
     start = time.perf_counter()
@@ -294,7 +294,7 @@ def compare_displacement_field_from_dense_field(args, rng: np.random.Generator, 
         return
     ants_array = ants_result.numpy().astype(np.float64)
 
-    torch_device = torch.device(args.device)
+    torch_device = device
     # ANTsPy stores vector fields as ``(*size, D)`` in direct ITK order,
     # whereas ANTsTorch uses ``(N, D, *reversed(size))``.
     component_first_reversed = np.transpose(
@@ -327,7 +327,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mesh-size", type=int, nargs="+", default=None, help="B-spline mesh size, ITK order (default: 4 for comparison 1, 1 for comparisons 2-3).")
     parser.add_argument("--number-of-fitting-levels", type=int, default=4)
     parser.add_argument("--random-weights", action="store_true", help="Use random per-point weights instead of uniform.")
-    parser.add_argument("--device", default="cpu", help="PyTorch device, e.g. cpu or cuda")
+    parser.add_argument("--device", default=None, help="PyTorch device, e.g. cpu, mps or cuda (default: antstorch.get_default_device()).")
     parser.add_argument("--enforce-stationary-boundary", dest="enforce_stationary_boundary", action="store_true", default=False)
     parser.add_argument("--no-enforce-stationary-boundary", dest="enforce_stationary_boundary", action="store_false")
     parser.add_argument("--skip-object-to-scattered-data", action="store_true")
@@ -340,7 +340,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    device = torch.device(args.device)
+    device = torch.device(args.device) if args.device else antstorch.get_default_device()
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("--device cuda was requested, but CUDA is not available")
     if device.type == "mps" and not torch.backends.mps.is_available():

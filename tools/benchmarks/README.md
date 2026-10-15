@@ -178,7 +178,7 @@ new source of truth — if they disagree, the code's docstring is always right).
 | `compare_n4_bias_field_correction.py` | ANTs vs ANTsTorch, N4 bias-field correction (not a registration model) | N/A — primitive comparison, no `--models` |
 | `compare_denoise_image.py` | ANTs `denoise_image` vs `antstorch.denoise_image` (adaptive non-local means, Rician or Gaussian noise) | N/A — primitive comparison, no `--models`; `--repeats 2+` also reports ANTs run-to-run variability |
 | `compare_cortical_thickness.py` | ANTs `kelly_kapowski` vs the ANTsTorch tensor DiReCT engine on a shared Deep Atropos segmentation (`S_template3` by default) | N/A — same GM/WM inputs and shared parameters; `--optimizer` and `--regularizer` select the ANTsTorch variant |
-| `run_ants_comparisons.sh` | Runs `compare_denoise_image.py`, `compare_n4_bias_field_correction.py` and `compare_cortical_thickness.py` in sequence on one device (`DEVICE=cuda:0` by default) and, optionally, one shared image (`$1` or `IMAGE`), with one log per comparison | N/A — variables `IMAGE`, `DEVICE`, `OUT_DIR`, `PYTHON`, `REPEATS`, `ANTS_THREADS` |
+| `run_primitive_benchmarks.py` | Runs `compare_denoise_image.py`, `compare_n4_bias_field_correction.py`, `compare_cortical_thickness.py` and `compare_bspline_scattered_data.py` in sequence on one device (`--device`, default `antstorch.get_default_device()`) with a common `--out-dir`, an optional shared image (positional; B-spline uses synthetic data unless `--bspline-image`), one `log.txt` per comparison, `run_info.txt` and `summary.txt`; `--only`, `--repeats`, `--ants-threads`, `--dry-run` | N/A — launcher for the primitive comparisons |
 
 ## Native ANTsTorch models (`antstorch.benchmark.evaluate_mindboggle_pair(model=...)`)
 
