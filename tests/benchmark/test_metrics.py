@@ -135,6 +135,23 @@ def test_compute_jacobian_metrics_identity_warp_gives_unit_jacobian():
     assert jac["max"] == pytest.approx(1.0, abs=1e-3)
     assert jac["mean"] == pytest.approx(1.0, abs=1e-3)
     assert jac["folding_pct"] == pytest.approx(0.0, abs=1e-6)
+    assert jac["std"] == pytest.approx(0.0, abs=1e-3)
+    assert jac["log_std"] == pytest.approx(0.0, abs=1e-3)
+
+
+def test_compute_jacobian_metrics_uniform_dilation_has_small_log_std_and_folding_is_counted():
+    # u(x) = 0.1 x along the first axis: det = 1.1 up to boundary effects, so almost no spread; u(x) = -2 x folds every voxel (det <= 0).
+    fixed = ants.from_numpy(np.ones(_SHAPE, dtype=np.float32), spacing=_SPACING)
+    idx = np.indices(_SHAPE).astype(np.float32)
+    for scale, folded in ((0.1, 0.0), (-2.0, 100.0)):
+        field = np.zeros(_SHAPE + (3,), dtype=np.float32)
+        field[..., 0] = scale * idx[0] * _SPACING[0]
+        warp = ants.from_numpy(field, spacing=_SPACING, has_components=True)
+        jac = compute_jacobian_metrics(fixed, warp)
+        assert jac["folding_pct"] == pytest.approx(folded, abs=1e-6)
+        if scale > 0:
+            assert jac["mean"] == pytest.approx(1.1, abs=3e-2)
+            assert 0.0 <= jac["log_std"] < 0.05
 
 
 def test_compute_harmonic_energy_zero_field_is_zero():

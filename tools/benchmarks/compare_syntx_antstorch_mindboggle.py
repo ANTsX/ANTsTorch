@@ -331,6 +331,77 @@ def _syntx_bspline_pair_eval(pair_idx, device=None, verbose=False, seed=42):
     }
 
 
+# ======================================================================================================================
+# Jacobian (uniform for every arm): the SAME finite-difference determinant of the exported forward warp, inside the
+# fixed image's foreground mask (antstorch.benchmark.metrics.compute_jacobian_metrics), whatever library made the warp.
+# (syntx's own record reports the determinant of its internal map; the two are different measures, hence this.)
+# ======================================================================================================================
+_JAC_LAST = (None, None)  # (pair_idx, fixed image): the fixed image of the pair being processed
+JAC_KEYS = ("jac_folding_pct", "jac_min", "jac_max", "jac_mean", "jac_log_std")
+
+
+def _jac_fixed_image(pair_idx):
+    global _JAC_LAST
+    if _JAC_LAST[0] != pair_idx:
+        sys.path.insert(0, ANTSTORCH_ROOT)
+        from antstorch.benchmark.data import load_mindboggle_pair
+        _JAC_LAST = (pair_idx, load_mindboggle_pair(pair_idx=pair_idx, data_dir=DATA_DIR, use_n4=True)["fixed"])
+    return _JAC_LAST[1]
+
+
+def _add_jacobian(rec, pair_idx):
+    """Add the uniform Jacobian statistics (`jac_*`) of the record's exported forward warp; NaN when no warp file exists.
+    Never raises: a failure is recorded as `_jac_error` and the run goes on."""
+    if rec.get("_status") != "SUCCESS":
+        return rec
+    nan = float("nan")
+    out = dict.fromkeys(JAC_KEYS, nan)
+    try:
+        fwd = (rec.get("transforms") or {}).get("fwdtransforms") or []
+        warp = next((str(t) for t in fwd if str(t).endswith(".nii.gz") and os.path.exists(str(t))), None)
+        if warp is not None:
+            from antstorch.benchmark.metrics import compute_jacobian_metrics
+            m = compute_jacobian_metrics(_jac_fixed_image(pair_idx), warp)
+            out.update(jac_folding_pct=float(m["folding_pct"]), jac_min=float(m["min"]), jac_max=float(m["max"]),
+                       jac_mean=float(m["mean"]), jac_log_std=float(m.get("log_std", nan)))
+    except Exception as e:  # noqa: BLE001
+        rec["_jac_error"] = str(e)
+    rec.update(out)
+    return rec
+
+
+def _jv(rec, key):
+    """A Jacobian statistic of a record: the uniform `jac_*` value, else the library's own value (older records)."""
+    v = rec.get(key)
+    if v is None or (isinstance(v, float) and v != v):
+        v = rec.get({"jac_folding_pct": "folding_pct", "jac_min": "min_jacobian"}.get(key, ""), float("nan"))
+    return float(v)
+
+
+def _jacobian_tables(results, models, pairs):
+    """Markdown lines: per-record Jacobian table and medians per (model, library)."""
+    import numpy as np
+    libs = ("syntx", "antstorch", "fireants")
+    ok = [r for r in results if r.get("_status") == "SUCCESS"]
+    lines = ["| Paire | Modèle | Bibliothèque | repli. % | min J | max J | J moyen | σ(log J) |", "|---|---|---|---|---|---|---|---|"]
+    for pair_idx in pairs:
+        for reg in list(models) + [FIREANTS_LABEL]:
+            for lib in libs:
+                for r in ok:
+                    if r.get("pair_idx") == pair_idx and r.get("_regularizer") == reg and r.get("_library") == lib:
+                        lines.append(f"| {pair_idx} | {reg} | {lib} | {_jv(r, 'jac_folding_pct'):.4f} | {_jv(r, 'jac_min'):.3f} | "
+                                     f"{_jv(r, 'jac_max'):.2f} | {_jv(r, 'jac_mean'):.3f} | {_jv(r, 'jac_log_std'):.3f} |")
+    agg = ["| Modèle | Bibliothèque | n | repli. % (médiane) | min J (médiane) | max J (médiane) | σ(log J) (médiane) |", "|---|---|---|---|---|---|---|"]
+    for reg in list(models) + [FIREANTS_LABEL]:
+        for lib in libs:
+            rs = [r for r in ok if r.get("_regularizer") == reg and r.get("_library") == lib]
+            if not rs:
+                continue
+            med = lambda k: float(np.nanmedian([_jv(r, k) for r in rs]))  # noqa: E731
+            agg.append(f"| {reg} | {lib} | {len(rs)} | {med('jac_folding_pct'):.4f} | {med('jac_min'):.3f} | {med('jac_max'):.2f} | {med('jac_log_std'):.3f} |")
+    return agg, lines
+
+
 def _share_affine(syntx_rec, pair_idx, out_dir):
     """Copy the affine syntx used for this pair into antstorch's canonical-affine cache (once per pair), so the
     antstorch arms start from exactly the same transform; the affine's fit time is stored beside it."""
@@ -361,7 +432,7 @@ def _run_pair_model(reg, pair_idx, device, out_dir, libs):
     """One (pair, model): libs run in the given order; in fair mode syntx goes first and shares its affine."""
     recs = []
     for lib, fn in libs:
-        rec = fn(reg, pair_idx, device, out_dir)
+        rec = _add_jacobian(fn(reg, pair_idx, device, out_dir), pair_idx)
         if FAIR and lib == "syntx" and rec.get("_status") == "SUCCESS":
             rec["_affine_shared"] = _share_affine(rec, pair_idx, out_dir)
         if FAIR and lib == "antstorch" and not reg.startswith("greedy") and rec.get("_status") == "SUCCESS":
@@ -392,13 +463,13 @@ def _aggregate(results, models, skip_syntx):
             continue
         da = np.array([A[p]["dice_sym"] for p in pairs])
         ta = np.array([A[p]["_deformable_seconds"] for p in pairs])
-        fa = np.median([A[p]["folding_pct"] for p in pairs])
+        fa = np.nanmedian([_jv(A[p], "jac_folding_pct") for p in pairs])
         if skip_syntx:
             lines.append(f"| {reg} | {len(pairs)} | — | {da.mean():.4f} | — | — | — | — | {ta.mean():.1f} | — | — / {fa:.4f} |")
             continue
         ds = np.array([S[p]["dice_sym"] for p in pairs])
         ts = np.array([S[p]["_deformable_seconds"] for p in pairs])
-        fs = np.median([S[p]["folding_pct"] for p in pairs])
+        fs = np.nanmedian([_jv(S[p], "jac_folding_pct") for p in pairs])
         d = da - ds
         se = d.std(ddof=1) / np.sqrt(len(d)) if len(d) > 1 else float("nan")
         lines.append(f"| {reg} | {len(pairs)} | {ds.mean():.4f} | {da.mean():.4f} | {d.mean():+.4f} ± {se:.4f} | {np.median(d):+.4f} | "
@@ -659,6 +730,7 @@ def _run_fireants_impl(pair_idx, device, out_dir, data_dir):
             # loss (negative local CC, lower is better) at the first / last iteration of each pyramid level
             "_fireants_loss_first_last": [[l[0], l[-1]] if l else None for l in losses],
             "_fireants_overrides": dict(FIREANTS_OVERRIDES),
+            "transforms": {"fwdtransforms": [fwd_warp_path]},
             "_library": "fireants", "_regularizer": FIREANTS_LABEL, "_status": "SUCCESS",
         }
         if affine_source != "syntx":
@@ -778,7 +850,7 @@ def _aggregate3(results, models, pairs):
         def se(x):
             return x.std(ddof=1) / np.sqrt(len(x)) if len(x) > 1 else float("nan")
         xa, xf = da - ds, df - ds
-        fm = [np.median(g(D, "folding_pct")) for D in (S, A, F)]
+        fm = [np.nanmedian([_jv(D[p], "jac_folding_pct") for p in ps]) for D in (S, A, F)]
         aff = np.array([S[p].get("syntx_affine_dice_sym", float("nan")) for p in ps], dtype=float)
         lines.append(
             f"| {reg} | {len(ps)} | {np.nanmean(aff):.4f} | {ds.mean():.4f} | {da.mean():.4f} | "
@@ -840,7 +912,7 @@ def main():
                          "to an earlier run.")
     ap.add_argument("--inverse-method", choices=["anderson", "fixed_point", "hybrid_lm"], default=None,
                     help="In-loop field-inversion solver for the ANTSTORCH arms only (default: antstorch's own, anderson). "
-                         "fixed_point measured ~2.2x faster than anderson on MPS at 6 steps; "
+                         "fixed_point measured ~2.2x faster than anderson on MPS at 6 steps (bench_inverse_field.py); "
                          "syntx arms keep their own solver, so use this as an ablation, not the main comparison.")
     ap.add_argument("--out-dir", default=None)
     ap.add_argument("--legacy-defaults", action="store_true",
@@ -981,7 +1053,7 @@ def main():
         if args.fireants:  # once per pair, after syntx has produced (and shared) the affine
             print(f"pair {pair_idx} / fireants ...", flush=True)
             print(f"[fireants / {FIREANTS_PRESET}] pair {pair_idx}", flush=True)
-            rec = _run_fireants(pair_idx, args.device, args.out_dir, DATA_DIR)
+            rec = _add_jacobian(_run_fireants(pair_idx, args.device, args.out_dir, DATA_DIR), pair_idx)
             results.append(rec)
             if rec.get("_status") == "SUCCESS":
                 print(f"    -> {rec['_status']} {_fmt_dice(rec)} deformable={rec['_deformable_seconds']:.1f}s "
@@ -1035,6 +1107,21 @@ f"antstorch inverse_schedule : {_eff_schedule}"
     md_lines.append("## Détail par paire")
     md_lines.append("")
     md_lines.extend(table_lines)
+    md_lines.append("")
+    jac_agg, jac_rows = _jacobian_tables(results, args.models, args.pairs)
+    md_lines.append("## Jacobien du déplacement direct (même mesure pour toutes les bibliothèques)")
+    md_lines.append("")
+    md_lines.append("Déterminant par différences finies du champ direct exporté, dans le masque du fixe "
+                    "(`antstorch.benchmark.metrics.compute_jacobian_metrics`) ; repli. % = voxels avec det ≤ 0 ; σ(log J) = écart-type "
+                    "du logarithme des déterminants positifs (variation locale de volume).")
+    md_lines.append("")
+    md_lines.extend(jac_agg)
+    md_lines.append("")
+    md_lines.append("<details><summary>Par paire</summary>")
+    md_lines.append("")
+    md_lines.extend(jac_rows)
+    md_lines.append("")
+    md_lines.append("</details>")
     md_lines.append("")
     if args.fireants:
         md_lines.append("## FireANTs (3ᵉ bras ; une exécution par paire, comparée à chaque modèle)")

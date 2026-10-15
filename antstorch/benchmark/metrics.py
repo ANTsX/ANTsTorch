@@ -208,7 +208,7 @@ def compute_bending_energy(warp, spacing=None) -> float:
 
 
 def compute_jacobian_metrics(fixed_image, warp) -> dict:
-    """Jacobian determinant statistics (min, max, mean, folding percentage)
+    """Jacobian determinant statistics (min, max, mean, std, log-std, folding percentage)
     of a deformation field within the foreground mask of the fixed image.
 
     Parameters
@@ -221,7 +221,9 @@ def compute_jacobian_metrics(fixed_image, warp) -> dict:
     Returns
     -------
     dict
-        ``'min'``, ``'max'``, ``'mean'``, ``'folding_pct'``.
+        ``'min'``, ``'max'``, ``'mean'``, ``'std'``, ``'log_std'`` (standard deviation of
+        log(det) over the positive determinants) and ``'folding_pct'`` (percentage of
+        masked voxels with det <= 0).
     """
     if isinstance(warp, str):
         warp = ants.image_read(warp)
@@ -236,9 +238,13 @@ def compute_jacobian_metrics(fixed_image, warp) -> dict:
 
     valid_jac = jac_arr[valid_mask]
 
+    positive = valid_jac[valid_jac > 0.0]
     return {
         "min": float(np.min(valid_jac)),
         "max": float(np.max(valid_jac)),
         "mean": float(np.mean(valid_jac)),
+        "std": float(np.std(valid_jac)),
+        # spread of the local volume change, on the positive determinants (NaN if there are none)
+        "log_std": float(np.std(np.log(positive))) if positive.size else float("nan"),
         "folding_pct": float(np.mean(valid_jac <= 0.0) * 100.0)
     }
