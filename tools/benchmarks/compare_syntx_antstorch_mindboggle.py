@@ -56,7 +56,7 @@ deformable-only (construction + optimize, torch.cuda.synchronize()). FireANTs is
 is a library comparison, not a parity check; its inverse is imperfect, so Dice fixed is reported next to Dice sym, and folding is
 reported because FireANTs' best Dice settings fold the field (its documentation in syntx reports 3.7 % at its tuned setting).
 --fireants-sweep runs a FireANTs-only hyper-parameter sweep on affines cached by an earlier run. Diagnostics: --fireants-iterations,
---fireants-lr, --fireants-warp-sigma, --fireants-grad-sigma, --fireants-cc-kernel, --fireants-preset, --fireants-no-early-stop.
+--fireants-lr, --fireants-warp-sigma, --fireants-grad-sigma, --fireants-cc-kernel, --fireants-preset, --fireants-early-stop.
 
 Output: writes a JSON file with one record per (pair, model, library), plus
 a Markdown summary table with syntx vs antstorch deltas, printed to stdout
@@ -398,21 +398,28 @@ def _aggregate(results, models, skip_syntx):
 FIREANTS_ROOT = os.path.expanduser("~/Pkg/fireants")
 
 
-# GreedyRegistration settings. optimizer_lr stays at FireANTs' own tutorial value (0.5): a 2026-09-22 run showed that
-# halving it undertrains FireANTs (project doc). Only the iteration budget differs between the two schedules.
+# GreedyRegistration presets (--fireants-preset). Each is a complete set of GreedyRegistration arguments (pyramid [4,2,1]);
+# explicit --fireants-* options override single entries.
+#   default           FireANTs' own defaults (smooth_warp_sigma 0.5, smooth_grad_sigma 1.0, optimizer_lr 0.5, cc_kernel_size 7)
+#                     with the iteration schedule of its tutorial, [200,100,25]: what a user gets without tuning.
+#   matched           same iteration budget as syntx / ANTsTorch in this benchmark, [100,100,20] (the fair-budget setting); smoothing
+#                     sigmas 1.0 / 1.0, optimizer_lr 0.5 (a 2026-09-22 run showed that halving it undertrains FireANTs), CC window 5.
+#   fine-tuned-syntx  the "Tuned Greedy Compositive" configuration of syntx's examples/compare_fireants_vs_syntx.py and
+#                     docs/v_fire_ants/README.md (warp 0.35, grad 2.0, lr 0.4, CC window 5, iterations [100,100,50]); that document
+#                     reports 3.7 % folded voxels for it. Its last level has 50 iterations, more than syntx's 20 here: use
+#                     `--fireants-iterations 100 100 20` for an equal budget.
 _FIREANTS_KWARGS = {
-    "matched": dict(scales=[4, 2, 1], iterations=[100, 100, 20], cc_kernel_size=5, optimizer_lr=0.5),
-    "tutorial": dict(scales=[4, 2, 1], iterations=[200, 100, 25], cc_kernel_size=5, optimizer_lr=0.5),
+    "default": dict(scales=[4, 2, 1], iterations=[200, 100, 25], cc_kernel_size=7, optimizer_lr=0.5,
+                    smooth_warp_sigma=0.5, smooth_grad_sigma=1.0),
+    "matched": dict(scales=[4, 2, 1], iterations=[100, 100, 20], cc_kernel_size=5, optimizer_lr=0.5,
+                    smooth_warp_sigma=1.0, smooth_grad_sigma=1.0),
+    "fine-tuned-syntx": dict(scales=[4, 2, 1], iterations=[100, 100, 50], cc_kernel_size=5, optimizer_lr=0.4,
+                             smooth_warp_sigma=0.35, smooth_grad_sigma=2.0),
 }
-FIREANTS_SCHEDULE = "matched"
-# Preset = the "Tuned Greedy Compositive" configuration of syntx's examples/compare_fireants_vs_syntx.py / docs/v_fire_ants/README.md
-# (grad=2.0, warp=0.35, lr=0.4, iterations [100,100,50], CC window 5). That document reports 3.7 % folded voxels for it.
-FIREANTS_PRESETS = {
-    "syntx-doc": dict(smooth_warp_sigma=0.35, smooth_grad_sigma=2.0, optimizer_lr=0.4, cc_kernel_size=5, iterations=[100, 100, 50]),
-}
+FIREANTS_PRESET = "matched"
 FIREANTS_NORMALIZE = True  # feed FireANTs the same auto-normalised images syntx's benchmark registers (see _run_fireants)
-FIREANTS_OVERRIDES = {}  # optional diagnostic overrides of _FIREANTS_KWARGS entries (set from the CLI)
-FIREANTS_TOLERANCE = None  # None: FireANTs' own early-stop setting (tolerance 1e-6 on the loss slope, 10 iterations)
+FIREANTS_OVERRIDES = {}  # optional overrides of the chosen preset's entries (set from the CLI)
+FIREANTS_TOLERANCE = 1e9  # default: no early stop, every nominal iteration runs (equal budget). None: FireANTs' own early stop (tolerance 1e-6 on the loss slope, 10 iterations), --fireants-early-stop
 FIREANTS_LABEL = "fireants"
 
 
@@ -483,7 +490,7 @@ def _run_fireants(pair_idx, device, out_dir, data_dir):
         affine_4x4[:dim, -1] = translation
         init_affine = affine_4x4.unsqueeze(0).to(device)
 
-        kw = dict(_FIREANTS_KWARGS[FIREANTS_SCHEDULE])
+        kw = dict(_FIREANTS_KWARGS[FIREANTS_PRESET])
         kw.update(FIREANTS_OVERRIDES)
         smooth_warp_sigma = float(kw.pop("smooth_warp_sigma", 1.0))
         smooth_grad_sigma = float(kw.pop("smooth_grad_sigma", 1.0))
@@ -538,7 +545,7 @@ def _run_fireants(pair_idx, device, out_dir, data_dir):
             "min_jacobian": float(jac.get("min", float("nan"))),
             "runtime_seconds": deformable_seconds, "_deformable_seconds": deformable_seconds,
             "_wall_seconds": time.time() - t0, "_affine_source": affine_source,
-            "_fireants_schedule": FIREANTS_SCHEDULE, "_fireants_normalized": bool(FIREANTS_NORMALIZE),
+            "_fireants_preset": FIREANTS_PRESET, "_fireants_normalized": bool(FIREANTS_NORMALIZE),
             "_fireants_iterations_run": list(iters_run), "_fireants_iterations_nominal": list(kw["iterations"]),
             "_fireants_tolerance": FIREANTS_TOLERANCE,
             # loss (negative local CC, lower is better) at the first / last iteration of each pyramid level
@@ -601,12 +608,12 @@ def _run_sweep(pairs, device, out_dir, data_dir):
         with open(os.path.join(out_dir, "fireants_sweep.json"), "w") as f:
             json.dump(raw, f, indent=2)
     md = ["# FireANTs hyper-parameter sweep (full budget, no early stop; shared syntx affine)", "",
-          f"Pairs: {pairs}; schedule: {_FIREANTS_KWARGS[FIREANTS_SCHEDULE]['iterations']}; other settings: scripts defaults.", "",
+          f"Pairs: {pairs}; preset: {FIREANTS_PRESET}, iterations {_FIREANTS_KWARGS[FIREANTS_PRESET]['iterations']}; other settings: the preset's.", "",
           "| smooth_warp_sigma | smooth_grad_sigma | cc_kernel_size | optimizer_lr | n | Dice sym | Dice fixed | t déf. (s) | final-level loss | folding % (median) |",
           "|---|---|---|---|---|---|---|---|---|---|"]
-    base = _FIREANTS_KWARGS[FIREANTS_SCHEDULE]
+    base = _FIREANTS_KWARGS[FIREANTS_PRESET]
     for cfg, n, tot, ds, df, t, ll, fo in sorted(rows, key=lambda r: -r[4]):
-        md.append(f"| {cfg.get('smooth_warp_sigma', 1.0)} | {cfg.get('smooth_grad_sigma', 1.0)} | {cfg.get('cc_kernel_size', base['cc_kernel_size'])} | "
+        md.append(f"| {cfg.get('smooth_warp_sigma', base['smooth_warp_sigma'])} | {cfg.get('smooth_grad_sigma', base['smooth_grad_sigma'])} | {cfg.get('cc_kernel_size', base['cc_kernel_size'])} | "
                   f"{cfg.get('optimizer_lr', base['optimizer_lr'])} | {n}/{tot} | {ds:.4f} | {df:.4f} | {t:.1f} | {ll:.4f} | {fo:.4f} |")
     md.append("")
     ok_rows = [r for r in rows if r[7] < FOLDING_LIMIT_PCT]
@@ -687,7 +694,7 @@ def _fireants_pair_table(results, pairs, models):
 
 def main():
     global FAIR
-    global FIREANTS_SCHEDULE, FIREANTS_TOLERANCE, FIREANTS_OVERRIDES, SWEEP_SET, FIREANTS_NORMALIZE
+    global FIREANTS_PRESET, FIREANTS_TOLERANCE, FIREANTS_OVERRIDES, SWEEP_SET, FIREANTS_NORMALIZE
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--pairs", type=int, nargs="+", default=PAIR_INDICES_DEFAULT)
     ap.add_argument("--models", nargs="+", default=DEFAULT_MODELS, choices=MODELS,
@@ -738,9 +745,11 @@ def main():
     ap.add_argument("--sweep-set", type=int, choices=sorted(SWEEP_GRIDS), default=1,
                     help="Grid for --fireants-sweep: 1 = warp smoothing x CC window (+ small lr set); 2 = larger learning rates "
                          "(1, 2, 4) x warp smoothing; 3 = gradient smoothing (1, 2, 3) x warp smoothing (0.25, 0.35, 0.5) at lr 0.4.")
-    ap.add_argument("--fireants-preset", choices=sorted(FIREANTS_PRESETS), default=None,
-                    help="Start from a named FireANTs configuration; explicit --fireants-* options still override it. 'syntx-doc' = the "
-                         "tuned greedy-compositive setting of syntx's docs/v_fire_ants (which reports 3.7 %% folding).")
+    ap.add_argument("--fireants-preset", choices=sorted(_FIREANTS_KWARGS), default="matched",
+                    help="FireANTs configuration. 'matched' (default) = same iteration budget as syntx / ANTsTorch, [100,100,20]; "
+                         "'default' = FireANTs' own defaults with its tutorial schedule [200,100,25]; 'fine-tuned-syntx' = the tuned "
+                         "greedy-compositive setting of syntx's docs/v_fire_ants (warp 0.35, grad 2.0, lr 0.4, [100,100,50]; that document "
+                         "reports 3.7 %% folding). Explicit --fireants-* options override single entries of the preset.")
     ap.add_argument("--fireants-iterations", type=int, nargs="+", default=None,
                     help="FireANTs iterations per pyramid level (3 values). '1 1 1' with --fireants-lr 0 tests the affine export / "
                          "scoring chain: the Dice should equal the affine-only Dice.")
@@ -749,10 +758,10 @@ def main():
                     help="FireANTs smooth_warp_sigma (this script's default 1.0; FireANTs' own default 0.5).")
     ap.add_argument("--fireants-grad-sigma", type=float, default=None, help="FireANTs smooth_grad_sigma (default 1.0).")
     ap.add_argument("--fireants-cc-kernel", type=int, default=None, help="FireANTs cc_kernel_size (default 5).")
-    ap.add_argument("--fireants-no-early-stop", action="store_true",
-                    help="Disable FireANTs' convergence-based early stop (tolerance=1e9) so every nominal iteration runs.")
-    ap.add_argument("--tutorial-schedule", action="store_true",
-                    help="FireANTs iterations [200,100,25] (its tutorial) instead of [100,100,20] (same budget as syntx).")
+    ap.add_argument("--fireants-early-stop", action="store_true",
+                    help="Keep FireANTs' own convergence-based early stop (tolerance 1e-6 on the loss slope, 10 iterations). By default "
+                         "it is disabled so every nominal iteration runs, as for syntx and ANTsTorch (equal budget, comparable times).")
+    ap.add_argument("--fireants-no-early-stop", action="store_true", help=argparse.SUPPRESS)  # kept for old command lines (now the default)
     ap.add_argument("--no-normalize", action="store_true",
                     help="Feed FireANTs the raw images instead of the auto-normalised ones syntx registers.")
     args = ap.parse_args()
@@ -771,12 +780,10 @@ def main():
         if not (str(args.device).startswith("cuda") and torch.cuda.is_available()):
             sys.exit(f"--fireants needs a CUDA GPU (got --device {args.device!r}, cuda available: {torch.cuda.is_available()}). "
                      f"Run it on the GPU machine (e.g. hyperwolf), or drop --fireants.")
-        FIREANTS_SCHEDULE = "tutorial" if args.tutorial_schedule else "matched"
-        FIREANTS_TOLERANCE = 1e9 if args.fireants_no_early_stop else None
+        FIREANTS_PRESET = args.fireants_preset
+        FIREANTS_TOLERANCE = None if (args.fireants_early_stop and not args.fireants_no_early_stop) else 1e9
         SWEEP_SET = args.sweep_set
         FIREANTS_NORMALIZE = not args.no_normalize
-        if args.fireants_preset:
-            FIREANTS_OVERRIDES.update(FIREANTS_PRESETS[args.fireants_preset])
         if args.fireants_grad_sigma is not None:
             FIREANTS_OVERRIDES["smooth_grad_sigma"] = args.fireants_grad_sigma
         if args.fireants_iterations is not None:
@@ -905,9 +912,9 @@ f"antstorch inverse_schedule : {_eff_schedule}"
     if args.fireants:
         md_lines.append("## FireANTs (3ᵉ bras ; une exécution par paire, comparée à chaque modèle)")
         md_lines.append("")
-        md_lines.append(f"GreedyRegistration, itérations {FIREANTS_OVERRIDES.get('iterations', _FIREANTS_KWARGS[FIREANTS_SCHEDULE]['iterations'])}, "
+        md_lines.append(f"GreedyRegistration, préréglage `{FIREANTS_PRESET}`, itérations {FIREANTS_OVERRIDES.get('iterations', _FIREANTS_KWARGS[FIREANTS_PRESET]['iterations'])}, "
                         f"surcharges {FIREANTS_OVERRIDES or 'aucune'}, images {'normalisées (auto)' if FIREANTS_NORMALIZE else 'brutes'}, "
-                        f"early stop {'désactivé' if FIREANTS_TOLERANCE else 'par défaut de FireANTs'} ; temps = construction + optimize, "
+                        f"early stop {'désactivé (budget complet)' if FIREANTS_TOLERANCE else 'actif (réglage natif de FireANTs)'} ; temps = construction + optimize, "
                         f"synchronisé, hors affine / E-S / métriques. `dice_fixed` (déformation directe seule) est la mesure la plus "
                         f"fiable pour FireANTs : son inverse est imparfait.")
         md_lines.append("")

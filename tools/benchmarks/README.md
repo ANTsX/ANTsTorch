@@ -195,12 +195,18 @@ third arm (the former `compare_fireants_mindboggle.py` has been removed):
   affine, NIfTI I/O, warp saving and scoring are outside the timer.
 - **CUDA only:** any other device exits with a message.
 - Inputs are normalized with `normalize_image('auto')` as in syntx (`--no-normalize` disables it).
-- Default schedule iterations [100,100,20], pyramid [4,2,1]; `--tutorial-schedule` uses FireANTs' own [200,100,25].
-  Overrides: `--fireants-iterations`, `--fireants-lr`, `--fireants-warp-sigma`, `--fireants-grad-sigma`,
-  `--fireants-cc-kernel`; `--fireants-preset syntx-doc` applies the tuned setting from syntx's `docs/v_fire_ants`
-  (warp 0.35, grad 2.0, lr 0.4, k5, iterations [100,100,50]).
-- `--fireants-no-early-stop` disables FireANTs' ConvergenceMonitor (tolerance 1e-6, 10 iterations). Iterations actually
-  run and first/last loss per level are recorded.
+- **Presets** (`--fireants-preset`, pyramid [4,2,1]; explicit `--fireants-*` options override single entries):
+
+  | Preset | Iterations | warp σ | grad σ | lr | CC window | Meaning |
+  |---|---|---|---|---|---|---|
+  | `matched` (default) | [100,100,20] | 1.0 | 1.0 | 0.5 | 5 | same iteration budget as syntx / ANTsTorch: the fair-budget setting |
+  | `default` | [200,100,25] | 0.5 | 1.0 | 0.5 | 7 | FireANTs' own defaults with its tutorial schedule |
+  | `fine-tuned-syntx` | [100,100,50] | 0.35 | 2.0 | 0.4 | 5 | the "Tuned Greedy Compositive" setting of syntx's `docs/v_fire_ants` (reports 3.7% folding) |
+
+  `fine-tuned-syntx` gives FireANTs 50 iterations at the last level (syntx has 20 here); add
+  `--fireants-iterations 100 100 20` for an equal budget. Other overrides: `--fireants-lr`, `--fireants-warp-sigma`,
+  `--fireants-grad-sigma`, `--fireants-cc-kernel`. (`--tutorial-schedule` was replaced by `--fireants-preset default`.)
+- **Early stop:** disabled by default, so every nominal iteration runs (equal budget with syntx and ANTsTorch, comparable times). `--fireants-early-stop` keeps FireANTs' own ConvergenceMonitor (tolerance 1e-6, 10 iterations); `--fireants-no-early-stop` is accepted but now redundant. Iterations actually run and first/last loss per level are recorded.
 - FireANTs is a different algorithm (Adam, compositive warp, CC kernel 5): this is a library comparison, not a parity check.
 - `dice_fixed` (forward warp only) is the reliable measure: `GreedyRegistration` has no native inverse, so the post-hoc
   inverse is poor and lowers `dice_sym`.
