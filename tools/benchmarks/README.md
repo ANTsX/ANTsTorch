@@ -9,7 +9,6 @@ new source of truth — if they disagree, the code's docstring is always right).
 
 | Script | Compares | Models / `--models` |
 |---|---|---|
-| `run_benchmark_mindboggle_probe.py` | All native ANTsTorch models against each other, on a small set of Mindboggle-101 pairs (local demo/pilot, no resumable orchestration CLI — see its own docstring) | The 6 default native variants, see the table below; `--models` actually accepts *any* name `evaluate_mindboggle_pair()` recognizes, including the four `*_regadam`, any `_ANTS_TRADITIONAL_MODELS`, or any deformable-only ANTs `type_of_transform` passed through as is |
 | `compare_syntx_antstorch_mindboggle.py` | syntx vs ANTsTorch, dense SyN family (fair mode by default, see below) | `gaussian`, `sobolev`, `dsti` (default), `bspline`, `gaussian_regadam`, `sobolev_regadam`, `dsti_regadam`, `bspline_regadam` |
 | `compare_bspline_scattered_data.py` | ANTs vs ANTsTorch, B-spline fit on scattered data (not a registration model) | N/A — primitive comparison, no `--models` |
 | `compare_n4_bias_field_correction.py` | ANTs vs ANTsTorch, N4 bias-field correction (not a registration model) | N/A — primitive comparison, no `--models` |
@@ -218,6 +217,29 @@ third arm (the former `compare_fireants_mindboggle.py` has been removed):
   highest `dice_fixed` with median folding below 0.01%; validate the chosen setting on other pairs to avoid tuning bias.
 - Outputs: `comparison_results.json`, `comparison_summary.md` with a three-way paired aggregate and a per-pair table.
 - Requires FireANTs on the machine that runs it.
+
+### 6b. The `greedy` model: `syntx.greedy` vs `antstorch.greedy`
+
+`antstorch.greedy` (`antstorch/greedy.py`) is a port of `syntx.greedy`: one-directional greedy compositive registration
+(a single forward displacement field refined by `u <- v + u(x + v)`, Adam on the Gaussian-smoothed local-CC gradient,
+`learning_rate` 0.375, `flow_sigma` 1.8, `total_sigma` 0.28, no inverse unless `return_inverse=True`). `--models greedy` (alone or after other models) runs two
+arms per pair: `syntx.greedy` first, then `antstorch.greedy`, from the same shared affine (the one the dense syntx arms
+already cached, else the one `syntx.greedy` fits itself and shares), both with `reg_iterations=[100, 100, 20]`, `return_inverse=True`, scored by the same antstorch metrics (`dice_fixed` from the
+forward warp; `dice_moving` / `dice_sym` use the Anderson-computed inverse, so `dice_fixed` is the primary measure). The
+time is the library's own `provenance['runtime_deformable_sec']` (optimisation only: no affine, export, inverse or scoring).
+`greedy_regadam` runs the same two libraries with `optimizer='regadam'` (Adam quotient smoothed, `regadam_sigma` 0.8); unlike the dense models, both libraries have it, so it is paired like `greedy`. Only the Gaussian regularizer exists for greedy; neither is in the default `--models`.
+
+`antstorch.greedy` ports the `syntx.greedy` that uses syntx's central 'deformable' pyramid (`syntx.pyramid.build_pyramid`, syntx >= 6.2: spacing-aware, millimetre-isotropic levels); it does not reproduce the older per-axis shrink of syntx < 6.2.
+
+Parity (CPU, tests in `tests/greedy`, against syntx >= 6.2): without an affine the fields are identical bit for bit, also for anisotropic spacing, a moving image on its own grid, 2-D and a fixed mask; with the same affine file they
+agree to 3.5e-5 voxel after 60 iterations and to ~0.03 voxel after 220, the residual coming from a 3e-7 rounding difference in
+the two `parse_ants_affine` implementations (amplified by the iterations). On CUDA / MPS, `syntx` samples through its
+`DeterministicGridSample` in the backward pass, `antstorch.greedy` through `F.grid_sample` (`antstorch._torch_compat`): expect
+round-off-level differences, not algorithmic ones.
+
+```
+python tools/benchmarks/compare_syntx_antstorch_mindboggle.py --models greedy --pairs 0 24 88 --out-dir <dir>
+```
 
 ### 7. Suggested runs
 

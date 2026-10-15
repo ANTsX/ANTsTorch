@@ -94,12 +94,7 @@ medians over three runs, after warm-up:
 
 Metal versus CPU maximum absolute error was 2.38e-7 (RMSE 2.93e-8).
 These timings are hardware-specific forward timings, not whole-registration
-speedups. Reproduce with:
-
-```bash
-PYTHONPATH="$PWD" python tools/benchmarks/benchmark_grid_sample_3d.py \
-  --channels 3 --repeats 3 --output /tmp/grid_sample_benchmark.json
-```
+speedups.
 
 
 ### Full-volume DiReCT validation and synchronization

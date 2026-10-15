@@ -9,7 +9,7 @@ These are source-checkout tools, not part of the installed Python API.
 | [weights/](weights/) | Convert ANTsPyNet weights, fetch source HDF5 files, upload converted weights, and migrate legacy checkpoints | `convert_antspynet_weights_to_antstorch.py`, `convert_*_bespoke.py`, `download_antspynet_h5_weights.py`, `upload_weights_to_figshare.py`, `patch_legacy_glow_checkpoint_config.py` |
 | [data/](data/) | Populate the ANTsTorch data and pretrained-model cache; also used by CI | `download_antstorch_data.py` |
 | [registration/](registration/) | Run SyN and stationary-velocity-field registration examples | `run_syn_registration.py`, `run_svf_registration.py` |
-| [benchmarks/](benchmarks/) | Compare registration/N4/B-spline implementations and run the Mindboggle probe | `run_benchmark_mindboggle_probe.py`, `compare_*.py` |
+| [benchmarks/](benchmarks/) | Compare registration/N4/B-spline implementations (syntx, FireANTs, ANTs) on Mindboggle and synthetic data | `compare_*.py` |
 | [verify_applications/](verify_applications/README.md) | Exercise application pipelines using weights and sample images | `run_all.py`, `verify_*.py` |
 
 ## Examples
@@ -23,7 +23,7 @@ python tools/weights/convert_antspynet_weights_to_antstorch.py --help
 
 # Inspect the registration and benchmark entry points.
 PYTHONPATH=. python tools/registration/run_syn_registration.py --help
-PYTHONPATH=. python tools/benchmarks/run_benchmark_mindboggle_probe.py --help
+PYTHONPATH=. python tools/benchmarks/compare_syntx_antstorch_mindboggle.py --help
 
 # List application checks without executing them.
 python tools/verify_applications/run_all.py --list
