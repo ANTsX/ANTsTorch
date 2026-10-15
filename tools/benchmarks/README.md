@@ -320,7 +320,7 @@ ANTsTorch's different ones — see the `syn_registration()` docstring for exactl
 `adam_betas` / `adam_eps` (optional kwargs, relevant only for the `*_regadam` arms) control the decay
 of the Adam moments.
 
-### Stationary velocity field family (SVF, not SyN)
+### Stationary velocity field (SVF) family
 
 | Model name | Backend | Note |
 |---|---|---|
