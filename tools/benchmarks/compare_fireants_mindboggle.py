@@ -51,6 +51,7 @@ _FIREANTS_KWARGS = {
     "tutorial": dict(scales=[4, 2, 1], iterations=[200, 100, 25], cc_kernel_size=5, optimizer_lr=0.5),
 }
 FIREANTS_SCHEDULE = "matched"
+FIREANTS_OVERRIDES = {}  # optional diagnostic overrides of _FIREANTS_KWARGS entries (set from the CLI)
 FIREANTS_TOLERANCE = None  # None: FireANTs' own early-stop setting (tolerance 1e-6 on the loss slope, 10 iterations)
 FIREANTS_LABEL = "fireants"
 
@@ -126,7 +127,9 @@ def _run_fireants(pair_idx, device, out_dir, data_dir):
         affine_4x4[:dim, -1] = translation
         init_affine = affine_4x4.unsqueeze(0).to(device)
 
-        kw = _FIREANTS_KWARGS[FIREANTS_SCHEDULE]
+        kw = dict(_FIREANTS_KWARGS[FIREANTS_SCHEDULE])
+        kw.update(FIREANTS_OVERRIDES)
+        smooth_warp_sigma = float(kw.pop("smooth_warp_sigma", 1.0))
         extra_kw = {} if FIREANTS_TOLERANCE is None else dict(tolerance=float(FIREANTS_TOLERANCE))
         _sync(device)
         t_start = time.time()
@@ -136,21 +139,24 @@ def _run_fireants(pair_idx, device, out_dir, data_dir):
             loss_type="cc", cc_kernel_size=kw["cc_kernel_size"],
             deformation_type="compositive",
             optimizer="adam", optimizer_lr=kw["optimizer_lr"],
-            smooth_warp_sigma=1.0, smooth_grad_sigma=1.0,
+            smooth_warp_sigma=smooth_warp_sigma, smooth_grad_sigma=1.0,
             init_affine=init_affine, **extra_kw,
         )
         # Count the iterations FireANTs really runs per pyramid level: its ConvergenceMonitor can stop a level early
         # (it stops when the slope of the last 10 losses exceeds `tolerance`), so the nominal budget may not be spent.
-        iters_run = []
+        iters_run, losses = [], []
         mon = reg_obj.convergence_monitor
         _orig_reset, _orig_converged = mon.reset, mon.converged
 
         def _reset():
             iters_run.append(0)
+            losses.append([])
             _orig_reset()
 
         def _converged(loss=None):
             iters_run[-1] += 1
+            if loss is not None:
+                losses[-1].append(float(loss))
             return _orig_converged(loss)
         mon.reset, mon.converged = _reset, _converged
         reg_obj.optimize()
@@ -178,6 +184,9 @@ def _run_fireants(pair_idx, device, out_dir, data_dir):
             "_fireants_schedule": FIREANTS_SCHEDULE,
             "_fireants_iterations_run": list(iters_run), "_fireants_iterations_nominal": list(kw["iterations"]),
             "_fireants_tolerance": FIREANTS_TOLERANCE,
+            # loss (negative local CC, lower is better) at the first / last iteration of each pyramid level
+            "_fireants_loss_first_last": [[l[0], l[-1]] if l else None for l in losses],
+            "_fireants_overrides": dict(FIREANTS_OVERRIDES),
             "_library": "fireants", "_regularizer": FIREANTS_LABEL, "_status": "SUCCESS",
         }
         if affine_source != "syntx":
@@ -238,6 +247,14 @@ def main():
     ap.add_argument("--fireants-no-early-stop", action="store_true",
                     help="Disable FireANTs' convergence-based early stop (tolerance=1e9) so every nominal iteration runs. "
                          "Use to test whether the early stop explains FireANTs' short runtime / low Dice.")
+    ap.add_argument("--fireants-iterations", type=int, nargs="+", default=None,
+                    help="Diagnostic: override FireANTs' per-level iterations (one value per pyramid level, 3). "
+                         "'1 1 1' (almost no optimisation) tests the affine export/scoring chain: the resulting Dice should "
+                         "be close to the affine-only Dice reported in the summary.")
+    ap.add_argument("--fireants-lr", type=float, default=None, help="Diagnostic: FireANTs Adam learning rate (default 0.5).")
+    ap.add_argument("--fireants-warp-sigma", type=float, default=None,
+                    help="Diagnostic: FireANTs smooth_warp_sigma (this script's default 1.0; FireANTs' own default 0.5).")
+    ap.add_argument("--fireants-cc-kernel", type=int, default=None, help="Diagnostic: FireANTs cc_kernel_size (default 5).")
     ap.add_argument("--own-defaults", action="store_true",
                     help="Disable the fair mode for syntx/antstorch (see the sibling script). The affine is then NOT shared.")
     ap.add_argument("--no-warmup", action="store_true")
@@ -249,9 +266,17 @@ def main():
         sys.exit(f"FireANTs benchmark needs a CUDA GPU (got --device {args.device!r}, "
                  f"cuda available: {torch.cuda.is_available()}). Run it on the GPU machine (e.g. hyperwolf).")
 
-    global FIREANTS_SCHEDULE, FIREANTS_TOLERANCE
+    global FIREANTS_SCHEDULE, FIREANTS_TOLERANCE, FIREANTS_OVERRIDES
     FIREANTS_SCHEDULE = "tutorial" if args.tutorial_schedule else "matched"
     FIREANTS_TOLERANCE = 1e9 if args.fireants_no_early_stop else None
+    if args.fireants_iterations is not None:
+        FIREANTS_OVERRIDES["iterations"] = list(args.fireants_iterations)
+    if args.fireants_lr is not None:
+        FIREANTS_OVERRIDES["optimizer_lr"] = args.fireants_lr
+    if args.fireants_warp_sigma is not None:
+        FIREANTS_OVERRIDES["smooth_warp_sigma"] = args.fireants_warp_sigma
+    if args.fireants_cc_kernel is not None:
+        FIREANTS_OVERRIDES["cc_kernel_size"] = args.fireants_cc_kernel
     if args.out_dir is None:
         args.out_dir = os.path.expanduser("~/Desktop/fireants_syntx_antstorch_mindboggle_comparison")
     os.makedirs(args.out_dir, exist_ok=True)
@@ -278,6 +303,9 @@ def main():
         results.append(rec)
         ok = rec.get("_status") == "SUCCESS"
         extra = f" iterations_run={rec['_fireants_iterations_run']}/{rec['_fireants_iterations_nominal']}" if ok and "_fireants_iterations_run" in rec else ""
+        if ok and "_fireants_loss_first_last" in rec:
+            extra += " loss_first->last=" + str([[round(a, 4), round(b, 4)] if a is not None else None for a, b in
+                                                 [(x[0], x[1]) if x else (None, None) for x in rec["_fireants_loss_first_last"]]])
         print(f"    {label}: " + (f"dice_sym={rec['dice_sym']:.4f} deformable={rec['_deformable_seconds']:.1f}s{extra}" if ok
                                   else f"{rec.get('_status')}: {rec.get('_error')}"), flush=True)
         with open(json_path, "w") as f:
@@ -316,7 +344,7 @@ def main():
     md = ["# Comparaison syntx vs antstorch vs FireANTs — Mindboggle-101", "",
           f"Paires : {args.pairs}  ", f"Modèles syntx/antstorch : {args.models}  ", f"Device : {args.device}  ",
           f"Mode syntx/antstorch : {'JUSTE (affine syntx partagée, antstorch iso-algorithme)' if sib.FAIR else 'défauts propres'}  ",
-          f"FireANTs : GreedyRegistration, early stop {'désactivé' if FIREANTS_TOLERANCE else 'par défaut de FireANTs'}, itérations {_FIREANTS_KWARGS[FIREANTS_SCHEDULE]['iterations']}, "
+          f"FireANTs : GreedyRegistration, early stop {'désactivé' if FIREANTS_TOLERANCE else 'par défaut de FireANTs'}, itérations {FIREANTS_OVERRIDES.get('iterations', _FIREANTS_KWARGS[FIREANTS_SCHEDULE]['iterations'])}, surcharges {FIREANTS_OVERRIDES or 'aucune'}, "
           f"affine de la source '{_affine_source(args.out_dir, args.pairs[0])}' (paire {args.pairs[0]}) ; temps = construction + optimize, "
           f"synchronisé, hors affine/E-S/métriques  ", "",
           "## Résumé apparié (paires où les trois bibliothèques ont réussi)", ""]
