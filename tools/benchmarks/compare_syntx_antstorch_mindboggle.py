@@ -71,6 +71,12 @@ import shutil
 import sys
 import time
 import traceback
+import warnings
+
+# syntx's own benchmark (syntx.benchmark.evaluate_mindboggle_pair) passes flow_sigma=3.0 to every SyN model, and syntx.syn warns that
+# flow_sigma only acts as an on/off gate with the spectral regularizers (sobolev / dsti). That is expected here (the value is
+# the model catalogue default, and syntx must not be modified), so the notice is hidden rather than printed for every pair.
+warnings.filterwarnings("ignore", message=r"flow_sigma=.*has no effect", category=UserWarning)
 
 PAIR_INDICES_DEFAULT = [0, 24, 88]
 _BASE_MODELS = ["gaussian", "sobolev", "dsti", "bspline"]
