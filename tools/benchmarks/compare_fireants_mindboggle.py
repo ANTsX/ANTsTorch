@@ -51,6 +51,7 @@ _FIREANTS_KWARGS = {
     "tutorial": dict(scales=[4, 2, 1], iterations=[200, 100, 25], cc_kernel_size=5, optimizer_lr=0.5),
 }
 FIREANTS_SCHEDULE = "matched"
+FIREANTS_TOLERANCE = None  # None: FireANTs' own early-stop setting (tolerance 1e-6 on the loss slope, 10 iterations)
 FIREANTS_LABEL = "fireants"
 
 
@@ -126,6 +127,7 @@ def _run_fireants(pair_idx, device, out_dir, data_dir):
         init_affine = affine_4x4.unsqueeze(0).to(device)
 
         kw = _FIREANTS_KWARGS[FIREANTS_SCHEDULE]
+        extra_kw = {} if FIREANTS_TOLERANCE is None else dict(tolerance=float(FIREANTS_TOLERANCE))
         _sync(device)
         t_start = time.time()
         reg_obj = GreedyRegistration(
@@ -135,8 +137,22 @@ def _run_fireants(pair_idx, device, out_dir, data_dir):
             deformation_type="compositive",
             optimizer="adam", optimizer_lr=kw["optimizer_lr"],
             smooth_warp_sigma=1.0, smooth_grad_sigma=1.0,
-            init_affine=init_affine,
+            init_affine=init_affine, **extra_kw,
         )
+        # Count the iterations FireANTs really runs per pyramid level: its ConvergenceMonitor can stop a level early
+        # (it stops when the slope of the last 10 losses exceeds `tolerance`), so the nominal budget may not be spent.
+        iters_run = []
+        mon = reg_obj.convergence_monitor
+        _orig_reset, _orig_converged = mon.reset, mon.converged
+
+        def _reset():
+            iters_run.append(0)
+            _orig_reset()
+
+        def _converged(loss=None):
+            iters_run[-1] += 1
+            return _orig_converged(loss)
+        mon.reset, mon.converged = _reset, _converged
         reg_obj.optimize()
         _sync(device)
         deformable_seconds = time.time() - t_start
@@ -160,6 +176,8 @@ def _run_fireants(pair_idx, device, out_dir, data_dir):
             "runtime_seconds": deformable_seconds, "_deformable_seconds": deformable_seconds,
             "_wall_seconds": time.time() - t0, "_affine_source": affine_source,
             "_fireants_schedule": FIREANTS_SCHEDULE,
+            "_fireants_iterations_run": list(iters_run), "_fireants_iterations_nominal": list(kw["iterations"]),
+            "_fireants_tolerance": FIREANTS_TOLERANCE,
             "_library": "fireants", "_regularizer": FIREANTS_LABEL, "_status": "SUCCESS",
         }
         if affine_source != "syntx":
@@ -177,10 +195,10 @@ def _run_fireants(pair_idx, device, out_dir, data_dir):
 def _aggregate3(results, models, pairs):
     """Paired statistics on pairs where syntx, antstorch AND fireants all succeeded (deformable-only times)."""
     import numpy as np
-    lines = ["| Modèle | n | Dice syntx | Dice antstorch | Dice fireants (sym / fixe) | Δ antstorch−syntx (moy ± ES) | "
+    lines = ["| Modèle | n | Dice affine (syntx) | Dice syntx | Dice antstorch | Dice fireants (sym / fixe) | Δ antstorch−syntx (moy ± ES) | "
              "Δ fireants−syntx (moy ± ES) | t déf. syntx | t déf. antstorch | t déf. fireants (s) | "
              "repli. % médiane s / a / f |",
-             "|---|---|---|---|---|---|---|---|---|---|---|"]
+             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     by = {}
     for r in results:
         if r.get("_status") == "SUCCESS":
@@ -199,8 +217,9 @@ def _aggregate3(results, models, pairs):
             return x.std(ddof=1) / np.sqrt(len(x)) if len(x) > 1 else float("nan")
         xa, xf = da - ds, df - ds
         fm = [np.median(g(D, "folding_pct")) for D in (S, A, F)]
+        aff = np.array([S[p].get("syntx_affine_dice_sym", float("nan")) for p in ps], dtype=float)
         lines.append(
-            f"| {reg} | {len(ps)} | {ds.mean():.4f} | {da.mean():.4f} | {df.mean():.4f} / {dff.mean():.4f} | "
+            f"| {reg} | {len(ps)} | {np.nanmean(aff):.4f} | {ds.mean():.4f} | {da.mean():.4f} | {df.mean():.4f} / {dff.mean():.4f} | "
             f"{xa.mean():+.4f} ± {se(xa):.4f} | {xf.mean():+.4f} ± {se(xf):.4f} | {ts.mean():.1f} | {ta.mean():.1f} | "
             f"{tf.mean():.1f} | {fm[0]:.4f} / {fm[1]:.4f} / {fm[2]:.4f} |")
     return lines
@@ -216,6 +235,9 @@ def main():
     ap.add_argument("--out-dir", default=None)
     ap.add_argument("--tutorial-schedule", action="store_true",
                     help="FireANTs iterations [200,100,25] (its tutorial) instead of [100,100,20] (same budget as syntx).")
+    ap.add_argument("--fireants-no-early-stop", action="store_true",
+                    help="Disable FireANTs' convergence-based early stop (tolerance=1e9) so every nominal iteration runs. "
+                         "Use to test whether the early stop explains FireANTs' short runtime / low Dice.")
     ap.add_argument("--own-defaults", action="store_true",
                     help="Disable the fair mode for syntx/antstorch (see the sibling script). The affine is then NOT shared.")
     ap.add_argument("--no-warmup", action="store_true")
@@ -227,8 +249,9 @@ def main():
         sys.exit(f"FireANTs benchmark needs a CUDA GPU (got --device {args.device!r}, "
                  f"cuda available: {torch.cuda.is_available()}). Run it on the GPU machine (e.g. hyperwolf).")
 
-    global FIREANTS_SCHEDULE
+    global FIREANTS_SCHEDULE, FIREANTS_TOLERANCE
     FIREANTS_SCHEDULE = "tutorial" if args.tutorial_schedule else "matched"
+    FIREANTS_TOLERANCE = 1e9 if args.fireants_no_early_stop else None
     if args.out_dir is None:
         args.out_dir = os.path.expanduser("~/Desktop/fireants_syntx_antstorch_mindboggle_comparison")
     os.makedirs(args.out_dir, exist_ok=True)
@@ -254,7 +277,8 @@ def main():
     def keep(rec, label):
         results.append(rec)
         ok = rec.get("_status") == "SUCCESS"
-        print(f"    {label}: " + (f"dice_sym={rec['dice_sym']:.4f} deformable={rec['_deformable_seconds']:.1f}s" if ok
+        extra = f" iterations_run={rec['_fireants_iterations_run']}/{rec['_fireants_iterations_nominal']}" if ok and "_fireants_iterations_run" in rec else ""
+        print(f"    {label}: " + (f"dice_sym={rec['dice_sym']:.4f} deformable={rec['_deformable_seconds']:.1f}s{extra}" if ok
                                   else f"{rec.get('_status')}: {rec.get('_error')}"), flush=True)
         with open(json_path, "w") as f:
             json.dump(results, f, indent=2)
@@ -292,7 +316,7 @@ def main():
     md = ["# Comparaison syntx vs antstorch vs FireANTs — Mindboggle-101", "",
           f"Paires : {args.pairs}  ", f"Modèles syntx/antstorch : {args.models}  ", f"Device : {args.device}  ",
           f"Mode syntx/antstorch : {'JUSTE (affine syntx partagée, antstorch iso-algorithme)' if sib.FAIR else 'défauts propres'}  ",
-          f"FireANTs : GreedyRegistration, itérations {_FIREANTS_KWARGS[FIREANTS_SCHEDULE]['iterations']}, "
+          f"FireANTs : GreedyRegistration, early stop {'désactivé' if FIREANTS_TOLERANCE else 'par défaut de FireANTs'}, itérations {_FIREANTS_KWARGS[FIREANTS_SCHEDULE]['iterations']}, "
           f"affine de la source '{_affine_source(args.out_dir, args.pairs[0])}' (paire {args.pairs[0]}) ; temps = construction + optimize, "
           f"synchronisé, hors affine/E-S/métriques  ", "",
           "## Résumé apparié (paires où les trois bibliothèques ont réussi)", ""]
