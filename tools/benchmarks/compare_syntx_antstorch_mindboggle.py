@@ -80,7 +80,7 @@ warnings.filterwarnings("ignore", message=r"flow_sigma=.*has no effect", categor
 
 PAIR_INDICES_DEFAULT = [0, 24, 88]
 _BASE_MODELS = ["gaussian", "sobolev", "dsti", "bspline"]
-MODELS = _BASE_MODELS + [f"{m}_regadam" for m in _BASE_MODELS]
+MODELS = _BASE_MODELS + [f"{m}_regadam" for m in _BASE_MODELS] + ["greedy", "greedy_regadam"]  # syntx.greedy vs antstorch.greedy, optimizer adam / regadam (see _run_greedy)
 
 SYNTX_ROOT = os.path.expanduser("~/Pkg/syntx")
 ANTSTORCH_ROOT = os.path.expanduser("~/Pkg/ANTsTorch")
@@ -148,6 +148,8 @@ _SHARED_AFFINE_DONE = set()
 
 
 def _run_antstorch(reg, pair_idx, device, out_dir, matched=True):  # `matched` kept for old callers; ignored
+    if reg in ("greedy", "greedy_regadam"):
+        return _run_greedy("antstorch", pair_idx, device, out_dir, reg=reg)
     sys.path.insert(0, ANTSTORCH_ROOT)
     from antstorch.benchmark.evaluate import evaluate_mindboggle_pair as antstorch_eval
 
@@ -186,6 +188,8 @@ def _run_antstorch(reg, pair_idx, device, out_dir, matched=True):  # `matched` k
 
 
 def _run_syntx(reg, pair_idx, device, out_dir, matched=True):  # `matched` kept for old callers; ignored
+    if reg in ("greedy", "greedy_regadam"):
+        return _run_greedy("syntx", pair_idx, device, out_dir, reg=reg)
     sys.path.insert(0, os.path.join(SYNTX_ROOT, "src"))
     os.chdir(SYNTX_ROOT)  # syntx.benchmark.evaluate caches to "results/..." relative to cwd
     import syntx
@@ -337,7 +341,11 @@ def _share_affine(syntx_rec, pair_idx, out_dir):
         src = [t for t in syntx_rec["transforms"]["fwdtransforms"] if str(t).endswith(".mat")][-1]
         dst_dir = os.path.join(out_dir, "antstorch_canonical_affines")
         os.makedirs(dst_dir, exist_ok=True)
-        shutil.copyfile(src, os.path.join(dst_dir, f"pair_{pair_idx:03d}_0GenericAffine.mat"))
+        dst = os.path.join(dst_dir, f"pair_{pair_idx:03d}_0GenericAffine.mat")
+        if os.path.abspath(src) == os.path.abspath(dst):  # syntx already ran from the cached shared affine
+            _SHARED_AFFINE_DONE.add(key)
+            return True
+        shutil.copyfile(src, dst)
         import json as _json
         with open(os.path.join(dst_dir, f"pair_{pair_idx:03d}_affine_info.json"), "w") as f:
             _json.dump({"runtime_seconds": float(syntx_rec.get("syntx_affine_time", 0.0)), "pair_idx": int(pair_idx),
@@ -356,7 +364,7 @@ def _run_pair_model(reg, pair_idx, device, out_dir, libs):
         rec = fn(reg, pair_idx, device, out_dir)
         if FAIR and lib == "syntx" and rec.get("_status") == "SUCCESS":
             rec["_affine_shared"] = _share_affine(rec, pair_idx, out_dir)
-        if FAIR and lib == "antstorch" and rec.get("_status") == "SUCCESS":
+        if FAIR and lib == "antstorch" and not reg.startswith("greedy") and rec.get("_status") == "SUCCESS":
             gap = None
             for r in recs:
                 if r.get("_library") == "syntx" and r.get("_status") == "SUCCESS":
@@ -396,6 +404,80 @@ def _aggregate(results, models, skip_syntx):
         lines.append(f"| {reg} | {len(pairs)} | {ds.mean():.4f} | {da.mean():.4f} | {d.mean():+.4f} ± {se:.4f} | {np.median(d):+.4f} | "
                      f"{int((d > 0).sum())}/{len(d)} | {ts.mean():.1f} | {ta.mean():.1f} | {ta.mean() / ts.mean():.2f}× | {fs:.4f} / {fa:.4f} |")
     return lines
+
+
+# ======================================================================================================================
+# Greedy arms (model "greedy" of --models): syntx.greedy vs antstorch.greedy (one-directional greedy compositive registration).
+# ======================================================================================================================
+GREEDY_KWARGS = dict(reg_iterations=[100, 100, 20])  # both libraries otherwise run their (identical) defaults
+GREEDY_LABEL = "greedy"
+
+
+def _run_greedy(lib, pair_idx, device, out_dir, data_dir=DATA_DIR, reg="greedy"):
+    """One `greedy` registration (lib = 'syntx' or 'antstorch') for one pair, from the SHARED syntx affine (the cached
+    canonical affine of `out_dir`; produced by syntx.greedy itself when nothing else has), on the same pair/N4 data. Both are scored by the same antstorch metrics (Dice fixed from
+    the forward warp, Dice moving from the Anderson-computed inverse). `_deformable_seconds` is the library's own
+    `provenance['runtime_deformable_sec']` (optimisation only: no affine, no export, no inverse, no scoring)."""
+    t0 = time.time()
+    sys.path.insert(0, ANTSTORCH_ROOT)
+    try:
+        if lib == "syntx":
+            sys.path.insert(0, os.path.join(SYNTX_ROOT, "src"))
+            import syntx  # noqa: F401
+            from syntx.greedy import greedy_registration as greedy_fn
+        else:
+            from antstorch.greedy import greedy_registration as greedy_fn
+        import ants
+        from antstorch.benchmark.data import load_mindboggle_pair
+        from antstorch.benchmark.evaluate import _fit_or_load_canonical_affine, clean_device_cache
+        from antstorch.benchmark.metrics import compute_bidirectional_dice, compute_jacobian_metrics
+
+        clean_device_cache()
+        pair_data = load_mindboggle_pair(pair_idx=pair_idx, data_dir=data_dir, use_n4=True)
+        fi, mi = pair_data["fixed"], pair_data["moving"]
+        fl, ml = pair_data["fixed_label"], pair_data["moving_label"]
+        affine_dir = os.path.join(out_dir, "antstorch_canonical_affines")
+        cached = os.path.join(affine_dir, f"pair_{pair_idx:03d}_0GenericAffine.mat")
+        if lib == "syntx" and not os.path.exists(cached):
+            # Nothing has produced a shared affine yet (e.g. --models greedy alone): syntx.greedy fits its own
+            # (robust_affine) and `_run_pair_model` shares it, so antstorch.greedy starts from the same transform.
+            affine_path = None
+        else:
+            _m, _t, _ts, affine_path = _fit_or_load_canonical_affine(fi, mi, pair_idx, affine_dir, device, False)
+        affine_source = "syntx" if affine_path is None else _affine_source(out_dir, pair_idx)  # None: syntx fitted its own
+
+        pair_out = os.path.join(out_dir, f"{lib}_{reg}", f"pair_{pair_idx:03d}")
+        os.makedirs(pair_out, exist_ok=True)
+        _sync(device)
+        optimizer = "regadam" if reg == "greedy_regadam" else "adam"
+        res = greedy_fn(fi, mi, initial_transform=affine_path, return_inverse=True, device=device, verbose=False,
+                        outprefix=os.path.join(pair_out, f"{reg}_"), optimizer=optimizer, **GREEDY_KWARGS)
+        _sync(device)
+        prov = res["provenance"]
+        deformable = float(prov.get("runtime_deformable_sec", time.time() - t0))
+        clean_device_cache()
+        df, dm, dsym = compute_bidirectional_dice(fl, ml, fi, mi, res["fwdtransforms"], res["invtransforms"],
+                                                  res["whichtoinvert_inv"])
+        warp = [t for t in res["fwdtransforms"] if "Warp" in os.path.basename(str(t)) or str(t).endswith(".nii.gz")][0]
+        jac = compute_jacobian_metrics(fi, warp)
+        rec = {
+            "pair_idx": int(pair_idx), "model_type": f"{reg} ({lib})", "cohort_type": pair_data["pair_type"],
+            "fixed_id": pair_data["fixed_id"], "moving_id": pair_data["moving_id"],
+            "dice_sym": float(dsym), "dice_fixed": float(df), "dice_moving": float(dm),
+            "folding_pct": float(jac.get("folding_pct", float("nan"))),
+            "min_jacobian": float(jac.get("min", float("nan"))),
+            "runtime_seconds": deformable, "_deformable_seconds": deformable, "_wall_seconds": time.time() - t0,
+            "_affine_source": affine_source, "_greedy_kwargs": dict(GREEDY_KWARGS), "_device": str(prov.get("device", device)),
+            "_library": lib, "_regularizer": reg, "_greedy_optimizer": optimizer, "_status": "SUCCESS",
+            "syntx_affine_time": float(prov.get("runtime_affine_sec", 0.0)),
+            "transforms": {"fwdtransforms": [str(t) for t in res["fwdtransforms"]]},
+        }
+        if FAIR and lib == "antstorch" and affine_source != "syntx":
+            print(f"    !! {reg} (antstorch) pair {pair_idx}: affine source is '{affine_source}', not syntx's.", flush=True)
+    except Exception as e:  # noqa: BLE001
+        rec = {"_library": lib, "_regularizer": reg, "pair_idx": pair_idx, "_status": "FAILED", "_error": str(e),
+               "_traceback": traceback.format_exc(), "_wall_seconds": time.time() - t0}
+    return rec
 
 
 # ======================================================================================================================
@@ -758,7 +840,7 @@ def main():
                          "to an earlier run.")
     ap.add_argument("--inverse-method", choices=["anderson", "fixed_point", "hybrid_lm"], default=None,
                     help="In-loop field-inversion solver for the ANTSTORCH arms only (default: antstorch's own, anderson). "
-                         "fixed_point measured ~2.2x faster than anderson on MPS at 6 steps (bench_inverse_field.py); "
+                         "fixed_point measured ~2.2x faster than anderson on MPS at 6 steps; "
                          "syntx arms keep their own solver, so use this as an ablation, not the main comparison.")
     ap.add_argument("--out-dir", default=None)
     ap.add_argument("--legacy-defaults", action="store_true",
@@ -875,6 +957,8 @@ def main():
         _run_pair_model(args.models[0], args.pairs[0], args.device, warm_dir, libs)
         if args.fireants:
             _run_fireants(args.pairs[0], args.device, warm_dir, DATA_DIR)
+        if any(m.startswith("greedy") for m in args.models) and not args.models[0].startswith("greedy"):
+            _run_pair_model("greedy", args.pairs[0], args.device, warm_dir, libs)
         _SHARED_AFFINE_DONE.clear()
 
     total = len(args.pairs) * len(args.models) * len(libs)
@@ -929,6 +1013,8 @@ def main():
                 label = reg + " (non-officiel)"
             elif reg == "bspline_regadam":
                 label = reg + " (non-officiel, vs syntx bspline)"
+            elif reg == "greedy_regadam":
+                label = reg + " (les deux bibliothèques en regadam)"
             elif reg.endswith("_regadam"):
                 label = reg + f" (vs syntx {base})"
             else:
