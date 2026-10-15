@@ -441,7 +441,27 @@ def _affine_source(out_dir, pair_idx):
         return "antstorch-fit"
 
 
+FIREANTS_VERBOSE = False  # --fireants-verbose: show FireANTs' own progress bars / log messages
+
+
 def _run_fireants(pair_idx, device, out_dir, data_dir):
+    """Run `_run_fireants_impl` with FireANTs' own console output (tqdm bars, log warnings) silenced, so the screen shows only the
+    same summary lines as the syntx / ANTsTorch arms. Our own warnings are written to the original stdout; errors are recorded in
+    the returned record (`_error`)."""
+    if FIREANTS_VERBOSE:
+        return _run_fireants_impl(pair_idx, device, out_dir, data_dir)
+    import contextlib
+    import logging
+    prev_disable = logging.root.manager.disable
+    logging.disable(logging.CRITICAL)
+    try:
+        with open(os.devnull, "w") as dn, contextlib.redirect_stdout(dn), contextlib.redirect_stderr(dn):
+            return _run_fireants_impl(pair_idx, device, out_dir, data_dir)
+    finally:
+        logging.disable(prev_disable)
+
+
+def _run_fireants_impl(pair_idx, device, out_dir, data_dir):
     """One FireANTs registration for one pair. `_deformable_seconds` times only the registration itself."""
     t0 = time.time()
     sys.path.insert(0, FIREANTS_ROOT)
@@ -555,7 +575,7 @@ def _run_fireants(pair_idx, device, out_dir, data_dir):
         }
         if affine_source != "syntx":
             print(f"    !! FireANTs pair {pair_idx}: affine source is '{affine_source}', not syntx's -- "
-                  f"the start is not shared with syntx.", flush=True)
+                  f"the start is not shared with syntx.", file=sys.__stdout__, flush=True)
     except Exception as e:  # noqa: BLE001
         rec = {
             "_library": "fireants", "_regularizer": FIREANTS_LABEL, "pair_idx": pair_idx,
@@ -632,10 +652,22 @@ def _run_sweep(pairs, device, out_dir, data_dir):
     print("\n" + "\n".join(md) + f"\n\nMarkdown: {path}")
 
 
+def _slash3(rec):
+    """'sym / fixed / moving' Dice cell for a table."""
+    g = lambda k: float(rec.get(k, float("nan")))  # noqa: E731
+    return f"{g('dice_sym'):.4f} / {g('dice_fixed'):.4f} / {g('dice_moving'):.4f}"
+
+
+def _fmt_dice(rec):
+    """'dice_sym=… dice_fixed=… dice_moving=…' for a successful record (nan when a library does not report a value)."""
+    g = lambda k: float(rec.get(k, float("nan")))  # noqa: E731
+    return f"dice_sym={g('dice_sym'):.4f} dice_fixed={g('dice_fixed'):.4f} dice_moving={g('dice_moving'):.4f}"
+
+
 def _aggregate3(results, models, pairs):
     """Paired statistics on pairs where syntx, antstorch AND fireants all succeeded (deformable-only times)."""
     import numpy as np
-    lines = ["| Modèle | n | Dice affine (syntx) | Dice syntx | Dice antstorch | Dice fireants (sym / fixe) | Dice fixe syntx / antstorch | Δ antstorch−syntx (moy ± ES) | "
+    lines = ["| Modèle | n | Dice affine (syntx) | Dice syntx | Dice antstorch | Dice fireants (sym / fixe / mobile) | Dice fixe / mobile syntx ; antstorch | Δ antstorch−syntx (moy ± ES) | "
              "Δ fireants−syntx (moy ± ES) | t déf. syntx | t déf. antstorch | t déf. fireants (s) | "
              "repli. % médiane s / a / f |",
              "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
@@ -653,15 +685,17 @@ def _aggregate3(results, models, pairs):
         da, ds, df, dff = g(A, "dice_sym"), g(S, "dice_sym"), g(F, "dice_sym"), g(F, "dice_fixed")
         ta, ts, tf = g(A, "_deformable_seconds"), g(S, "_deformable_seconds"), g(F, "_deformable_seconds")
 
+        mean_of = lambda D, k: float(np.nanmean([D[p].get(k, float('nan')) for p in ps]))  # noqa: E731
+
         def se(x):
             return x.std(ddof=1) / np.sqrt(len(x)) if len(x) > 1 else float("nan")
         xa, xf = da - ds, df - ds
         fm = [np.median(g(D, "folding_pct")) for D in (S, A, F)]
         aff = np.array([S[p].get("syntx_affine_dice_sym", float("nan")) for p in ps], dtype=float)
         lines.append(
-            f"| {reg} | {len(ps)} | {np.nanmean(aff):.4f} | {ds.mean():.4f} | {da.mean():.4f} | {df.mean():.4f} / {dff.mean():.4f} | "
-            f"{np.nanmean([S[p].get('dice_fixed', float('nan')) for p in ps]):.4f} / "
-            f"{np.nanmean([A[p].get('dice_fixed', float('nan')) for p in ps]):.4f} | "
+            f"| {reg} | {len(ps)} | {np.nanmean(aff):.4f} | {ds.mean():.4f} | {da.mean():.4f} | "
+            f"{df.mean():.4f} / {dff.mean():.4f} / {np.nanmean(g(F, 'dice_moving')):.4f} | "
+            f"{mean_of(S, 'dice_fixed'):.4f} / {mean_of(S, 'dice_moving'):.4f} ; {mean_of(A, 'dice_fixed'):.4f} / {mean_of(A, 'dice_moving'):.4f} | "
             f"{xa.mean():+.4f} ± {se(xa):.4f} | {xf.mean():+.4f} ± {se(xf):.4f} | {ts.mean():.1f} | {ta.mean():.1f} | "
             f"{tf.mean():.1f} | {fm[0]:.4f} / {fm[1]:.4f} / {fm[2]:.4f} |")
     return lines
@@ -672,7 +706,7 @@ def _fireants_pair_table(results, pairs, models):
     by_key = {}
     for r in results:
         by_key.setdefault((r.get("pair_idx"), r["_regularizer"]), {})[r["_library"]] = r
-    out = ["| Paire | Modèle | syntx | antstorch | fireants (sym / fixe) | Δ a−s | Δ f−s | t déf. s | t déf. a | t déf. f (s) |",
+    out = ["| Paire | Modèle | syntx (sym / fixe / mobile) | antstorch (sym / fixe / mobile) | fireants (sym / fixe / mobile) | Δ a−s | Δ f−s | t déf. s | t déf. a | t déf. f (s) |",
            "|---|---|---|---|---|---|---|---|---|---|"]
     for pair_idx in pairs:
         f = by_key.get((pair_idx, FIREANTS_LABEL), {}).get("fireants", {})
@@ -682,8 +716,7 @@ def _fireants_pair_table(results, pairs, models):
             s, a = e.get("syntx", {}), e.get("antstorch", {})
             s_ok, a_ok = s.get("_status") == "SUCCESS", a.get("_status") == "SUCCESS"
             cells = [str(pair_idx), reg,
-                     f"{s['dice_sym']:.4f}" if s_ok else "ÉCHEC", f"{a['dice_sym']:.4f}" if a_ok else "ÉCHEC",
-                     f"{f['dice_sym']:.4f} / {f['dice_fixed']:.4f}" if f_ok else "ÉCHEC",
+                     _slash3(s) if s_ok else "ÉCHEC", _slash3(a) if a_ok else "ÉCHEC", _slash3(f) if f_ok else "ÉCHEC",
                      f"{a['dice_sym'] - s['dice_sym']:+.4f}" if (s_ok and a_ok) else "—",
                      f"{f['dice_sym'] - s['dice_sym']:+.4f}" if (s_ok and f_ok) else "—",
                      f"{s['_deformable_seconds']:.1f}" if s_ok else "—", f"{a['_deformable_seconds']:.1f}" if a_ok else "—",
@@ -694,7 +727,7 @@ def _fireants_pair_table(results, pairs, models):
 
 def main():
     global FAIR
-    global FIREANTS_PRESET, FIREANTS_TOLERANCE, FIREANTS_OVERRIDES, SWEEP_SET, FIREANTS_NORMALIZE
+    global FIREANTS_PRESET, FIREANTS_TOLERANCE, FIREANTS_OVERRIDES, SWEEP_SET, FIREANTS_NORMALIZE, FIREANTS_VERBOSE
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--pairs", type=int, nargs="+", default=PAIR_INDICES_DEFAULT)
     ap.add_argument("--models", nargs="+", default=DEFAULT_MODELS, choices=MODELS,
@@ -762,6 +795,8 @@ def main():
                     help="Keep FireANTs' own convergence-based early stop (tolerance 1e-6 on the loss slope, 10 iterations). By default "
                          "it is disabled so every nominal iteration runs, as for syntx and ANTsTorch (equal budget, comparable times).")
     ap.add_argument("--fireants-no-early-stop", action="store_true", help=argparse.SUPPRESS)  # kept for old command lines (now the default)
+    ap.add_argument("--fireants-verbose", action="store_true",
+                    help="Show FireANTs' own console output (tqdm progress bars, log warnings); silenced by default.")
     ap.add_argument("--no-normalize", action="store_true",
                     help="Feed FireANTs the raw images instead of the auto-normalised ones syntx registers.")
     args = ap.parse_args()
@@ -784,6 +819,7 @@ def main():
         FIREANTS_TOLERANCE = None if (args.fireants_early_stop and not args.fireants_no_early_stop) else 1e9
         SWEEP_SET = args.sweep_set
         FIREANTS_NORMALIZE = not args.no_normalize
+        FIREANTS_VERBOSE = args.fireants_verbose
         if args.fireants_grad_sigma is not None:
             FIREANTS_OVERRIDES["smooth_grad_sigma"] = args.fireants_grad_sigma
         if args.fireants_iterations is not None:
@@ -846,21 +882,20 @@ def main():
                 results.append(rec)
                 done += 1
                 status = rec.get("_status")
-                dice = rec.get("dice_sym", float("nan"))
                 secs = rec.get("_deformable_seconds", float("nan"))
-                print(f"    -> {status} dice_sym={dice:.4f} deformable={secs:.1f}s" if status == "SUCCESS"
+                print(f"    -> {status} {_fmt_dice(rec)} deformable={secs:.1f}s" if status == "SUCCESS"
                       else f"    -> {status}: {rec.get('_error')}", flush=True)
                 # Write incrementally so a partial run is never lost.
                 with open(json_path, "w") as f:
                     json.dump(results, f, indent=2)
         if args.fireants:  # once per pair, after syntx has produced (and shared) the affine
             print(f"pair {pair_idx} / fireants ...", flush=True)
+            print(f"[fireants / {FIREANTS_PRESET}] pair {pair_idx}", flush=True)
             rec = _run_fireants(pair_idx, args.device, args.out_dir, DATA_DIR)
             results.append(rec)
             if rec.get("_status") == "SUCCESS":
-                print(f"    -> fireants dice_sym={rec['dice_sym']:.4f} dice_fixed={rec['dice_fixed']:.4f} "
-                      f"deformable={rec['_deformable_seconds']:.1f}s iterations_run={rec['_fireants_iterations_run']}/"
-                      f"{rec['_fireants_iterations_nominal']}", flush=True)
+                print(f"    -> {rec['_status']} {_fmt_dice(rec)} deformable={rec['_deformable_seconds']:.1f}s "
+                      f"iterations_run={rec['_fireants_iterations_run']}/{rec['_fireants_iterations_nominal']}", flush=True)
             else:
                 print(f"    -> fireants {rec.get('_status')}: {rec.get('_error')}", flush=True)
             with open(json_path, "w") as f:

@@ -206,6 +206,7 @@ third arm (the former `compare_fireants_mindboggle.py` has been removed):
   `fine-tuned-syntx` gives FireANTs 50 iterations at the last level (syntx has 20 here); add
   `--fireants-iterations 100 100 20` for an equal budget. Other overrides: `--fireants-lr`, `--fireants-warp-sigma`,
   `--fireants-grad-sigma`, `--fireants-cc-kernel`. (`--tutorial-schedule` was replaced by `--fireants-preset default`.)
+- **Console output:** FireANTs' own progress bars and log warnings are silenced; each pair prints the same `-> SUCCESS dice_sym=… dice_fixed=… dice_moving=… deformable=…s` line as the syntx / ANTsTorch arms (plus iterations run). `--fireants-verbose` shows FireANTs' output again.
 - **Early stop:** disabled by default, so every nominal iteration runs (equal budget with syntx and ANTsTorch, comparable times). `--fireants-early-stop` keeps FireANTs' own ConvergenceMonitor (tolerance 1e-6, 10 iterations); `--fireants-no-early-stop` is accepted but now redundant. Iterations actually run and first/last loss per level are recorded.
 - FireANTs is a different algorithm (Adam, compositive warp, CC kernel 5): this is a library comparison, not a parity check.
 - `dice_fixed` (forward warp only) is the reliable measure: `GreedyRegistration` has no native inverse, so the post-hoc
