@@ -1,4 +1,164 @@
-# Model catalogue — `tools/benchmarks/`
+# Registration benchmarks — `tools/benchmarks/`
+
+This directory benchmarks ANTsTorch registration against [syntx](https://github.com/stnava/syntx) and
+[FireANTs](https://github.com/rohitrango/FireANTs) on the Mindboggle-101 data. The first half of this file
+(sections 1–6) is the guide to the registration work; the second half (**Reference**) is the catalogue of
+every model name and script. Non-registration comparisons (N4, denoising, cortical thickness, scattered-data
+B-splines) are listed in the script table of the reference part.
+
+**Contents**
+
+1. [Overview: what is borrowed from syntx](#1-overview-what-is-borrowed-from-syntx)
+2. [Models](#2-models)
+3. [Optimizers](#3-optimizers)
+4. [The Mindboggle benchmark](#4-the-mindboggle-benchmark) — data, evaluation measures, fair mode
+5. [FireANTs](#5-fireants)
+6. [Results](#6-results) — Dice, time, Jacobian
+7. [Reproducing the runs](#7-reproducing-the-runs)
+
+## 1. Overview: what is borrowed from syntx
+
+ANTsTorch's registration code follows the design of syntx (S. Stnava), which is the reference for this work.
+Borrowed, and kept as close to syntx as is practical:
+
+- **The dense SyN formulation:** symmetric, midpoint-based, Eulerian fields, local cross-correlation (`cc2`),
+  4-2-1 pyramid, and the fluid regularizers (Gaussian, Sobolev, DST-I).
+- **`greedy`:** the one-directional compositive model of `syntx.greedy`, including syntx's
+  millimetre-isotropic deformable pyramid (`antstorch.greedy`, bit-identical to syntx on CPU).
+- **The benchmark protocol:** the 90 Mindboggle pairs, N4 pre-processing, the DKT31 Dice measures, and the
+  model names (`gaussian`, `sobolev`, `dsti`, ...).
+- **The syntx default hyper-parameters** (`syntx_defaults=True`), selected per regularizer and optimizer.
+
+The rule of this repository is **one-way**: only ANTsTorch is modified; syntx is read-only and is called as
+installed. Because syntx evolves quickly, record its version with every run.
+
+Where ANTsTorch differs, it is by implementation (PyTorch-native sampling through
+`antstorch._torch_compat`, autograd or analytical gradients, MPS/CPU/CUDA support, the
+`antstorch.syn` / `antstorch.greedy` / `antstorch.bspline_flows` modules) and not by algorithm; the
+parity tests live in `tests/greedy` and the benchmark scripts of this directory.
+
+## 2. Models
+
+| Family | ANTsTorch entry point | Model names | Inverse |
+|---|---|---|---|
+| Dense SyN | `antstorch.syn.syn_registration` | `gaussian_syn`, `sobolev_syn`, `dsti_syn`, `bspline_syn` | yes (symmetric) |
+| Greedy (compositive) | `antstorch.greedy.greedy_registration` (alias `greedy`) | `greedy`, `greedy_regadam` | no (optional Anderson inverse with `return_inverse=True`) |
+| Stationary velocity field (SVF) | `antstorch.bspline_flows.bspline_svf_registration`, `gaussian_svf_registration` | `bspline_svf` (alias `svf`), `gaussian_svf` | yes (by integration) |
+| ANTs baselines | `ants.registration` | `ants_syn_quick`, any deformable-only `type_of_transform` | — |
+
+- **Dense SyN** differs between variants only by the regularizer applied to the update field.
+- **SVF** parameterizes a velocity field (B-spline or dense Gaussian-smoothed) and exponentiates it; it is
+  a different transform family from SyN even though `bspline_svf` and `bspline_syn` share a word.
+- **Greedy** estimates one forward displacement field and has no native inverse; its `dice_moving` and
+  `dice_sym` depend on a post-hoc inverse, so `dice_fixed` is its primary measure.
+
+Details, regularizer tables and defaults: see the Reference part, section "Native ANTsTorch models".
+
+## 3. Optimizers
+
+`optimizer` and `regularizer` are independent arguments of `syn_registration`.
+
+| Optimizer | Where | What it does |
+|---|---|---|
+| `gradient_descent` | `syn_registration` default | CFL-scaled step along the regularized gradient |
+| `reg_adam` | `syn_registration`, `greedy` (name `regadam`) | `greedy.py` Adam: bias-corrected moments, the Adam quotient is smoothed (`regadam_sigma` 0.8); moments reset at each level |
+| `syn_reg_adam` | `syn_registration` (sobolev, dsti only) | `syntx.syn()` variant: gradient regularized, Adam quotient, Green operator applied again, CFL step shared by both half-warps; used by the `dsti` fair-mode arm |
+
+`*_regadam` benchmark arms test the effect of the optimizer alone: same regularizer and schedule as the base
+arm, only the optimizer changes. For `greedy`, both libraries implement `regadam`, so
+`greedy_regadam` is paired library-to-library like `greedy`; for the dense models the syntx counterpart is
+the base arm.
+
+## 4. The Mindboggle benchmark
+
+### Data
+
+[Mindboggle-101](https://mindboggle.info/data.html) (Klein & Tourville 2012, *Front. Neurosci.* 6:171):
+manually labeled T1-weighted brains with DKT31 cortical labels (`labels.DKT31.manual.nii.gz`), from the
+cohorts OASIS-TRT-20, NKI-RS-22, NKI-TRT-20 and MMRR-21.
+
+- **Pairs:** 90 pairs (40 intra-subject and 50 inter-subject), defined in `antstorch/benchmark/pairs.csv`
+  (copied from syntx's `examples/pairs.csv`).
+- **Pre-processing:** brain-extracted volumes, N4 bias correction (cached), images normalized as in syntx.
+- **Location:** `ANTSTORCH_MINDBOGGLE_DATA_DIR` (default `~/data/mindboggle/volumes`; the script uses
+  `DATA_DIR`). Directory layout: `antstorch/benchmark/data.py`.
+
+### Measures
+
+| Measure | Definition |
+|---|---|
+| `dice_fixed` | DKT31 Dice in the fixed space (forward warp of the moving labels) |
+| `dice_moving` | Dice in the moving space (needs the inverse) |
+| `dice_sym` | mean of the two |
+| time | deformable-only seconds (affine time reported separately) |
+| Jacobian | see below, identical measure for every library |
+
+**Jacobian.** For every arm, the determinant of the exported *forward* displacement field is computed by finite
+differences inside the fixed-image foreground mask (`antstorch.benchmark.metrics.compute_jacobian_metrics`). Reported:
+folding % (voxels with det ≤ 0), min and max J, mean J, and σ(log J) (standard deviation of the logarithm of the
+positive determinants, a measure of local volume change). The syntx-internal `folding_pct` is a different
+quantity (it is computed from the internal map) and is **not** used in comparisons.
+
+### Fair mode
+
+`python compare_syntx_antstorch_mindboggle.py` (default `gaussian sobolev dsti`) shares one affine between
+libraries, uses the iso-algorithm ANTsTorch configuration, compares deformable-only times, and runs a
+warm-up on the first pair. The full description is in
+the Reference section "Fair syntx / ANTsTorch / FireANTs comparison".
+
+## 5. FireANTs
+
+[FireANTs](https://github.com/rohitrango/FireANTs) (Jena, Chaudhari, Gee; *Nature Communications*, 2024) is a
+GPU-accelerated registration toolkit that optimizes with Riemannian Adam. In this benchmark it enters as an
+optional third arm (`--fireants`, CUDA only) through its `GreedyRegistration`: unidirectional, compositive, no native
+inverse.
+
+syntx's own evaluation of FireANTs on Mindboggle is documented in
+[`docs/v_fire_ants/README.md`](https://github.com/stnava/syntx/blob/main/docs/v_fire_ants/README.md). Its main
+points: FireANTs' default SyN plateaus near 0.39 DKT Dice, its Greedy setting reaches about 0.62–0.63 (similar
+to `syntx.syn`) at roughly 3.5x the speed, but with 3.7–15.6 % folded voxels against 0.0005 % for `syntx.syn`, and
+without a reliable inverse. Those numbers are syntx's, obtained on a different machine and settings; this
+repository re-measures FireANTs on the same pairs, affine and Jacobian measure as the other arms (presets
+`matched`, `default`, `fine-tuned-syntx`; see the Reference subsection "FireANTs").
+
+## 6. Results
+
+> **Not yet filled in.** This section will hold only complete 90-pair runs. Numbers from earlier non-fair or
+> partial runs are in the Reference part and are not comparable with it.
+
+| Item | Source of the numbers |
+|---|---|
+| Dice (`dice_fixed`, `dice_sym`), paired difference ± s.e. | `comparison_summary.md`, aggregate table |
+| Time (deformable-only), per device: MPS, CUDA, CPU | `comparison_summary.md`, time column |
+| Jacobian (folding %, min/max J, σ(log J)) | `comparison_summary.md`, section "Jacobien du déplacement direct" |
+
+Template to fill, one table per device:
+
+| Model | Library | Dice fixed | Dice sym | Time (s) | Folding % | min J | σ(log J) |
+|---|---|---|---|---|---|---|---|
+| gaussian | syntx / ANTsTorch | | | | | | |
+| sobolev | syntx / ANTsTorch | | | | | | |
+| dsti | syntx / ANTsTorch | | | | | | |
+| greedy | syntx / ANTsTorch / FireANTs | | | | | | |
+
+## 7. Reproducing the runs
+
+```
+# Required: syntx and ANTsTorch must be the checkouts you mean to test, not site-packages copies
+export PYTHONPATH=$HOME/Pkg/syntx/src:$HOME/Pkg/ANTsTorch
+python tools/benchmarks/compare_syntx_antstorch_mindboggle.py --pairs 0 1 2 --out-dir <dir>          # validation
+python tools/benchmarks/compare_syntx_antstorch_mindboggle.py --out-dir <dir>                        # 90 pairs, fair mode
+python tools/benchmarks/compare_syntx_antstorch_mindboggle.py --models greedy greedy_regadam --out-dir <dir>
+python tools/benchmarks/compare_syntx_antstorch_mindboggle.py --fireants --device cuda:0 --out-dir <dir>
+```
+
+More run recipes: the Reference subsection "Suggested runs".
+
+---
+
+# Reference
+
+## Model catalogue
 
 This file documents, in one place, every model name accepted by the comparison scripts under
 `tools/benchmarks/` and by `antstorch.benchmark.evaluate_mindboggle_pair()`, which they call. Each
@@ -9,7 +169,7 @@ new source of truth — if they disagree, the code's docstring is always right).
 
 | Script | Compares | Models / `--models` |
 |---|---|---|
-| `compare_syntx_antstorch_mindboggle.py` | syntx vs ANTsTorch, dense SyN family (fair mode by default, see below) | `gaussian`, `sobolev`, `dsti` (default), `bspline`, `gaussian_regadam`, `sobolev_regadam`, `dsti_regadam`, `bspline_regadam` |
+| `compare_syntx_antstorch_mindboggle.py` | syntx vs ANTsTorch, dense SyN family (fair mode by default, see below) | `gaussian`, `sobolev`, `dsti` (default), `bspline`, `gaussian_regadam`, `sobolev_regadam`, `dsti_regadam`, `bspline_regadam`, `greedy`, `greedy_regadam` (syntx vs ANTsTorch); `--fireants` adds FireANTs |
 | `compare_bspline_scattered_data.py` | ANTs vs ANTsTorch, B-spline fit on scattered data (not a registration model) | N/A — primitive comparison, no `--models` |
 | `compare_n4_bias_field_correction.py` | ANTs vs ANTsTorch, N4 bias-field correction (not a registration model) | N/A — primitive comparison, no `--models` |
 | `compare_denoise_image.py` | ANTs `denoise_image` vs `antstorch.denoise_image` (adaptive non-local means, Rician or Gaussian noise) | N/A — primitive comparison, no `--models`; `--repeats 2+` also reports ANTs run-to-run variability |
