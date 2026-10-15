@@ -183,14 +183,13 @@ python tools/benchmarks/run_primitive_benchmarks.py --device cuda:0 --out-dir <d
 python tools/benchmarks/run_primitive_benchmarks.py --only n4_bias_field_correction --device mps
 ```
 
-## Runs of 2026-10-15
+## Run (WIP: N=1)
 
 | | MPS | CUDA |
 |---|---|---|
-| Host | Mac (Apple silicon, `mps`) | `hyperwolf`, `cuda:0` = NVIDIA RTX A6000 (49 GB; a second A6000 was present but unused) |
+| Host | Mac (Apple M4, `mps`, 24 GB) | `cuda:0` = NVIDIA RTX A6000 (49 GB; a second A6000 was present but unused) |
 | Python / ANTsTorch commit | 3.11.15 / `73ee932` | 3.11.9 / `2769e40` |
 | Input | `S_template3` (136×176×176, ~1.5 mm) for denoising, N4 and cortical thickness; synthetic data for B-spline fitting | same |
-| Result files | `other_primitives_evaluation_mps/` | `other_primitives_evaluation_cuda/` |
 
 How to read the numbers:
 
@@ -206,11 +205,11 @@ How to read the numbers:
 
 | Comparison | Device | ANTs (s) | ANTsTorch (s) | Ratio |
 |---|---|---:|---:|---:|
-| Denoising (`denoise_image`, median of 3) | MPS | 5.687 | 7.127 | 0.80× (ANTs faster) |
+| Denoising (`denoise_image`, median of 3) | MPS | 5.687 | 7.127 | 0.80× |
 | | CUDA | 11.421 | 1.110 | 10.29× |
 | N4 bias-field correction (corrected image + bias field) | MPS | 8.086 | 5.089 | 1.59× |
 | | CUDA | 25.174 | 1.201 | 20.96× |
-| Cortical thickness (KellyKapowski vs DiReCT, 45 iterations) | MPS | 283.756 | 211.614 | 1.34× |
+| Cortical thickness (KellyKapowski, 45 iterations) | MPS | 283.756 | 211.614 | 1.34× |
 | | CUDA | 607.950 | 17.418 | 34.90× |
 
 - Cortical thickness: Deep Atropos is run once and shared by both engines; it is excluded from these times
@@ -232,7 +231,7 @@ How to read the numbers:
 | | Scale-aligned corrected-image RMSE | 0.001652 | 0.000446 |
 | | Normalized log-bias MAE | 0.001320 | 0.000570 |
 | | Normalized log-bias correlation | 0.99998254 | 0.99999517 |
-| Cortical thickness (GM voxels) | MAE (mm) | 0.1537 | 0.1453 |
+| Cortical thickness | MAE (mm) | 0.1537 | 0.1453 |
 | | RMSE (mm) | 0.2033 | 0.1931 |
 | | 95th percentile \|error\| (mm) | 0.3969 | 0.3733 |
 | | Pearson correlation | 0.99634 | 0.99649 |
