@@ -49,6 +49,9 @@ parity tests live in `tests/greedy` and the benchmark scripts of this directory.
 - **Dense SyN** differs between variants only by the regularizer applied to the update field.
 - **SVF** parameterizes a velocity field (B-spline or dense Gaussian-smoothed) and exponentiates it; it is
   a different transform family from SyN even though `bspline_svf` and `bspline_syn` share a word.
+- **SVF in the comparison script:** `--models bspline_svf gaussian_svf` runs them as ANTsTorch-only arms (syntx has no
+  stationary-velocity-field model; `syntx.tvf` is a time-varying one and is not compared). They run after the other
+  models, from syntx's shared affine, and are scored with the same Dice, deformable-only time and Jacobian measures.
 - **Greedy** estimates one forward displacement field and has no native inverse; its `dice_moving` and
   `dice_sym` depend on a post-hoc inverse, so `dice_fixed` is its primary measure.
 
@@ -149,6 +152,7 @@ export PYTHONPATH=$HOME/Pkg/syntx/src:$HOME/Pkg/ANTsTorch
 python tools/benchmarks/compare_syntx_antstorch_mindboggle.py --pairs 0 1 2 --out-dir <dir>          # validation
 python tools/benchmarks/compare_syntx_antstorch_mindboggle.py --out-dir <dir>                        # 90 pairs, fair mode
 python tools/benchmarks/compare_syntx_antstorch_mindboggle.py --models greedy greedy_regadam --out-dir <dir>
+python tools/benchmarks/compare_syntx_antstorch_mindboggle.py --models gaussian sobolev dsti bspline_svf gaussian_svf --out-dir <dir>   # SVF: ANTsTorch only
 python tools/benchmarks/compare_syntx_antstorch_mindboggle.py --fireants --device cuda:0 --out-dir <dir>
 ```
 
@@ -169,7 +173,7 @@ new source of truth — if they disagree, the code's docstring is always right).
 
 | Script | Compares | Models / `--models` |
 |---|---|---|
-| `compare_syntx_antstorch_mindboggle.py` | syntx vs ANTsTorch, dense SyN family (fair mode by default, see below) | `gaussian`, `sobolev`, `dsti` (default), `bspline`, `gaussian_regadam`, `sobolev_regadam`, `dsti_regadam`, `bspline_regadam`, `greedy`, `greedy_regadam` (syntx vs ANTsTorch); `--fireants` adds FireANTs |
+| `compare_syntx_antstorch_mindboggle.py` | syntx vs ANTsTorch, dense SyN family (fair mode by default, see below) | `gaussian`, `sobolev`, `dsti` (default), `bspline`, `gaussian_regadam`, `sobolev_regadam`, `dsti_regadam`, `bspline_regadam`, `greedy`, `greedy_regadam` (syntx vs ANTsTorch), `bspline_svf`, `gaussian_svf` (ANTsTorch only); `--fireants` adds FireANTs |
 | `compare_bspline_scattered_data.py` | ANTs vs ANTsTorch, B-spline fit on scattered data (not a registration model) | N/A — primitive comparison, no `--models` |
 | `compare_n4_bias_field_correction.py` | ANTs vs ANTsTorch, N4 bias-field correction (not a registration model) | N/A — primitive comparison, no `--models` |
 | `compare_denoise_image.py` | ANTs `denoise_image` vs `antstorch.denoise_image` (adaptive non-local means, Rician or Gaussian noise) | N/A — primitive comparison, no `--models`; `--repeats 2+` also reports ANTs run-to-run variability |

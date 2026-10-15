@@ -80,7 +80,8 @@ warnings.filterwarnings("ignore", message=r"flow_sigma=.*has no effect", categor
 
 PAIR_INDICES_DEFAULT = [0, 24, 88]
 _BASE_MODELS = ["gaussian", "sobolev", "dsti", "bspline"]
-MODELS = _BASE_MODELS + [f"{m}_regadam" for m in _BASE_MODELS] + ["greedy", "greedy_regadam"]  # syntx.greedy vs antstorch.greedy, optimizer adam / regadam (see _run_greedy)
+SVF_MODELS = ["bspline_svf", "gaussian_svf"]  # ANTsTorch stationary velocity fields: no syntx counterpart, antstorch-only arms
+MODELS = _BASE_MODELS + [f"{m}_regadam" for m in _BASE_MODELS] + ["greedy", "greedy_regadam"] + SVF_MODELS  # syntx.greedy vs antstorch.greedy, optimizer adam / regadam (see _run_greedy)
 
 SYNTX_ROOT = os.path.expanduser("~/Pkg/syntx")
 ANTSTORCH_ROOT = os.path.expanduser("~/Pkg/ANTsTorch")
@@ -111,6 +112,7 @@ _SYNTX_MODEL_NAME = {
 # _SYN_REGULARIZERS/_SYN_OPTIMIZER_OVERRIDE registry key directly.
 _ANTSTORCH_MODEL_NAME = {m: f"{m}_syn" for m in _BASE_MODELS}
 _ANTSTORCH_MODEL_NAME.update({f"{m}_regadam": f"{m}_regadam" for m in _BASE_MODELS})
+_ANTSTORCH_MODEL_NAME.update({m: m for m in SVF_MODELS})
 
 
 # antstorch side: nothing to set here any more. The matched hyperparameters
@@ -155,12 +157,13 @@ def _run_antstorch(reg, pair_idx, device, out_dir, matched=True):  # `matched` k
 
     model = _ANTSTORCH_MODEL_NAME[reg]
     extra = {}
-    if FAIR:
-        extra.update(FAIR_ANTSTORCH_KWARGS)
-        if reg in FAIR_MODEL_OVERRIDES:
-            model, model_extra = FAIR_MODEL_OVERRIDES[reg]
-            extra.update(model_extra)
-    extra.update(ANTSTORCH_EXTRA)
+    if reg not in SVF_MODELS:  # the SyN-specific options (fair-mode loop settings, inverse options) do not apply to SVF
+        if FAIR:
+            extra.update(FAIR_ANTSTORCH_KWARGS)
+            if reg in FAIR_MODEL_OVERRIDES:
+                model, model_extra = FAIR_MODEL_OVERRIDES[reg]
+                extra.update(model_extra)
+        extra.update(ANTSTORCH_EXTRA)
     t0 = time.time()
     try:
         rec = antstorch_eval(
@@ -431,8 +434,15 @@ def _share_affine(syntx_rec, pair_idx, out_dir):
 def _run_pair_model(reg, pair_idx, device, out_dir, libs):
     """One (pair, model): libs run in the given order; in fair mode syntx goes first and shares its affine."""
     recs = []
+    if reg in SVF_MODELS:  # no syntx counterpart: antstorch only, from the shared affine if syntx produced one for this pair
+        libs = tuple(l for l in libs if l[0] == "antstorch")
     for lib, fn in libs:
         rec = _add_jacobian(fn(reg, pair_idx, device, out_dir), pair_idx)
+        if reg in SVF_MODELS and rec.get("_status") == "SUCCESS":
+            rec["_affine_source"] = _affine_source(out_dir, pair_idx)
+            if FAIR and rec["_affine_source"] != "syntx":
+                print(f"    !! {reg}: affine source is {rec['_affine_source']!r}, not syntx's (run a syntx model on this pair first "
+                      f"or use the same --out-dir): the Dice is not on a shared start", flush=True)
         if FAIR and lib == "syntx" and rec.get("_status") == "SUCCESS":
             rec["_affine_shared"] = _share_affine(rec, pair_idx, out_dir)
         if FAIR and lib == "antstorch" and not reg.startswith("greedy") and rec.get("_status") == "SUCCESS":
@@ -458,14 +468,15 @@ def _aggregate(results, models, skip_syntx):
             by.setdefault((r["_regularizer"], r["_library"]), {})[r["pair_idx"]] = r
     for reg in models:
         A, S = by.get((reg, "antstorch"), {}), by.get((reg, "syntx"), {})
-        pairs = sorted(set(A) & set(S)) if not skip_syntx else sorted(A)
+        svf = reg in SVF_MODELS
+        pairs = sorted(set(A) & set(S)) if not (skip_syntx or svf) else sorted(A)
         if not pairs:
             continue
         da = np.array([A[p]["dice_sym"] for p in pairs])
         ta = np.array([A[p]["_deformable_seconds"] for p in pairs])
         fa = np.nanmedian([_jv(A[p], "jac_folding_pct") for p in pairs])
-        if skip_syntx:
-            lines.append(f"| {reg} | {len(pairs)} | — | {da.mean():.4f} | — | — | — | — | {ta.mean():.1f} | — | — / {fa:.4f} |")
+        if skip_syntx or svf:
+            lines.append(f"| {reg}{' (antstorch seul)' if svf else ''} | {len(pairs)} | — | {da.mean():.4f} | — | — | — | — | {ta.mean():.1f} | — | — / {fa:.4f} |")
             continue
         ds = np.array([S[p]["dice_sym"] for p in pairs])
         ts = np.array([S[p]["_deformable_seconds"] for p in pairs])
@@ -872,6 +883,8 @@ def _fireants_pair_table(results, pairs, models):
         f = by_key.get((pair_idx, FIREANTS_LABEL), {}).get("fireants", {})
         f_ok = f.get("_status") == "SUCCESS"
         for reg in models:
+            if reg in SVF_MODELS:  # antstorch-only arms are not part of the three-way table
+                continue
             e = by_key.get((pair_idx, reg), {})
             s, a = e.get("syntx", {}), e.get("antstorch", {})
             s_ok, a_ok = s.get("_status") == "SUCCESS", a.get("_status") == "SUCCESS"
@@ -891,7 +904,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--pairs", type=int, nargs="+", default=PAIR_INDICES_DEFAULT)
     ap.add_argument("--models", nargs="+", default=DEFAULT_MODELS, choices=MODELS,
-                    help="Default: gaussian sobolev dsti (the arms with a syntx counterpart of the same algorithm).")
+                    help="Default: gaussian sobolev dsti (the arms with a syntx counterpart of the same algorithm). "
+                         "bspline_svf / gaussian_svf are ANTsTorch stationary-velocity-field models with no syntx counterpart: "
+                         "antstorch only, from the shared affine, scored with the same Dice / time / Jacobian measures.")
     ap.add_argument("--device", default=None,
                     help="cuda / mps / cpu. Default: auto-detect (cuda, then mps, then cpu), passed identically to both libraries.")
     ap.add_argument("--inverse-schedule", choices=["per_iteration", "end_of_level"], default=None,
@@ -970,6 +985,8 @@ def main():
         base = os.path.expanduser("~/Desktop/syntx_antstorch_mindboggle_comparison")
         args.out_dir = base + ("_legacy" if args.legacy_defaults else "") + ("_own" if args.own_defaults or args.legacy_defaults else "")
     FAIR = not (args.own_defaults or args.legacy_defaults)
+    # SVF arms (antstorch only) go last, so syntx has already produced the shared affine of each pair's earlier arms.
+    args.models = [m for m in args.models if m not in SVF_MODELS] + [m for m in args.models if m in SVF_MODELS]
     if args.fireants:
         import torch  # (local: main() imports torch locally elsewhere, which makes the name local to this function)
         if not (str(args.device).startswith("cuda") and torch.cuda.is_available()):
@@ -1031,15 +1048,17 @@ def main():
             _run_fireants(args.pairs[0], args.device, warm_dir, DATA_DIR)
         if any(m.startswith("greedy") for m in args.models) and not args.models[0].startswith("greedy"):
             _run_pair_model("greedy", args.pairs[0], args.device, warm_dir, libs)
+        if any(m in SVF_MODELS for m in args.models) and args.models[0] not in SVF_MODELS:
+            _run_pair_model(next(m for m in args.models if m in SVF_MODELS), args.pairs[0], args.device, warm_dir, libs)
         _SHARED_AFFINE_DONE.clear()
 
-    total = len(args.pairs) * len(args.models) * len(libs)
+    total = len(args.pairs) * sum(1 if m in SVF_MODELS else len(libs) for m in args.models)
     done = 0
     for pair_idx in args.pairs:
         for reg in args.models:
             print(f"pair {pair_idx} / {reg} ...", flush=True)
             for lib_pos, rec in enumerate(_run_pair_model(reg, pair_idx, args.device, args.out_dir, libs)):
-                lib = libs[lib_pos][0]
+                lib = rec.get("_library", libs[lib_pos][0])
                 print(f"[{done + 1}/{total}] {lib} / {reg} / pair {pair_idx}", flush=True)
                 results.append(rec)
                 done += 1
@@ -1075,7 +1094,7 @@ def main():
             pair = by_key.get((pair_idx, reg), {})
             s, a = pair.get("syntx", {}), pair.get("antstorch", {})
             s_ok, a_ok = s.get("_status") == "SUCCESS", a.get("_status") == "SUCCESS"
-            s_dice = f"{s['dice_sym']:.4f}" if s_ok else ("—" if args.skip_syntx else "ÉCHEC")
+            s_dice = f"{s['dice_sym']:.4f}" if s_ok else ("—" if (args.skip_syntx or reg in SVF_MODELS) else "ÉCHEC")
             a_dice = f"{a['dice_sym']:.4f}" if a_ok else "ÉCHEC"
             delta = f"{(a['dice_sym'] - s['dice_sym']):+.4f}" if (s_ok and a_ok) else "—"
             s_t = f"{s.get('_deformable_seconds', float('nan')):.1f}" if s_ok else "—"
