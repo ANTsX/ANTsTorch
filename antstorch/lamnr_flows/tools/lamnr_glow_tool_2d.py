@@ -73,7 +73,7 @@ def parse_hw_float(spec: str) -> Tuple[float, float]:
 # 2D-specific I/O helpers (module-level, unchanged from original)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _coerce_nchw_4d(x, target_hw=None):
+def _coerce_nchw_4d(x, target_hw=None, keep_channels=False):
     """Coerce any tensor/list output to (B, C, H, W) float32."""
     if isinstance(x, (list, tuple)):
         cands = [t for t in x if torch.is_tensor(t) and t.dim() in (3, 4)]
@@ -98,10 +98,12 @@ def _coerce_nchw_4d(x, target_hw=None):
         if x.shape[-1] in (1, 3) and x.shape[0] not in (1, 3):
             x = x.permute(2, 0, 1).contiguous()
         x = x.unsqueeze(0)
-    if x.dim() == 4 and x.shape[-1] in (1, 3) and x.shape[1] not in (1, 3):
+    if (x.dim() == 4 and x.shape[-1] in (1, 3) and x.shape[1] not in (1, 3)
+            and not keep_channels):
         x = x.permute(0, 3, 1, 2).contiguous()
 
-    if x.size(1) not in (1, 3):
+    # keep_channels: multichannel model (--channel-files), each channel is kept.
+    if x.size(1) not in (1, 3) and not keep_channels:
         x = x.mean(dim=1, keepdim=True)
     x = x.float()
     try:
@@ -219,9 +221,9 @@ def save_grid_2d(
 
 
 @torch.no_grad()
-def _prime_if_needed_2d(model, H: int, W: int, device: torch.device):
+def _prime_if_needed_2d(model, H: int, W: int, device: torch.device, channels: int = 1):
     """One dummy pass to initialise ActNorm statistics."""
-    x = torch.zeros(1, 1, int(H), int(W), device=device, dtype=torch.float32)
+    x = torch.zeros(1, int(channels), int(H), int(W), device=device, dtype=torch.float32)
     try:
         model.inverse_and_log_det(x)
     except Exception:
@@ -231,14 +233,14 @@ def _prime_if_needed_2d(model, H: int, W: int, device: torch.device):
             pass
 
 
-def build_model_from_config_2d(cfg: dict, device: torch.device, target_hw=None):
+def build_model_from_config_2d(cfg: dict, device: torch.device, target_hw=None, channels=None):
     """Build 2D Glow model from checkpoint config dict."""
     if target_hw is not None:
         H, W = int(target_hw[0]), int(target_hw[1])
     else:
         H = int(cfg.get("H", 128))
         W = int(cfg.get("W", 128))
-    C = int(cfg.get("C", 1))  # flow models usually have C=1
+    C = int(channels or cfg.get("C", 1))  # flow models usually have C=1
     input_shape = (C, H, W)
 
     if create_glow_normalizing_flow_model_2d is None:
@@ -405,30 +407,57 @@ class GlowTool2D(GlowToolBase):
         """Read 2D image from NIfTI/PNG at the stored slice position."""
         slice_axis  = kw.get("slice_axis",  self._default_slice_axis)
         slice_index = kw.get("slice_index", self._default_slice_index)
-        t = _read_image_any(
-            path, slice_axis, slice_index,
-            target_hw=target_size if target_size else None,
-            mask_background=kw.get("mask_background", False),
-        )
-        # Normalise channels to 1 (flow model expects C=1)
-        if t.shape[0] > 1:
-            t = t.mean(dim=0, keepdim=True)
-        return t  # (1, H, W)
+        def _one(p):
+            t = _read_image_any(
+                p, slice_axis, slice_index,
+                target_hw=target_size if target_size else None,
+                mask_background=kw.get("mask_background", False),
+            )
+            # Normalise each file to 1 channel
+            if t.shape[0] > 1:
+                t = t.mean(dim=0, keepdim=True)
+            return t  # (1, H, W)
+
+        channel_files = getattr(self, "_channel_files", None)
+        if channel_files:
+            # One view = several channel files stored side by side.
+            return torch.cat([_one(Path(path).parent / f) for f in channel_files], dim=0)
+        return _one(path)  # (1, H, W)
+
+    def _per_channel(self) -> bool:
+        """True for a multichannel model whose channels are separate images
+        (--channel-files, or C not in {1, 3}); C=3 alone stays an RGB image."""
+        n = self._n_channels()
+        return n > 1 and (bool(getattr(self, "_channel_files", None)) or n != 3)
 
     def coerce_nd(self, x, target_size) -> torch.Tensor:
-        return _coerce_nchw_4d(x, target_hw=target_size)
+        return _coerce_nchw_4d(x, target_hw=target_size, keep_channels=self._per_channel())
 
     def save_volume(self, x: torch.Tensor, path, **kw):
         nrow = kw.get("nrow", 1)
         target_hw = kw.get("target_hw", None)
+        if self._per_channel() and x.dim() == 4 and x.shape[1] > 1:
+            # One image per channel: '{stem}_{channel_label}{ext}'
+            path = Path(path)
+            name = path.name
+            ext = ".nii.gz" if name.lower().endswith(".nii.gz") else path.suffix
+            stem = name[: -len(ext)] if ext else name
+            labels = self._channel_labels()
+            if len(labels) != x.shape[1]:
+                labels = [f"ch{c}" for c in range(x.shape[1])]
+            for c, label in enumerate(labels):
+                save_grid_2d(x[:, c:c + 1], path.with_name(f"{stem}_{label}{ext}"),
+                             nrow=nrow, target_hw=target_hw)
+            return
         save_grid_2d(x, path, nrow=nrow, target_hw=target_hw)
 
     def build_model(self, cfg: dict, device: torch.device, target_size) -> nn.Module:
-        return build_model_from_config_2d(cfg, device, target_hw=target_size)
+        return build_model_from_config_2d(cfg, device, target_hw=target_size,
+                                          channels=self._n_channels() if getattr(self, "_channels", None) else None)
 
     def prime_if_needed(self, model, size, device):
         H, W = int(size[0]), int(size[1])
-        _prime_if_needed_2d(model, H, W, device)
+        _prime_if_needed_2d(model, H, W, device, channels=self._n_channels())
 
     # ── 2D-specific CLI hooks ────────────────────────────────────────────── #
 
@@ -450,6 +479,18 @@ class GlowTool2D(GlowToolBase):
             required=False,
             help="Slice index to extract from 3D NIfTI volumes (default 130).",
         )
+        ap.add_argument(
+            "--channels", type=int, default=None,
+            help="Number of image channels per view (default: C from the "
+                 "checkpoint config, else the number of --channel-files, else 1).",
+        )
+        ap.add_argument(
+            "--channel-files", nargs="+", default=None, metavar="NAME",
+            help="File names of the channels of one view, read from the "
+                 "directory of each manifest path (e.g. vent.nii.gz "
+                 "anatvent.nii.gz), in model channel order. Outputs are "
+                 "written as one image per channel.",
+        )
 
     def _get_target_size(self, args, cfg: dict) -> Tuple[int, int]:
         """
@@ -458,6 +499,16 @@ class GlowTool2D(GlowToolBase):
         """
         H = int(cfg.get("H", 128))
         W = int(cfg.get("W", 128))
+        # Channels: --channels, else --channel-files, else checkpoint C, else 1.
+        self._channel_files = getattr(args, "channel_files", None)
+        n_files = len(self._channel_files) if self._channel_files else None
+        n_arg = getattr(args, "channels", None)
+        self._channels = int(n_arg or n_files or cfg.get("C", None) or 1)
+        if n_files and n_files != self._channels:
+            raise ValueError(
+                f"--channel-files lists {n_files} files but the number of "
+                f"channels is {self._channels}."
+            )
         # Store slice parameters for read_image calls
         self._default_slice_axis  = int(getattr(args, "slice_axis",  self._default_slice_axis))
         self._default_slice_index = int(getattr(args, "slice_index", self._default_slice_index))
