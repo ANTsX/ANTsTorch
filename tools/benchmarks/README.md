@@ -119,8 +119,6 @@ python tools/benchmarks/compare_syntx_antstorch_mindboggle.py --models gaussian 
 python tools/benchmarks/compare_syntx_antstorch_mindboggle.py --fireants --device cuda:0 --out-dir <dir>
 ```
 
-More run recipes: the Reference subsection "Suggested runs".
-
 ---
 
 ## Primitive comparisons: N4, denoising, cortical thickness, B-spline fitting
