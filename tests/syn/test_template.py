@@ -319,3 +319,66 @@ def test_identical_images_are_a_fixed_point():
     corr = np.corrcoef(out["template"].numpy().ravel(), blob.numpy().ravel())[0, 1]
     assert corr > 0.99
     assert max(sr["l2_norm"] for sr in out["shape_residuals"]) < 0.5
+
+
+# ---------------------------------------------------------------------------
+# NumPy fallback for antsApplyTransforms(imagetype=1) on vector images
+# ---------------------------------------------------------------------------
+
+
+def _vector_case(dim, invert, tmp_path):
+    from scipy.ndimage import gaussian_filter
+
+    rng = np.random.default_rng(7)
+    shape = (24, 22) if dim == 2 else (14, 12, 10)
+    spacing = list(rng.uniform(0.8, 1.5, dim))
+    kw = dict(spacing=spacing, origin=[0.5] * dim)
+    fixed = ants.from_numpy(rng.random(shape).astype("float32"), **kw)
+    data = rng.normal(size=shape + (dim,)).astype("float32")
+    for k in range(dim):
+        data[..., k] = gaussian_filter(data[..., k], 2)
+    moving = ants.from_numpy(data, has_components=True, **kw)
+    matrix = np.eye(dim) + rng.uniform(-0.12, 0.12, (dim, dim))
+    tx = ants.create_ants_transform(
+        transform_type="AffineTransform", dimension=dim, matrix=matrix, translation=rng.uniform(-1, 1, dim),
+        center=[3.0] * dim,
+    )
+    fn = str(tmp_path / f"affine_{dim}d.mat")
+    ants.write_transform(tx, fn)
+    return fixed, moving, fn
+
+
+@pytest.mark.parametrize("dim", [2, 3])
+@pytest.mark.parametrize("invert", [True, False])
+def test_vector_fallback_matches_ants(dim, invert, tmp_path):
+    from antstorch.syn.template import _apply_affine_to_vector_image
+
+    fixed, moving, fn = _vector_case(dim, invert, tmp_path)
+    try:
+        ref = ants.apply_transforms(
+            fixed=fixed, moving=moving, imagetype=1, transformlist=[fn], whichtoinvert=[1 if invert else 0]
+        )
+    except RuntimeError:
+        pytest.skip("this ANTsPy build cannot apply a transform to a vector image (the fallback exists for that case)")
+    got = _apply_affine_to_vector_image(fixed, moving, fn, invert=invert)
+    assert got.components == dim
+    inner = tuple(slice(3, -3) for _ in range(dim))
+    np.testing.assert_allclose(got.numpy()[inner], ref.numpy()[inner], atol=1e-5)
+
+
+def test_vector_fallback_runs_without_ants_vector_support(tmp_path, monkeypatch):
+    """With ANTs' vector path unavailable, ``_apply_affine_to_vectors`` returns the NumPy result."""
+    from antstorch.syn import template as tmod
+
+    fixed, moving, fn = _vector_case(2, True, tmp_path)
+    real = ants.apply_transforms
+
+    def fake(fixed, moving, **kwargs):
+        if kwargs.get("imagetype", 0) != 0 or moving.components > 1:
+            raise RuntimeError("antsApplyTransforms returned non-zero exit code 1")
+        return real(fixed=fixed, moving=moving, **kwargs)
+
+    monkeypatch.setattr(tmod.ants, "apply_transforms", fake)
+    out = tmod._apply_affine_to_vectors(fixed, moving, fn, invert=True)
+    assert out.components == 2 and out.shape == moving.shape
+    assert np.isfinite(out.numpy()).all()
