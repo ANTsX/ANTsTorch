@@ -83,6 +83,50 @@ def _compute_shape_residual(mean_warp: ants.ANTsImage) -> Dict[str, float]:
     return {"l2_norm": l2_norm, "membrane_energy": membrane, "bending_energy": bending}
 
 
+def _polar_rotation(matrix: np.ndarray) -> np.ndarray:
+    """Rotation factor ``U V^T`` of the polar decomposition of a square matrix (SVD form)."""
+    u, _, vt = np.linalg.svd(matrix)
+    return u @ vt
+
+
+def _apply_affine_to_vector_image(fixed, moving, affine_file: str, invert: bool = True):
+    """NumPy equivalent of ``ants.apply_transforms(fixed, moving, imagetype=1, transformlist=affine_file, whichtoinvert=[invert])``.
+
+    ``antsApplyTransforms`` resamples every component at the transformed location and rotates the vector by the rotation
+    factor of the polar decomposition of the affine's linear part (``M`` for an inverted transform, ``M^-1`` otherwise),
+    applied to the raw components with no spacing / direction conversion. Reproduced here exactly (agreement to ~1e-8
+    against ANTs 0.6.3 on Linux, 2D and 3D, with anisotropic spacing, a rotated direction and a non-zero centre).
+
+    Used as a fallback because some ANTsPy builds (the macOS 0.6.3 wheels) cannot read a multi-component image in
+    ``antsApplyTransforms`` ("Unable to read vector image"), for any dimension and any ``imagetype``.
+    """
+    dim = fixed.dimension
+    transform = ants.read_transform(affine_file)
+    matrix = np.asarray(transform.parameters[: dim * dim], dtype=np.float64).reshape(dim, dim)
+    rotation = _polar_rotation(matrix if invert else np.linalg.inv(matrix))
+    channels = ants.split_channels(moving)
+    resampled = [
+        ants.apply_transforms(fixed=fixed, moving=channel, transformlist=[affine_file], whichtoinvert=[bool(invert)])
+        for channel in channels
+    ]
+    stacked = np.stack([r.numpy() for r in resampled], axis=-1)
+    rotated = np.einsum("ij,...j->...i", rotation, stacked).astype(np.float32)
+    out = ants.from_numpy(
+        rotated, origin=fixed.origin, spacing=fixed.spacing, direction=fixed.direction, has_components=True
+    )
+    return out.clone(moving.pixeltype)
+
+
+def _apply_affine_to_vectors(fixed, moving, affine_file: str, invert: bool = True):
+    """``ants.apply_transforms(..., imagetype=1)`` of a vector image through an affine, with the NumPy fallback."""
+    try:
+        return ants.apply_transforms(
+            fixed=fixed, moving=moving, imagetype=1, transformlist=affine_file, whichtoinvert=[1 if invert else 0]
+        )
+    except RuntimeError:
+        return _apply_affine_to_vector_image(fixed, moving, affine_file, invert)
+
+
 def build_template(
     initial_template: Optional[ants.ANTsImage] = None,
     image_list: Optional[List[ants.ANTsImage]] = None,
@@ -263,9 +307,7 @@ def build_template(
         if has_field and wavg is not None:
             scaled = wavg * ((-1.0) * gradient_step)
             if affine_fn is not None:
-                scaled = ants.apply_transforms(
-                    fixed=xavg_new, moving=scaled, imagetype=1, transformlist=affine_fn, whichtoinvert=[1]
-                )
+                scaled = _apply_affine_to_vectors(xavg_new, scaled, affine_fn, invert=True)
             warp_fn = os.path.join(work_dir, f"avgWarp_{it}.nii.gz")
             ants.image_write(scaled, warp_fn)
             transforms = [warp_fn] + ([affine_fn] if affine_fn is not None else [])
