@@ -83,7 +83,7 @@ def _save_nifti(tensor: torch.Tensor, out_path: Path, spacing: Optional[tuple] =
             
     ants.image_write(img, str(out_path))
 
-def _coerce_nchwd_5d(x, target_hwd=None):
+def _coerce_nchwd_5d(x, target_hwd=None, keep_channels=False):
     """Coerce n'importe quel tenseur/liste en sortie vers (B, C, H, W, D) float32."""
     if isinstance(x, (list, tuple)):
         # Filtrer pour ne garder que les tenseurs 4D ou 5D
@@ -103,7 +103,8 @@ def _coerce_nchwd_5d(x, target_hwd=None):
         x = x.unsqueeze(0)
     
     # Si la dimension canal est > 1, moyenner pour obtenir C=1
-    if x.size(1) > 1:
+    # (sauf pour un modèle multicanal, où chaque canal est conservé).
+    if x.size(1) > 1 and not keep_channels:
         x = x.mean(dim=1, keepdim=True)
     
     x = x.float()
@@ -156,12 +157,34 @@ class GlowTool3D(GlowToolBase):
             "--spatial-dims", type=int, nargs=3, metavar=("H", "W", "D"),
             help="Override the checkpoint spatial dimensions as H W D.",
         )
+        parser.add_argument(
+            "--channels", type=int, default=None,
+            help="Number of image channels per view (default: C from the "
+                 "checkpoint config, else the number of --channel-files, else 1).",
+        )
+        parser.add_argument(
+            "--channel-files", nargs="+", default=None, metavar="NAME",
+            help="File names of the channels of one view, read from the "
+                 "directory of each manifest path (e.g. vent.nii.gz "
+                 "anatvent.nii.gz), in model channel order. Outputs are "
+                 "written as one NIfTI per channel.",
+        )
         parser.add_argument("--H", type=int, help="Override volume height.")
         parser.add_argument("--W", type=int, help="Override volume width.")
         parser.add_argument("--D", type=int, help="Override volume depth.")
         
     def _get_target_size(self, args: argparse.Namespace, cfg: dict) -> Tuple[int, int, int]:
         """Extract the (H, W, D) target size from arguments or config."""
+        self._channel_files = getattr(args, "channel_files", None)
+        n_files = len(self._channel_files) if self._channel_files else None
+        n_cfg = cfg.get("C", None)
+        n_arg = getattr(args, "channels", None)
+        self._channels = int(n_arg or n_files or n_cfg or 1)
+        if n_files and n_files != self._channels:
+            raise ValueError(
+                f"--channel-files lists {n_files} files but the number of "
+                f"channels is {self._channels}."
+            )
         if getattr(args, "spatial_dims", None) is not None and len(args.spatial_dims) == 3:
             return tuple(args.spatial_dims)
         if getattr(args, "H", None) is not None and getattr(args, "W", None) is not None and getattr(args, "D", None) is not None:
@@ -182,7 +205,7 @@ class GlowTool3D(GlowToolBase):
             
         H, W, D = target_size
         self._input_normalization = str(cfg.get("input_normalization", "minmax")).lower()
-        C = cfg.get("C", 1)
+        C = self._n_channels()
         
         # Normalize K and hidden logic (same as training scripts)
         K = cfg.get("K", 16)
@@ -278,7 +301,7 @@ class GlowTool3D(GlowToolBase):
         # 2. Construction d'une liste de tenseurs 5D (un par vue)
         # Chaque tenseur respecte la forme (B=1, C=1, H, W, D)
         dummy_input = [
-            torch.zeros([1, 1] + list(target_size), device=device)
+            torch.zeros([1, self._n_channels()] + list(target_size), device=device)
             for _ in range(num_views)
         ]
         
@@ -303,26 +326,30 @@ class GlowTool3D(GlowToolBase):
     def read_image(self, path: "Path", target_size, **kw) -> torch.Tensor:
         import ants
         path = Path(path)
-        if not path.exists(): raise FileNotFoundError(f"{path}")
-        
-        img = ants.image_read(str(path))
         H, W, D = target_size
-        
-        resize_factor = min(float(H)/float(img.shape[0]), 
-                            float(W)/float(img.shape[1]),
-                            float(D)/float(img.shape[2]))
-        
-        spacing = (img.spacing[0] / resize_factor, 
-                   img.spacing[1] / resize_factor,
-                   img.spacing[2] / resize_factor)   
-        
-        img = ants.resample_image(img, spacing, use_voxels=False, interp_type=0)
-        img = ants.pad_or_crop_image_to_size(img, (H, W, D))
-        
-        arr = img.numpy()
-        if arr.ndim == 3: 
-            arr = arr[np.newaxis, ...] # (1, H, W, D)
-            
+
+        def _read_channel(p: Path) -> np.ndarray:
+            if not p.exists(): raise FileNotFoundError(f"{p}")
+            img = ants.image_read(str(p))
+            resize_factor = min(float(H)/float(img.shape[0]),
+                                float(W)/float(img.shape[1]),
+                                float(D)/float(img.shape[2]))
+            spacing = (img.spacing[0] / resize_factor,
+                       img.spacing[1] / resize_factor,
+                       img.spacing[2] / resize_factor)
+            img = ants.resample_image(img, spacing, use_voxels=False, interp_type=0)
+            img = ants.pad_or_crop_image_to_size(img, (H, W, D))
+            return img.numpy()
+
+        channel_files = getattr(self, "_channel_files", None)
+        if channel_files:
+            # One view = several channel files stored side by side.
+            arr = np.stack([_read_channel(path.parent / f) for f in channel_files])
+        else:
+            arr = _read_channel(path)
+            if arr.ndim == 3:
+                arr = arr[np.newaxis, ...] # (1, H, W, D)
+
         t = torch.from_numpy(arr).float()
         
         if getattr(self, "_input_normalization", "minmax") != "none":
@@ -341,6 +368,9 @@ class GlowTool3D(GlowToolBase):
         # Force default extension if not provided
         if out_path.suffix == "":
             out_path = out_path.with_suffix(".nii.gz")
+        if x_tensor.dim() == 5 and x_tensor.shape[1] > 1:
+            self._save_per_channel(x_tensor, out_path, self.save_single, **kwargs)
+            return
         _save_nifti(x_tensor, out_path, spacing=spacing)
         
     def save_volume(self, x_tensor: torch.Tensor, out_path: Path, nrow: int = 1, **kwargs):
@@ -368,6 +398,10 @@ class GlowTool3D(GlowToolBase):
         out_path = Path(out_path)
         if out_path.suffix == "":
             out_path = out_path.with_suffix(".nii.gz")
+
+        if x_tensor.dim() == 5 and x_tensor.shape[1] > 1:
+            self._save_per_channel(x_tensor, out_path, self.save_volume, nrow=nrow, **kwargs)
+            return
 
         arr = x_tensor.detach().cpu()
         # Retirer l'axe canal (index 1) s'il vaut 1, sans toucher à
@@ -420,6 +454,19 @@ class GlowTool3D(GlowToolBase):
 
         print(f"[save_volume] {len(written)} fichier(s) NIfTI 3D écrit(s) sous {parent}/")
 
+    def _save_per_channel(self, x_tensor: torch.Tensor, out_path: Path, saver, **kwargs):
+        """Write each channel of a (N, C, H, W, D) tensor to its own NIfTI file,
+        named '{stem}_{channel_label}.nii.gz', using `saver` for the single-channel write."""
+        out_path = Path(out_path)
+        name = out_path.name
+        ext = ".nii.gz" if name.endswith(".nii.gz") else out_path.suffix
+        stem = name[: -len(ext)] if ext else name
+        labels = self._channel_labels()
+        if len(labels) != x_tensor.shape[1]:
+            labels = [f"ch{c}" for c in range(x_tensor.shape[1])]
+        for c, label in enumerate(labels):
+            saver(x_tensor[:, c:c + 1], out_path.with_name(f"{stem}_{label}{ext}"), **kwargs)
+
     @property
     def ndim(self) -> int:
         """Return the canonical tensor rank: (B, C, H, W, D)."""
@@ -441,7 +488,8 @@ class GlowTool3D(GlowToolBase):
         return "lowrank"
 
     def coerce_nd(self, x, target_size) -> torch.Tensor:
-        return _coerce_nchwd_5d(x, target_hwd=target_size)
+        return _coerce_nchwd_5d(x, target_hwd=target_size,
+                                keep_channels=self._n_channels() > 1)
 
     def parse_size(self, size_arg) -> tuple:
         """Convertit l'argument de taille en tuple de 3 entiers (H, W, D)."""
