@@ -305,6 +305,18 @@ def _build_torch_affine_matrix(fixed, moving, M_phys: np.ndarray, t_phys: np.nda
     return theta, P_F, P_M
 
 
+def _apply_homogeneous(P: np.ndarray, points: np.ndarray) -> np.ndarray:
+    """``(P @ [points, 1]^T)^T`` for ``(N, dim)`` points and a ``(dim + 1, dim + 1)`` matrix.
+
+    The result is the same as the plain matrix product. The floating-point error flags are silenced because
+    NumPy 2.0.x on macOS (Accelerate BLAS) raises spurious "divide by zero / overflow / invalid value encountered in
+    matmul" RuntimeWarnings on perfectly finite inputs; a genuine non-finite result is still caught downstream.
+    """
+    homogeneous = np.concatenate([points, np.ones((len(points), 1))], axis=-1)
+    with np.errstate(all="ignore"):
+        return (P @ homogeneous.T).T
+
+
 def _grid_to_ants_displacement(total_target_grid: torch.Tensor, fixed, P_F: np.ndarray, P_M: Optional[np.ndarray] = None,
                                restrict_transformation: Optional[Sequence[float]] = None):
     """Target coordinate grid (normalised) -> ANTs physical displacement image on the fixed grid (``y_phys - x_phys``)."""
@@ -315,19 +327,19 @@ def _grid_to_ants_displacement(total_target_grid: torch.Tensor, fixed, P_F: np.n
     if dim == 2:
         Y, X, _ = grid_np.shape
         grid_flat = grid_np.reshape(-1, 2)
-        y_phys = (P_M @ np.concatenate([grid_flat, np.ones((len(grid_flat), 1))], axis=-1).T).T[:, :2]
+        y_phys = _apply_homogeneous(P_M, grid_flat)[:, :2]
         mesh_y, mesh_x = np.meshgrid(np.linspace(-1, 1, Y), np.linspace(-1, 1, X), indexing="ij")
         fixed_norm_flat = np.stack([mesh_x.flatten(), mesh_y.flatten()], axis=-1)
-        x_phys = (P_F @ np.concatenate([fixed_norm_flat, np.ones((len(fixed_norm_flat), 1))], axis=-1).T).T[:, :2]
+        x_phys = _apply_homogeneous(P_F, fixed_norm_flat)[:, :2]
         disp_itk = np.transpose((y_phys - x_phys).reshape(Y, X, 2), (1, 0, 2)).copy().astype(np.float32)
     elif dim == 3:
         Z, Y, X, _ = grid_np.shape
         grid_flat = grid_np.reshape(-1, 3)
-        y_phys = (P_M @ np.concatenate([grid_flat, np.ones((len(grid_flat), 1))], axis=-1).T).T[:, :3]
+        y_phys = _apply_homogeneous(P_M, grid_flat)[:, :3]
         mesh_z, mesh_y, mesh_x = np.meshgrid(np.linspace(-1, 1, Z), np.linspace(-1, 1, Y), np.linspace(-1, 1, X),
                                              indexing="ij")
         fixed_norm_flat = np.stack([mesh_x.flatten(), mesh_y.flatten(), mesh_z.flatten()], axis=-1)
-        x_phys = (P_F @ np.concatenate([fixed_norm_flat, np.ones((len(fixed_norm_flat), 1))], axis=-1).T).T[:, :3]
+        x_phys = _apply_homogeneous(P_F, fixed_norm_flat)[:, :3]
         disp_itk = np.transpose((y_phys - x_phys).reshape(Z, Y, X, 3), (2, 1, 0, 3)).copy().astype(np.float32)
     else:
         raise ValueError(f"Unsupported spatial dimension: {dim}")

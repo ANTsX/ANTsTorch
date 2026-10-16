@@ -57,4 +57,7 @@ filterwarnings = [
     # installed versions. Scoped to tqdm.std so it never masks a
     # DeprecationWarning raised by our own code.
     "ignore:datetime\\.datetime\\.utcfromtimestamp\\(\\) is deprecated:DeprecationWarning:tqdm\\.std",
+    # NumPy 2.0.x + macOS Accelerate: spurious "divide by zero / overflow / invalid value encountered in matmul" on finite
+    # inputs, raised inside syntx.greedy (read-only dependency, so it cannot be fixed there). Scoped to that module.
+    "ignore:.*encountered in matmul:RuntimeWarning:syntx\\.greedy",
 ]
