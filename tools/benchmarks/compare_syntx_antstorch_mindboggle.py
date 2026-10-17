@@ -64,6 +64,7 @@ and saved alongside the JSON.
 """
 import torch  # noqa: F401  (keep BEFORE any `import ants`: OpenMP runtime load order, see tests/conftest.py)
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -431,28 +432,67 @@ def _share_affine(syntx_rec, pair_idx, out_dir):
         return False
 
 
+# --- Scratch space. syntx.syn() / syntx.greedy() (read-only here) and several antstorch paths write their displacement fields,
+# affine files and midpoint warps into the system temp directory (tempfile.NamedTemporaryFile(delete=False) / mktemp)
+# and never remove them: a long run fills /tmp (a tmpfs on many machines, so also RAM), TB-scale on 90 pairs x 12 models.
+# Every (pair, model, library) run therefore gets its own scratch directory (tempfile.tempdir is redirected to it) that is
+# deleted once the record has been scored and its Jacobian computed. --keep-fields keeps everything.
+KEEP_FIELDS = False
+SCRATCH_BASE = None  # set in main(): --tmp-dir, default <out-dir>/_scratch
+
+
+@contextlib.contextmanager
+def _scratch(tag):
+    import tempfile
+    base = SCRATCH_BASE
+    if base is None:
+        yield None
+        return
+    path = os.path.join(base, tag)
+    os.makedirs(path, exist_ok=True)
+    previous = tempfile.tempdir
+    tempfile.tempdir = path
+    try:
+        yield path
+    finally:
+        tempfile.tempdir = previous
+        if not KEEP_FIELDS:
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def _drop_dir(path):
+    """Delete a per-pair output directory (displacement fields) unless --keep-fields."""
+    if not KEEP_FIELDS:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 def _run_pair_model(reg, pair_idx, device, out_dir, libs):
     """One (pair, model): libs run in the given order; in fair mode syntx goes first and shares its affine."""
     recs = []
     if reg in SVF_MODELS:  # no syntx counterpart: antstorch only, from the shared affine if syntx produced one for this pair
         libs = tuple(l for l in libs if l[0] == "antstorch")
     for lib, fn in libs:
-        rec = _add_jacobian(fn(reg, pair_idx, device, out_dir), pair_idx)
-        if reg in SVF_MODELS and rec.get("_status") == "SUCCESS":
-            rec["_affine_source"] = _affine_source(out_dir, pair_idx)
-            if FAIR and rec["_affine_source"] != "syntx":
-                print(f"    !! {reg}: affine source is {rec['_affine_source']!r}, not syntx's (run a syntx model on this pair first "
-                      f"or use the same --out-dir): the Dice is not on a shared start", flush=True)
-        if FAIR and lib == "syntx" and rec.get("_status") == "SUCCESS":
-            rec["_affine_shared"] = _share_affine(rec, pair_idx, out_dir)
-        if FAIR and lib == "antstorch" and not reg.startswith("greedy") and rec.get("_status") == "SUCCESS":
-            gap = None
-            for r in recs:
-                if r.get("_library") == "syntx" and r.get("_status") == "SUCCESS":
-                    gap = abs(rec["affine_dice_sym"] - r["syntx_affine_dice_sym"])
-            rec["_affine_dice_gap_vs_syntx"] = gap
-            if gap is not None and gap > 1e-3:
-                print(f"    !! affine Dice differs between libraries by {gap:.4f}: the shared affine was not used", flush=True)
+        with _scratch(f"{lib}_{reg}_pair{pair_idx:03d}"):
+            rec = _add_jacobian(fn(reg, pair_idx, device, out_dir), pair_idx)
+            if reg in SVF_MODELS and rec.get("_status") == "SUCCESS":
+                rec["_affine_source"] = _affine_source(out_dir, pair_idx)
+                if FAIR and rec["_affine_source"] != "syntx":
+                    print(f"    !! {reg}: affine source is {rec['_affine_source']!r}, not syntx's (run a syntx model on this pair first "
+                          f"or use the same --out-dir): the Dice is not on a shared start", flush=True)
+            if FAIR and lib == "syntx" and rec.get("_status") == "SUCCESS":
+                rec["_affine_shared"] = _share_affine(rec, pair_idx, out_dir)  # copies the .mat before the scratch is deleted
+            if FAIR and lib == "antstorch" and not reg.startswith("greedy") and rec.get("_status") == "SUCCESS":
+                gap = None
+                for r in recs:
+                    if r.get("_library") == "syntx" and r.get("_status") == "SUCCESS":
+                        gap = abs(rec["affine_dice_sym"] - r["syntx_affine_dice_sym"])
+                rec["_affine_dice_gap_vs_syntx"] = gap
+                if gap is not None and gap > 1e-3:
+                    print(f"    !! affine Dice differs between libraries by {gap:.4f}: the shared affine was not used", flush=True)
+            if reg.startswith("greedy"):  # greedy writes under <out-dir>/<lib>_<reg>/pair_NNN (outprefix)
+                _drop_dir(os.path.join(out_dir, f"{lib}_{reg}", f"pair_{pair_idx:03d}"))
+            if not KEEP_FIELDS:
+                rec["_fields_deleted"] = True  # the files named in rec["transforms"] no longer exist
         recs.append(rec)
     return recs
 
@@ -899,7 +939,7 @@ def _fireants_pair_table(results, pairs, models):
 
 
 def main():
-    global FAIR
+    global FAIR, KEEP_FIELDS, SCRATCH_BASE
     global FIREANTS_PRESET, FIREANTS_TOLERANCE, FIREANTS_OVERRIDES, SWEEP_SET, FIREANTS_NORMALIZE, FIREANTS_VERBOSE
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--pairs", type=int, nargs="+", default=PAIR_INDICES_DEFAULT)
@@ -942,6 +982,13 @@ def main():
                          "10 steps, syntx parity, autograd; dsti with syntx.syn()'s reg_adam), and times compared are deformable-only.")
     ap.add_argument("--no-warmup", action="store_true",
                     help="Skip the throwaway first run per library (device/kernel initialisation) that is excluded from the timings.")
+    ap.add_argument("--tmp-dir", default=None,
+                    help="Base directory of the per-run scratch folders (default: <out-dir>/_scratch). syntx and several antstorch paths write "
+                         "displacement fields to the system temp directory and never delete them; each run now gets its own scratch folder, "
+                         "redirected through tempfile.tempdir and deleted after scoring. Put it on a disk, not a tmpfs.")
+    ap.add_argument("--keep-fields", action="store_true",
+                    help="Keep the scratch folders and the per-pair displacement fields (greedy, FireANTs) instead of deleting them after each run. "
+                         "Needs a lot of disk on 90 pairs x many models (hundreds of MB per run).")
     # --- FireANTs (optional third arm; CUDA only) ---
     ap.add_argument("--fireants", action="store_true",
                     help="Add FireANTs (GreedyRegistration) as a third arm. It runs ONCE per pair, after syntx, from the same shared "
@@ -1024,6 +1071,10 @@ def main():
     if args.end_of_level_inverse_steps is not None:
         ANTSTORCH_EXTRA["end_of_level_inverse_steps"] = args.end_of_level_inverse_steps
     os.makedirs(args.out_dir, exist_ok=True)
+    KEEP_FIELDS = args.keep_fields
+    SCRATCH_BASE = os.path.abspath(os.path.expanduser(args.tmp_dir)) if args.tmp_dir else os.path.join(os.path.abspath(args.out_dir), "_scratch")
+    os.makedirs(SCRATCH_BASE, exist_ok=True)
+    print(f"[scratch] temporary files go to {SCRATCH_BASE} (deleted after each run{'; kept: --keep-fields' if KEEP_FIELDS else ''})", flush=True)
     if args.fireants_sweep:
         _run_sweep(args.pairs, args.device, args.out_dir, DATA_DIR)
         return
@@ -1051,6 +1102,7 @@ def main():
         if any(m in SVF_MODELS for m in args.models) and args.models[0] not in SVF_MODELS:
             _run_pair_model(next(m for m in args.models if m in SVF_MODELS), args.pairs[0], args.device, warm_dir, libs)
         _SHARED_AFFINE_DONE.clear()
+        shutil.rmtree(warm_dir, ignore_errors=True)  # the warm-up fields are never needed
 
     total = len(args.pairs) * sum(1 if m in SVF_MODELS else len(libs) for m in args.models)
     done = 0
@@ -1072,7 +1124,11 @@ def main():
         if args.fireants:  # once per pair, after syntx has produced (and shared) the affine
             print(f"pair {pair_idx} / fireants ...", flush=True)
             print(f"[fireants / {FIREANTS_PRESET}] pair {pair_idx}", flush=True)
-            rec = _add_jacobian(_run_fireants(pair_idx, args.device, args.out_dir, DATA_DIR), pair_idx)
+            with _scratch(f"fireants_pair{pair_idx:03d}"):
+                rec = _add_jacobian(_run_fireants(pair_idx, args.device, args.out_dir, DATA_DIR), pair_idx)
+            _drop_dir(os.path.join(args.out_dir, "fireants_registration", f"pair_{pair_idx:03d}"))
+            if not KEEP_FIELDS:
+                rec["_fields_deleted"] = True
             results.append(rec)
             if rec.get("_status") == "SUCCESS":
                 print(f"    -> {rec['_status']} {_fmt_dice(rec)} deformable={rec['_deformable_seconds']:.1f}s "
