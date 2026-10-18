@@ -164,31 +164,32 @@ Summarised run:
 * syntx, ANTsTorch, FireANTs, and an ANTs C++ baseline.
 * NVIDIA GPU A6000, 48 GB for the first three and CPU w/ 8 threads of a 20-core machine for the latter.
 
-| Model | Library | Dice sym | Dice fixed | Time (s) | folding % (det ≤ 0) | pairs with folding > 0.01 % | max J | σ(log J) |
-|---|---|---|---|---|---|---|---|---|
-| `gaussian` | syntx | 0.6348 | 0.6360 | 29.1 | 0.0012 | 0 | 30.5 | 0.616 |
-| `gaussian` | ANTsTorch | 0.6291 | 0.6303 | 18.3 | 0.0008 | 0 | 27.0 | 0.608 |
-| `gaussian_regadam` | ANTsTorch | 0.6157 | 0.6161 | 37.3 | 0.0008 | 2 | 34.9 | 0.692 |
-| `sobolev` | syntx | 0.6346 | 0.6356 | 35.5 | 0.0000 | 0 | 25.5 | 0.566 |
-| `sobolev` | ANTsTorch | 0.6313 | 0.6323 | 29.4 | 0.0000 | 0 | 21.6 | 0.563 |
-| `sobolev_regadam` | ANTsTorch | 0.6289 | 0.6281 | 37.7 | 0.0214 | 23 | 57.3 | 0.761 |
-| `dsti` | syntx | 0.6341 | 0.6338 | 38.9 | 0.0037 | 3 | 38.5 | 0.690 |
-| `dsti` | ANTsTorch | 0.6315 | 0.6312 | 27.6 | 0.0025 | 0 | 36.1 | 0.692 |
-| `dsti_regadam` | ANTsTorch | 0.6263 | 0.6255 | 26.5 | 0.0052 | 5 | 46.9 | 0.726 |
-| `bspline` (unofficial syntx arm) | syntx | 0.4957 | 0.4955 | 90.6 | n/a | n/a | n/a | n/a |
-| `bspline` | ANTsTorch | 0.5163 | 0.5163 | 69.6 | 0.0000 | 0 | 6.5 | 0.411 |
-| `bspline_regadam` | ANTsTorch | 0.5586 | 0.5587 | 76.4 | 0.0000 | 0 | 18.1 | 0.615 |
-| `greedy` | syntx | 0.5335 | 0.5946 | 5.3 | 0.0000 | 0 | 13.3 | 0.657 |
-| `greedy_regadam` | syntx | 0.5308 | 0.5918 | 5.5 | 0.0000 | 0 | 13.5 | 0.633 |
-| `greedy` | ANTsTorch | 0.5335 | 0.5946 | 2.0 | 0.0000 | 0 | 13.7 | 0.657 |
-| `greedy_regadam` | ANTsTorch | 0.5307 | 0.5918 | 2.1 | 0.0000 | 0 | 13.6 | 0.631 |
-| `bspline_svf` | ANTsTorch | 0.4478 | 0.4970 | 33.8 | 0.0000 | 6 | 19.6 | 0.585 |
-| `gaussian_svf` | ANTsTorch | 0.4179 | 0.4672 | 23.6 | 0.0008 | 4 | 30.1 | 0.674 |
-| FireANTs `matched` (100 / 100 / 20) | FireANTs | 0.3971 | 0.4424 | 4.3 | 0.0000 | 0 | 1.8 | 0.140 |
-| FireANTs `default` (200 / 100 / 25) | FireANTs | 0.4422 | 0.5397 | 9.0 | 0.0000 | 12 | 3.8 | 0.344 |
-| FireANTs `fine-tuned-syntx` (100 / 100 / 50) | FireANTs | 0.4608 | 0.5978 | 13.0 | 0.1327 | 22 | 10.0 | 0.603 |
-| `ants_syn_quick` (CPU, 8 threads) | ANTs C++ | 0.4889 | 0.4889 | 32.2 | 0.0000 | 3 | 2.9 | 0.233 |
+| Model | Library | Dice sym | Dice fixed | Dice moving | Time (s) | folding % (det ≤ 0) | pairs with folding > 0.01 % | max J | σ(log J) |
+|---|---|---|---|---|---|---|---|---|---|
+| `gaussian` | syntx | 0.6348 | 0.6360 | 0.6337 | 29.1 | 0.0012 | 0 | 30.5 | 0.616 |
+| `gaussian` | ANTsTorch | 0.6291 | 0.6303 | 0.6279 | 18.3 | 0.0008 | 0 | 27.0 | 0.608 |
+| `gaussian_regadam` | ANTsTorch | 0.6157 | 0.6161 | 0.6153 | 37.3 | 0.0008 | 2 | 34.9 | 0.692 |
+| `sobolev` | syntx | 0.6346 | 0.6356 | 0.6335 | 35.5 | 0.0000 | 0 | 25.5 | 0.566 |
+| `sobolev` | ANTsTorch | 0.6313 | 0.6323 | 0.6302 | 29.4 | 0.0000 | 0 | 21.6 | 0.563 |
+| `sobolev_regadam` | ANTsTorch | 0.6289 | 0.6281 | 0.6298 | 37.7 | 0.0214 | 23 | 57.3 | 0.761 |
+| `dsti` | syntx | 0.6341 | 0.6338 | 0.6344 | 38.9 | 0.0037 | 3 | 38.5 | 0.690 |
+| `dsti` | ANTsTorch | 0.6315 | 0.6312 | 0.6318 | 27.6 | 0.0025 | 0 | 36.1 | 0.692 |
+| `dsti_regadam` | ANTsTorch | 0.6263 | 0.6255 | 0.6272 | 26.5 | 0.0052 | 5 | 46.9 | 0.726 |
+| `bspline` (unofficial syntx arm) | syntx | 0.4957 | 0.4955 | 0.4958 | 90.6 | n/a | n/a | n/a | n/a |
+| `bspline` | ANTsTorch | 0.5163 | 0.5163 | 0.5162 | 69.6 | 0.0000 | 0 | 6.5 | 0.411 |
+| `bspline_regadam` | ANTsTorch | 0.5586 | 0.5587 | 0.5586 | 76.4 | 0.0000 | 0 | 18.1 | 0.615 |
+| `greedy` | syntx | 0.5335 | 0.5946 | 0.4723 | 5.3 | 0.0000 | 0 | 13.3 | 0.657 |
+| `greedy_regadam` | syntx | 0.5308 | 0.5918 | 0.4697 | 5.5 | 0.0000 | 0 | 13.5 | 0.633 |
+| `greedy` | ANTsTorch | 0.5335 | 0.5946 | 0.4723 | 2.0 | 0.0000 | 0 | 13.7 | 0.657 |
+| `greedy_regadam` | ANTsTorch | 0.5307 | 0.5918 | 0.4697 | 2.1 | 0.0000 | 0 | 13.6 | 0.631 |
+| `bspline_svf` | ANTsTorch | 0.4478 | 0.4970 | 0.3985 | 33.8 | 0.0000 | 6 | 19.6 | 0.585 |
+| `gaussian_svf` | ANTsTorch | 0.4179 | 0.4672 | 0.3686 | 23.6 | 0.0008 | 4 | 30.1 | 0.674 |
+| FireANTs `matched` (100 / 100 / 20) | FireANTs | 0.3971 | 0.4424 | 0.3519 | 4.3 | 0.0000 | 0 | 1.8 | 0.140 |
+| FireANTs `default` (200 / 100 / 25) | FireANTs | 0.4422 | 0.5397 | 0.3448 | 9.0 | 0.0000 | 12 | 3.8 | 0.344 |
+| FireANTs `fine-tuned-syntx` (100 / 100 / 50) | FireANTs | 0.4608 | 0.5978 | 0.3238 | 13.0 | 0.1327 | 22 | 10.0 | 0.603 |
+| `ants_syn_quick` (CPU, 8 threads) | ANTs C++ | 0.4889 | 0.4889 | 0.4888 | 32.2 | 0.0000 | 3 | 2.9 | 0.233 |
 
+- **Dice fixed** is the Dice in the fixed space (forward warp only, available for every arm). **Dice moving** is the Dice in the moving space, which needs the inverse transform; **Dice sym** is the mean of the two. The inverse is native for SyN (syntx, ANTsTorch) and ANTs C++, computed post hoc for `greedy*` and SVF, and approximate for FireANTs (no native inverse), so FireANTs' Dice moving, and hence its Dice sym, is lower than its Dice fixed.
 - Only `gaussian`, `sobolev`, `dsti` and `greedy` are like-for-like between syntx and ANTsTorch. The `*_regadam` dense rows (`gaussian`, `sobolev`, `dsti`, `bspline`) have no syntx row of their own: syntx has no `reg_adam` counterpart for them, so ANTsTorch's `reg_adam` variant is compared with the syntx row of the base model, and the `bspline` rows compare with an unofficial syntx arm; the `greedy` rows agree to within 1e-4 of Dice.
 - `bspline_svf` and `gaussian_svf` (ANTsTorch stationary velocity fields) have no syntx counterpart.
 - FireANTs' Greedy has no native inverse, so Dice fixed is its fair measure (its Dice sym relies on an approximate inverse). The ANTs C++ baseline runs on the CPU, so its time is not comparable with the GPU arms.
