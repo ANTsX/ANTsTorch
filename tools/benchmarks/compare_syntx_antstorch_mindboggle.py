@@ -863,6 +863,87 @@ def _run_sweep(pairs, device, out_dir, data_dir):
     print("\n" + "\n".join(md) + f"\n\nMarkdown: {path}")
 
 
+def _run_fireants_only(pairs, device, out_dir, data_dir):
+    """FireANTs alone (preset FIREANTS_PRESET) on `pairs`, from the shared syntx affines cached in `out_dir`; writes
+    fireants_<preset>_results.json / _summary.md and, when `out_dir/comparison_results.json` exists, compares with its syntx / ANTsTorch arms."""
+    import numpy as np
+    missing = [p for p in pairs if _affine_source(out_dir, p) != "syntx"]
+    if missing:
+        sys.exit(f"--fireants-only needs syntx's cached affines in '{out_dir}/antstorch_canonical_affines' "
+                 f"(pairs without one: {missing}). Use the --out-dir of an earlier run of this script that covered these pairs.")
+    tag = FIREANTS_PRESET.replace("-", "_")
+    json_path = os.path.join(out_dir, f"fireants_{tag}_results.json")
+    results = []
+    for pair_idx in pairs:
+        print(f"[fireants / {FIREANTS_PRESET}] pair {pair_idx}", flush=True)
+        with _scratch(f"fireants_pair{pair_idx:03d}"):
+            rec = _add_jacobian(_run_fireants(pair_idx, device, out_dir, data_dir), pair_idx)
+        _drop_dir(os.path.join(out_dir, "fireants_registration", f"pair_{pair_idx:03d}"))
+        if not KEEP_FIELDS:
+            rec["_fields_deleted"] = True
+        results.append(rec)
+        if rec.get("_status") == "SUCCESS":
+            print(f"    -> {rec['_status']} {_fmt_dice(rec)} deformable={rec['_deformable_seconds']:.1f}s "
+                  f"iterations_run={rec['_fireants_iterations_run']}/{rec['_fireants_iterations_nominal']}", flush=True)
+        else:
+            print(f"    -> fireants {rec.get('_status')}: {rec.get('_error')}", flush=True)
+        with open(json_path, "w") as f:
+            json.dump(results, f, indent=2)
+    ok = [r for r in results if r.get("_status") == "SUCCESS"]
+    kw = dict(_FIREANTS_KWARGS[FIREANTS_PRESET]); kw.update(FIREANTS_OVERRIDES)
+    md = [f"# FireANTs `{FIREANTS_PRESET}` — Mindboggle-101", "",
+          f"Pairs: {pairs}  ", f"Device: {device}  ", f"Settings: {kw}  ",
+          f"Images {'normalised (auto)' if FIREANTS_NORMALIZE else 'raw'}; early stop {'disabled (full budget)' if FIREANTS_TOLERANCE else 'on (FireANTs default)'}; "
+          f"shared syntx affine; time = construction + optimize, synchronised.", ""]
+    if not ok:
+        md.append("All runs failed.")
+    else:
+        g = lambda k: np.array([r.get(k, float("nan")) for r in ok], dtype=float)  # noqa: E731
+        md += ["| n | Dice fixed (mean) | Dice sym (mean) | time s (mean) | folding % (median) | pairs folding > 0.01 % | min J (median) | max J (median) | σ(log J) (median) |",
+               "|---|---|---|---|---|---|---|---|---|",
+               f"| {len(ok)}/{len(results)} | {np.nanmean(g('dice_fixed')):.4f} | {np.nanmean(g('dice_sym')):.4f} | {np.nanmean(g('_deformable_seconds')):.1f} | "
+               f"{np.nanmedian(g('jac_folding_pct')):.4f} | {int((g('jac_folding_pct') > FOLDING_LIMIT_PCT).sum())} | {np.nanmedian(g('jac_min')):.3f} | "
+               f"{np.nanmedian(g('jac_max')):.2f} | {np.nanmedian(g('jac_log_std')):.3f} |", ""]
+        prev_path = os.path.join(out_dir, "comparison_results.json")
+        if os.path.exists(prev_path):
+            try:
+                with open(prev_path) as f:
+                    prev = [r for r in json.load(f) if r.get("_status") == "SUCCESS" and r.get("_library") in ("syntx", "antstorch")]
+            except (OSError, ValueError):
+                prev = []
+            fa = {r["pair_idx"]: r for r in ok}
+            md += ["## Against the syntx / ANTsTorch arms of the same pairs (comparison_results.json)", "",
+                   "| Modèle | n | Dice fixed syntx | Dice fixed ANTsTorch | Dice fixed FireANTs | Δ FireANTs − syntx (moy ± ES) | t déf. syntx | t déf. ANTsTorch | t déf. FireANTs | repli. % médiane s / a / f |",
+                   "|---|---|---|---|---|---|---|---|---|---|"]
+            models = []
+            for r in prev:
+                if r["_regularizer"] not in models:
+                    models.append(r["_regularizer"])
+            for reg in models:
+                S = {r["pair_idx"]: r for r in prev if r["_regularizer"] == reg and r["_library"] == "syntx"}
+                A = {r["pair_idx"]: r for r in prev if r["_regularizer"] == reg and r["_library"] == "antstorch"}
+                ps = sorted(set(S) & set(A) & set(fa))
+                if not ps:
+                    continue
+                v = lambda D, k: np.array([D[p].get(k, float("nan")) for p in ps], dtype=float)  # noqa: E731
+                d = v(fa, "dice_fixed") - v(S, "dice_fixed")
+                se = d.std(ddof=1) / np.sqrt(len(d)) if len(d) > 1 else float("nan")
+                md.append(f"| {reg} | {len(ps)} | {np.nanmean(v(S, 'dice_fixed')):.4f} | {np.nanmean(v(A, 'dice_fixed')):.4f} | {np.nanmean(v(fa, 'dice_fixed')):.4f} | "
+                          f"{np.nanmean(d):+.4f} ± {se:.4f} | {np.nanmean(v(S, '_deformable_seconds')):.1f} | {np.nanmean(v(A, '_deformable_seconds')):.1f} | "
+                          f"{np.nanmean(v(fa, '_deformable_seconds')):.1f} | {np.nanmedian([_jv(S[p], 'jac_folding_pct') for p in ps]):.4f} / "
+                          f"{np.nanmedian([_jv(A[p], 'jac_folding_pct') for p in ps]):.4f} / {np.nanmedian(v(fa, 'jac_folding_pct')):.4f} |")
+            md.append("")
+        md += ["## Per pair", "", "| Paire | Dice sym / fixe / mobile | t déf. (s) | repli. % | min J | max J | σ(log J) | itérations |", "|---|---|---|---|---|---|---|---|"]
+        for r in ok:
+            md.append(f"| {r['pair_idx']} | {_slash3(r)} | {r['_deformable_seconds']:.1f} | {_jv(r, 'jac_folding_pct'):.4f} | {_jv(r, 'jac_min'):.3f} | "
+                      f"{_jv(r, 'jac_max'):.2f} | {_jv(r, 'jac_log_std'):.3f} | {r['_fireants_iterations_run']} |")
+    md += ["", f"Résultats bruts : `{json_path}`"]
+    md_path = os.path.join(out_dir, f"fireants_{tag}_summary.md")
+    with open(md_path, "w") as f:
+        f.write("\n".join(md) + "\n")
+    print("\n" + "\n".join(md) + f"\n\nJSON: {json_path}\nMarkdown: {md_path}")
+
+
 def _slash3(rec):
     """'sym / fixed / moving' Dice cell for a table."""
     g = lambda k: float(rec.get(k, float("nan")))  # noqa: E731
@@ -997,6 +1078,11 @@ def main():
     ap.add_argument("--fireants-sweep", action="store_true",
                     help="FireANTs-only hyper-parameter sweep (implies --fireants; syntx / ANTsTorch are NOT run). Reuses the syntx "
                          "affines cached in --out-dir by an earlier run. Writes fireants_sweep.md / fireants_sweep.json.")
+    ap.add_argument("--fireants-only", action="store_true",
+                    help="Run ONLY the FireANTs arm (implies --fireants; syntx / ANTsTorch are NOT run) with --fireants-preset on --pairs, "
+                         "from the syntx affines cached in --out-dir by an earlier run of this script (use the same --out-dir). Writes "
+                         "fireants_<preset>_results.json / fireants_<preset>_summary.md and leaves comparison_results.json untouched; "
+                         "when that file exists, the summary compares FireANTs with the syntx / ANTsTorch arms of the same pairs.")
     ap.add_argument("--sweep-set", type=int, choices=sorted(SWEEP_GRIDS), default=1,
                     help="Grid for --fireants-sweep: 1 = warp smoothing x CC window (+ small lr set); 2 = larger learning rates "
                          "(1, 2, 4) x warp smoothing; 3 = gradient smoothing (1, 2, 3) x warp smoothing (0.25, 0.35, 0.5) at lr 0.4.")
@@ -1022,7 +1108,7 @@ def main():
     ap.add_argument("--no-normalize", action="store_true",
                     help="Feed FireANTs the raw images instead of the auto-normalised ones syntx registers.")
     args = ap.parse_args()
-    if args.fireants_sweep:
+    if args.fireants_sweep or args.fireants_only:
         args.fireants = True
     if args.device is None:
         import torch
@@ -1077,6 +1163,9 @@ def main():
     print(f"[scratch] temporary files go to {SCRATCH_BASE} (deleted after each run{'; kept: --keep-fields' if KEEP_FIELDS else ''})", flush=True)
     if args.fireants_sweep:
         _run_sweep(args.pairs, args.device, args.out_dir, DATA_DIR)
+        return
+    if args.fireants_only:
+        _run_fireants_only(args.pairs, args.device, args.out_dir, DATA_DIR)
         return
     results = []
     json_path = os.path.join(args.out_dir, "comparison_results.json")
