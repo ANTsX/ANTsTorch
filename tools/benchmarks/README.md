@@ -201,11 +201,11 @@ The median minimum of J is not tabulated: it is below 0.05 for most arms (0.00 f
 
 **Figures** (`python tools/benchmarks/plot_mindboggle_results.py --results-dir <dir of the run>`):
 
-![Distribution over the 30 Mindboggle pairs of the Dice in the fixed space, per arm](figures/mindboggle_dice.png)
+![Distribution over the 30 Mindboggle pairs of the Dice in the fixed space, per arm](./figures/mindboggle_dice.png)
 
-![Distribution over the 30 Mindboggle pairs of the deformable-only time (log scale), per arm](figures/mindboggle_time.png)
+![Distribution over the 30 Mindboggle pairs of the deformable-only time (log scale), per arm](./figures/mindboggle_time.png)
 
-![Distribution over the 30 Mindboggle pairs of the folding percentage and of the standard deviation of log J of the forward warp, per arm](figures/mindboggle_jacobian.png)
+![Distribution over the 30 Mindboggle pairs of the folding percentage and of the standard deviation of log J of the forward warp, per arm](./figures/mindboggle_jacobian.png)
 
 <!--
 The Dice plot shows Dice fixed, the one measure available for every arm. The Jacobian plot has two panels with the same arms: the folding percentage (voxels with det J ≤ 0; log scale, the dashed line is the 0.01 % limit used in the table, and pairs without any folding sit on the floor, axis label 0) and σ(log J). The unofficial syntx `bspline` arm has no Jacobian, so it has no violin there. The `*_regadam` dense models have no syntx violin: syntx has no `reg_adam` counterpart for them, so only the ANTsTorch violin is drawn. The ANTs C++ violin (hatched) is a CPU run and is not comparable with the GPU violins in the time plot.
