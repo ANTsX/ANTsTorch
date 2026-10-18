@@ -58,6 +58,12 @@ reported because FireANTs' best Dice settings fold the field (its documentation 
 --fireants-sweep runs a FireANTs-only hyper-parameter sweep on affines cached by an earlier run. Diagnostics: --fireants-iterations,
 --fireants-lr, --fireants-warp-sigma, --fireants-grad-sigma, --fireants-cc-kernel, --fireants-preset, --fireants-early-stop.
 
+ANTs C++ baseline (--ants-only): ants.registration(type_of_transform="antsRegistrationSyNQuick[so]") through antspyx (model name
+`ants_syn_quick`), on the CPU, from the syntx affines cached in --out-dir by an earlier run (same shared start as every other arm).
+Writes ants_<model>_results.json / ants_<model>_summary.md and compares with the syntx / ANTsTorch arms of the same pairs without
+touching comparison_results.json. --ants-model picks another deformable-only ants.registration type_of_transform; --ants-threads sets
+ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS (ANTs' CPU time depends on it).
+
 Output: writes a JSON file with one record per (pair, model, library), plus
 a Markdown summary table with syntx vs antstorch deltas, printed to stdout
 and saved alongside the JSON.
@@ -944,6 +950,118 @@ def _run_fireants_only(pairs, device, out_dir, data_dir):
     print("\n" + "\n".join(md) + f"\n\nJSON: {json_path}\nMarkdown: {md_path}")
 
 
+ANTS_MODEL = "ants_syn_quick"  # --ants-model: key of antstorch.benchmark.evaluate._ANTS_TRADITIONAL_MODELS or a deformable-only type_of_transform
+ANTS_THREADS = None  # --ants-threads (ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS), None = leave the environment as is
+
+
+def _run_ants(pair_idx, out_dir, data_dir, model=None):
+    """ANTs C++ (antspyx `ants.registration`, deformable-only preset) on the CPU, from the cached shared affine of `out_dir`.
+    Same record layout as the antstorch arms (`_library` 'ants'); ANTs has an inverse, so Dice sym / fixed / moving are all reported."""
+    model = model or ANTS_MODEL
+    sys.path.insert(0, ANTSTORCH_ROOT)
+    from antstorch.benchmark.evaluate import evaluate_mindboggle_pair as antstorch_eval
+    t0 = time.time()
+    try:
+        rec = antstorch_eval(
+            pair_idx=pair_idx, model=model, device="cpu", data_dir=DATA_DIR,
+            canonical_affine_dir=os.path.join(out_dir, "antstorch_canonical_affines"), verbose=False)
+        rec["_wall_seconds"] = time.time() - t0
+        rec["_library"] = "ants"
+        rec["_regularizer"] = model
+        rec["_deformable_seconds"] = rec.get("deformable_seconds", rec["runtime_seconds"] - rec.get("affine_seconds", 0.0))
+        rec["_ants_threads"] = os.environ.get("ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS")
+        rec["_status"] = "SUCCESS"
+    except Exception as e:  # noqa: BLE001
+        rec = {"_library": "ants", "_regularizer": model, "pair_idx": pair_idx, "_status": "FAILED", "_error": str(e),
+               "_traceback": traceback.format_exc(), "_wall_seconds": time.time() - t0}
+    return rec
+
+
+def _run_ants_only(pairs, out_dir, data_dir):
+    """The ANTs C++ baseline alone (ANTS_MODEL) on `pairs`, from the shared syntx affines cached in `out_dir`; writes
+    ants_<model>_results.json / _summary.md and, when `out_dir/comparison_results.json` exists, compares with its syntx / ANTsTorch arms."""
+    import numpy as np
+    missing = [p for p in pairs if _affine_source(out_dir, p) != "syntx"]
+    if missing:
+        sys.exit(f"--ants-only needs syntx's cached affines in '{out_dir}/antstorch_canonical_affines' "
+                 f"(pairs without one: {missing}). Use the --out-dir of an earlier run of this script that covered these pairs.")
+    tag = "".join(c if c.isalnum() else "_" for c in ANTS_MODEL).strip("_")
+    json_path = os.path.join(out_dir, f"ants_{tag}_results.json")
+    threads = os.environ.get("ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS")
+    print(f"[ants / {ANTS_MODEL}] CPU, ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS={threads}, cpu_count={os.cpu_count()}", flush=True)
+    if threads in (None, "", "1"):
+        print("    !! ANTs runs on "
+              + ("a single thread" if threads == "1" else "all available threads (variable not set)")
+              + ": its time depends on this; set --ants-threads N (or the variable) and keep it fixed across runs.", flush=True)
+    results = []
+    for pair_idx in pairs:
+        print(f"[ants / {ANTS_MODEL}] pair {pair_idx}", flush=True)
+        with _scratch(f"ants_pair{pair_idx:03d}"):
+            rec = _add_jacobian(_run_ants(pair_idx, out_dir, data_dir), pair_idx)
+        if not KEEP_FIELDS:
+            rec["_fields_deleted"] = True
+        results.append(rec)
+        if rec.get("_status") == "SUCCESS":
+            print(f"    -> {rec['_status']} {_fmt_dice(rec)} deformable={rec['_deformable_seconds']:.1f}s", flush=True)
+        else:
+            print(f"    -> ants {rec.get('_status')}: {rec.get('_error')}", flush=True)
+        with open(json_path, "w") as f:
+            json.dump(results, f, indent=2)
+    ok = [r for r in results if r.get("_status") == "SUCCESS"]
+    md = [f"# ANTs C++ `{ANTS_MODEL}` — Mindboggle-101", "",
+          f"Pairs: {pairs}  ", "Device: cpu (antspyx, compiled ANTs)  ",
+          f"ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS: {threads}; cpu_count: {os.cpu_count()}  ",
+          "Shared syntx affine (initial transform); time = deformable stage only, wall clock.", ""]
+    if not ok:
+        md.append("All runs failed.")
+    else:
+        g = lambda k: np.array([r.get(k, float("nan")) for r in ok], dtype=float)  # noqa: E731
+        md += ["| n | Dice sym (mean) | Dice fixed (mean) | Dice moving (mean) | time s (mean) | folding % (median) | pairs folding > 0.01 % | min J (median) | max J (median) | σ(log J) (median) |",
+               "|---|---|---|---|---|---|---|---|---|---|",
+               f"| {len(ok)}/{len(results)} | {np.nanmean(g('dice_sym')):.4f} | {np.nanmean(g('dice_fixed')):.4f} | {np.nanmean(g('dice_moving')):.4f} | "
+               f"{np.nanmean(g('_deformable_seconds')):.1f} | {np.nanmedian(g('jac_folding_pct')):.4f} | {int((g('jac_folding_pct') > FOLDING_LIMIT_PCT).sum())} | "
+               f"{np.nanmedian(g('jac_min')):.3f} | {np.nanmedian(g('jac_max')):.2f} | {np.nanmedian(g('jac_log_std')):.3f} |", ""]
+        prev_path = os.path.join(out_dir, "comparison_results.json")
+        if os.path.exists(prev_path):
+            try:
+                with open(prev_path) as f:
+                    prev = [r for r in json.load(f) if r.get("_status") == "SUCCESS" and r.get("_library") in ("syntx", "antstorch")]
+            except (OSError, ValueError):
+                prev = []
+            an = {r["pair_idx"]: r for r in ok}
+            md += ["## Against the syntx / ANTsTorch arms of the same pairs (comparison_results.json)", "",
+                   "Δ = ANTs − syntx on the symmetric Dice, mean ± standard error of the paired difference; times are deformable-only seconds.", "",
+                   "| Modèle | n | Dice sym syntx | Dice sym ANTsTorch | Dice sym ANTs | Δ ANTs − syntx | t déf. syntx | t déf. ANTsTorch | t déf. ANTs | repli. % médiane s / a / ANTs |",
+                   "|---|---|---|---|---|---|---|---|---|---|"]
+            models = []
+            for r in prev:
+                if r["_regularizer"] not in models:
+                    models.append(r["_regularizer"])
+            for reg in models:
+                S = {r["pair_idx"]: r for r in prev if r["_regularizer"] == reg and r["_library"] == "syntx"}
+                A = {r["pair_idx"]: r for r in prev if r["_regularizer"] == reg and r["_library"] == "antstorch"}
+                ps = sorted(set(S) & set(A) & set(an))
+                if not ps:
+                    continue
+                v = lambda D, k: np.array([D[p].get(k, float("nan")) for p in ps], dtype=float)  # noqa: E731
+                d = v(an, "dice_sym") - v(S, "dice_sym")
+                se = d.std(ddof=1) / np.sqrt(len(d)) if len(d) > 1 else float("nan")
+                md.append(f"| {reg} | {len(ps)} | {np.nanmean(v(S, 'dice_sym')):.4f} | {np.nanmean(v(A, 'dice_sym')):.4f} | {np.nanmean(v(an, 'dice_sym')):.4f} | "
+                          f"{np.nanmean(d):+.4f} ± {se:.4f} | {np.nanmean(v(S, '_deformable_seconds')):.1f} | {np.nanmean(v(A, '_deformable_seconds')):.1f} | "
+                          f"{np.nanmean(v(an, '_deformable_seconds')):.1f} | {np.nanmedian([_jv(S[p], 'jac_folding_pct') for p in ps]):.4f} / "
+                          f"{np.nanmedian([_jv(A[p], 'jac_folding_pct') for p in ps]):.4f} / {np.nanmedian(v(an, 'jac_folding_pct')):.4f} |")
+            md.append("")
+        md += ["## Per pair", "", "| Paire | Dice sym / fixe / mobile | t déf. (s) | repli. % | min J | max J | σ(log J) |", "|---|---|---|---|---|---|---|"]
+        for r in ok:
+            md.append(f"| {r['pair_idx']} | {_slash3(r)} | {r['_deformable_seconds']:.1f} | {_jv(r, 'jac_folding_pct'):.4f} | {_jv(r, 'jac_min'):.3f} | "
+                      f"{_jv(r, 'jac_max'):.2f} | {_jv(r, 'jac_log_std'):.3f} |")
+    md += ["", f"Résultats bruts : `{json_path}`"]
+    md_path = os.path.join(out_dir, f"ants_{tag}_summary.md")
+    with open(md_path, "w") as f:
+        f.write("\n".join(md) + "\n")
+    print("\n" + "\n".join(md) + f"\n\nJSON: {json_path}\nMarkdown: {md_path}")
+
+
 def _slash3(rec):
     """'sym / fixed / moving' Dice cell for a table."""
     g = lambda k: float(rec.get(k, float("nan")))  # noqa: E731
@@ -1021,7 +1139,7 @@ def _fireants_pair_table(results, pairs, models):
 
 def main():
     global FAIR, KEEP_FIELDS, SCRATCH_BASE
-    global FIREANTS_PRESET, FIREANTS_TOLERANCE, FIREANTS_OVERRIDES, SWEEP_SET, FIREANTS_NORMALIZE, FIREANTS_VERBOSE
+    global FIREANTS_PRESET, FIREANTS_TOLERANCE, FIREANTS_OVERRIDES, SWEEP_SET, FIREANTS_NORMALIZE, FIREANTS_VERBOSE, ANTS_MODEL
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--pairs", type=int, nargs="+", default=PAIR_INDICES_DEFAULT)
     ap.add_argument("--models", nargs="+", default=DEFAULT_MODELS, choices=MODELS,
@@ -1083,6 +1201,17 @@ def main():
                          "from the syntx affines cached in --out-dir by an earlier run of this script (use the same --out-dir). Writes "
                          "fireants_<preset>_results.json / fireants_<preset>_summary.md and leaves comparison_results.json untouched; "
                          "when that file exists, the summary compares FireANTs with the syntx / ANTsTorch arms of the same pairs.")
+    ap.add_argument("--ants-only", action="store_true",
+                    help="Run ONLY the ANTs C++ baseline (antspyx ants.registration, deformable-only, CPU; syntx / ANTsTorch are NOT run) "
+                         "on --pairs, from the syntx affines cached in --out-dir by an earlier run (use the same --out-dir). Writes "
+                         "ants_<model>_results.json / ants_<model>_summary.md and leaves comparison_results.json untouched; when that file "
+                         "exists, the summary compares ANTs with the syntx / ANTsTorch arms of the same pairs.")
+    ap.add_argument("--ants-model", default="ants_syn_quick",
+                    help="Model of --ants-only: 'ants_syn_quick' (= antsRegistrationSyNQuick[so], default) or any deformable-only "
+                         "ants.registration type_of_transform (e.g. 'SyNOnly', 'antsRegistrationSyN[bo]'); a preset that fits its own affine is rejected.")
+    ap.add_argument("--ants-threads", type=int, default=None,
+                    help="Number of CPU threads for ANTs (sets ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS before ANTs is loaded). Default: the "
+                         "environment's value. ANTs' time depends on it; keep it fixed and report it.")
     ap.add_argument("--sweep-set", type=int, choices=sorted(SWEEP_GRIDS), default=1,
                     help="Grid for --fireants-sweep: 1 = warp smoothing x CC window (+ small lr set); 2 = larger learning rates "
                          "(1, 2, 4) x warp smoothing; 3 = gradient smoothing (1, 2, 3) x warp smoothing (0.25, 0.35, 0.5) at lr 0.4.")
@@ -1108,6 +1237,13 @@ def main():
     ap.add_argument("--no-normalize", action="store_true",
                     help="Feed FireANTs the raw images instead of the auto-normalised ones syntx registers.")
     args = ap.parse_args()
+    if args.ants_threads is not None:
+        os.environ["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] = str(args.ants_threads)  # before ANTs is first imported
+    if args.ants_only:
+        if args.fireants or args.fireants_sweep or args.fireants_only:
+            sys.exit("--ants-only runs the ANTs baseline alone: do not combine it with the FireANTs options.")
+        ANTS_MODEL = args.ants_model
+        args.device = "cpu"
     if args.fireants_sweep or args.fireants_only:
         args.fireants = True
     if args.device is None:
@@ -1166,6 +1302,9 @@ def main():
         return
     if args.fireants_only:
         _run_fireants_only(args.pairs, args.device, args.out_dir, DATA_DIR)
+        return
+    if args.ants_only:
+        _run_ants_only(args.pairs, args.out_dir, DATA_DIR)
         return
     results = []
     json_path = os.path.join(args.out_dir, "comparison_results.json")
