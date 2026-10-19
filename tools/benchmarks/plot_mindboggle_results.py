@@ -110,11 +110,11 @@ def panel(ax, g, field, ylabel, fmt, kind="linear", ylim=None, ref=None, from_ze
             tops.append(data.max())
             bottoms.append(data.min())
             pad = {"linear": 0.012 * (ylim[1] - ylim[0]) if ylim else 0.006, "log": 0.03, "logfloor": 0.12}[kind]
-            ax.text(i + off, data.max() + pad, fmt.format(float(np.median(v))), ha="center", va="bottom", fontsize=6.3, color=INK, zorder=6,
+            ax.text(i + off, data.max() + pad, fmt.format(float(np.median(v))), ha="center", va="bottom", fontsize=8.5, color=INK, zorder=6,
                     bbox=dict(boxstyle="square,pad=0.12", facecolor=SURFACE, edgecolor="none", alpha=0.85))
     ax.set_xticks(range(n))
     ax.set_xlim(-0.7, n - 0.3)
-    ax.set_ylabel(ylabel, color=INK2, fontsize=9)
+    ax.set_ylabel(ylabel, color=INK2, fontsize=12)
     if kind == "log":
         ticks = [1, 2, 5, 10, 20, 50, 100]
         lo, hi = min(min(bottoms), 0.0), max(tops) + 0.18
@@ -136,8 +136,8 @@ def panel(ax, g, field, ylabel, fmt, kind="linear", ylim=None, ref=None, from_ze
     if ref is not None:
         y = np.log10(ref[0]) if kind != "linear" else ref[0]
         ax.axhline(y, color=INK2, linewidth=0.9, linestyle=(0, (4, 3)), zorder=2)
-        ax.text(n - 0.35, y, ref[1], ha="right", va="bottom", fontsize=7, color=INK2)
-    ax.tick_params(axis="y", labelsize=8, colors=INK2, length=0)
+        ax.text(n - 0.35, y, ref[1], ha="right", va="bottom", fontsize=10, color=INK2)
+    ax.tick_params(axis="y", labelsize=11, colors=INK2, length=0)
     ax.tick_params(axis="x", length=0)
     ax.yaxis.grid(True, color=GRID, linewidth=0.8, zorder=0)
     ax.set_axisbelow(True)
@@ -151,24 +151,26 @@ def legend(ax, g):
     present = [lib for lib in COLORS if any(lib in v for v in g.values())]
     handles = [Patch(facecolor=COLORS[lib], edgecolor=SURFACE, label=lib + (" (CPU)" if lib == "ANTs C++" else ""),
                      hatch="////" if lib == "ANTs C++" else None) for lib in present]
-    ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 1.12), ncol=len(handles), frameon=False, fontsize=8,
+    ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 1.12), ncol=len(handles), frameon=False, fontsize=11,
               labelcolor=INK2, handlelength=1.2, columnspacing=1.6)
 
 
-def figure(g, panels, path, note=None, height=5.2):
+def figure(g, panels, path, note=None, height=5.8):
     """panels: list of dicts for panel(); the x labels are drawn under the last one."""
     labels = list(g)
     n = len(labels)
-    fig, axes = plt.subplots(len(panels), 1, figsize=(max(9.0, 0.78 * n + 2), height), dpi=160, sharex=True, squeeze=False)
+    fig, axes = plt.subplots(len(panels), 1, figsize=(max(9.0, 1.1 * n + 2), height), dpi=160, sharex=True, squeeze=False)
     axes = axes[:, 0]
     fig.patch.set_facecolor(SURFACE)
     for ax, kw in zip(axes, panels):
         panel(ax, g, **kw)
     legend(axes[0], g)
-    axes[-1].set_xticklabels(labels, rotation=40, ha="right", fontsize=8, color=INK2)
+    axes[-1].set_xticklabels(labels, rotation=40, ha="right", fontsize=11, color=INK2)
     if note:
-        fig.text(0.01, 0.01, note, fontsize=7, color=INK2, ha="left", va="bottom")
-    fig.tight_layout(rect=(0, 0.03 if note else 0, 1, 1))
+        import textwrap
+        note = "\n".join(textwrap.wrap(note, 170))
+        fig.text(0.01, 0.01, note, fontsize=10, color=INK2, ha="left", va="bottom")
+    fig.tight_layout(rect=(0, (0.015 + 0.03 * note.count("\n") + 0.02) if note else 0, 1, 1))
     fig.savefig(path, facecolor=SURFACE)
     plt.close(fig)
     print("wrote", path)
@@ -185,16 +187,16 @@ def main():
     npairs = sorted({len(v) for libs in g.values() for v in libs.values()})
     n_txt = f"{npairs[0]}" if len(npairs) == 1 else f"{npairs[0]}-{npairs[-1]}"
     note = f"One violin per arm over the {n_txt} pairs; dot = median (value printed above), bar = interquartile range."
-    figure(g, [dict(field="dice", ylabel="Dice fixed (distribution over the pairs)", fmt="{:.3f}")],
+    figure(g, [dict(field="dice", ylabel="Dice fixed\n(distribution over the pairs)", fmt="{:.3f}")],
            os.path.join(a.out_dir, "mindboggle_dice.png"),
            note=note + " Dice in the fixed space: the forward warp only, available for every arm.")
     figure(g, [dict(field="time", ylabel="Deformable-only time, s (log scale)", fmt="{:.1f}", kind="log")],
            os.path.join(a.out_dir, "mindboggle_time.png"),
            note=note + " ANTs C++ (hatched) ran on the CPU: not comparable with the GPU arms.")
-    figure(g, [dict(field="fold", ylabel="Folding, % of voxels with det J <= 0 (log scale)", fmt="{:.4f}", kind="logfloor",
+    figure(g, [dict(field="fold", ylabel="Folding, % of voxels\nwith det J <= 0 (log scale)", fmt="{:.4f}", kind="logfloor",
                     ref=(0.01, "0.01 %")),
-               dict(field="logstd", ylabel="σ(log J) (distribution over the pairs)", fmt="{:.2f}", from_zero=True)],
-           os.path.join(a.out_dir, "mindboggle_jacobian.png"), height=8.2,
+               dict(field="logstd", ylabel="σ(log J)\n(distribution over the pairs)", fmt="{:.2f}", from_zero=True)],
+           os.path.join(a.out_dir, "mindboggle_jacobian.png"), height=9.5,
            note=note + " Jacobian of the forward warp, same finite-difference measure for every arm; zero folding is drawn on the floor of the "
                        "top panel (axis label 0). The unofficial syntx bspline arm has no Jacobian.")
 
