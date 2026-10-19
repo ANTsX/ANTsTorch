@@ -1404,6 +1404,29 @@ def warmup_actnorm_with_real_batch(model, x_real: torch.Tensor):
 # GlowToolBase — abstract class
 # ---------------------------------------------------------------------------
 
+def copy_reference_header(img, reference, out_path=None):
+    """Copy direction, origin and spacing from `reference` onto `img` in place
+    (the same as ANTs ``CopyImageHeaderInformation ref img img 1 1 1 0``).
+    The voxel grid is not resampled, so the shapes should normally agree."""
+    if reference is None:
+        return img
+    if reference.dimension != img.dimension:
+        raise ValueError(
+            f"--reference-image is {reference.dimension}D but the output"
+            f"{f' {out_path}' if out_path else ''} is {img.dimension}D."
+        )
+    if tuple(reference.shape) != tuple(img.shape):
+        print(
+            f"[warn] --reference-image shape {tuple(reference.shape)} differs from the "
+            f"output shape {tuple(img.shape)}; its header is copied without resampling.",
+            file=sys.stderr,
+        )
+    img.set_direction(reference.direction)
+    img.set_origin(reference.origin)
+    img.set_spacing(reference.spacing)
+    return img
+
+
 class GlowToolBase(ABC):
     """
     Abstract base for lamnr_glow_tool_2d and lamnr_glow_tool_3d.
@@ -1872,6 +1895,24 @@ class GlowToolBase(ABC):
     def _get_target_size(self, args, cfg: dict):
         """Return target_size from args or config dict. Subclass must implement."""
         raise NotImplementedError
+
+    def _reference_header_image(self):
+        """Image given by --reference-image (read once), or None."""
+        path = getattr(self, "_reference_image", None)
+        if not path:
+            return None
+        if getattr(self, "_reference_cache", None) is None:
+            import ants
+            self._reference_cache = ants.image_read(str(path))
+        return self._reference_cache
+
+    def _set_reference_image(self, args) -> None:
+        """Record --reference-image from parsed args; fail early if it is missing."""
+        path = getattr(args, "reference_image", None)
+        if path and not Path(path).is_file():
+            raise FileNotFoundError(f"--reference-image not found: {path}")
+        self._reference_image = path
+        self._reference_cache = None
 
     def _n_channels(self) -> int:
         """Number of image channels per view (1 unless --channels/--channel-files)."""

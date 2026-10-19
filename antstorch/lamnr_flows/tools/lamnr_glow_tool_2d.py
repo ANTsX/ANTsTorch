@@ -37,7 +37,9 @@ except ImportError:
     create_glow_normalizing_flow_model_2d = None
 
 # Import everything from the shared base
-from antstorch.lamnr_flows.core.lamnr_glow_tool_base import GlowToolBase, to01
+from antstorch.lamnr_flows.core.lamnr_glow_tool_base import (
+    GlowToolBase, copy_reference_header, to01,
+)
 
 __version__ = "0.3.9"
 
@@ -202,8 +204,11 @@ def save_grid_2d(
     nrow: int,
     target_hw: Optional[Tuple[int, int]] = None,
     winsorize: bool = True,
+    reference=None,
 ):
-    """Save a 4D tensor (B, C, H, W) as a PNG grid or NIfTI."""
+    """Save a 4D tensor (B, C, H, W) as a PNG grid or NIfTI.
+
+    `reference` (an ANTs image) gives the header of NIfTI outputs; PNGs have none."""
     x = _coerce_nchw_4d(x, target_hw=target_hw)
     x = to01(x, winsorize=winsorize)
     out_path = Path(out_path)
@@ -215,6 +220,7 @@ def save_grid_2d(
         else:
             arr_ants = arr[0, 0]
         ants_img = ants.from_numpy(arr_ants)
+        copy_reference_header(ants_img, reference, out_path)
         ants.image_write(ants_img, str(out_path))
     else:
         tv.utils.save_image(x, str(out_path), nrow=int(nrow))
@@ -447,9 +453,11 @@ class GlowTool2D(GlowToolBase):
                 labels = [f"ch{c}" for c in range(x.shape[1])]
             for c, label in enumerate(labels):
                 save_grid_2d(x[:, c:c + 1], path.with_name(f"{stem}_{label}{ext}"),
-                             nrow=nrow, target_hw=target_hw)
+                             nrow=nrow, target_hw=target_hw,
+                             reference=self._reference_header_image())
             return
-        save_grid_2d(x, path, nrow=nrow, target_hw=target_hw)
+        save_grid_2d(x, path, nrow=nrow, target_hw=target_hw,
+                     reference=self._reference_header_image())
 
     def build_model(self, cfg: dict, device: torch.device, target_size) -> nn.Module:
         return build_model_from_config_2d(cfg, device, target_hw=target_size,
@@ -480,6 +488,13 @@ class GlowTool2D(GlowToolBase):
             help="Slice index to extract from 3D NIfTI volumes (default 130).",
         )
         ap.add_argument(
+            "--reference-image", default=None, metavar="IMAGE",
+            help="Image whose spatial header (direction, origin, spacing) is "
+                 "copied onto every NIfTI output (a 2D image here), like ANTs "
+                 "CopyImageHeaderInformation <reference> <out> <out> 1 1 1 0. "
+                 "The output is not resampled.",
+        )
+        ap.add_argument(
             "--channels", type=int, default=None,
             help="Number of image channels per view (default: C from the "
                  "checkpoint config, else the number of --channel-files, else 1).",
@@ -501,6 +516,7 @@ class GlowTool2D(GlowToolBase):
         W = int(cfg.get("W", 128))
         # Channels: --channels, else --channel-files, else checkpoint C, else 1.
         self._channel_files = getattr(args, "channel_files", None)
+        self._set_reference_image(args)
         n_files = len(self._channel_files) if self._channel_files else None
         n_arg = getattr(args, "channels", None)
         self._channels = int(n_arg or n_files or cfg.get("C", None) or 1)

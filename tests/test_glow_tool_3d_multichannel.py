@@ -70,3 +70,36 @@ def test_single_channel_behaviour_is_unchanged(subject, tmp_path):
 def test_inconsistent_channel_arguments_are_rejected():
     with pytest.raises(ValueError):
         _tool(["--channels", "3", "--channel-files", "a.nii.gz", "b.nii.gz"])
+
+
+def _reference(tmp_path):
+    direction = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+    ref = ants.from_numpy(np.zeros((H, W, D), dtype="float32"),
+                          origin=(1.0, 2.0, 3.0), spacing=(2.0, 3.0, 4.0), direction=direction)
+    path = tmp_path / "reference.nii.gz"
+    ants.image_write(ref, str(path))
+    return ref, path
+
+
+def test_reference_image_header_is_copied_to_every_channel(tmp_path):
+    ref, ref_path = _reference(tmp_path)
+    tool, _, _ = _tool(["--channel-files", "vent.nii.gz", "anatvent.nii.gz",
+                        "--reference-image", str(ref_path)])
+    tool.save_volume(torch.rand(1, 2, H, W, D), tmp_path / "out.nii.gz")
+    for name in ("vent", "anatvent"):
+        out = ants.image_read(str(tmp_path / f"out_{name}.nii.gz"))
+        assert out.spacing == pytest.approx(ref.spacing)
+        assert out.origin == pytest.approx(ref.origin)
+        assert np.allclose(out.direction, ref.direction)
+
+
+def test_header_is_untouched_without_reference_image(tmp_path):
+    tool, _, _ = _tool([])
+    tool.save_volume(torch.rand(1, 1, H, W, D), tmp_path / "out.nii.gz")
+    out = ants.image_read(str(tmp_path / "out.nii.gz"))
+    assert out.spacing == pytest.approx((1.0, 1.0, 1.0))
+
+
+def test_missing_reference_image_is_rejected(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        _tool(["--reference-image", str(tmp_path / "nope.nii.gz")])
