@@ -50,11 +50,18 @@ Most of ANTsTorch's registration code follows [syntx](https://github.com/stnava/
 
 ### Optimizers
 
-| Optimizer | Where | What it does |
-|---|---|---|
-| `gradient_descent` | `syn_registration` default | CFL-scaled step along the regularized gradient |
-| `reg_adam` | `syn_registration`, `greedy` (name `regadam`) | `greedy.py` Adam: bias-corrected moments, the Adam quotient is smoothed (`regadam_sigma` 0.8); moments reset at each level |
-| `syn_reg_adam` | `syn_registration` (sobolev, dsti only) | `syntx.syn()` variant: gradient regularized, Adam quotient, Green operator applied again, CFL step shared by both half-warps; used by the `dsti` fair-mode arm |
+| Optimizer | Where | What it does | Benchmark arms (ANTsTorch) | Benchmark arms (syntx) |
+|---|---|---|---|---|
+| `gradient_descent` | `syn_registration` default | CFL-scaled step along the regularized gradient | `gaussian`, `sobolev`, `dsti`, `bspline` | none |
+| `reg_adam` | `syn_registration`, `greedy` (name `regadam`) | `greedy.py` Adam: bias-corrected moments, the Adam quotient is smoothed (`regadam_sigma` 0.8); moments reset at each level | `gaussian_regadam`, `sobolev_regadam`, `dsti_regadam`, `bspline_regadam`, `greedy_regadam` | `greedy_regadam` (`optimizer='regadam'`); no `*_regadam` SyN arm |
+| `adam` | `greedy` only (default) | Adam without the quotient smoothing | `greedy` | `greedy` |
+| `syn_reg_adam` | `syn_registration` (sobolev, dsti only) | `syntx.syn()` variant: gradient regularized, Adam quotient, Green operator applied again, CFL step shared by both half-warps; used by the `dsti` fair-mode arm | `dsti` in fair mode (the default run) | `dsti` (`syn_dsti1`: `reg_adam` + `dsti1`) |
+
+Notes:
+
+- syntx has no `*_regadam` model: each ANTsTorch `*_regadam` arm is compared with the same syntx arm as its base model, so those rows have no syntx counterpart in the results table.
+- The `reg_adam` of ANTsTorch is the `syntx/greedy.py` algorithm, **not** the `reg_adam` of `syntx.syn()` (that one is `syn_reg_adam`). A `*_regadam` arm therefore asks whether an Adam-type optimizer closes the gap with syntx, not whether it reproduces syntx exactly.
+- The optimizer of the syntx `gaussian` and `sobolev` arms is not documented here; in fair mode the ANTsTorch counterparts use `gradient_descent`.
 
 ### [FireANTs](https://github.com/rohitrango/FireANTs)
 
