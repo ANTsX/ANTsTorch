@@ -35,7 +35,9 @@ except ImportError:
     create_glow_normalizing_flow_model_3d = None
 
 # Import the shared base class
-from antstorch.lamnr_flows.core.lamnr_glow_tool_base import GlowToolBase, to01
+from antstorch.lamnr_flows.core.lamnr_glow_tool_base import (
+    GlowToolBase, copy_reference_header, to01,
+)
 
 __version__ = "0.5.5"
 
@@ -43,7 +45,8 @@ __version__ = "0.5.5"
 # 3D Helper Functions
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _save_nifti(tensor: torch.Tensor, out_path: Path, spacing: Optional[tuple] = None):
+def _save_nifti(tensor: torch.Tensor, out_path: Path, spacing: Optional[tuple] = None,
+                reference=None):
     """
     Enregistre un SEUL volume 3D (ou une image 2D) au format NIfTI.
 
@@ -80,7 +83,9 @@ def _save_nifti(tensor: torch.Tensor, out_path: Path, spacing: Optional[tuple] =
             img.set_spacing(spacing)
         except Exception as e:
             print(f"[warn] Could not set spacing: {e}")
-            
+
+    # --reference-image: take direction/origin/spacing from the reference.
+    copy_reference_header(img, reference, out_path)
     ants.image_write(img, str(out_path))
 
 def _coerce_nchwd_5d(x, target_hwd=None, keep_channels=False):
@@ -169,6 +174,13 @@ class GlowTool3D(GlowToolBase):
                  "anatvent.nii.gz), in model channel order. Outputs are "
                  "written as one NIfTI per channel.",
         )
+        parser.add_argument(
+            "--reference-image", default=None, metavar="IMAGE",
+            help="Image whose spatial header (direction, origin, spacing) is "
+                 "copied onto every NIfTI output, like ANTs "
+                 "CopyImageHeaderInformation <reference> <out> <out> 1 1 1 0. "
+                 "The output is not resampled.",
+        )
         parser.add_argument("--H", type=int, help="Override volume height.")
         parser.add_argument("--W", type=int, help="Override volume width.")
         parser.add_argument("--D", type=int, help="Override volume depth.")
@@ -176,6 +188,7 @@ class GlowTool3D(GlowToolBase):
     def _get_target_size(self, args: argparse.Namespace, cfg: dict) -> Tuple[int, int, int]:
         """Extract the (H, W, D) target size from arguments or config."""
         self._channel_files = getattr(args, "channel_files", None)
+        self._set_reference_image(args)
         n_files = len(self._channel_files) if self._channel_files else None
         n_cfg = cfg.get("C", None)
         n_arg = getattr(args, "channels", None)
@@ -371,7 +384,8 @@ class GlowTool3D(GlowToolBase):
         if x_tensor.dim() == 5 and x_tensor.shape[1] > 1:
             self._save_per_channel(x_tensor, out_path, self.save_single, **kwargs)
             return
-        _save_nifti(x_tensor, out_path, spacing=spacing)
+        _save_nifti(x_tensor, out_path, spacing=spacing,
+                     reference=self._reference_header_image())
         
     def save_volume(self, x_tensor: torch.Tensor, out_path: Path, nrow: int = 1, **kwargs):
         """
@@ -414,7 +428,8 @@ class GlowTool3D(GlowToolBase):
         # Cas majoritaire et déjà correct : un seul volume -> comportement
         # inchangé, un seul fichier écrit directement sous out_path.
         if n_total <= 1:
-            _save_nifti(x_tensor, out_path, spacing=spacing)
+            _save_nifti(x_tensor, out_path, spacing=spacing,
+                     reference=self._reference_header_image())
             return
 
         n_panels = max(1, int(nrow))
@@ -449,7 +464,8 @@ class GlowTool3D(GlowToolBase):
                 else:
                     fname = f"{stem}_item{g:03d}_{label}.nii.gz"
                 fpath = parent / fname
-                _save_nifti(vol, fpath, spacing=spacing)
+                _save_nifti(vol, fpath, spacing=spacing,
+                     reference=self._reference_header_image())
                 written.append(fpath)
 
         print(f"[save_volume] {len(written)} fichier(s) NIfTI 3D écrit(s) sous {parent}/")
