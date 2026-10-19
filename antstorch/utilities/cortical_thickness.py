@@ -28,13 +28,6 @@ def cortical_thickness(t1, device=None, verbose: bool = False, backend=None):
     from ..utilities.deep_atropos import deep_atropos
     from ..utilities.device_manager import get_default_device
 
-    # NOTE (2026-08-23 bug fix): antstorch's deep_atropos() only implements
-    # the list-input branch ([T1, T2, FA]) -- it raises ValueError on a bare
-    # ANTsImage. This call used to pass `t1` directly, so
-    # cortical_thickness() crashed unconditionally on every input. Wrapping
-    # t1 in a 3-element list with None placeholders for T2/FA selects
-    # deep_atropos's T1-only network variant, which is exactly what this
-    # function needs (T1-only cortical thickness).
     atropos = deep_atropos([t1, None, None], do_preprocessing=True, device=device, verbose=verbose,
                            backend=backend)
             
@@ -207,9 +200,6 @@ def longitudinal_cortical_thickness(
         t1s_preprocessed.append(t1_pre)
 
     # --- Torch Deep Atropos on SST to get priors ---
-    # NOTE (2026-08-23 bug fix): same list-input requirement as in
-    # cortical_thickness() above -- a bare `sst` image would raise
-    # ValueError inside deep_atropos().
     sst_atropos = deep_atropos([sst, None, None], do_preprocessing=True, device=device, verbose=verbose,
                                backend=backend)
 
