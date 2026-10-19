@@ -81,7 +81,7 @@ def cit168_labeling(t1,
     backend : str, dict or None
         "ants" or "antstorch" for the internal N4 and template registration (including the preprocessing); a dict selects per
         operation (keys "n4", "denoise", "registration").  None uses antstorch.set_default_backend(),
-        then ANTSTORCH_BACKEND, then "ants".
+        then ANTSTORCH_BACKEND, then "antstorch".
 
     Returns
     -------

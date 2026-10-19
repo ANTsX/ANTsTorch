@@ -90,7 +90,7 @@ def preprocess_brain_image(
         "ants" (C++) or "antstorch" (PyTorch, CUDA/MPS/CPU) for N4, denoising and
         template registration.  A dict selects per operation, e.g.
         ``{"n4": "antstorch", "denoise": "antstorch", "registration": "ants"}``.
-        None uses antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "ants".
+        None uses antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "antstorch".
 
     brain_mask : ANTsImage or None
         Precomputed brain mask of ``image`` (voxels > 0.5 are kept).  When given, brain

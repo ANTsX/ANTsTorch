@@ -52,7 +52,7 @@ def deep_atropos(
     backend : str, dict or None
         "ants" or "antstorch" for the internal N4 and template registration;
         a dict selects per operation (keys "n4", "registration").  None uses
-        antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "ants".
+        antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "antstorch".
 
     Returns
     -------

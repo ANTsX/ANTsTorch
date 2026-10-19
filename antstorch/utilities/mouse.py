@@ -293,7 +293,7 @@ def mouse_brain_parcellation(image,
 
     backend : str, dict or None
         "ants" or "antstorch" for the template registration (key "registration").
-        None uses antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "ants".
+        None uses antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "antstorch".
 
     Returns
     -------
@@ -480,7 +480,7 @@ def mouse_cortical_thickness(t2,
 
     backend : str, dict or None
         "ants" or "antstorch" per operation (keys "registration", "kelly_kapowski").
-        None uses antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "ants".
+        None uses antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "antstorch".
 
     Returns
     -------

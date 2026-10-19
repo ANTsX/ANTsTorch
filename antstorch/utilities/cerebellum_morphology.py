@@ -81,7 +81,7 @@ def cerebellum_morphology(t1,
         "ants" or "antstorch" for the internal N4, template registration and (when
         compute_thickness_image is True) KellyKapowski; a dict selects per operation
         (keys "n4", "registration", "kelly_kapowski").  None uses antstorch.set_default_backend(),
-        then ANTSTORCH_BACKEND, then "ants".
+        then ANTSTORCH_BACKEND, then "antstorch".
 
     Returns
     -------

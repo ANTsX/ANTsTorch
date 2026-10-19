@@ -9,7 +9,8 @@ Resolution order for an operation (``n4``, ``denoise``, ``registration`` or
 2. :func:`set_default_backend`;
 3. the ``ANTSTORCH_BACKEND`` environment variable, either a single value
    (``antstorch``) or comma-separated pairs (``n4=antstorch,denoise=ants``);
-4. ``"ants"``.
+4. ``"antstorch"`` (set ``ANTSTORCH_BACKEND=ants`` or call
+   ``set_default_backend("ants")`` to get the ANTs C++ tools back).
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import os
 
 VALID_BACKENDS = ("ants", "antstorch")
 OPERATIONS = ("n4", "denoise", "registration", "kelly_kapowski")
-_FALLBACK_BACKEND = "ants"
+_FALLBACK_BACKEND = "antstorch"
 
 # Operation -> backend, set through set_default_backend().
 _GLOBAL_BACKEND = {}

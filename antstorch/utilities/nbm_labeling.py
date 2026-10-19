@@ -44,7 +44,7 @@ def nbm_labeling(t1,
     backend : str, dict or None
         "ants" or "antstorch" per operation (keys "n4", "denoise", "registration"); see
         antstorch.set_default_backend().  None uses the session default, then
-        ANTSTORCH_BACKEND, then "ants".
+        ANTSTORCH_BACKEND, then "antstorch".
 
     brain_mask : ANTsImage or None
         Precomputed brain mask of the input image (voxels > 0.5 are kept).  When given,

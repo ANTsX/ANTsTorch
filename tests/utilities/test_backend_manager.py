@@ -15,20 +15,20 @@ def _clean(monkeypatch):
     bm.set_default_backend(None)
 
 
-def test_default_is_ants():
+def test_default_is_antstorch():
     assert bm.get_default_backend() == {
-        "n4": "ants", "denoise": "ants", "registration": "ants", "kelly_kapowski": "ants"
+        "n4": "antstorch", "denoise": "antstorch", "registration": "antstorch", "kelly_kapowski": "antstorch"
     }
 
 
 def test_resolution_order(monkeypatch):
-    monkeypatch.setenv("ANTSTORCH_BACKEND", "n4=antstorch,denoise=antstorch")
-    assert bm.resolve_backend(None, "n4") == "antstorch"
-    assert bm.resolve_backend(None, "registration") == "ants"
-    antstorch.set_default_backend({"registration": "antstorch"})
+    monkeypatch.setenv("ANTSTORCH_BACKEND", "n4=ants,denoise=ants")
+    assert bm.resolve_backend(None, "n4") == "ants"
     assert bm.resolve_backend(None, "registration") == "antstorch"
-    assert bm.resolve_backend("ants", "n4") == "ants"
-    assert bm.resolve_backend({"n4": "ants"}, "denoise") == "antstorch"
+    antstorch.set_default_backend({"registration": "ants"})
+    assert bm.resolve_backend(None, "registration") == "ants"
+    assert bm.resolve_backend("antstorch", "n4") == "antstorch"
+    assert bm.resolve_backend({"n4": "antstorch"}, "denoise") == "ants"
 
 
 @pytest.mark.parametrize("bad", ["gpu", {"foo": "ants"}, 3])

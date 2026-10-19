@@ -17,7 +17,7 @@ def cortical_thickness(t1, device=None, verbose: bool = False, backend=None):
     backend : str, dict or None
         "ants" or "antstorch" for KellyKapowski (key "kelly_kapowski"), and for the
         N4 and template registration inside deep_atropos (keys "n4", "registration").
-        None uses antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "ants".
+        None uses antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "antstorch".
 
     Returns
     -------
@@ -138,7 +138,7 @@ def longitudinal_cortical_thickness(
     backend : str, dict or None
         "ants" or "antstorch" per operation (keys "n4", "denoise", "registration",
         "kelly_kapowski"); Atropos has no ANTsTorch equivalent and stays on ANTs.
-        None uses antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "ants".
+        None uses antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "antstorch".
 
     Returns
     -------

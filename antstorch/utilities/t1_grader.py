@@ -18,7 +18,7 @@ def t1_grader(image, device=None, verbose=False, backend=None):
 
     backend : str, dict or None
         "ants" or "antstorch" for the template registration (key "registration").
-        None uses antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "ants".
+        None uses antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "antstorch".
 
     Returns
     -------
@@ -59,7 +59,7 @@ def t1_grader(image, device=None, verbose=False, backend=None):
     templateb = ants.pad_image_by_factor(templateb, 8)
     templatebsmall = ants.resample_image(templateb, (2, 2, 2))
 
-    reg = run_registration(templatebsmall, t1, 'Similarity',
+    reg = run_registration(templatebsmall, t1, 'Affine',
                            backend=backend, device=device, verbose=verbose)
 
     ilist = [[templateb]]
