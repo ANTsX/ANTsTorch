@@ -9,7 +9,9 @@ def deep_flash(t1,
                use_rank_intensity=True,
                device=None,
                verbose=False,
-               backend=None
+               backend=None,
+               brain_mask=None,
+               do_bias_correction=True
                ):
 
     """
@@ -64,6 +66,14 @@ def deep_flash(t1,
 
     verbose : boolean
         Print progress to the screen.
+
+    brain_mask : ANTsImage or None
+        Precomputed brain mask of the input image (voxels > 0.5 are kept).  When given,
+        brain extraction is skipped; compute it once with antstorch.brain_extraction
+        and share it between applications.
+
+    do_bias_correction : boolean
+        Run N4 on the input(s) when do_preprocessing is True (set False if already corrected).
 
     backend : str, dict or None
         "ants" or "antstorch" for the internal N4 and template registration; a dict selects per
@@ -168,13 +178,17 @@ def deep_flash(t1,
             print("Preprocessing T1.")
 
         # Brain extraction
-        probability_mask = brain_extraction(t1_preprocessed, modality="t1", verbose=verbose)
-        t1_mask = ants.threshold_image(probability_mask, 0.5, 1, 1, 0)
+        if brain_mask is not None:
+            t1_mask = ants.threshold_image(ants.image_clone(brain_mask, pixeltype='float'), 0.5, 1e9, 1, 0)
+        else:
+            probability_mask = brain_extraction(t1_preprocessed, modality="t1", device=device, verbose=verbose)
+            t1_mask = ants.threshold_image(probability_mask, 0.5, 1, 1, 0)
         t1_preprocessed = t1_preprocessed * t1_mask
 
         # Bias correction
-        t1_preprocessed = run_n4(t1_preprocessed, t1_mask, shrink_factor=4, verbose=verbose,
-                                 backend=backend, device=device)
+        if do_bias_correction:
+            t1_preprocessed = run_n4(t1_preprocessed, t1_mask, shrink_factor=4, verbose=verbose,
+                                     backend=backend, device=device)
 
         # Warp to template
         registration = run_registration(t1_template, t1_preprocessed,
@@ -207,8 +221,9 @@ def deep_flash(t1,
             t2_preprocessed = t2_preprocessed * t1_mask
 
             # Do bias correction
-            t2_preprocessed = run_n4(t2_preprocessed, t1_mask, shrink_factor=4, verbose=verbose,
-                                     backend=backend, device=device)
+            if do_bias_correction:
+                t2_preprocessed = run_n4(t2_preprocessed, t1_mask, shrink_factor=4, verbose=verbose,
+                                         backend=backend, device=device)
 
             # Warp to template
             t2_preprocessed = ants.apply_transforms(fixed=t1_template,

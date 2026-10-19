@@ -6,7 +6,7 @@ from .backend_ops import run_n4, run_registration
 import torch
 import torch.nn as nn
 
-def cit168_labeling(t1, device=None, verbose=False, backend=None):
+def cit168_labeling(t1, device=None, verbose=False, backend=None, brain_mask=None, do_preprocessing=True):
     """
     
     Perform CIT168 segmentation in T1 images using Pauli atlas (CIT168) 
@@ -65,6 +65,14 @@ def cit168_labeling(t1, device=None, verbose=False, backend=None):
     verbose : boolean
         Print progress to the screen.
 
+    brain_mask : ANTsImage or None
+        Precomputed brain mask of the input image (voxels > 0.5 are kept).  When given,
+        brain extraction is skipped; compute it once with antstorch.brain_extraction
+        and share it between applications.
+
+    do_preprocessing : boolean
+        Run N4 bias correction (False if the input is already bias corrected).
+
     backend : str, dict or None
         "ants" or "antstorch" for the internal N4 and template registration (including the preprocessing); a dict selects per
         operation (keys "n4", "denoise", "registration").  None uses antstorch.set_default_backend(),
@@ -114,11 +122,13 @@ def cit168_labeling(t1, device=None, verbose=False, backend=None):
 
     t1_preprocessing = preprocess_brain_image(t1,
         truncate_intensity=[1e-4, 0.999],
-        brain_extraction_modality="t1threetissue",
+        brain_extraction_modality=None if brain_mask is not None else "t1threetissue",
+        brain_mask=brain_mask,
         template=None,
-        do_bias_correction=True,
+        do_bias_correction=do_preprocessing,
         do_denoising=False,
         intensity_normalization_type='01',
+        device=device,
         verbose=verbose,
         backend=backend)
                         

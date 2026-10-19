@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 
 import antstorch
@@ -68,3 +70,35 @@ def test_kelly_kapowski_ants_thickness_prior(monkeypatch):
     monkeypatch.setattr(backend_ops.ants, "kelly_kapowski", lambda **kw: calls.append(kw) or "thickness")
     backend_ops.run_kelly_kapowski("seg", "gm", "wm", gradient_step=0.0025, thickness_prior=10, backend="ants")
     assert calls[0]["t"] == 10 and calls[0]["r"] == 0.0025
+
+
+class _Img:
+    def clone(self, pixeltype):
+        return self
+
+
+@pytest.mark.parametrize("name, engine", [
+    ("antsRegistrationSyNQuickRepro[a]", "robust_affine"),
+    ("Affine", "robust_affine"),
+    ("antsRegistrationSyNQuickRepro[s]", "greedy_registration"),
+    ("SyN", "greedy_registration"),
+    ("Similarity", "syn_registration"),
+    ("antsRegistrationSyNQuick[r]", "syn_registration"),
+    ("antsRegistrationSyNQuickRepro[t]", "syn_registration"),
+])
+def test_antstorch_registration_engine(monkeypatch, name, engine):
+    called = []
+
+    def fake(label):
+        return lambda *a, **k: called.append((label, k)) or {"engine": label}
+
+    # `antstorch.syn.robust_affine` is shadowed by the function of the same name,
+    # so patch the modules through sys.modules.
+    monkeypatch.setattr(sys.modules["antstorch.syn.robust_affine"], "robust_affine", fake("robust_affine"))
+    monkeypatch.setattr(sys.modules["antstorch.greedy"], "greedy_registration", fake("greedy_registration"))
+    monkeypatch.setattr(sys.modules["antstorch.syn.syn"], "syn_registration", fake("syn_registration"))
+    monkeypatch.setattr(antstorch.syn, "syn_registration", fake("syn_registration"))
+
+    out = backend_ops.run_registration(_Img(), _Img(), name, backend="antstorch", device="cpu")
+    assert out == {"engine": engine}
+    assert called[0][1]["device"] in ("cpu",) or str(called[0][1]["device"]) == "cpu"

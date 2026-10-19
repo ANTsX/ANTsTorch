@@ -31,6 +31,7 @@ def preprocess_brain_image(
     device=None,
     verbose: bool = True,
     backend=None,
+    brain_mask: Optional["ants.ANTsImage"] = None,
 ) -> Dict[str, Any]:
     """
     Basic preprocessing pipeline for T1-weighted brain MRI
@@ -91,6 +92,11 @@ def preprocess_brain_image(
         ``{"n4": "antstorch", "denoise": "antstorch", "registration": "ants"}``.
         None uses antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "ants".
 
+    brain_mask : ANTsImage or None
+        Precomputed brain mask of ``image`` (voxels > 0.5 are kept).  When given, brain
+        extraction of ``image`` is skipped; compute it once with antstorch.brain_extraction
+        and share it between applications.
+
     Returns
     -------
     Dictionary with preprocessing information ANTs image (i.e., source_image) matched to the
@@ -121,7 +127,9 @@ def preprocess_brain_image(
 
     # Brain extraction
     mask = None
-    if brain_extraction_modality is not None:
+    if brain_mask is not None:
+        mask = ants.threshold_image(ants.image_clone(brain_mask, pixeltype='float'), 0.5, 1e9, 1, 0)
+    elif brain_extraction_modality is not None:
         if verbose:
             print("Preprocessing:  brain extraction.")
 
@@ -150,11 +158,13 @@ def preprocess_brain_image(
             transforms = dict(fwdtransforms=registration['fwdtransforms'],
                               invtransforms=registration['invtransforms'])
         else:
-            mask_key = _template_mask_key(template_image, brain_extraction_modality)
+            # The template mask needs a modality even when the image mask was supplied.
+            bext_mod = brain_extraction_modality or "t1"
+            mask_key = _template_mask_key(template_image, bext_mod)
             template_mask = _TEMPLATE_MASK_CACHE.get(mask_key)
             if template_mask is None:
-                template_bext = brain_extraction(template_image, modality=brain_extraction_modality, device=device, verbose=verbose)
-                if brain_extraction_modality == "t1threetissue":
+                template_bext = brain_extraction(template_image, modality=bext_mod, device=device, verbose=verbose)
+                if bext_mod == "t1threetissue":
                     template_mask = ants.threshold_image(template_bext['segmentation_image'], 1, 1, 1, 0)
                 else:
                     template_mask = ants.threshold_image(template_bext, 0.5, 1, 1, 0)

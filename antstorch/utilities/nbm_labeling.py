@@ -6,7 +6,7 @@ import ants
 import torch
 import torch.nn as nn
 
-def nbm_labeling(t1, device=None, verbose=False):
+def nbm_labeling(t1, device=None, verbose=False, backend=None, brain_mask=None):
     """
     Perform CH13 and Nucleaus basalis of Meynert (NBM) segmentation in 
     T1 images using Avants labels.
@@ -25,6 +25,27 @@ def nbm_labeling(t1, device=None, verbose=False):
     Preprocessing consists of:
        * n4 bias correction and
        * brain extraction
+
+    Arguments
+    ---------
+    t1 : ANTsImage
+        input 3-D T1-weighted image.
+
+    device : torch.device or string, optional
+        Defaults to antstorch's default device.
+
+    verbose : boolean
+        Print progress to the screen.
+
+    backend : str, dict or None
+        "ants" or "antstorch" per operation (keys "n4", "denoise", "registration"); see
+        antstorch.set_default_backend().  None uses the session default, then
+        ANTSTORCH_BACKEND, then "ants".
+
+    brain_mask : ANTsImage or None
+        Precomputed brain mask of the input image (voxels > 0.5 are kept).  When given,
+        brain extraction is skipped; compute it once with antstorch.brain_extraction
+        and share it between applications.
     """
 
     from ..utilities import get_pretrained_network
@@ -63,8 +84,10 @@ def nbm_labeling(t1, device=None, verbose=False):
         template_transform_type=template_transform_type,
         do_bias_correction=True,
         do_denoising=False,
+        brain_mask=brain_mask,
         device=device,
-        verbose=verbose)
+        verbose=verbose,
+        backend=backend)
         
     t1_preprocessed = t1_preprocessing["preprocessed_image"] * t1_preprocessing['brain_mask']
     t1_preprocessed = ants.rank_intensity(t1_preprocessed)

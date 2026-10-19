@@ -93,6 +93,7 @@ def t1_grader(image, device=None, verbose=False, backend=None):
     
     model.load_state_dict(torch.load(weights_file_name, map_location="cpu"))
     model.eval()
+    model = model.to(device)
 
     def get_grade(score, probs):
         grade = 'f'
@@ -122,7 +123,7 @@ def t1_grader(image, device=None, verbose=False, backend=None):
         # PyTorch : (Batch, Channels, Depth, Height, Width)
         newshape = [1, 1] + list(xarr.shape)
         xarr = np.reshape(xarr, newshape)
-        xtensor = torch.from_numpy(xarr).float()
+        xtensor = torch.from_numpy(xarr).float().to(device)
         
         with torch.no_grad():
             preds_tensor = model(xtensor)

@@ -7,7 +7,8 @@ def deep_atropos(
     do_preprocessing=True,
     device=None,
     verbose=False,
-    backend=None
+    backend=None,
+    brain_mask=None
 ):
     """
     Six-tissue segmentation.
@@ -42,6 +43,11 @@ def deep_atropos(
 
     verbose : boolean
         Print progress to the screen.
+
+    brain_mask : ANTsImage or None
+        Precomputed brain mask of the input image (voxels > 0.5 are kept).  When given,
+        brain extraction is skipped; compute it once with antstorch.brain_extraction
+        and share it between applications.
 
     backend : str, dict or None
         "ants" or "antstorch" for the internal N4 and template registration;
@@ -119,32 +125,40 @@ def deep_atropos(
     reg = None
     t1_mask = None
     preprocessed_images = []
-    for i, img in enumerate(input_images):
-        n4 = run_n4(
-            truncate_image_intensity(img),
-            img * 0 + 1,
-            convergence={'iters': [50, 50, 50, 50], 'tol': 0.0},
-            rescale_intensities=True,
-            verbose=verbose,
-            backend=backend,
-            device=device
-        )
-        if i == 0:
-            t1_bext = _brain_extraction(input_images[0], modality="t1threetissue", device=device, verbose=verbose)
-            t1_mask = ants.threshold_image(t1_bext['segmentation_image'], 1, 1, 1, 0)
-            n4 = n4 * t1_mask
-            reg = run_registration(hcp_t1_template, n4,
-                                   "antsRegistrationSyNQuick[a]",
-                                   backend=backend, device=device,
-                                   verbose=verbose)
-            preprocessed_images.append(reg['warpedmovout'])
-        else:
-            n4 = n4 * t1_mask
-            n4 = ants.apply_transforms(hcp_t1_template, n4,
-                                       transformlist=reg['fwdtransforms'],
+    if do_preprocessing:
+        for i, img in enumerate(input_images):
+            n4 = run_n4(
+                truncate_image_intensity(img),
+                img * 0 + 1,
+                convergence={'iters': [50, 50, 50, 50], 'tol': 0.0},
+                rescale_intensities=True,
+                verbose=verbose,
+                backend=backend,
+                device=device
+            )
+            if i == 0:
+                if brain_mask is not None:
+                    t1_mask = ants.threshold_image(brain_mask, 0.5, 1e9, 1, 0)
+                else:
+                    t1_bext = _brain_extraction(input_images[0], modality="t1threetissue", device=device, verbose=verbose)
+                    t1_mask = ants.threshold_image(t1_bext['segmentation_image'], 1, 1, 1, 0)
+                n4 = n4 * t1_mask
+                reg = run_registration(hcp_t1_template, n4,
+                                       "antsRegistrationSyNQuick[a]",
+                                       backend=backend, device=device,
                                        verbose=verbose)
-            preprocessed_images.append(n4)
-        preprocessed_images[i] = ants.iMath_normalize(preprocessed_images[i])
+                preprocessed_images.append(reg['warpedmovout'])
+            else:
+                n4 = n4 * t1_mask
+                n4 = ants.apply_transforms(hcp_t1_template, n4,
+                                           transformlist=reg['fwdtransforms'],
+                                           verbose=verbose)
+                preprocessed_images.append(n4)
+            preprocessed_images[i] = ants.iMath_normalize(preprocessed_images[i])
+    else:
+        # Inputs are already preprocessed: only normalize (and nothing is warped back below).
+        for img in input_images:
+            preprocessed_images.append(ants.iMath_normalize(img))
 
     # ----------------------------
     # Build model and load weights
@@ -209,40 +223,34 @@ def deep_atropos(
     # Working tensor (N=1, C, D, H, W)
     batchX = np.zeros((in_channels, *patch_size), dtype=np.float32)
 
+    # Patches do not depend on the octant: extract them once instead of once per octant.
+    modality_patches = [
+        ants.extract_image_patches(
+            img, patch_size=patch_size, max_number_of_patches="all",
+            stride_length=stride_length, return_as_array=True
+        )
+        for img in preprocessed_images
+    ]
+    prior_patches = [
+        ants.extract_image_patches(
+            prior, patch_size=patch_size, max_number_of_patches="all",
+            stride_length=stride_length, return_as_array=True
+        )
+        for prior in hcp_template_priors
+    ]
+
     with torch.no_grad():
         for h in range(8):
             idx = 0
-            # Modalities
-            for img in preprocessed_images:
-                patches = ants.extract_image_patches(
-                    img, patch_size=patch_size, max_number_of_patches="all",
-                    stride_length=stride_length, return_as_array=True
-                )
+            for patches in modality_patches:
                 batchX[idx, :, :, :] = patches[h, :, :, :]
                 idx += 1
-            # Priors
-            for prior in hcp_template_priors:
-                patches = ants.extract_image_patches(
-                    prior, patch_size=patch_size, max_number_of_patches="all",
-                    stride_length=stride_length, return_as_array=True
-                )
+            for patches in prior_patches:
                 batchX[idx, :, :, :] = patches[h, :, :, :]
                 idx += 1
 
-            # NOTE (2026-08-23 perf fix): this forward pass was previously
-            # nested one level too deep, inside the priors loop above -- so
-            # it ran once per prior (6x) per octant instead of once per
-            # octant, with the first 5 calls seeing a still-partially-filled
-            # batchX (only the modalities + priors filled so far). The
-            # result was still numerically correct (only the LAST call, once
-            # all 6 priors were filled, is ever kept -- `yt` is overwritten
-            # every iteration and only read after the loop), but it wasted
-            # ~6x the compute (48 forward passes instead of 8 across the 8
-            # octants). Dedented so it now runs exactly once per octant,
-            # after batchX is fully populated.
-            with torch.no_grad():
-                xt = torch.from_numpy(batchX[None, ...]).to(device)  # [1,C,D,H,W]
-                yt = model(xt).squeeze(0).permute(1, 2, 3, 0).cpu().numpy()  # [C_out,D,H,W]
+            xt = torch.from_numpy(batchX[None, ...]).to(device)  # [1,C,D,H,W]
+            yt = model(xt).squeeze(0).permute(1, 2, 3, 0).cpu().numpy()  # [C_out,D,H,W]
 
             predicted_data[h, ...] = yt
 

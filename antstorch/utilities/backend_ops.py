@@ -13,9 +13,13 @@ import ants
 
 from .backend_manager import resolve_backend
 
-# ants.registration transform names -> antstorch.syn.syn_registration names.
+# ants.registration transform names -> ANTsTorch transform models.
 # The "Quick" presets map to the nearest ANTsTorch model: the result is
 # comparable, not numerically identical, to the ANTs preset.
+# Engines (see _antstorch_registration): "Affine" -> robust_affine, "SyN" ->
+# greedy_registration (both probe MPS and fall back to the CPU on their own);
+# "Rigid", "Similarity", "Translation" and "SyNOnly" keep their exact model
+# through syn_registration.
 _SYN_TRANSFORM_MAP = {
     "Translation": "Translation",
     "Rigid": "Rigid",
@@ -33,6 +37,11 @@ _SYN_TRANSFORM_MAP = {
     "antsRegistrationSyNQuickRepro[a]": "Affine",
     "antsRegistrationSyNQuickRepro[s]": "SyN",
     "antsRegistrationSyNQuickRepro[t]": "Translation",
+    # nbm_labeling spells the preset "antsRegistrationSyNReproQuick[a]".
+    "antsRegistrationSyNReproQuick[r]": "Rigid",
+    "antsRegistrationSyNReproQuick[a]": "Affine",
+    "antsRegistrationSyNReproQuick[s]": "SyN",
+    "antsRegistrationSyNReproQuick[t]": "Translation",
 }
 
 
@@ -56,6 +65,35 @@ def run_denoise(image, mask=None, shrink_factor=1, *, backend=None, device=None)
     return ants.denoise_image(image, mask, shrink_factor=shrink_factor)
 
 
+def _antstorch_registration(fixed, moving, mapped, device, verbose):
+    """Run ``mapped`` (a value of ``_SYN_TRANSFORM_MAP``) with an ANTsTorch engine.
+
+    All engines return ``warpedmovout``, ``fwdtransforms`` and ``invtransforms``
+    in the ``ants.registration`` layout (``fwd = [warp, affine]`` and
+    ``inv = [affine, inverse_warp]`` for SyN, a single affine file otherwise).
+    """
+    from ..utilities.device_manager import get_default_device
+
+    if device is None:
+        device = get_default_device()
+    fixed, moving = fixed.clone("float"), moving.clone("float")
+    if mapped == "Affine":
+        from ..syn.robust_affine import robust_affine
+
+        return robust_affine(fixed, moving, mode="auto", device=str(device), verbose=verbose)
+    if mapped == "SyN":
+        from ..greedy import greedy_registration
+
+        return greedy_registration(
+            fixed, moving, return_inverse=True, device=str(device), verbose=verbose
+        )
+    from ..syn import syn_registration
+
+    return syn_registration(
+        fixed, moving, type_of_transform=mapped, device=device, verbose=verbose
+    )
+
+
 def run_registration(fixed, moving, type_of_transform, *, backend=None, device=None, verbose=False):
     """Registration returning ``warpedmovout``, ``fwdtransforms`` and
     ``invtransforms`` (transform files usable with ``ants.apply_transforms``).
@@ -69,12 +107,7 @@ def run_registration(fixed, moving, type_of_transform, *, backend=None, device=N
                 RuntimeWarning,
             )
         else:
-            from ..syn import syn_registration
-
-            return syn_registration(
-                fixed.clone("float"), moving.clone("float"),
-                type_of_transform=mapped, device=device, verbose=verbose,
-            )
+            return _antstorch_registration(fixed, moving, mapped, device, verbose)
     return ants.registration(
         fixed=fixed, moving=moving, type_of_transform=type_of_transform, verbose=verbose
     )

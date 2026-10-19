@@ -10,7 +10,8 @@ def cerebellum_morphology(t1,
                           do_preprocessing=True,
                           device=None,
                           verbose=False,
-                          backend=None):
+                          backend=None,
+                          brain_mask=None):
     """
     Cerebellum tissue segmentation, Schmahmann parcellation, and thickness.
 
@@ -70,6 +71,11 @@ def cerebellum_morphology(t1,
 
     verbose : boolean
         Print progress to the screen.
+
+    brain_mask : ANTsImage or None
+        Precomputed brain mask of the input image (voxels > 0.5 are kept).  When given,
+        brain extraction is skipped; compute it once with antstorch.brain_extraction
+        and share it between applications.
 
     backend : str, dict or None
         "ants" or "antstorch" for the internal N4, template registration and (when
@@ -148,8 +154,11 @@ def cerebellum_morphology(t1,
 
     if cerebellum_mask is None:
         # Brain extraction → registration to whole-brain template
-        probability_mask = brain_extraction(t1_preprocessed, modality="t1", verbose=verbose)
-        t1_mask = ants.threshold_image(probability_mask, 0.5, 1, 1, 0)
+        if brain_mask is not None:
+            t1_mask = ants.threshold_image(ants.image_clone(brain_mask, pixeltype='float'), 0.5, 1e9, 1, 0)
+        else:
+            probability_mask = brain_extraction(t1_preprocessed, modality="t1", device=device, verbose=verbose)
+            t1_mask = ants.threshold_image(probability_mask, 0.5, 1, 1, 0)
         t1_brain_preprocessed = t1_preprocessed * t1_mask
 
         if verbose:

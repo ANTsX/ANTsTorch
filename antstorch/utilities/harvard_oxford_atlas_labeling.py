@@ -9,7 +9,9 @@ import ants
 def harvard_oxford_atlas_labeling(t1,
                                   do_preprocessing=True,
                                   device=None,
-                                  verbose=False):
+                                  verbose=False,
+                                  backend=None,
+                                  brain_mask=None):
 
 
     """
@@ -73,6 +75,16 @@ def harvard_oxford_atlas_labeling(t1,
     verbose : boolean
         Print progress to the screen.
 
+    backend : str, dict or None
+        "ants" or "antstorch" per operation (keys "n4", "denoise", "registration"); see
+        antstorch.set_default_backend().  None uses the session default, then
+        ANTSTORCH_BACKEND, then "ants".
+
+    brain_mask : ANTsImage or None
+        Precomputed brain mask of the input image (voxels > 0.5 are kept).  When given,
+        brain extraction is skipped; compute it once with antstorch.brain_extraction
+        and share it between applications.
+
     Returns
     -------
     Dict consisting of the segmentation image and probability images for
@@ -126,8 +138,10 @@ def harvard_oxford_atlas_labeling(t1,
             template_transform_type=template_transform_type,
             do_bias_correction=True,
             do_denoising=False,
+            brain_mask=brain_mask,
             device=device,
-            verbose=verbose)
+            verbose=verbose,
+            backend=backend)
         t1_preprocessed = t1_preprocessing["preprocessed_image"] * t1_preprocessing['brain_mask']
         t1_preprocessed = reshape_image(t1_preprocessed, crop_size=cropped_template_size)
 
