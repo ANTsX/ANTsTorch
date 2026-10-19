@@ -70,6 +70,14 @@ finer one, mirroring ``antsRegistration``'s
     PYTHONPATH=. python tools/registration/run_syn_registration.py \
         --type-of-transform SyNOnly --regularizer bspline \
         --update-field-mesh-size-at-base-level 2 --verbose
+
+Use the Adam-momentum update (the benchmark's ``gaussian_regadam`` arm); any
+regularizer combines with it::
+
+    PYTHONPATH=. python tools/registration/run_syn_registration.py \
+        --regularizer gaussian --optimizer reg_adam --verbose
+
+For the greedy (one-directional) registration, see ``run_greedy_registration.py``.
 """
 
 import argparse
@@ -141,6 +149,19 @@ def parse_args() -> argparse.Namespace:
         help="regularizer='bspline' only: disable fitting a zero-displacement boundary "
         "constraint (ITK's own default keeps this enabled)",
     )
+    parser.add_argument(
+        "--optimizer",
+        choices=("gradient_descent", "reg_adam", "syn_reg_adam"),
+        default="gradient_descent",
+        help="Update rule for the dense stage: 'gradient_descent' (default), 'reg_adam' (the benchmark's "
+        "'*_regadam' arms: per-voxel Adam moments, reset at each level, with smoothed gradient/quotient) or "
+        "'syn_reg_adam' (syntx.syn()'s own reg_adam)",
+    )
+    parser.add_argument("--optimizer-lr", type=float, default=1.0, help="Step multiplier for the reg_adam optimizers")
+    parser.add_argument("--adam-betas", type=float, nargs=2, default=(0.9, 0.999), metavar=("BETA1", "BETA2"))
+    parser.add_argument("--adam-eps", type=float, default=1e-8)
+    parser.add_argument("--regadam-grad-sigma", type=float, default=1.8, help="reg_adam: gradient smoothing sigma (voxels)")
+    parser.add_argument("--regadam-quotient-sigma", type=float, default=0.8, help="reg_adam: Adam-quotient smoothing sigma (voxels)")
     parser.add_argument("--inverse-method", choices=("fixed_point", "anderson", "hybrid_lm"), default="anderson")
     parser.add_argument("--in-loop-inverse-steps", type=int, default=6)
     parser.add_argument(
@@ -242,6 +263,12 @@ def main() -> None:
         flow_sigma=args.flow_sigma,
         total_sigma=args.total_sigma,
         regularizer=args.regularizer,
+        optimizer=args.optimizer,
+        optimizer_lr=args.optimizer_lr,
+        adam_betas=tuple(args.adam_betas),
+        adam_eps=args.adam_eps,
+        regadam_grad_sigma=args.regadam_grad_sigma,
+        regadam_quotient_sigma=args.regadam_quotient_sigma,
         update_field_mesh_size_at_base_level=args.update_field_mesh_size_at_base_level,
         total_field_mesh_size_at_base_level=args.total_field_mesh_size_at_base_level,
         bspline_enforce_stationary_boundary=args.bspline_enforce_stationary_boundary,
@@ -286,6 +313,7 @@ def main() -> None:
     print(f"Registration completed in {elapsed:.2f} seconds on {result['provenance']['device']}.")
     print(f"Type of transform: {args.type_of_transform}")
     print(f"Regularizer: {args.regularizer}")
+    print(f"Optimizer: {args.optimizer}")
     if result["loss_history"]:
         print(f"Final SyN loss: {result['loss_history'][-1]:.6g}")
     if result["affine_loss_history"] is not None:
