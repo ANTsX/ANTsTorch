@@ -5,14 +5,13 @@ import torch
 
 def deep_flash(t1,
                t2=None,
+               brain_mask=None,
                do_preprocessing=True,
+               do_bias_correction=True,
                use_rank_intensity=True,
                device=None,
                verbose=False,
-               backend=None,
-               brain_mask=None,
-               do_bias_correction=True
-               ):
+               backend=None):
 
     """
     Hippocampal/Enthorhinal segmentation using "Deep Flash"

@@ -6,7 +6,12 @@ from .backend_ops import run_n4, run_registration
 import torch
 import torch.nn as nn
 
-def cit168_labeling(t1, device=None, verbose=False, backend=None, brain_mask=None, do_preprocessing=True):
+def cit168_labeling(t1,
+                    brain_mask=None,
+                    do_preprocessing=True,
+                    device=None,
+                    verbose=False,
+                    backend=None):
     """
     
     Perform CIT168 segmentation in T1 images using Pauli atlas (CIT168) 

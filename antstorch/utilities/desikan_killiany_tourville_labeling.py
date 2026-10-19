@@ -9,11 +9,11 @@ def desikan_killiany_tourville_labeling(t1,
                                         do_preprocessing=True,
                                         return_probability_images=False,
                                         do_lobar_parcellation=False,
+                                        brain_mask=None,
+                                        atropos_segmentation=None,
                                         device=None,
                                         verbose=False,
-                                        backend=None,
-                                        brain_mask=None,
-                                        atropos_segmentation=None):
+                                        backend=None):
     """
     Desikan-Killiany-Tourville labeling.  https://pubmed.ncbi.nlm.nih.gov/23227001/
 

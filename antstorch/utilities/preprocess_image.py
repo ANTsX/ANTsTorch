@@ -28,10 +28,10 @@ def preprocess_brain_image(
     intensity_matching_type: Optional[str] = None,
     reference_image: Optional["ants.ANTsImage"] = None,
     intensity_normalization_type: Optional[str] = None,
+    brain_mask: Optional["ants.ANTsImage"] = None,
     device=None,
     verbose: bool = True,
     backend=None,
-    brain_mask: Optional["ants.ANTsImage"] = None,
 ) -> Dict[str, Any]:
     """
     Basic preprocessing pipeline for T1-weighted brain MRI

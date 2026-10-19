@@ -8,10 +8,10 @@ import ants
 
 def harvard_oxford_atlas_labeling(t1,
                                   do_preprocessing=True,
+                                  brain_mask=None,
                                   device=None,
                                   verbose=False,
-                                  backend=None,
-                                  brain_mask=None):
+                                  backend=None):
 
 
     """

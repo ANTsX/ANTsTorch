@@ -6,12 +6,12 @@ from .backend_ops import run_n4, run_registration, run_kelly_kapowski
 
 def cerebellum_morphology(t1,
                           cerebellum_mask=None,
+                          brain_mask=None,
                           compute_thickness_image=False,
                           do_preprocessing=True,
                           device=None,
                           verbose=False,
-                          backend=None,
-                          brain_mask=None):
+                          backend=None):
     """
     Cerebellum tissue segmentation, Schmahmann parcellation, and thickness.
 

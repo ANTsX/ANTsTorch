@@ -5,10 +5,10 @@ import torch
 def deep_atropos(
     t1,
     do_preprocessing=True,
+    brain_mask=None,
     device=None,
     verbose=False,
     backend=None,
-    brain_mask=None
 ):
     """
     Six-tissue segmentation.
