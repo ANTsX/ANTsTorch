@@ -1,9 +1,10 @@
 import ants
+from .backend_ops import run_registration
 import numpy as np
 import pandas as pd
 import torch
 
-def t1_grader(image, device=None, verbose=False):
+def t1_grader(image, device=None, verbose=False, backend=None):
     """
     Supervised grader / scoring of T1-weighted brain MRI.
 
@@ -14,6 +15,10 @@ def t1_grader(image, device=None, verbose=False):
 
     verbose : boolean
         Print progress to the screen.
+
+    backend : str, dict or None
+        "ants" or "antstorch" for the template registration (key "registration").
+        None uses antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "antstorch".
 
     Returns
     -------
@@ -28,7 +33,6 @@ def t1_grader(image, device=None, verbose=False):
     from ..utilities import get_pretrained_network
     from ..utilities import get_antstorch_data
     from ..architectures import create_resnet_model_3d
-    from ..syn import robust_affine
     from ..utilities.device_manager import get_default_device
 
     if device is None:
@@ -55,7 +59,8 @@ def t1_grader(image, device=None, verbose=False):
     templateb = ants.pad_image_by_factor(templateb, 8)
     templatebsmall = ants.resample_image(templateb, (2, 2, 2))
 
-    reg = robust_affine(templatebsmall, t1, mode="auto", device=str(device), verbose=verbose)
+    reg = run_registration(templatebsmall, t1, 'Affine',
+                           backend=backend, device=device, verbose=verbose)
 
     ilist = [[templateb]]
     nsim = 16

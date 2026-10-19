@@ -1,7 +1,19 @@
 from __future__ import annotations
 
+import hashlib
+
 import ants
 from typing import Optional, Tuple, Dict, Any
+
+# Brain mask of the registration template, keyed by (modality, template content).
+# The template is fixed across calls, so extracting its brain once is enough.
+_TEMPLATE_MASK_CACHE: Dict[Any, Any] = {}
+
+
+def _template_mask_key(template_image, modality):
+    digest = hashlib.blake2b(template_image.numpy().tobytes(), digest_size=16).hexdigest()
+    return (modality, digest, tuple(template_image.shape), tuple(template_image.spacing),
+            tuple(template_image.origin), tuple(map(float, template_image.direction.ravel())))
 
 
 def preprocess_brain_image(
@@ -19,6 +31,7 @@ def preprocess_brain_image(
     brain_mask: Optional["ants.ANTsImage"] = None,
     device=None,
     verbose: bool = True,
+    backend=None,
 ) -> Dict[str, Any]:
     """
     Basic preprocessing pipeline for T1-weighted brain MRI
@@ -73,6 +86,17 @@ def preprocess_brain_image(
     verbose : boolean
         Print progress to the screen.
 
+    backend : str, dict or None
+        "ants" (C++) or "antstorch" (PyTorch, CUDA/MPS/CPU) for N4, denoising and
+        template registration.  A dict selects per operation, e.g.
+        ``{"n4": "antstorch", "denoise": "antstorch", "registration": "ants"}``.
+        None uses antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "antstorch".
+
+    brain_mask : ANTsImage or None
+        Precomputed brain mask of ``image`` (voxels > 0.5 are kept).  When given, brain
+        extraction of ``image`` is skipped; compute it once with antstorch.brain_extraction
+        and share it between applications.
+
     Returns
     -------
     Dictionary with preprocessing information ANTs image (i.e., source_image) matched to the
@@ -88,12 +112,9 @@ def preprocess_brain_image(
     # Local imports to mirror original structure and keep dependency surface minimal
     import torch
     from ..utilities import brain_extraction
-    from ..utilities import get_antstorch_data
+    from ..utilities import get_antstorch_data  
+    from .backend_ops import run_n4, run_denoise, run_registration
     from ..utilities.device_manager import get_default_device
-    from ..utilities.n4_bias_field_correction import n4_bias_field_correction
-    from ..utilities.denoise_image import denoise_image
-    from ..syn.robust_affine import robust_affine
-    from ..greedy import greedy_registration
 
     if device is None:
         device = get_default_device()
@@ -126,16 +147,6 @@ def preprocess_brain_image(
             mask = ants.threshold_image(bext, 0.5, 1, 1, 0)
             mask = ants.morphology(mask, "close", 6).iMath_fill_holes()
 
-    def _register_to_template(fixed_img, moving_img, tx_type):
-        tx_lower = str(tx_type).lower()
-        if "syn" in tx_lower and not tx_lower.endswith("[a]") and not tx_lower.endswith("[r]"):
-            return greedy_registration(
-                fixed=fixed_img, moving=moving_img, return_inverse=True, device=str(device), verbose=verbose
-            )
-        return robust_affine(
-            fixed=fixed_img, moving=moving_img, mode="auto", device=str(device), verbose=verbose
-        )
-
     # Template normalization
     transforms = None
     if template_transform_type is not None:
@@ -146,22 +157,34 @@ def preprocess_brain_image(
             template_image = template
 
         if mask is None:
-            registration = _register_to_template(template_image, preprocessed_image, template_transform_type)
+            registration = run_registration(
+                template_image, preprocessed_image, template_transform_type,
+                backend=backend, device=device, verbose=verbose
+            )
             preprocessed_image = registration['warpedmovout']
             transforms = dict(fwdtransforms=registration['fwdtransforms'],
                               invtransforms=registration['invtransforms'])
         else:
+            # The template mask needs a modality even when the image mask was supplied.
             bext_mod = brain_extraction_modality or "t1"
-            template_bext = brain_extraction(template_image, modality=bext_mod, device=device, verbose=verbose)
-            if bext_mod == "t1threetissue":
-                template_mask = ants.threshold_image(template_bext['segmentation_image'], 1, 1, 1, 0)
-            else:
-                template_mask = ants.threshold_image(template_bext, 0.5, 1, 1, 0)
+            mask_key = _template_mask_key(template_image, bext_mod)
+            template_mask = _TEMPLATE_MASK_CACHE.get(mask_key)
+            if template_mask is None:
+                template_bext = brain_extraction(template_image, modality=bext_mod, device=device, verbose=verbose)
+                if bext_mod == "t1threetissue":
+                    template_mask = ants.threshold_image(template_bext['segmentation_image'], 1, 1, 1, 0)
+                else:
+                    template_mask = ants.threshold_image(template_bext, 0.5, 1, 1, 0)
+                _TEMPLATE_MASK_CACHE[mask_key] = template_mask
+            template_mask = ants.image_clone(template_mask)
             template_brain_image = template_mask * template_image
 
             preprocessed_brain_image = mask * preprocessed_image
 
-            registration = _register_to_template(template_brain_image, preprocessed_brain_image, template_transform_type)
+            registration = run_registration(
+                template_brain_image, preprocessed_brain_image, template_transform_type,
+                backend=backend, device=device, verbose=verbose
+            )
             transforms = dict(fwdtransforms=registration['fwdtransforms'],
                               invtransforms=registration['invtransforms'])
 
@@ -180,14 +203,16 @@ def preprocess_brain_image(
     if do_bias_correction:
         if verbose:
             print("Preprocessing:  bias correction.")
-        n4_output = n4_bias_field_correction(
-            preprocessed_image,
-            mask=mask,
-            shrink_factor=4,
-            return_bias_field=return_bias_field,
-            device=device,
-            verbose=verbose,
-        )
+        if mask is None:
+            n4_output = run_n4(
+                preprocessed_image, shrink_factor=4, return_bias_field=return_bias_field,
+                verbose=verbose, backend=backend, device=device
+            )
+        else:
+            n4_output = run_n4(
+                preprocessed_image, mask, shrink_factor=4, return_bias_field=return_bias_field,
+                verbose=verbose, backend=backend, device=device
+            )
         if return_bias_field:
             bias_field = n4_output
         else:
@@ -197,9 +222,10 @@ def preprocess_brain_image(
     if do_denoising:
         if verbose:
             print("Preprocessing:  denoising.")
-        preprocessed_image = denoise_image(
-            preprocessed_image, mask=mask, shrink_factor=1, device=device, verbose=verbose
-        )
+        if mask is None:
+            preprocessed_image = run_denoise(preprocessed_image, shrink_factor=1, backend=backend, device=device)
+        else:
+            preprocessed_image = run_denoise(preprocessed_image, mask, shrink_factor=1, backend=backend, device=device)
 
     # Image matching
     if reference_image is not None and intensity_matching_type is not None:

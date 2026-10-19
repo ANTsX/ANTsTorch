@@ -7,7 +7,8 @@ def deep_atropos(
     do_preprocessing=True,
     brain_mask=None,
     device=None,
-    verbose=False
+    verbose=False,
+    backend=None,
 ):
     """
     Six-tissue segmentation.
@@ -43,6 +44,16 @@ def deep_atropos(
     verbose : boolean
         Print progress to the screen.
 
+    brain_mask : ANTsImage or None
+        Precomputed brain mask of the input image (voxels > 0.5 are kept).  When given,
+        brain extraction is skipped; compute it once with antstorch.brain_extraction
+        and share it between applications.
+
+    backend : str, dict or None
+        "ants" or "antstorch" for the internal N4 and template registration;
+        a dict selects per operation (keys "n4", "registration").  None uses
+        antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "antstorch".
+
     Returns
     -------
     Dictionary consisting of the segmentation image and probability images for
@@ -59,9 +70,8 @@ def deep_atropos(
     from ..utilities import get_antstorch_data as _get_antstorch_data
     from ..utilities import get_pretrained_network as _get_pretrained_network
     from ..utilities import brain_extraction as _brain_extraction
-    from ..utilities import n4_bias_field_correction as _n4_bias_field_correction
-    from ..syn import robust_affine as _robust_affine
     from ..utilities.device_manager import get_default_device
+    from .backend_ops import run_n4, run_registration
 
     if device is None:
         device = get_default_device()   
@@ -117,13 +127,14 @@ def deep_atropos(
     preprocessed_images = []
     if do_preprocessing:
         for i, img in enumerate(input_images):
-            n4 = _n4_bias_field_correction(
+            n4 = run_n4(
                 truncate_image_intensity(img),
-                mask=img * 0 + 1,
+                img * 0 + 1,
                 convergence={'iters': [50, 50, 50, 50], 'tol': 0.0},
                 rescale_intensities=True,
-                device=device,
-                verbose=verbose
+                verbose=verbose,
+                backend=backend,
+                device=device
             )
             if i == 0:
                 if brain_mask is not None:
@@ -132,13 +143,10 @@ def deep_atropos(
                     t1_bext = _brain_extraction(input_images[0], modality="t1threetissue", device=device, verbose=verbose)
                     t1_mask = ants.threshold_image(t1_bext['segmentation_image'], 1, 1, 1, 0)
                 n4 = n4 * t1_mask
-                reg = _robust_affine(
-                    hcp_t1_template,
-                    n4,
-                    mode="auto",
-                    device=str(device),
-                    verbose=verbose,
-                )
+                reg = run_registration(hcp_t1_template, n4,
+                                       "antsRegistrationSyNQuick[a]",
+                                       backend=backend, device=device,
+                                       verbose=verbose)
                 preprocessed_images.append(reg['warpedmovout'])
             else:
                 n4 = n4 * t1_mask
@@ -148,7 +156,8 @@ def deep_atropos(
                 preprocessed_images.append(n4)
             preprocessed_images[i] = ants.iMath_normalize(preprocessed_images[i])
     else:
-        for i, img in enumerate(input_images):
+        # Inputs are already preprocessed: only normalize (and nothing is warped back below).
+        for img in input_images:
             preprocessed_images.append(ants.iMath_normalize(img))
 
     # ----------------------------
@@ -214,6 +223,7 @@ def deep_atropos(
     # Working tensor (N=1, C, D, H, W)
     batchX = np.zeros((in_channels, *patch_size), dtype=np.float32)
 
+    # Patches do not depend on the octant: extract them once instead of once per octant.
     modality_patches = [
         ants.extract_image_patches(
             img, patch_size=patch_size, max_number_of_patches="all",

@@ -12,7 +12,8 @@ def desikan_killiany_tourville_labeling(t1,
                                         brain_mask=None,
                                         atropos_segmentation=None,
                                         device=None,
-                                        verbose=False):
+                                        verbose=False,
+                                        backend=None):
     """
     Desikan-Killiany-Tourville labeling.  https://pubmed.ncbi.nlm.nih.gov/23227001/
 
@@ -191,6 +192,20 @@ def desikan_killiany_tourville_labeling(t1,
     verbose : boolean
         Print progress to the screen.
 
+    backend : str, dict or None
+        "ants" or "antstorch" per operation (keys "n4", "denoise", "registration"); see
+        antstorch.set_default_backend().  None uses the session default, then
+        ANTSTORCH_BACKEND, then "antstorch".
+
+    brain_mask : ANTsImage or None
+        Precomputed brain mask of the input image (voxels > 0.5 are kept).  When given,
+        brain extraction is skipped; compute it once with antstorch.brain_extraction
+        and share it between applications.
+
+    atropos_segmentation : ANTsImage or None
+        Precomputed six-tissue segmentation (antstorch.deep_atropos) of ``t1``, used by the
+        lobar parcellation instead of running deep_atropos a second time.
+
     version : integer
         Which version.
 
@@ -257,7 +272,8 @@ def desikan_killiany_tourville_labeling(t1,
             do_denoising=False,
             brain_mask=brain_mask,
             device=device,
-            verbose=verbose)
+            verbose=verbose,
+            backend=backend)
         t1_preprocessed = t1_preprocessing["preprocessed_image"] * t1_preprocessing['brain_mask']
         t1_preprocessed = reshape_image(t1_preprocessed, crop_size=cropped_template_size)
 
@@ -451,13 +467,8 @@ def desikan_killiany_tourville_labeling(t1,
         if atropos_segmentation is not None:
             atropos_seg = ants.image_clone(atropos_segmentation)
         else:
-            six_tissue = deep_atropos(
-                [t1, None, None],
-                do_preprocessing=True,
-                brain_mask=brain_mask,
-                device=device,
-                verbose=verbose,
-            )
+            six_tissue = deep_atropos([t1, None, None], do_preprocessing=True, device=device,
+                                      verbose=verbose, backend=backend, brain_mask=brain_mask)
             atropos_seg = ants.image_clone(six_tissue['segmentation_image'])
         atropos_seg[atropos_seg == 1] = 0
         atropos_seg[atropos_seg == 5] = 0
@@ -466,7 +477,8 @@ def desikan_killiany_tourville_labeling(t1,
         lobar_brain_mask = ants.image_clone(atropos_seg)
         lobar_brain_mask = ants.threshold_image(lobar_brain_mask, 0, 0, 0, 1)
 
-        lobar_parcellation = ants.iMath(lobar_brain_mask, "PropagateLabelsThroughMask", lobar_brain_mask * dkt_lobes)
+        lobar_parcellation = ants.iMath(lobar_brain_mask, "PropagateLabelsThroughMask",
+                                        lobar_brain_mask * dkt_lobes)
 
         # Do left/right
 

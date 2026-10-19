@@ -1,5 +1,6 @@
 import numpy as np
 import ants
+from .backend_ops import run_n4, run_registration
 import torch
 
 def deep_flash(t1,
@@ -9,8 +10,8 @@ def deep_flash(t1,
                do_bias_correction=True,
                use_rank_intensity=True,
                device=None,
-               verbose=False
-               ):
+               verbose=False,
+               backend=None):
 
     """
     Hippocampal/Enthorhinal segmentation using "Deep Flash"
@@ -65,6 +66,19 @@ def deep_flash(t1,
     verbose : boolean
         Print progress to the screen.
 
+    brain_mask : ANTsImage or None
+        Precomputed brain mask of the input image (voxels > 0.5 are kept).  When given,
+        brain extraction is skipped; compute it once with antstorch.brain_extraction
+        and share it between applications.
+
+    do_bias_correction : boolean
+        Run N4 on the input(s) when do_preprocessing is True (set False if already corrected).
+
+    backend : str, dict or None
+        "ants" or "antstorch" for the internal N4 and template registration; a dict selects per
+        operation (keys "n4", "registration").  None uses antstorch.set_default_backend(),
+        then ANTSTORCH_BACKEND, then "antstorch".
+
     Returns
     -------
     List consisting of the segmentation image and probability images for
@@ -108,8 +122,6 @@ def deep_flash(t1,
     from ..architectures import create_unet_model_3d
     from ..architectures import create_multihead_unet_model_3d
     from ..utilities.device_manager import get_default_device
-    from ..utilities.n4_bias_field_correction import n4_bias_field_correction
-    from ..syn.robust_affine import robust_affine
 
     if device is None:
         device = get_default_device()   
@@ -174,14 +186,13 @@ def deep_flash(t1,
 
         # Bias correction
         if do_bias_correction:
-            t1_preprocessed = n4_bias_field_correction(
-                t1_preprocessed, mask=t1_mask, shrink_factor=4, device=device, verbose=verbose
-            )
+            t1_preprocessed = run_n4(t1_preprocessed, t1_mask, shrink_factor=4, verbose=verbose,
+                                     backend=backend, device=device)
 
         # Warp to template
-        registration = robust_affine(
-            fixed=t1_template, moving=t1_preprocessed, mode="auto", device=str(device), verbose=verbose
-        )
+        registration = run_registration(t1_template, t1_preprocessed,
+                                        "antsRegistrationSyNQuickRepro[a]",
+                                        backend=backend, device=device, verbose=verbose)
         template_transforms = dict(fwdtransforms=registration['fwdtransforms'],
                                    invtransforms=registration['invtransforms'])
         t1_preprocessed = registration['warpedmovout']
@@ -209,9 +220,9 @@ def deep_flash(t1,
             t2_preprocessed = t2_preprocessed * t1_mask
 
             # Do bias correction
-            t2_preprocessed = n4_bias_field_correction(
-                t2_preprocessed, mask=t1_mask, shrink_factor=4, device=device, verbose=verbose
-            )
+            if do_bias_correction:
+                t2_preprocessed = run_n4(t2_preprocessed, t1_mask, shrink_factor=4, verbose=verbose,
+                                         backend=backend, device=device)
 
             # Warp to template
             t2_preprocessed = ants.apply_transforms(fixed=t1_template,

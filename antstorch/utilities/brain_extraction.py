@@ -58,6 +58,18 @@ def _infer_unet3d_from_state_dict(state_dict):
 
 
 # -----------------------------
+# Resource cache (weights, template, network) keyed by
+# (modality, channel_size, device)
+# -----------------------------
+_RESOURCE_CACHE = {}
+
+
+def _clear_cache():
+    """Release cached networks/templates (e.g. to free GPU memory)."""
+    _RESOURCE_CACHE.clear()
+
+
+# -----------------------------
 # Public API
 # -----------------------------
 def brain_extraction(image, 
@@ -110,111 +122,124 @@ def brain_extraction(image,
     # Modality routing
     # ---------------------
 
-    weights_prefix = None
-    is_standard_network = False
+    # Weights, template and network are identical across calls for a given
+    # (modality, number of channels, device): build them once and reuse.
+    # Use ``brain_extraction.clear_cache()`` to release them.
+    cache_key = (modality, channel_size, str(device))
+    cached = _RESOURCE_CACHE.get(cache_key)
+    if cached is None:
+        weights_prefix = None
+        is_standard_network = False
 
-    if modality == "t1":
-        weights_prefix = "brainExtractionRobustT1"; is_standard_network = True
-    elif modality == "t2":
-        weights_prefix = "brainExtractionRobustT2"; is_standard_network = True
-    elif modality == "t2star":
-        weights_prefix = "brainExtractionRobustT2Star"; is_standard_network = True
-    elif modality == "flair":
-        weights_prefix = "brainExtractionRobustFLAIR"; is_standard_network = True
-    elif modality == "bold":
-        weights_prefix = "brainExtractionRobustBOLD"; is_standard_network = True
-    elif modality == "fa":
-        weights_prefix = "brainExtractionRobustFA"; is_standard_network = True
-    elif modality == "pet":
-        weights_prefix = "brainExtractionPet"; is_standard_network = True
-    elif modality == "mra":
-        weights_prefix = "brainExtractionMra"; is_standard_network = True
-    elif modality == "t1threetissue":
-        weights_prefix = "brainExtractionBrainWeb20"; is_standard_network = True
-    elif modality == "t1hemi":
-        weights_prefix = "brainExtractionT1Hemi"; is_standard_network = True
-    elif modality == "t1lobes":
-        weights_prefix = "brainExtractionT1Lobes"; is_standard_network = True
-    else:
-        raise ValueError("Unknown modality type.")
-
-    if verbose:
-        print("Brain extraction:  retrieving model weights.")
-    weights_file_name = get_pretrained_network(f"{weights_prefix}_pytorch", target_file_name=f"{weights_prefix}_pytorch.pt")
-
-    if verbose:
-        print("Brain extraction:  retrieving template.")
-
-    if modality == "t1threetissue":
-        reorient_template = ants.image_read(get_antstorch_data("nki"))
-    elif modality in ("t1hemi", "t1lobes"):
-        reorient_template = ants.image_read(get_antstorch_data("hcpyaT1Template"))
-        reorient_template_mask = ants.image_read(get_antstorch_data("hcpyaTemplateBrainMask"))
-        reorient_template = reorient_template * reorient_template_mask
-        reorient_template = ants.resample_image(reorient_template, (1, 1, 1), use_voxels=False, interp_type=0)
-        reorient_template = ants.pad_or_crop_image_to_size(reorient_template, (160, 192, 160))
-        xfrm_tmp = ants.create_ants_transform(transform_type="Euler3DTransform",
-                            center=np.asarray(ants.get_center_of_mass(reorient_template)), translation=(0, 0, -10))
-        reorient_template = xfrm_tmp.apply_to_image(reorient_template)
-    else:
-        reorient_template = ants.image_read(get_antstorch_data("S_template3"))
-        if modality == "pet":
-            reorient_template = ants.resample_image(
-                reorient_template, resample_params=(1.5, 1.5, 1.5))
-            reorient_template = ants.pad_or_crop_image_to_size(
-                reorient_template, (136, 176, 176))
-        elif is_standard_network and (modality != "t1.v1" and modality != "mra"):
-            ants.set_spacing(reorient_template, (1.5, 1.5, 1.5))
-    resampled_image_size = reorient_template.shape
-
-    # ---------------------
-    # Build model EXACTLY matching weights
-    # ---------------------
-    sd = torch.load(weights_file_name, map_location="cpu", weights_only=True)
-    out_channels, filters, num_layers, mode, sd = _infer_unet3d_from_state_dict(sd)
-
-    # For multi-class modalities, override to fixed label counts like antspynet
-    if modality in ("t1threetissue", "t1hemi", "t1lobes"):
-        mode = "classification"
-        if modality == "t1threetissue":
-            out_channels = 4  # background + 3 classes
+        if modality == "t1":
+            weights_prefix = "brainExtractionRobustT1"; is_standard_network = True
+        elif modality == "t2":
+            weights_prefix = "brainExtractionRobustT2"; is_standard_network = True
+        elif modality == "t2star":
+            weights_prefix = "brainExtractionRobustT2Star"; is_standard_network = True
+        elif modality == "flair":
+            weights_prefix = "brainExtractionRobustFLAIR"; is_standard_network = True
+        elif modality == "bold":
+            weights_prefix = "brainExtractionRobustBOLD"; is_standard_network = True
+        elif modality == "fa":
+            weights_prefix = "brainExtractionRobustFA"; is_standard_network = True
+        elif modality == "pet":
+            weights_prefix = "brainExtractionPet"; is_standard_network = True
+        elif modality == "mra":
+            weights_prefix = "brainExtractionMra"; is_standard_network = True
+        elif modality == "t1threetissue":
+            weights_prefix = "brainExtractionBrainWeb20"; is_standard_network = True
         elif modality == "t1hemi":
-            out_channels = 3  # background + L/R
+            weights_prefix = "brainExtractionT1Hemi"; is_standard_network = True
         elif modality == "t1lobes":
-            out_channels = 6  # background + 5
-    elif is_standard_network:
-        mode = "sigmoid"; out_channels = 1
+            weights_prefix = "brainExtractionT1Lobes"; is_standard_network = True
+        else:
+            raise ValueError("Unknown modality type.")
+
+        if verbose:
+            print("Brain extraction:  retrieving model weights.")
+        weights_file_name = get_pretrained_network(f"{weights_prefix}_pytorch", target_file_name=f"{weights_prefix}_pytorch.pt")
+
+        if verbose:
+            print("Brain extraction:  retrieving template.")
+
+        if modality == "t1threetissue":
+            reorient_template = ants.image_read(get_antstorch_data("nki"))
+        elif modality in ("t1hemi", "t1lobes"):
+            reorient_template = ants.image_read(get_antstorch_data("hcpyaT1Template"))
+            reorient_template_mask = ants.image_read(get_antstorch_data("hcpyaTemplateBrainMask"))
+            reorient_template = reorient_template * reorient_template_mask
+            reorient_template = ants.resample_image(reorient_template, (1, 1, 1), use_voxels=False, interp_type=0)
+            reorient_template = ants.pad_or_crop_image_to_size(reorient_template, (160, 192, 160))
+            xfrm_tmp = ants.create_ants_transform(transform_type="Euler3DTransform",
+                                center=np.asarray(ants.get_center_of_mass(reorient_template)), translation=(0, 0, -10))
+            reorient_template = xfrm_tmp.apply_to_image(reorient_template)
+        else:
+            reorient_template = ants.image_read(get_antstorch_data("S_template3"))
+            if modality == "pet":
+                reorient_template = ants.resample_image(
+                    reorient_template, resample_params=(1.5, 1.5, 1.5))
+                reorient_template = ants.pad_or_crop_image_to_size(
+                    reorient_template, (136, 176, 176))
+            elif is_standard_network and (modality != "t1.v1" and modality != "mra"):
+                ants.set_spacing(reorient_template, (1.5, 1.5, 1.5))
+        resampled_image_size = reorient_template.shape
+
+        # ---------------------
+        # Build model EXACTLY matching weights
+        # ---------------------
+        sd = torch.load(weights_file_name, map_location="cpu", weights_only=True)
+        out_channels, filters, num_layers, mode, sd = _infer_unet3d_from_state_dict(sd)
+
+        # For multi-class modalities, override to fixed label counts like antspynet
+        if modality in ("t1threetissue", "t1hemi", "t1lobes"):
+            mode = "classification"
+            if modality == "t1threetissue":
+                out_channels = 4  # background + 3 classes
+            elif modality == "t1hemi":
+                out_channels = 3  # background + L/R
+            elif modality == "t1lobes":
+                out_channels = 6  # background + 5
+        elif is_standard_network:
+            mode = "sigmoid"; out_channels = 1
+        else:
+            mode = "classification"; out_channels = 2
+
+        model = create_unet_model_3d(
+            input_channel_size=channel_size,
+            number_of_outputs=out_channels,
+            number_of_layers=num_layers,
+            number_of_filters=filters,
+            number_of_filters_at_base_layer=filters[0],
+            convolution_kernel_size=(3, 3, 3),
+            deconvolution_kernel_size=(2, 2, 2),
+            pool_size=(2, 2, 2),
+            strides=(2, 2, 2),
+            dropout_rate=0.0,
+            pad_crop="center",
+            additional_options=("kerasDeconvolutionStyle" if modality == "pet" else None),
+            mode=mode)
+
+        ret = model.load_state_dict(sd, strict=False)
+
+        # PyTorch version–safe access
+        missing = getattr(ret, "missing_keys", None)
+        unexpected = getattr(ret, "unexpected_keys", None)
+        if missing is None or unexpected is None:
+            # older tuple-style return
+            missing, unexpected = ret
+
+        if missing or unexpected:
+            print("[weights check] missing:", len(missing), "unexpected:", len(unexpected))
+            print("  e.g. missing[:8]   =", missing[:8])
+            print("  e.g. unexpected[:8]=", unexpected[:8])
+        _RESOURCE_CACHE[cache_key] = (
+            reorient_template, model, mode, out_channels,
+            resampled_image_size, is_standard_network,
+        )
     else:
-        mode = "classification"; out_channels = 2
-
-    model = create_unet_model_3d(
-        input_channel_size=channel_size,
-        number_of_outputs=out_channels,
-        number_of_layers=num_layers,
-        number_of_filters=filters,
-        number_of_filters_at_base_layer=filters[0],
-        convolution_kernel_size=(3, 3, 3),
-        deconvolution_kernel_size=(2, 2, 2),
-        pool_size=(2, 2, 2),
-        strides=(2, 2, 2),
-        dropout_rate=0.0,
-        pad_crop="center",
-        additional_options=("kerasDeconvolutionStyle" if modality == "pet" else None),
-        mode=mode)
-
-    ret = model.load_state_dict(sd, strict=False)
-
-    # PyTorch version–safe access
-    missing = getattr(ret, "missing_keys", None)
-    unexpected = getattr(ret, "unexpected_keys", None)
-    if missing is None or unexpected is None:
-        # older tuple-style return
-        missing, unexpected = ret
-
-    if missing or unexpected:
-        print("[weights check] missing:", len(missing), "unexpected:", len(unexpected))
-        print("  e.g. missing[:8]   =", missing[:8])
-        print("  e.g. unexpected[:8]=", unexpected[:8])
+        (reorient_template, model, mode, out_channels,
+         resampled_image_size, is_standard_network) = cached
 
     if verbose:
         print("Brain extraction:  normalizing image to the template.")
@@ -284,3 +309,6 @@ def brain_extraction(image,
         prob_img_template = prob_images_template[-1]
         probability_image = xfrm_inv.apply_to_image(prob_img_template, input_images[0])
         return probability_image
+
+
+brain_extraction.clear_cache = _clear_cache

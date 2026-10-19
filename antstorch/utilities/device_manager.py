@@ -28,3 +28,14 @@ def get_default_device():
         return torch.device("mps")
     else:
         return torch.device("cpu")
+
+
+def get_user_default_device():
+    """
+    Renvoie l'appareil fixé explicitement via ``set_default_device``, ou
+    ``None`` si l'utilisateur n'en a pas fixé. Contrairement à
+    ``get_default_device``, ne fait aucune détection automatique : permet aux
+    outils qui ont leur propre logique de repli (p. ex. SyN sur MPS) de
+    respecter un choix explicite sans le deviner.
+    """
+    return _GLOBAL_DEVICE

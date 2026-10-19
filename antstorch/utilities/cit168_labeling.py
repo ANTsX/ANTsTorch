@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import numpy as np
 import ants
+from .backend_ops import run_n4, run_registration
 import torch
 import torch.nn as nn
 
-def cit168_labeling(t1, brain_mask=None, do_preprocessing=True, device=None, verbose=False):
+def cit168_labeling(t1,
+                    brain_mask=None,
+                    do_preprocessing=True,
+                    device=None,
+                    verbose=False,
+                    backend=None):
     """
     
     Perform CIT168 segmentation in T1 images using Pauli atlas (CIT168) 
@@ -64,6 +70,19 @@ def cit168_labeling(t1, brain_mask=None, do_preprocessing=True, device=None, ver
     verbose : boolean
         Print progress to the screen.
 
+    brain_mask : ANTsImage or None
+        Precomputed brain mask of the input image (voxels > 0.5 are kept).  When given,
+        brain extraction is skipped; compute it once with antstorch.brain_extraction
+        and share it between applications.
+
+    do_preprocessing : boolean
+        Run N4 bias correction (False if the input is already bias corrected).
+
+    backend : str, dict or None
+        "ants" or "antstorch" for the internal N4 and template registration (including the preprocessing); a dict selects per
+        operation (keys "n4", "denoise", "registration").  None uses antstorch.set_default_backend(),
+        then ANTSTORCH_BACKEND, then "antstorch".
+
     Returns
     -------
     ANTs segmentation label and probability images.
@@ -78,7 +97,6 @@ def cit168_labeling(t1, brain_mask=None, do_preprocessing=True, device=None, ver
     from ..utilities import get_antstorch_data
     from ..architectures import create_unet_model_3d
     from ..utilities.device_manager import get_default_device
-    from ..greedy import greedy_registration
 
     if device is None:
         device = get_default_device()
@@ -95,6 +113,8 @@ def cit168_labeling(t1, brain_mask=None, do_preprocessing=True, device=None, ver
 
     cropped_template_size = [160, 160, 112]
 
+    template_transform_type = "antsRegistrationSyNQuickRepro[s]"
+
     ################################
     # Preprocess images
     ################################
@@ -109,17 +129,13 @@ def cit168_labeling(t1, brain_mask=None, do_preprocessing=True, device=None, ver
         do_denoising=False,
         intensity_normalization_type='01',
         device=device,
-        verbose=verbose)
+        verbose=verbose,
+        backend=backend)
                         
     t1_preprocessed = t1_preprocessing['preprocessed_image'] * t1_preprocessing['brain_mask']
 
-    reg = greedy_registration(
-        fixed=template_small,
-        moving=t1_preprocessed,
-        return_inverse=True,
-        device=str(device),
-        verbose=verbose,
-    )
+    reg = run_registration(template_small, t1_preprocessed, template_transform_type,
+                           backend=backend, device=device, verbose=verbose)
     t1_preprocessed = ants.apply_transforms(fixed=template_large, moving=t1_preprocessed,
                                             transformlist=reg['fwdtransforms'][1],
                                             interpolator="linear", singleprecision=True, verbose=verbose)
