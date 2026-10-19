@@ -9,6 +9,8 @@ def desikan_killiany_tourville_labeling(t1,
                                         do_preprocessing=True,
                                         return_probability_images=False,
                                         do_lobar_parcellation=False,
+                                        brain_mask=None,
+                                        atropos_segmentation=None,
                                         device=None,
                                         verbose=False):
     """
@@ -253,6 +255,7 @@ def desikan_killiany_tourville_labeling(t1,
             template_transform_type=template_transform_type,
             do_bias_correction=True,
             do_denoising=False,
+            brain_mask=brain_mask,
             device=device,
             verbose=verbose)
         t1_preprocessed = t1_preprocessing["preprocessed_image"] * t1_preprocessing['brain_mask']
@@ -445,16 +448,25 @@ def desikan_killiany_tourville_labeling(t1,
 
         dkt_lobes[dkt_lobes > len(lobar_labels)] = 0
 
-        six_tissue = deep_atropos([t1, None, None], do_preprocessing=True, device=device, verbose=verbose)
-        atropos_seg = six_tissue['segmentation_image']
+        if atropos_segmentation is not None:
+            atropos_seg = ants.image_clone(atropos_segmentation)
+        else:
+            six_tissue = deep_atropos(
+                [t1, None, None],
+                do_preprocessing=True,
+                brain_mask=brain_mask,
+                device=device,
+                verbose=verbose,
+            )
+            atropos_seg = ants.image_clone(six_tissue['segmentation_image'])
         atropos_seg[atropos_seg == 1] = 0
         atropos_seg[atropos_seg == 5] = 0
         atropos_seg[atropos_seg == 6] = 0
 
-        brain_mask = ants.image_clone(atropos_seg)
-        brain_mask = ants.threshold_image(brain_mask, 0, 0, 0, 1)
+        lobar_brain_mask = ants.image_clone(atropos_seg)
+        lobar_brain_mask = ants.threshold_image(lobar_brain_mask, 0, 0, 0, 1)
 
-        lobar_parcellation = ants.iMath(brain_mask, "PropagateLabelsThroughMask", brain_mask * dkt_lobes)
+        lobar_parcellation = ants.iMath(lobar_brain_mask, "PropagateLabelsThroughMask", lobar_brain_mask * dkt_lobes)
 
         # Do left/right
 

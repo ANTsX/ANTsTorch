@@ -28,6 +28,7 @@ def t1_grader(image, device=None, verbose=False):
     from ..utilities import get_pretrained_network
     from ..utilities import get_antstorch_data
     from ..architectures import create_resnet_model_3d
+    from ..syn import robust_affine
     from ..utilities.device_manager import get_default_device
 
     if device is None:
@@ -54,7 +55,7 @@ def t1_grader(image, device=None, verbose=False):
     templateb = ants.pad_image_by_factor(templateb, 8)
     templatebsmall = ants.resample_image(templateb, (2, 2, 2))
 
-    reg = ants.registration(templatebsmall, t1, type_of_transform='Similarity', verbose=verbose)
+    reg = robust_affine(templatebsmall, t1, mode="auto", device=str(device), verbose=verbose)
 
     ilist = [[templateb]]
     nsim = 16
@@ -87,6 +88,7 @@ def t1_grader(image, device=None, verbose=False):
     
     model.load_state_dict(torch.load(weights_file_name, map_location="cpu"))
     model.eval()
+    model = model.to(device)
 
     def get_grade(score, probs):
         grade = 'f'
@@ -116,7 +118,7 @@ def t1_grader(image, device=None, verbose=False):
         # PyTorch : (Batch, Channels, Depth, Height, Width)
         newshape = [1, 1] + list(xarr.shape)
         xarr = np.reshape(xarr, newshape)
-        xtensor = torch.from_numpy(xarr).float()
+        xtensor = torch.from_numpy(xarr).float().to(device)
         
         with torch.no_grad():
             preds_tensor = model(xtensor)

@@ -5,7 +5,7 @@ import ants
 import torch
 import torch.nn as nn
 
-def cit168_labeling(t1, device=None,verbose=False):
+def cit168_labeling(t1, brain_mask=None, do_preprocessing=True, device=None, verbose=False):
     """
     
     Perform CIT168 segmentation in T1 images using Pauli atlas (CIT168) 
@@ -78,12 +78,7 @@ def cit168_labeling(t1, device=None,verbose=False):
     from ..utilities import get_antstorch_data
     from ..architectures import create_unet_model_3d
     from ..utilities.device_manager import get_default_device
-
-    from ..utilities import get_pretrained_network
-    from ..utilities import preprocess_brain_image
-    from ..utilities import get_antstorch_data
-    from ..architectures import create_unet_model_3d
-    from ..utilities.device_manager import get_default_device
+    from ..greedy import greedy_registration
 
     if device is None:
         device = get_default_device()
@@ -98,7 +93,6 @@ def cit168_labeling(t1, device=None,verbose=False):
     template_large = ants.resample_image(template, [0.5, 0.5, 0.5])
     template_seg = ants.image_read(get_antstorch_data("det_atlas_25_pad_LR_adni"))
 
-    template_transform_type = "antsRegistrationSyNQuickRepro[s]"
     cropped_template_size = [160, 160, 112]
 
     ################################
@@ -108,16 +102,24 @@ def cit168_labeling(t1, device=None,verbose=False):
 
     t1_preprocessing = preprocess_brain_image(t1,
         truncate_intensity=[1e-4, 0.999],
-        brain_extraction_modality="t1threetissue",
+        brain_extraction_modality=None if brain_mask is not None else "t1threetissue",
+        brain_mask=brain_mask,
         template=None,
-        do_bias_correction=True,
+        do_bias_correction=do_preprocessing,
         do_denoising=False,
         intensity_normalization_type='01',
+        device=device,
         verbose=verbose)
                         
     t1_preprocessed = t1_preprocessing['preprocessed_image'] * t1_preprocessing['brain_mask']
 
-    reg = ants.registration(template_small, t1_preprocessed, type_of_transform=template_transform_type, verbose=verbose)  
+    reg = greedy_registration(
+        fixed=template_small,
+        moving=t1_preprocessed,
+        return_inverse=True,
+        device=str(device),
+        verbose=verbose,
+    )
     t1_preprocessed = ants.apply_transforms(fixed=template_large, moving=t1_preprocessed,
                                             transformlist=reg['fwdtransforms'][1],
                                             interpolator="linear", singleprecision=True, verbose=verbose)
