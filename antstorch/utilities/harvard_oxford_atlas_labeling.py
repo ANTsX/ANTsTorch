@@ -8,6 +8,7 @@ import ants
 
 def harvard_oxford_atlas_labeling(t1,
                                   do_preprocessing=True,
+                                  brain_mask=None,
                                   device=None,
                                   verbose=False):
 
@@ -126,6 +127,7 @@ def harvard_oxford_atlas_labeling(t1,
             template_transform_type=template_transform_type,
             do_bias_correction=True,
             do_denoising=False,
+            brain_mask=brain_mask,
             device=device,
             verbose=verbose)
         t1_preprocessed = t1_preprocessing["preprocessed_image"] * t1_preprocessing['brain_mask']

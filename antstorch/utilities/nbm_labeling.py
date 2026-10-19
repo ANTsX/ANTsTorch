@@ -6,7 +6,7 @@ import ants
 import torch
 import torch.nn as nn
 
-def nbm_labeling(t1, device=None, verbose=False):
+def nbm_labeling(t1, brain_mask=None, device=None, verbose=False):
     """
     Perform CH13 and Nucleaus basalis of Meynert (NBM) segmentation in 
     T1 images using Avants labels.
@@ -63,6 +63,7 @@ def nbm_labeling(t1, device=None, verbose=False):
         template_transform_type=template_transform_type,
         do_bias_correction=True,
         do_denoising=False,
+        brain_mask=brain_mask,
         device=device,
         verbose=verbose)
         

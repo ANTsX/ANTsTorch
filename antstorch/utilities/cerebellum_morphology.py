@@ -5,6 +5,7 @@ import ants
 
 def cerebellum_morphology(t1,
                           cerebellum_mask=None,
+                          brain_mask=None,
                           compute_thickness_image=False,
                           do_preprocessing=True,
                           device=None,
@@ -85,6 +86,8 @@ def cerebellum_morphology(t1,
     from ..utilities.get_antstorch_data import get_antstorch_data
     from ..utilities.brain_extraction import brain_extraction
     from ..utilities.device_manager import get_default_device
+    from ..utilities.n4_bias_field_correction import n4_bias_field_correction
+    from ..greedy import greedy_registration
 
     if device is None:
         device = get_default_device()
@@ -95,11 +98,7 @@ def cerebellum_morphology(t1,
         raise ValueError("Image dimension must be 3.")
     t1 = ants.image_clone(t1, pixeltype='float')
 
-    # transform_type = "antsRegistrationSyNQuick[s]"  # up to ~10% run-to-run difference
-    transform_type = "antsRegistrationSyNQuickRepro[s]"
     whichtoinvert = [True, False, True]
-    # transform_type = "antsRegistrationSyNQuick[a]"
-    # whichtoinvert = [True, True]
 
     ################################
     # Get templates / masks / priors
@@ -133,21 +132,27 @@ def cerebellum_morphology(t1,
         if verbose:
             print("Preprocessing T1.")
         # Bias correction only (matches your version)
-        t1_preprocessed = ants.n4_bias_field_correction(
-            t1_preprocessed, shrink_factor=4, verbose=verbose
+        t1_preprocessed = n4_bias_field_correction(
+            t1_preprocessed, shrink_factor=4, device=device, verbose=verbose
         )
 
     if cerebellum_mask is None:
         # Brain extraction → registration to whole-brain template
-        probability_mask = brain_extraction(t1_preprocessed, modality="t1", verbose=verbose)
-        t1_mask = ants.threshold_image(probability_mask, 0.5, 1, 1, 0)
+        if brain_mask is not None:
+            t1_mask = ants.threshold_image(ants.image_clone(brain_mask, pixeltype='float'), 0.5, 1e9, 1, 0)
+        else:
+            probability_mask = brain_extraction(t1_preprocessed, modality="t1", device=device, verbose=verbose)
+            t1_mask = ants.threshold_image(probability_mask, 0.5, 1, 1, 0)
         t1_brain_preprocessed = t1_preprocessed * t1_mask
 
         if verbose:
             print("Register T1 to whole brain template.")
-        registration = ants.registration(
-            fixed=t1_template_brain, moving=t1_brain_preprocessed,
-            type_of_transform=transform_type, verbose=verbose
+        registration = greedy_registration(
+            fixed=t1_template_brain,
+            moving=t1_brain_preprocessed,
+            return_inverse=True,
+            device=str(device),
+            verbose=verbose,
         )
         registration['invtransforms'].append(cerebellum_x_template_xfrm)
         registration['fwdtransforms'].insert(0, cerebellum_x_template_xfrm)
@@ -167,10 +172,12 @@ def cerebellum_morphology(t1,
         )
         if verbose:
             print("Register T1 cerebellum to the cerebellum of the whole brain template.")
-        registration = ants.registration(
+        registration = greedy_registration(
             fixed=t1_template_brain * t1_cerebellum_template_mask,
             moving=t1_preprocessed * cerebellum_mask,
-            type_of_transform=transform_type, verbose=verbose
+            return_inverse=True,
+            device=str(device),
+            verbose=verbose,
         )
         registration['invtransforms'].append(cerebellum_x_template_xfrm)
         registration['fwdtransforms'].insert(0, cerebellum_x_template_xfrm)
