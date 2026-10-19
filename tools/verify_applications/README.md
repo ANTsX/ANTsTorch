@@ -1,7 +1,7 @@
 # Verify applications (real data, real weights)
 
-These are standalone scripts, **not** part of `tests/` (Nick asked to
-keep them out -- they're too slow/heavy for the automated pytest suite:
+These are standalone scripts not part of `tests/` as 
+they're too slow/heavy for the automated pytest suite:
 real network downloads, real pretrained weights, real `ants`
 preprocessing/registration). Run them by hand, individually or all at
 once, whenever you want to confirm a ported application actually works
