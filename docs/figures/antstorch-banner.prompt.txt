@@ -1,0 +1,11 @@
+Generated with the built-in image_gen tool.
+Conceptual artwork, not a medical image or an ANTsTorch inference result.
+
+Use case: stylized-concept
+Asset type: polished horizontal GitHub README banner for ANTsTorch, approximately 3:1 aspect ratio.
+Primary request: elegant scientific visual identity for medical imaging software. Left side: a carefully illustrated coronal brain section, one hemisphere in nuanced grayscale MRI-like texture, the other with discrete anatomical segmentation regions in restrained turquoise, blue and orange. A thin, subtle curved deformation grid overlays part of the brain and fades into the surrounding space, evoking image registration. This is conceptual artwork, not a claimed software result.
+Right side: large beautifully typeset exact text "ANTsTorch", with ANTs in deep navy and Torch in warm PyTorch-like orange. Beneath it, smaller exact text "Medical imaging with PyTorch". A tiny tasteful six-legged ant silhouette adjacent to the wordmark as a subtle ANTs reference.
+Style: premium scientific editorial illustration, restrained, crisp, sophisticated, generous negative space; anatomically plausible coronal brain with recognizable ventricles and cortical folds, not a side view or exposed 3D brain.
+Background: solid very light cool gray/off-white, fully opaque, suitable as a self-contained banner on both light and dark GitHub pages. No border.
+Composition: brain left 40%, wordmark right 55%, generous safe margins. All elements entirely within the frame.
+Avoid: neon glow, sci-fi clutter, extra text, stock-photo aesthetic, watermarks, extra logos, flames, oversized ant.

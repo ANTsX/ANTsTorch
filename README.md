@@ -1,5 +1,9 @@
 <div align="center">
 
+<img src="docs/figures/antstorch-banner.png" alt="ANTsTorch — conceptual brain illustration combining MRI, colored segmentation, and a deformation grid" width="100%" />
+
+<!-- AI-generated conceptual artwork; not an ANTsTorch inference result. -->
+
 # ANTsTorch
 
 ### Medical imaging with PyTorch, powered by ANTsX
