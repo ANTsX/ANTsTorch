@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import numpy as np
 import ants
+from .backend_ops import run_n4, run_registration
 import torch
 import torch.nn as nn
 
-def cit168_labeling(t1, device=None,verbose=False):
+def cit168_labeling(t1, device=None, verbose=False, backend=None):
     """
     
     Perform CIT168 segmentation in T1 images using Pauli atlas (CIT168) 
@@ -64,6 +65,11 @@ def cit168_labeling(t1, device=None,verbose=False):
     verbose : boolean
         Print progress to the screen.
 
+    backend : str, dict or None
+        "ants" or "antstorch" for the internal N4 and template registration (including the preprocessing); a dict selects per
+        operation (keys "n4", "denoise", "registration").  None uses antstorch.set_default_backend(),
+        then ANTSTORCH_BACKEND, then "ants".
+
     Returns
     -------
     ANTs segmentation label and probability images.
@@ -113,11 +119,13 @@ def cit168_labeling(t1, device=None,verbose=False):
         do_bias_correction=True,
         do_denoising=False,
         intensity_normalization_type='01',
-        verbose=verbose)
+        verbose=verbose,
+        backend=backend)
                         
     t1_preprocessed = t1_preprocessing['preprocessed_image'] * t1_preprocessing['brain_mask']
 
-    reg = ants.registration(template_small, t1_preprocessed, type_of_transform=template_transform_type, verbose=verbose)  
+    reg = run_registration(template_small, t1_preprocessed, template_transform_type,
+                           backend=backend, device=device, verbose=verbose)
     t1_preprocessed = ants.apply_transforms(fixed=template_large, moving=t1_preprocessed,
                                             transformlist=reg['fwdtransforms'][1],
                                             interpolator="linear", singleprecision=True, verbose=verbose)

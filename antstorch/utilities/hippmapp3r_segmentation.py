@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import ants
+from .backend_ops import run_n4, run_registration
 
 
 def _load_state_dict(weights_file_name):
@@ -14,7 +15,8 @@ def hippmapp3r_segmentation(t1,
                             do_preprocessing=True,
                             number_of_monte_carlo_iterations=30,
                             device=None,
-                            verbose=False):
+                            verbose=False,
+                            backend=None):
 
     """
     Perform HippMapp3r (hippocampal) segmentation described in
@@ -56,6 +58,11 @@ def hippmapp3r_segmentation(t1,
     verbose : boolean
         Print progress to the screen.
 
+    backend : str, dict or None
+        "ants" or "antstorch" for the internal N4 and template registration (including the preprocessing); a dict selects per
+        operation (keys "n4", "denoise", "registration").  None uses antstorch.set_default_backend(),
+        then ANTSTORCH_BACKEND, then "ants".
+
     Returns
     -------
     ANTs labeled hippocampal image.
@@ -92,7 +99,8 @@ def hippmapp3r_segmentation(t1,
             do_bias_correction=True,
             do_denoising=False,
             device=device,
-            verbose=verbose)
+            verbose=verbose,
+            backend=backend)
         t1_preprocessed = t1_preprocessing["preprocessed_image"] * t1_preprocessing["brain_mask"]
 
     if verbose:
@@ -106,8 +114,8 @@ def hippmapp3r_segmentation(t1,
     template_file_name_path = get_antstorch_data("mprage_hippmapp3r")
     template_image = ants.image_read(template_file_name_path)
 
-    registration = ants.registration(fixed=template_image, moving=t1_preprocessed,
-        type_of_transform="antsRegistrationSyNQuickRepro[t]", verbose=verbose)
+    registration = run_registration(template_image, t1_preprocessed,
+        "antsRegistrationSyNQuickRepro[t]", backend=backend, device=device, verbose=verbose)
     image = registration["warpedmovout"]
     transforms = dict(fwdtransforms=registration["fwdtransforms"],
                        invtransforms=registration["invtransforms"])

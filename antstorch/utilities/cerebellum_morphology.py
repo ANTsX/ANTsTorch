@@ -2,13 +2,15 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import ants
+from .backend_ops import run_n4, run_registration, run_kelly_kapowski
 
 def cerebellum_morphology(t1,
                           cerebellum_mask=None,
                           compute_thickness_image=False,
                           do_preprocessing=True,
                           device=None,
-                          verbose=False):
+                          verbose=False,
+                          backend=None):
     """
     Cerebellum tissue segmentation, Schmahmann parcellation, and thickness.
 
@@ -68,6 +70,12 @@ def cerebellum_morphology(t1,
 
     verbose : boolean
         Print progress to the screen.
+
+    backend : str, dict or None
+        "ants" or "antstorch" for the internal N4, template registration and (when
+        compute_thickness_image is True) KellyKapowski; a dict selects per operation
+        (keys "n4", "registration", "kelly_kapowski").  None uses antstorch.set_default_backend(),
+        then ANTSTORCH_BACKEND, then "ants".
 
     Returns
     -------
@@ -133,8 +141,9 @@ def cerebellum_morphology(t1,
         if verbose:
             print("Preprocessing T1.")
         # Bias correction only (matches your version)
-        t1_preprocessed = ants.n4_bias_field_correction(
-            t1_preprocessed, shrink_factor=4, verbose=verbose
+        t1_preprocessed = run_n4(
+            t1_preprocessed, shrink_factor=4, verbose=verbose,
+            backend=backend, device=device
         )
 
     if cerebellum_mask is None:
@@ -145,9 +154,9 @@ def cerebellum_morphology(t1,
 
         if verbose:
             print("Register T1 to whole brain template.")
-        registration = ants.registration(
-            fixed=t1_template_brain, moving=t1_brain_preprocessed,
-            type_of_transform=transform_type, verbose=verbose
+        registration = run_registration(
+            t1_template_brain, t1_brain_preprocessed, transform_type,
+            backend=backend, device=device, verbose=verbose
         )
         registration['invtransforms'].append(cerebellum_x_template_xfrm)
         registration['fwdtransforms'].insert(0, cerebellum_x_template_xfrm)
@@ -167,10 +176,10 @@ def cerebellum_morphology(t1,
         )
         if verbose:
             print("Register T1 cerebellum to the cerebellum of the whole brain template.")
-        registration = ants.registration(
-            fixed=t1_template_brain * t1_cerebellum_template_mask,
-            moving=t1_preprocessed * cerebellum_mask,
-            type_of_transform=transform_type, verbose=verbose
+        registration = run_registration(
+            t1_template_brain * t1_cerebellum_template_mask,
+            t1_preprocessed * cerebellum_mask, transform_type,
+            backend=backend, device=device, verbose=verbose
         )
         registration['invtransforms'].append(cerebellum_x_template_xfrm)
         registration['fwdtransforms'].insert(0, cerebellum_x_template_xfrm)
@@ -417,11 +426,12 @@ def cerebellum_morphology(t1,
 
     if compute_thickness_image:
         # Kelly–Kapowski thickness
-        kk = ants.kelly_kapowski(
-            s=tissue_segmentation,
-            g=tissue_probability_images[2],
-            w=tissue_probability_images[3],
-            its=45, r=0.025, m=1.5, x=0, verbose=int(verbose)
+        kk = run_kelly_kapowski(
+            tissue_segmentation,
+            tissue_probability_images[2],
+            tissue_probability_images[3],
+            iterations=45, gradient_step=0.025, velocity_smoothing_variance=1.5,
+            backend=backend, device=device, verbose=verbose
         )
         return {
             'cerebellum_probability_image': cerebellum_probability_image,

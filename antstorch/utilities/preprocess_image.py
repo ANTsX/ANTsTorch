@@ -1,7 +1,19 @@
 from __future__ import annotations
 
+import hashlib
+
 import ants
 from typing import Optional, Tuple, Dict, Any
+
+# Brain mask of the registration template, keyed by (modality, template content).
+# The template is fixed across calls, so extracting its brain once is enough.
+_TEMPLATE_MASK_CACHE: Dict[Any, Any] = {}
+
+
+def _template_mask_key(template_image, modality):
+    digest = hashlib.blake2b(template_image.numpy().tobytes(), digest_size=16).hexdigest()
+    return (modality, digest, tuple(template_image.shape), tuple(template_image.spacing),
+            tuple(template_image.origin), tuple(map(float, template_image.direction.ravel())))
 
 
 def preprocess_brain_image(
@@ -18,6 +30,7 @@ def preprocess_brain_image(
     intensity_normalization_type: Optional[str] = None,
     device=None,
     verbose: bool = True,
+    backend=None,
 ) -> Dict[str, Any]:
     """
     Basic preprocessing pipeline for T1-weighted brain MRI
@@ -72,6 +85,12 @@ def preprocess_brain_image(
     verbose : boolean
         Print progress to the screen.
 
+    backend : str, dict or None
+        "ants" (C++) or "antstorch" (PyTorch, CUDA/MPS/CPU) for N4, denoising and
+        template registration.  A dict selects per operation, e.g.
+        ``{"n4": "antstorch", "denoise": "antstorch", "registration": "ants"}``.
+        None uses antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "ants".
+
     Returns
     -------
     Dictionary with preprocessing information ANTs image (i.e., source_image) matched to the
@@ -87,6 +106,7 @@ def preprocess_brain_image(
     # Local imports to mirror original structure and keep dependency surface minimal
     from ..utilities import brain_extraction
     from ..utilities import get_antstorch_data  
+    from .backend_ops import run_n4, run_denoise, run_registration
 
     preprocessed_image = ants.image_clone(image, pixeltype='float')
 
@@ -122,26 +142,31 @@ def preprocess_brain_image(
             template_image = template
 
         if mask is None:
-            registration = ants.registration(
-                fixed=template_image, moving=preprocessed_image,
-                type_of_transform=template_transform_type, verbose=verbose
+            registration = run_registration(
+                template_image, preprocessed_image, template_transform_type,
+                backend=backend, device=device, verbose=verbose
             )
             preprocessed_image = registration['warpedmovout']
             transforms = dict(fwdtransforms=registration['fwdtransforms'],
                               invtransforms=registration['invtransforms'])
         else:
-            template_bext = brain_extraction(template_image, modality=brain_extraction_modality, device=device, verbose=verbose)
-            if brain_extraction_modality == "t1threetissue":
-                template_mask = ants.threshold_image(template_bext['segmentation_image'], 1, 1, 1, 0)
-            else:
-                template_mask = ants.threshold_image(template_bext, 0.5, 1, 1, 0)
+            mask_key = _template_mask_key(template_image, brain_extraction_modality)
+            template_mask = _TEMPLATE_MASK_CACHE.get(mask_key)
+            if template_mask is None:
+                template_bext = brain_extraction(template_image, modality=brain_extraction_modality, device=device, verbose=verbose)
+                if brain_extraction_modality == "t1threetissue":
+                    template_mask = ants.threshold_image(template_bext['segmentation_image'], 1, 1, 1, 0)
+                else:
+                    template_mask = ants.threshold_image(template_bext, 0.5, 1, 1, 0)
+                _TEMPLATE_MASK_CACHE[mask_key] = template_mask
+            template_mask = ants.image_clone(template_mask)
             template_brain_image = template_mask * template_image
 
             preprocessed_brain_image = mask * preprocessed_image
 
-            registration = ants.registration(
-                fixed=template_brain_image, moving=preprocessed_brain_image,
-                type_of_transform=template_transform_type, verbose=verbose
+            registration = run_registration(
+                template_brain_image, preprocessed_brain_image, template_transform_type,
+                backend=backend, device=device, verbose=verbose
             )
             transforms = dict(fwdtransforms=registration['fwdtransforms'],
                               invtransforms=registration['invtransforms'])
@@ -162,12 +187,14 @@ def preprocess_brain_image(
         if verbose:
             print("Preprocessing:  bias correction.")
         if mask is None:
-            n4_output = ants.n4_bias_field_correction(
-                preprocessed_image, shrink_factor=4, return_bias_field=return_bias_field, verbose=verbose
+            n4_output = run_n4(
+                preprocessed_image, shrink_factor=4, return_bias_field=return_bias_field,
+                verbose=verbose, backend=backend, device=device
             )
         else:
-            n4_output = ants.n4_bias_field_correction(
-                preprocessed_image, mask, shrink_factor=4, return_bias_field=return_bias_field, verbose=verbose
+            n4_output = run_n4(
+                preprocessed_image, mask, shrink_factor=4, return_bias_field=return_bias_field,
+                verbose=verbose, backend=backend, device=device
             )
         if return_bias_field:
             bias_field = n4_output
@@ -179,9 +206,9 @@ def preprocess_brain_image(
         if verbose:
             print("Preprocessing:  denoising.")
         if mask is None:
-            preprocessed_image = ants.denoise_image(preprocessed_image, shrink_factor=1)
+            preprocessed_image = run_denoise(preprocessed_image, shrink_factor=1, backend=backend, device=device)
         else:
-            preprocessed_image = ants.denoise_image(preprocessed_image, mask, shrink_factor=1)
+            preprocessed_image = run_denoise(preprocessed_image, mask, shrink_factor=1, backend=backend, device=device)
 
     # Image matching
     if reference_image is not None and intensity_matching_type is not None:

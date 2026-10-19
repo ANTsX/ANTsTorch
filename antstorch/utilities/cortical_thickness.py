@@ -1,6 +1,7 @@
 import ants
+from .backend_ops import run_kelly_kapowski
 
-def cortical_thickness(t1, device=None, verbose: bool = False):
+def cortical_thickness(t1, device=None, verbose: bool = False, backend=None):
     """
     Perform KellyKapowski cortical thickness using antstorch.deep_atropos for
     segmentation.
@@ -12,6 +13,11 @@ def cortical_thickness(t1, device=None, verbose: bool = False):
 
     verbose : bool
         Print progress to the screen.
+
+    backend : str, dict or None
+        "ants" or "antstorch" for KellyKapowski (key "kelly_kapowski"), and for the
+        N4 and template registration inside deep_atropos (keys "n4", "registration").
+        None uses antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "ants".
 
     Returns
     -------
@@ -29,24 +35,20 @@ def cortical_thickness(t1, device=None, verbose: bool = False):
     # t1 in a 3-element list with None placeholders for T2/FA selects
     # deep_atropos's T1-only network variant, which is exactly what this
     # function needs (T1-only cortical thickness).
-    atropos = deep_atropos([t1, None, None], do_preprocessing=True, device=device, verbose=verbose)
+    atropos = deep_atropos([t1, None, None], do_preprocessing=True, device=device, verbose=verbose,
+                           backend=backend)
             
-    # Kelly-Kapowski cortical thickness (unchanged; uses ANTs ops)
+    # Kelly-Kapowski cortical thickness (ANTs or ANTsTorch DiReCT, see ``backend``)
     kk_segmentation = ants.image_clone(atropos['segmentation_image'])
     kk_segmentation[kk_segmentation == 4] = 3
 
     gray_matter = atropos['probability_images'][2]
     white_matter = (atropos['probability_images'][3] + atropos['probability_images'][4])
 
-    kk = ants.kelly_kapowski(
-        s=kk_segmentation,
-        g=gray_matter,
-        w=white_matter,
-        its=45,
-        r=0.025,
-        m=1.5,
-        x=0,
-        verbose=int(verbose)
+    kk = run_kelly_kapowski(
+        kk_segmentation, gray_matter, white_matter,
+        iterations=45, gradient_step=0.025, velocity_smoothing_variance=1.5,
+        backend=backend, device=device, verbose=verbose
     )
 
     return {
@@ -113,7 +115,8 @@ def longitudinal_cortical_thickness(
     number_of_iterations: int = 1,
     refinement_transform: str = "antsRegistrationSyNQuick[a]",
     device=None,
-    verbose: bool = False
+    verbose: bool = False,
+    backend=None
 ):
     """
     Longitudinal KellyKapowski cortical thickness using antstorch.deep_atropos for the
@@ -131,6 +134,11 @@ def longitudinal_cortical_thickness(
         ants.registration transform string for SST refinement when s>0.
     verbose : bool
         Print progress.
+
+    backend : str, dict or None
+        "ants" or "antstorch" per operation (keys "n4", "denoise", "registration",
+        "kelly_kapowski"); Atropos has no ANTsTorch equivalent and stays on ANTs.
+        None uses antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "ants".
 
     Returns
     -------
@@ -170,7 +178,8 @@ def longitudinal_cortical_thickness(
                 do_denoising=False,
                 intensity_normalization_type="01",
                 device=device,
-                verbose=verbose
+                verbose=verbose,
+                backend=backend
             )
             sst_tmp += t1_pre['preprocessed_image']
         sst = sst_tmp / len(t1s)
@@ -192,7 +201,8 @@ def longitudinal_cortical_thickness(
             do_denoising=True,
             intensity_normalization_type="01",
             device=device,
-            verbose=verbose
+            verbose=verbose,
+            backend=backend
         )
         t1s_preprocessed.append(t1_pre)
 
@@ -200,7 +210,8 @@ def longitudinal_cortical_thickness(
     # NOTE (2026-08-23 bug fix): same list-input requirement as in
     # cortical_thickness() above -- a bare `sst` image would raise
     # ValueError inside deep_atropos().
-    sst_atropos = deep_atropos([sst, None, None], do_preprocessing=True, device=device, verbose=verbose)
+    sst_atropos = deep_atropos([sst, None, None], do_preprocessing=True, device=device, verbose=verbose,
+                               backend=backend)
 
     # --- Traditional Atropos + KellyKapowski per timepoint ---
     return_list = []
@@ -223,15 +234,10 @@ def longitudinal_cortical_thickness(
         gray_matter = atropos_output['probabilityimages'][1]
         white_matter = atropos_output['probabilityimages'][2] + atropos_output['probabilityimages'][3]
 
-        kk = ants.kelly_kapowski(
-            s=kk_segmentation,
-            g=gray_matter,
-            w=white_matter,
-            its=45,
-            r=0.025,
-            m=1.5,
-            x=0,
-            verbose=int(verbose)
+        kk = run_kelly_kapowski(
+            kk_segmentation, gray_matter, white_matter,
+            iterations=45, gradient_step=0.025, velocity_smoothing_variance=1.5,
+            backend=backend, device=device, verbose=verbose
         )
 
         return_list.append({

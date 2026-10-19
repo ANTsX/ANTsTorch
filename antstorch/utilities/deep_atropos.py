@@ -6,7 +6,8 @@ def deep_atropos(
     t1,
     do_preprocessing=True,
     device=None,
-    verbose=False
+    verbose=False,
+    backend=None
 ):
     """
     Six-tissue segmentation.
@@ -42,6 +43,11 @@ def deep_atropos(
     verbose : boolean
         Print progress to the screen.
 
+    backend : str, dict or None
+        "ants" or "antstorch" for the internal N4 and template registration;
+        a dict selects per operation (keys "n4", "registration").  None uses
+        antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "ants".
+
     Returns
     -------
     Dictionary consisting of the segmentation image and probability images for
@@ -59,6 +65,7 @@ def deep_atropos(
     from ..utilities import get_pretrained_network as _get_pretrained_network
     from ..utilities import brain_extraction as _brain_extraction
     from ..utilities.device_manager import get_default_device
+    from .backend_ops import run_n4, run_registration
 
     if device is None:
         device = get_default_device()   
@@ -113,20 +120,23 @@ def deep_atropos(
     t1_mask = None
     preprocessed_images = []
     for i, img in enumerate(input_images):
-        n4 = ants.n4_bias_field_correction(
+        n4 = run_n4(
             truncate_image_intensity(img),
-            mask=img * 0 + 1,
+            img * 0 + 1,
             convergence={'iters': [50, 50, 50, 50], 'tol': 0.0},
             rescale_intensities=True,
-            verbose=verbose
+            verbose=verbose,
+            backend=backend,
+            device=device
         )
         if i == 0:
             t1_bext = _brain_extraction(input_images[0], modality="t1threetissue", device=device, verbose=verbose)
             t1_mask = ants.threshold_image(t1_bext['segmentation_image'], 1, 1, 1, 0)
             n4 = n4 * t1_mask
-            reg = ants.registration(hcp_t1_template, n4,
-                                    type_of_transform="antsRegistrationSyNQuick[a]",
-                                    verbose=verbose)
+            reg = run_registration(hcp_t1_template, n4,
+                                   "antsRegistrationSyNQuick[a]",
+                                   backend=backend, device=device,
+                                   verbose=verbose)
             preprocessed_images.append(reg['warpedmovout'])
         else:
             n4 = n4 * t1_mask

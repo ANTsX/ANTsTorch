@@ -1217,6 +1217,10 @@ def syn_registration(
 
     dimension = fixed.dimension
     if device is None:
+        # Respect an explicit antstorch.set_default_device(); otherwise fall through to auto-detection below.
+        from ..utilities.device_manager import get_user_default_device
+        device = get_user_default_device()
+    if device is None:
         auto_device = auto_detect_device(requested_device=None)
         if auto_device == "mps":
             # bspline_flows.affine_registration()'s differentiable warp

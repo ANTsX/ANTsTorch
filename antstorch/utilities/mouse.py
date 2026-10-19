@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import ants
 import warnings
+from .backend_ops import run_registration, run_kelly_kapowski
 
 
 def _load_state_dict(weights_file_name):
@@ -243,7 +244,8 @@ def mouse_brain_parcellation(image,
                              return_isotropic_output=False,
                              which_parcellation="nick",
                              device=None,
-                             verbose=False):
+                             verbose=False,
+                             backend=None):
 
     """
     Determine brain parcellation
@@ -288,6 +290,10 @@ def mouse_brain_parcellation(image,
 
     verbose : boolean
         Print progress to the screen.
+
+    backend : str, dict or None
+        "ants" or "antstorch" for the template registration (key "registration").
+        None uses antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "ants".
 
     Returns
     -------
@@ -370,9 +376,10 @@ def mouse_brain_parcellation(image,
         if verbose:
             print("Preprocessing:  Warping to " + template_string + " mouse template.")
 
-        reg = ants.registration(template, image_brain,
-                                type_of_transform="antsRegistrationSyNQuickRepro[a]",
-                                verbose=int(verbose))
+        reg = run_registration(template, image_brain,
+                               "antsRegistrationSyNQuickRepro[a]",
+                               backend=backend, device=device,
+                               verbose=verbose)
 
         image_warped = None
         if which_parcellation == "nick" or which_parcellation == "tct":
@@ -441,7 +448,8 @@ def mouse_cortical_thickness(t2,
                              mask=None,
                              return_isotropic_output=False,
                              device=None,
-                             verbose=False):
+                             verbose=False,
+                             backend=None):
 
     """
     Perform KellyKapowski cortical thickness using mouse_brain_parcellation
@@ -470,6 +478,10 @@ def mouse_cortical_thickness(t2,
     verbose : boolean
         Print progress to the screen.
 
+    backend : str, dict or None
+        "ants" or "antstorch" per operation (keys "registration", "kelly_kapowski").
+        None uses antstorch.set_default_backend(), then ANTSTORCH_BACKEND, then "ants".
+
     Returns
     -------
     Cortical thickness image and segmentation probability images.
@@ -487,7 +499,8 @@ def mouse_cortical_thickness(t2,
                                             which_parcellation="nick",
                                             return_isotropic_output=True,
                                             device=device,
-                                            verbose=verbose)
+                                            verbose=verbose,
+                                            backend=backend)
 
     # Kelly Kapowski cortical thickness
 
@@ -498,9 +511,10 @@ def mouse_cortical_thickness(t2,
     cortical_matter = parcellation['probability_images'][1] + parcellation['probability_images'][6]
     other_matter = parcellation['probability_images'][2] + parcellation['probability_images'][3]
 
-    kk = ants.kelly_kapowski(s=kk_segmentation, g=cortical_matter, w=other_matter,
-                            its=45, r=0.0025, m=1.5, x=0, t=10,
-                            verbose=int(verbose))
+    kk = run_kelly_kapowski(kk_segmentation, cortical_matter, other_matter,
+                            iterations=45, gradient_step=0.0025,
+                            velocity_smoothing_variance=1.5, thickness_prior=10,
+                            backend=backend, device=device, verbose=verbose)
 
     if not return_isotropic_output:
         kk = ants.resample_image(kk, t2.spacing, use_voxels=False, interp_type=0)

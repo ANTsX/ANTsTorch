@@ -1,5 +1,6 @@
 import numpy as np
 import ants
+from .backend_ops import run_n4, run_registration
 import torch
 
 def deep_flash(t1,
@@ -7,7 +8,8 @@ def deep_flash(t1,
                do_preprocessing=True,
                use_rank_intensity=True,
                device=None,
-               verbose=False
+               verbose=False,
+               backend=None
                ):
 
     """
@@ -62,6 +64,11 @@ def deep_flash(t1,
 
     verbose : boolean
         Print progress to the screen.
+
+    backend : str, dict or None
+        "ants" or "antstorch" for the internal N4 and template registration; a dict selects per
+        operation (keys "n4", "registration").  None uses antstorch.set_default_backend(),
+        then ANTSTORCH_BACKEND, then "ants".
 
     Returns
     -------
@@ -166,11 +173,13 @@ def deep_flash(t1,
         t1_preprocessed = t1_preprocessed * t1_mask
 
         # Bias correction
-        t1_preprocessed = ants.n4_bias_field_correction(t1_preprocessed, t1_mask, shrink_factor=4, verbose=verbose)
+        t1_preprocessed = run_n4(t1_preprocessed, t1_mask, shrink_factor=4, verbose=verbose,
+                                 backend=backend, device=device)
 
         # Warp to template
-        registration = ants.registration(fixed=t1_template, moving=t1_preprocessed,
-                                         type_of_transform="antsRegistrationSyNQuickRepro[a]", verbose=verbose)
+        registration = run_registration(t1_template, t1_preprocessed,
+                                        "antsRegistrationSyNQuickRepro[a]",
+                                        backend=backend, device=device, verbose=verbose)
         template_transforms = dict(fwdtransforms=registration['fwdtransforms'],
                                    invtransforms=registration['invtransforms'])
         t1_preprocessed = registration['warpedmovout']
@@ -198,7 +207,8 @@ def deep_flash(t1,
             t2_preprocessed = t2_preprocessed * t1_mask
 
             # Do bias correction
-            t2_preprocessed = ants.n4_bias_field_correction(t2_preprocessed, t1_mask, shrink_factor=4, verbose=verbose)
+            t2_preprocessed = run_n4(t2_preprocessed, t1_mask, shrink_factor=4, verbose=verbose,
+                                     backend=backend, device=device)
 
             # Warp to template
             t2_preprocessed = ants.apply_transforms(fixed=t1_template,

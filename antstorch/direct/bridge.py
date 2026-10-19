@@ -36,6 +36,9 @@ def kelly_kapowski(
     for name, image in (("gray_matter", gray_matter), ("white_matter", white_matter)):
         if image.dimension != segmentation.dimension or image.shape != segmentation.shape:
             raise ValueError(f"{name} must match the segmentation domain")
+    if device is None:
+        from ..utilities.device_manager import get_user_default_device
+        device = get_user_default_device()
     resolved_device = torch.device(device) if device is not None else auto_detect_device()
     seg = ants_image_to_tensor(segmentation, resolved_device, normalize=False)
     gray = ants_image_to_tensor(gray_matter, resolved_device, normalize=False)
