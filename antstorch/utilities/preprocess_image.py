@@ -110,9 +110,16 @@ def preprocess_brain_image(
     """
 
     # Local imports to mirror original structure and keep dependency surface minimal
+    import torch
     from ..utilities import brain_extraction
     from ..utilities import get_antstorch_data  
     from .backend_ops import run_n4, run_denoise, run_registration
+    from ..utilities.device_manager import get_default_device
+
+    if device is None:
+        device = get_default_device()
+    elif isinstance(device, str):
+        device = torch.device(device)
 
     preprocessed_image = ants.image_clone(image, pixeltype='float')
 

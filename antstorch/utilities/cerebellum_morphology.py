@@ -109,11 +109,10 @@ def cerebellum_morphology(t1,
         raise ValueError("Image dimension must be 3.")
     t1 = ants.image_clone(t1, pixeltype='float')
 
-    # transform_type = "antsRegistrationSyNQuick[s]"  # up to ~10% run-to-run difference
+    # SyN with the deterministic ("Repro") variant; backend="antstorch" maps it to greedy_registration.
     transform_type = "antsRegistrationSyNQuickRepro[s]"
+
     whichtoinvert = [True, False, True]
-    # transform_type = "antsRegistrationSyNQuick[a]"
-    # whichtoinvert = [True, True]
 
     ################################
     # Get templates / masks / priors

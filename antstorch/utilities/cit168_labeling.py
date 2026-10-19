@@ -98,12 +98,6 @@ def cit168_labeling(t1,
     from ..architectures import create_unet_model_3d
     from ..utilities.device_manager import get_default_device
 
-    from ..utilities import get_pretrained_network
-    from ..utilities import preprocess_brain_image
-    from ..utilities import get_antstorch_data
-    from ..architectures import create_unet_model_3d
-    from ..utilities.device_manager import get_default_device
-
     if device is None:
         device = get_default_device()
     elif isinstance(device, str):
@@ -117,8 +111,9 @@ def cit168_labeling(t1,
     template_large = ants.resample_image(template, [0.5, 0.5, 0.5])
     template_seg = ants.image_read(get_antstorch_data("det_atlas_25_pad_LR_adni"))
 
-    template_transform_type = "antsRegistrationSyNQuickRepro[s]"
     cropped_template_size = [160, 160, 112]
+
+    template_transform_type = "antsRegistrationSyNQuickRepro[s]"
 
     ################################
     # Preprocess images
