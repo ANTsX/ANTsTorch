@@ -71,7 +71,21 @@ def middle_slice(volume, axis=2):
     a 2-D image and no bundled 2-D sample exists for that modality."""
     import ants
     idx = volume.shape[axis] // 2
-    return ants.slice_image(volume, axis=axis, idx=idx)
+    # Templates with an oblique/non-trivial direction matrix make ITK fail with
+    # "Invalid submatrix extracted for collapsed direction" under the default
+    # collapse strategy, so try the other strategies first.
+    for strategy in (None, 1, 2, 3):
+        try:
+            if strategy is None:
+                return ants.slice_image(volume, axis=axis, idx=idx)
+            return ants.slice_image(volume, axis=axis, idx=idx, collapse_strategy=strategy)
+        except (RuntimeError, TypeError):
+            continue
+    # Last resort: plain array slice with the remaining spacing and an identity direction.
+    keep = [d for d in range(volume.dimension) if d != axis]
+    out = ants.from_numpy(volume.numpy().take(idx, axis=axis),
+                          spacing=tuple(volume.spacing[d] for d in keep))
+    return out
 
 
 def to_fake_rgb(gray_2d):
