@@ -281,6 +281,161 @@ def _typical_radius(gauss_blob: Dict[str, Any], level: int,
     return _covariance_rms_radius(Sigma_view, dimension)
 
 
+def _frechet_mean_unit_sphere(unit_points, max_iterations=100, tolerance=1e-7):
+    """Intrinsic equal-weight Fréchet mean of unit row vectors."""
+    points = torch.as_tensor(unit_points, dtype=torch.float64)
+    resultant = points.mean(dim=0)
+    resultant_norm = resultant.norm()
+    if resultant_norm > 1e-12:
+        mean_direction = resultant / resultant_norm
+    else:
+        # A near-zero extrinsic resultant can occur for widely spread
+        # or nearly antipodal observations. Use the observed direction
+        # with the smallest total squared angular distance as a stable
+        # intrinsic initialisation.
+        dots = torch.clamp(points @ points.T, -1.0, 1.0)
+        objectives = torch.acos(dots).square().sum(dim=1)
+        mean_direction = points[int(torch.argmin(objectives))].clone()
+
+    converged = False
+    tangent_norm = float("inf")
+    for iteration in range(int(max_iterations)):
+        dots = torch.clamp(points @ mean_direction, -1.0, 1.0)
+        angles = torch.acos(dots)
+        sin_angles = torch.sin(angles)
+        coefficients = torch.ones_like(angles)
+        nonzero = angles > 1e-10
+        coefficients[nonzero] = (
+            angles[nonzero] / torch.clamp(sin_angles[nonzero], min=1e-12)
+        )
+        tangents = coefficients[:, None] * (
+            points - dots[:, None] * mean_direction[None, :]
+        )
+        mean_tangent = tangents.mean(dim=0)
+        tangent_norm = float(mean_tangent.norm())
+        if tangent_norm < float(tolerance):
+            converged = True
+            break
+        step = min(tangent_norm, math.pi / 2.0)
+        tangent_direction = mean_tangent / max(tangent_norm, 1e-12)
+        mean_direction = (
+            math.cos(step) * mean_direction
+            + math.sin(step) * tangent_direction
+        )
+        mean_direction = mean_direction / mean_direction.norm()
+
+    final_dots = torch.clamp(points @ mean_direction, -1.0, 1.0)
+    objective = float(torch.acos(final_dots).square().mean())
+    return (
+        mean_direction,
+        converged,
+        iteration + 1,
+        tangent_norm,
+        objective,
+        float(resultant_norm),
+    )
+
+
+class _LowRankWhitener:
+    """Whitening for a low-rank Gaussian ``Sigma = diag(psi) + U diag(eig) U^T``.
+
+    With ``A = D^{-1/2} U diag(eig)^{1/2}`` and the thin SVD ``A = V S Q^T`` one has
+    ``Sigma = D^{1/2} (I + V S^2 V^T) D^{1/2}``, so the exact whitening and colouring maps are
+    ``W = (I + V ((1+S^2)^{-1/2} - 1) V^T) D^{-1/2}`` and
+    ``C = D^{1/2} (I + V ((1+S^2)^{1/2} - 1) V^T)``, with ``W Sigma W^T = I`` and ``C W = I``.
+    ``||W c||^2`` is the squared Mahalanobis distance ``c^T Sigma^{-1} c``. The columns of
+    ``U`` need not be orthonormal. Costs one SVD of a (d, rank) matrix; nothing d x d is built.
+    """
+
+    def __init__(self, U, eig, psi):
+        U = torch.as_tensor(np.asarray(U), dtype=torch.float64)
+        eig = torch.as_tensor(np.asarray(eig), dtype=torch.float64).clamp_min(0.0)
+        d = U.shape[0]
+        psi = torch.as_tensor(np.asarray(psi), dtype=torch.float64)
+        if psi.ndim == 0:
+            psi = psi.expand(d)
+        psi = psi.reshape(-1).clamp_min(1e-12)
+        if psi.numel() != d:
+            raise ValueError(f"psi has {psi.numel()} entries; expected {d}.")
+        self.d = d
+        self.sqrt_psi = psi.sqrt()
+        A = (U / self.sqrt_psi[:, None]) * eig.sqrt()[None, :]
+        V, S, _ = torch.linalg.svd(A, full_matrices=False)
+        self.V = V
+        s2 = S * S
+        self._white = (1.0 + s2).rsqrt() - 1.0
+        self._colour = (1.0 + s2).sqrt() - 1.0
+
+    @classmethod
+    def from_covariance(cls, Sigma_view):
+        """Build from a view-sliced covariance (see _slice_covariance); low-rank fits only."""
+        if not (isinstance(Sigma_view, dict) and Sigma_view.get("type") == "lowrank"):
+            raise ValueError(
+                "--mean-method spherical-mahalanobis requires a low-rank Gaussian model "
+                "(gauss-fit --cov-estimator lowrank)."
+            )
+        return cls(Sigma_view["U"], Sigma_view["eig"], _lowrank_noise(Sigma_view))
+
+    def whiten(self, c):
+        """(n, d) or (d,) centred vectors -> whitened coordinates (Sigma^{-1/2}-like)."""
+        y = c / self.sqrt_psi
+        return y + (y @ self.V * self._white) @ self.V.T
+
+    def colour(self, w):
+        """Inverse of whiten: whitened coordinates -> centred vectors with covariance Sigma."""
+        y = w + (w @ self.V * self._colour) @ self.V.T
+        return y * self.sqrt_psi
+
+
+def _spherical_centred_mean(flat, centre, Sigma_view, typical_radius, metric="euclidean",
+                            max_iterations=100, tolerance=1e-7, radius_scale=1.0):
+    """Centred spherical (Frechet) mean of the rows of ``flat`` (N, d), as a (d,) vector.
+
+    Each row is centred on ``centre``, optionally whitened (``metric='mahalanobis'``), and
+    reduced to its direction; the Frechet mean of the directions gets a fixed radius.
+    'euclidean': radius = ``typical_radius`` (the empirical median Euclidean radius stored by
+    gauss-fit). 'mahalanobis': the sphere is the Mahalanobis one and the radius is the median
+    Mahalanobis norm of the rows themselves; the result is mapped back with Sigma^{1/2}.
+    ``radius_scale`` (> 0, default 1) multiplies that radius: decoding is unreliable for latents
+    that are not close to the data when they sit on the full typical radius, so values below 1
+    (like a sampling temperature) move the point inwards along the same direction.
+    Returns ``(mean_flat, info)``."""
+    radius_scale = float(radius_scale)
+    if not radius_scale > 0.0:
+        raise ValueError("radius_scale must be positive.")
+    if metric not in ("euclidean", "mahalanobis"):
+        raise ValueError(f"Unknown metric {metric!r}.")
+    flat = torch.as_tensor(flat, dtype=torch.float64)
+    centre = torch.as_tensor(centre, dtype=torch.float64)
+    centred = flat - centre[None, :]
+    whitener = None
+    if metric == "mahalanobis":
+        whitener = _LowRankWhitener.from_covariance(Sigma_view)
+        coords = whitener.whiten(centred)
+    else:
+        coords = centred
+    norms = coords.norm(dim=1)
+    if torch.any(~torch.isfinite(norms)) or torch.any(norms <= 1e-12):
+        raise ValueError(
+            "at least one cohort latent cannot be projected onto the centred typical-set sphere."
+        )
+    unit_points = coords / norms[:, None]
+    (direction, converged, iterations, tangent_norm,
+     objective, resultant_norm) = _frechet_mean_unit_sphere(unit_points, max_iterations, tolerance)
+    if whitener is None:
+        radius = radius_scale * float(typical_radius)
+        mean_flat = centre + radius * direction
+    else:
+        radius = radius_scale * float(torch.quantile(norms, 0.5))
+        mean_flat = centre + whitener.colour(radius * direction)
+    info = dict(radius=radius, iterations=iterations, converged=converged,
+                tangent_norm=tangent_norm, objective=objective, resultant_norm=resultant_norm,
+                metric=metric, radius_scale=radius_scale,
+                median_norm=float(torch.quantile(norms, 0.5)),
+                mean_norm=float(norms.mean()))
+    return mean_flat, info
+
+
 def _project_to_typical_sphere(z: np.ndarray, mu: np.ndarray, radius: float,
                                eps: float = 1e-12) -> np.ndarray:
     """Centre z on mu and project it to the specified typical-set radius."""
@@ -3380,23 +3535,42 @@ class GlowToolBase(ABC):
             default=None,
             help=(
                 "Gaussian model from gauss-fit. Required by "
-                "--mean-method spherical-centered."
+                "--mean-method spherical-centered and spherical-mahalanobis."
             ),
         )
         ap.add_argument(
             "--mean-method",
-            choices=["euclidean", "spherical-centered"],
+            choices=["euclidean", "spherical-centered", "spherical-mahalanobis", "image"],
             default="euclidean",
             help=(
-                "How to average cohort latents at each level. 'euclidean' "
-                "uses the arithmetic latent mean (default, most stable); "
-                "'spherical-centered' computes a Fréchet mean on the same "
-                "empirically centred typical-set sphere used by SLERP and "
-                "calc-distance."
+                "How to average the cohort. 'euclidean' uses the arithmetic "
+                "latent mean (default, most stable); 'spherical-centered' "
+                "computes a Fréchet mean on the same empirically centred "
+                "typical-set sphere used by SLERP and calc-distance; "
+                "'spherical-mahalanobis' does the same after whitening the "
+                "centred latents with the fitted covariance, so the sphere is "
+                "the Mahalanobis one (radius = median Mahalanobis norm of the "
+                "cohort itself; needs a low-rank Gaussian); 'image' "
+                "averages the input images voxel by voxel on the working grid "
+                "(no model is run; intensities are those of the inputs after "
+                "per-subject [0,1] normalisation and are saved without any "
+                "rescaling, whatever --out-range-mode). Decoding a latent mean is "
+                "non-linear and does not preserve absolute intensity, so use "
+                "'image' for quantitative comparisons between cohorts."
             ),
         )
         ap.add_argument("--spherical-max-iterations", type=int, default=100)
         ap.add_argument("--spherical-tolerance", type=float, default=1e-7)
+        ap.add_argument(
+            "--spherical-radius-scale", type=float, default=1.0,
+            help=(
+                "spherical-centered / spherical-mahalanobis only: factor applied to "
+                "the sphere radius (default 1 = full typical radius). Values below "
+                "1, such as 0.8-0.9, move the point inwards like a sampling "
+                "temperature: at the full radius, directions that are not those of "
+                "real subjects decode poorly."
+            ),
+        )
         ap.add_argument("--ema",         action=argparse.BooleanOptionalAction, default=True)
         self._add_size_arg(ap, required=True)
         args = ap.parse_args(argv)
@@ -3415,12 +3589,45 @@ class GlowToolBase(ABC):
         vi = int(args.view_index)
         v_name = view_names[vi]
 
+        if not args.spherical_radius_scale > 0.0:
+            raise ValueError("--spherical-radius-scale must be positive.")
+        if args.spherical_radius_scale != 1.0 and args.mean_method not in (
+            "spherical-centered", "spherical-mahalanobis"
+        ):
+            raise ValueError(
+                "--spherical-radius-scale only applies to --mean-method "
+                "spherical-centered and spherical-mahalanobis."
+            )
+
+        if args.mean_method == "image":
+            # Voxel-wise mean of the inputs as the model sees them (same reader,
+            # per-subject [0,1] normalisation). The flow is bijective, so this
+            # equals the mean of the decoded latents; no network is needed.
+            total = None
+            n_read = 0
+            for img_path in tqdm(per_view_paths[vi], desc="reading"):
+                x = self.read_image(img_path, target_size).float().cpu()
+                total = x.clone() if total is None else total + x
+                n_read += 1
+            x_mean = (total / n_read).unsqueeze(0).clamp(0.0, 1.0)
+            # The mean of [0,1] images is already in range: save it as is. A rescale
+            # (the 2D saver applies one in its default mode) would change its intensity.
+            self._out_range_mode = "clamp"
+            out_path = Path(args.out)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            self.save_volume(x_mean, out_path)
+            print(
+                f"[recon-cohort-template] mean-method=image over {n_read} "
+                f"subject(s) → {out_path}"
+            )
+            return
+
         gauss_blob = None
         v_idx_gauss = None
-        if args.mean_method == "spherical-centered":
+        if args.mean_method in ("spherical-centered", "spherical-mahalanobis"):
             if not args.gauss:
                 raise ValueError(
-                    "--mean-method spherical-centered requires --gauss."
+                    f"--mean-method {args.mean_method} requires --gauss."
                 )
             if args.spherical_max_iterations < 1:
                 raise ValueError("--spherical-max-iterations must be positive.")
@@ -3456,60 +3663,6 @@ class GlowToolBase(ABC):
 
         L = len(z_stacks[0])
 
-        def frechet_mean_unit_sphere(unit_points):
-            """Intrinsic equal-weight Fréchet mean of unit row vectors."""
-            points = torch.as_tensor(unit_points, dtype=torch.float64)
-            resultant = points.mean(dim=0)
-            resultant_norm = resultant.norm()
-            if resultant_norm > 1e-12:
-                mean_direction = resultant / resultant_norm
-            else:
-                # A near-zero extrinsic resultant can occur for widely spread
-                # or nearly antipodal observations. Use the observed direction
-                # with the smallest total squared angular distance as a stable
-                # intrinsic initialisation.
-                dots = torch.clamp(points @ points.T, -1.0, 1.0)
-                objectives = torch.acos(dots).square().sum(dim=1)
-                mean_direction = points[int(torch.argmin(objectives))].clone()
-
-            converged = False
-            tangent_norm = float("inf")
-            for iteration in range(int(args.spherical_max_iterations)):
-                dots = torch.clamp(points @ mean_direction, -1.0, 1.0)
-                angles = torch.acos(dots)
-                sin_angles = torch.sin(angles)
-                coefficients = torch.ones_like(angles)
-                nonzero = angles > 1e-10
-                coefficients[nonzero] = (
-                    angles[nonzero] / torch.clamp(sin_angles[nonzero], min=1e-12)
-                )
-                tangents = coefficients[:, None] * (
-                    points - dots[:, None] * mean_direction[None, :]
-                )
-                mean_tangent = tangents.mean(dim=0)
-                tangent_norm = float(mean_tangent.norm())
-                if tangent_norm < float(args.spherical_tolerance):
-                    converged = True
-                    break
-                step = min(tangent_norm, math.pi / 2.0)
-                tangent_direction = mean_tangent / max(tangent_norm, 1e-12)
-                mean_direction = (
-                    math.cos(step) * mean_direction
-                    + math.sin(step) * tangent_direction
-                )
-                mean_direction = mean_direction / mean_direction.norm()
-
-            final_dots = torch.clamp(points @ mean_direction, -1.0, 1.0)
-            objective = float(torch.acos(final_dots).square().mean())
-            return (
-                mean_direction,
-                converged,
-                iteration + 1,
-                tangent_norm,
-                objective,
-                float(resultant_norm),
-            )
-
         z_mean_list = []
         for l in range(L):
             if args.mean_method == "euclidean":
@@ -3536,23 +3689,6 @@ class GlowToolBase(ABC):
                         f"have {flat.shape[1]}."
                     )
                 centre = torch.from_numpy(centre_np)
-                centred = flat - centre[None, :]
-                norms = centred.norm(dim=1)
-                if torch.any(~torch.isfinite(norms)) or torch.any(norms <= 1e-12):
-                    raise ValueError(
-                        f"Level {l}: at least one cohort latent cannot be "
-                        "projected onto the centred typical-set sphere."
-                    )
-                unit_points = centred / norms[:, None]
-                (
-                    mean_direction,
-                    converged,
-                    iterations,
-                    tangent_norm,
-                    objective,
-                    resultant_norm,
-                ) = frechet_mean_unit_sphere(unit_points)
-
                 Sigma_list = gauss_blob.get("Sigma", None)
                 Sigma_l = (
                     Sigma_list[l]
@@ -3560,19 +3696,47 @@ class GlowToolBase(ABC):
                     else Sigma_list
                 )
                 Sigma_view = _slice_covariance(Sigma_l, start, stop)
-                radius = _typical_radius(
+                metric = (
+                    "mahalanobis"
+                    if args.mean_method == "spherical-mahalanobis"
+                    else "euclidean"
+                )
+                typical_radius = _typical_radius(
                     gauss_blob, l, v_idx_gauss, Sigma_view, stop - start
                 )
-                mean_flat = centre + float(radius) * mean_direction
+                try:
+                    mean_flat, info = _spherical_centred_mean(
+                        flat, centre, Sigma_view, typical_radius, metric=metric,
+                        max_iterations=args.spherical_max_iterations,
+                        tolerance=args.spherical_tolerance,
+                        radius_scale=args.spherical_radius_scale,
+                    )
+                except ValueError as exc:
+                    raise ValueError(f"Level {l}: {exc}") from exc
                 sample_shape = z_stacks[0][l].shape[1:]
                 z_mean = mean_flat.to(torch.float32).view(1, *sample_shape)
-                print(
-                    f"[recon-cohort-template] level={l} centred-spherical "
-                    f"radius={radius:.6g} iterations={iterations} "
-                    f"converged={converged} tangent_norm={tangent_norm:.3e} "
-                    f"mean_squared_angle={objective:.6g} "
-                    f"resultant_norm={resultant_norm:.6g}"
+                label = (
+                    "centred-spherical-mahalanobis"
+                    if metric == "mahalanobis"
+                    else "centred-spherical"
                 )
+                print(
+                    f"[recon-cohort-template] level={l} {label} "
+                    f"radius={info['radius']:.6g} "
+                    f"(scale={info['radius_scale']:g}) iterations={info['iterations']} "
+                    f"converged={info['converged']} "
+                    f"tangent_norm={info['tangent_norm']:.3e} "
+                    f"mean_squared_angle={info['objective']:.6g} "
+                    f"resultant_norm={info['resultant_norm']:.6g}"
+                )
+                if metric == "mahalanobis":
+                    print(
+                        f"[recon-cohort-template] level={l} mahalanobis norms: "
+                        f"median={info['median_norm']:.6g} "
+                        f"mean={info['mean_norm']:.6g} "
+                        f"sqrt(d)={math.sqrt(stop - start):.6g} "
+                        f"(euclidean typical radius={typical_radius:.6g})"
+                    )
             z_mean_list.append(z_mean.to(device))
 
         print(
