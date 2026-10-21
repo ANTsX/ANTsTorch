@@ -3397,7 +3397,6 @@ class GlowToolBase(ABC):
         )
         ap.add_argument("--spherical-max-iterations", type=int, default=100)
         ap.add_argument("--spherical-tolerance", type=float, default=1e-7)
-        ap.add_argument("--sharpen-image", action="store_true")
         ap.add_argument("--ema",         action=argparse.BooleanOptionalAction, default=True)
         self._add_size_arg(ap, required=True)
         args = ap.parse_args(argv)
