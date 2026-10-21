@@ -2018,6 +2018,27 @@ class GlowToolBase(ABC):
         """Return target_size from args or config dict. Subclass must implement."""
         raise NotImplementedError
 
+    def _finalize_range(self, x: torch.Tensor, label: str = "") -> torch.Tensor:
+        """Bring a decoded template/mean image into [0, 1] according to --out-range-mode.
+
+        'rescale' (default) winsorises at the 1%/99% quantiles and min-max rescales it
+        (to01, the historical behaviour); 'clamp' only clamps it to [0, 1], keeping the
+        intensity scale of training. One diagnostic line per call goes to stderr.
+        """
+        mode = getattr(self, "_out_range_mode", "rescale")
+        x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=0.0)
+        if x.ndim >= 4:
+            ranges = ", ".join(
+                f"c{c}=[{float(x[:, c].amin()):.4g}, {float(x[:, c].amax()):.4g}] "
+                f"out-of-[0,1]={100.0 * float(((x[:, c] < 0.0) | (x[:, c] > 1.0)).float().mean()):.2f}%"
+                for c in range(x.size(1))
+            )
+            print(f"[to01]{f' {label}' if label else ''} output range before normalisation: "
+                  f"{ranges}; mode={mode}", file=sys.stderr)
+        if mode == "clamp":
+            return x.clamp(0.0, 1.0)
+        return to01(x, winsorize=True)
+
     def _reference_header_image(self):
         """Image given by --reference-image (read once), or None."""
         path = getattr(self, "_reference_image", None)
@@ -3267,7 +3288,7 @@ class GlowToolBase(ABC):
                         "population mean."
                     )
 
-            x_mu = to01(x_mu, winsorize=True)
+            x_mu = self._finalize_range(x_mu, "recon-template")
             if args.sharpen_image:
                 try:
                     import ants as _ants
@@ -3335,7 +3356,7 @@ class GlowToolBase(ABC):
                 del x_samp, z_samp
                 gc.collect()
 
-            x_avg = to01(acc / mc_n, winsorize=True)
+            x_avg = self._finalize_range(acc / mc_n, "recon-template (MC)")
             self.save_volume(x_avg, out_path)
 
         print(f"[recon-template] saved → {out_path}")
@@ -3566,7 +3587,7 @@ class GlowToolBase(ABC):
                 f"Decoded {args.mean_method} cohort template contains non-finite "
                 "values; output was not written."
             )
-        x_mean = to01(x_mean, winsorize=True)
+        x_mean = self._finalize_range(x_mean, "recon-cohort-template")
 
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
