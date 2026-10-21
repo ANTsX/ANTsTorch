@@ -75,8 +75,14 @@ def parse_hw_float(spec: str) -> Tuple[float, float]:
 # 2D-specific I/O helpers (module-level, unchanged from original)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _coerce_nchw_4d(x, target_hw=None, keep_channels=False):
-    """Coerce any tensor/list output to (B, C, H, W) float32."""
+def _coerce_nchw_4d(x, target_hw=None, keep_channels=False, range_mode="rescale"):
+    """Coerce any tensor/list output to (B, C, H, W) float32.
+
+    range_mode: what to do when the output leaves [0, 1] by more than a tolerance.
+      'rescale' : winsorise at the 1%/99% quantiles then min-max rescale (to01);
+      'clamp'   : only clamp to [0, 1] (the intensity scale of training is kept).
+    One diagnostic line per call is written to stderr.
+    """
     if isinstance(x, (list, tuple)):
         cands = [t for t in x if torch.is_tensor(t) and t.dim() in (3, 4)]
         if not cands:
@@ -108,11 +114,24 @@ def _coerce_nchw_4d(x, target_hw=None, keep_channels=False):
     if x.size(1) not in (1, 3) and not keep_channels:
         x = x.mean(dim=1, keepdim=True)
     x = x.float()
+    tol = 1e-3
     try:
-        if x.amin() < 0.0 or x.amax() > 1.0:
+        rescale = bool(x.amin() < -tol or x.amax() > 1.0 + tol)
+        ranges = ", ".join(
+            f"c{c}=[{float(x[:, c].amin()):.4g}, {float(x[:, c].amax()):.4g}] "
+            f"out-of-[0,1]={100.0 * float(((x[:, c] < 0.0) | (x[:, c] > 1.0)).float().mean()):.2f}%"
+            for c in range(x.size(1))
+        )
+        print(f"[to01] output range before normalisation: {ranges}; "
+              f"winsorise+rescale {'APPLIED' if rescale and range_mode == 'rescale' else 'not applied'}"
+              f"{' (out of range, clamped only)' if rescale and range_mode == 'clamp' else ''}",
+              file=sys.stderr)
+        if rescale and range_mode == "rescale":
             x = to01(x)
-    except Exception:
-        pass
+        else:
+            x = x.clamp(0.0, 1.0)
+    except Exception as e:
+        print(f"[warn] to01 normalisation failed: {e}", file=sys.stderr)
 
     if target_hw is not None:
         Ht, Wt = int(target_hw[0]), int(target_hw[1])
@@ -205,12 +224,15 @@ def save_grid_2d(
     target_hw: Optional[Tuple[int, int]] = None,
     winsorize: bool = True,
     reference=None,
+    range_mode: str = "rescale",
 ):
     """Save a 4D tensor (B, C, H, W) as a PNG grid or NIfTI.
 
-    `reference` (an ANTs image) gives the header of NIfTI outputs; PNGs have none."""
-    x = _coerce_nchw_4d(x, target_hw=target_hw)
-    x = to01(x, winsorize=winsorize)
+    `reference` (an ANTs image) gives the header of NIfTI outputs; PNGs have none.
+    range_mode 'rescale' (default) min-max rescales every saved image (to01);
+    'clamp' only clamps it to [0, 1], keeping the intensity scale of training."""
+    x = _coerce_nchw_4d(x, target_hw=target_hw, range_mode=range_mode)
+    x = to01(x, winsorize=winsorize) if range_mode == "rescale" else x.clamp(0.0, 1.0)
     out_path = Path(out_path)
     name_lower = out_path.name.lower()
     if name_lower.endswith(".nii") or name_lower.endswith(".nii.gz"):
@@ -437,7 +459,8 @@ class GlowTool2D(GlowToolBase):
         return n > 1 and (bool(getattr(self, "_channel_files", None)) or n != 3)
 
     def coerce_nd(self, x, target_size) -> torch.Tensor:
-        return _coerce_nchw_4d(x, target_hw=target_size, keep_channels=self._per_channel())
+        return _coerce_nchw_4d(x, target_hw=target_size, keep_channels=self._per_channel(),
+                               range_mode=getattr(self, "_out_range_mode", "rescale"))
 
     def save_volume(self, x: torch.Tensor, path, **kw):
         nrow = kw.get("nrow", 1)
@@ -454,10 +477,12 @@ class GlowTool2D(GlowToolBase):
             for c, label in enumerate(labels):
                 save_grid_2d(x[:, c:c + 1], path.with_name(f"{stem}_{label}{ext}"),
                              nrow=nrow, target_hw=target_hw,
-                             reference=self._reference_header_image())
+                             reference=self._reference_header_image(),
+                             range_mode=getattr(self, "_out_range_mode", "rescale"))
             return
         save_grid_2d(x, path, nrow=nrow, target_hw=target_hw,
-                     reference=self._reference_header_image())
+                     reference=self._reference_header_image(),
+                     range_mode=getattr(self, "_out_range_mode", "rescale"))
 
     def build_model(self, cfg: dict, device: torch.device, target_size) -> nn.Module:
         return build_model_from_config_2d(cfg, device, target_hw=target_size,
@@ -492,7 +517,13 @@ class GlowTool2D(GlowToolBase):
             help="Image whose spatial header (direction, origin, spacing) is "
                  "copied onto every NIfTI output (a 2D image here), like ANTs "
                  "CopyImageHeaderInformation <reference> <out> <out> 1 1 1 0. "
-                 "The output is not resampled.",
+                 "If its shape differs from the output, the header is mapped onto the working grid (min-ratio resample, pad/crop) so the spacing is correct.",
+        )
+        ap.add_argument(
+            "--out-range-mode", choices=("rescale", "clamp"), default="rescale",
+            help="When a decoded image leaves [0, 1] (and when saving): 'rescale' (default) "
+                 "winsorises at the 1%%/99%% quantiles and min-max rescales it; 'clamp' only "
+                 "clamps it to [0, 1], keeping the intensity scale used in training.",
         )
         ap.add_argument(
             "--channels", type=int, default=None,
@@ -517,6 +548,7 @@ class GlowTool2D(GlowToolBase):
         # Channels: --channels, else --channel-files, else checkpoint C, else 1.
         self._channel_files = getattr(args, "channel_files", None)
         self._set_reference_image(args)
+        self._out_range_mode = getattr(args, "out_range_mode", "rescale")
         n_files = len(self._channel_files) if self._channel_files else None
         n_arg = getattr(args, "channels", None)
         self._channels = int(n_arg or n_files or cfg.get("C", None) or 1)

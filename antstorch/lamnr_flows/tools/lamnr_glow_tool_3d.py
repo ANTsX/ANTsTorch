@@ -88,8 +88,13 @@ def _save_nifti(tensor: torch.Tensor, out_path: Path, spacing: Optional[tuple] =
     copy_reference_header(img, reference, out_path)
     ants.image_write(img, str(out_path))
 
-def _coerce_nchwd_5d(x, target_hwd=None, keep_channels=False):
-    """Coerce n'importe quel tenseur/liste en sortie vers (B, C, H, W, D) float32."""
+def _coerce_nchwd_5d(x, target_hwd=None, keep_channels=False, range_mode="rescale"):
+    """Coerce n'importe quel tenseur/liste en sortie vers (B, C, H, W, D) float32.
+
+    range_mode: what to do when the output leaves [0, 1] by more than a tolerance.
+      'rescale' : winsorise at the 1%/99% quantiles then min-max rescale (to01);
+      'clamp'   : only clamp to [0, 1] (the intensity scale of training is kept).
+    """
     if isinstance(x, (list, tuple)):
         # Filtrer pour ne garder que les tenseurs 4D ou 5D
         cands = [t for t in x if torch.is_tensor(t) and t.dim() in (4, 5)]
@@ -129,7 +134,19 @@ def _coerce_nchwd_5d(x, target_hwd=None, keep_channels=False):
     # vrai problème de décodage plutôt que d'un artefact numérique bénin.
     tol = 1e-3
     try:
-        if x.amin() < -tol or x.amax() > 1.0 + tol:
+        # One line per call: range of each channel before any normalisation and
+        # whether the winsorise + min-max rescaling (to01) was applied.
+        rescale = bool(x.amin() < -tol or x.amax() > 1.0 + tol)
+        ranges = ", ".join(
+            f"c{c}=[{float(x[:, c].amin()):.4g}, {float(x[:, c].amax()):.4g}] "
+            f"out-of-[0,1]={100.0 * float(((x[:, c] < 0.0) | (x[:, c] > 1.0)).float().mean()):.2f}%"
+            for c in range(x.size(1))
+        )
+        print(f"[to01] output range before normalisation: {ranges}; "
+              f"winsorise+rescale {'APPLIED' if rescale and range_mode == 'rescale' else 'not applied'}"
+              f"{' (out of range, clamped only)' if rescale and range_mode == 'clamp' else ''}",
+              file=sys.stderr)
+        if rescale and range_mode == "rescale":
             x = to01(x, winsorize=True)
         else:
             x = x.clamp(0.0, 1.0)
@@ -179,7 +196,13 @@ class GlowTool3D(GlowToolBase):
             help="Image whose spatial header (direction, origin, spacing) is "
                  "copied onto every NIfTI output, like ANTs "
                  "CopyImageHeaderInformation <reference> <out> <out> 1 1 1 0. "
-                 "The output is not resampled.",
+                 "If its shape differs from the output, the header is mapped onto the working grid (min-ratio resample, pad/crop) so the spacing is correct.",
+        )
+        parser.add_argument(
+            "--out-range-mode", choices=("rescale", "clamp"), default="rescale",
+            help="When a decoded volume leaves [0, 1]: 'rescale' (default) winsorises at "
+                 "the 1%%/99%% quantiles and min-max rescales it; 'clamp' only clamps it to "
+                 "[0, 1], keeping the intensity scale used in training.",
         )
         parser.add_argument("--H", type=int, help="Override volume height.")
         parser.add_argument("--W", type=int, help="Override volume width.")
@@ -189,6 +212,7 @@ class GlowTool3D(GlowToolBase):
         """Extract the (H, W, D) target size from arguments or config."""
         self._channel_files = getattr(args, "channel_files", None)
         self._set_reference_image(args)
+        self._out_range_mode = getattr(args, "out_range_mode", "rescale")
         n_files = len(self._channel_files) if self._channel_files else None
         n_cfg = cfg.get("C", None)
         n_arg = getattr(args, "channels", None)
@@ -505,7 +529,8 @@ class GlowTool3D(GlowToolBase):
 
     def coerce_nd(self, x, target_size) -> torch.Tensor:
         return _coerce_nchwd_5d(x, target_hwd=target_size,
-                                keep_channels=self._n_channels() > 1)
+                                keep_channels=self._n_channels() > 1,
+                                range_mode=getattr(self, "_out_range_mode", "rescale"))
 
     def parse_size(self, size_arg) -> tuple:
         """Convertit l'argument de taille en tuple de 3 entiers (H, W, D)."""

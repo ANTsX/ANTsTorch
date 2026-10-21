@@ -197,17 +197,32 @@ def _level_view_slice(gauss_blob: Dict[str, Any], level: int,
     return start, start + int(dims[view_idx][level])
 
 
+def _lowrank_noise(Sigma_l, start=None, stop=None):
+    """Noise variance of a low-rank Gaussian: per-dimension ``psi`` if stored
+    (``Sigma = U diag(eig) U^T + diag(psi)``), otherwise the isotropic scalar
+    ``sigma2`` (``Sigma = U diag(eig) U^T + sigma2 I``). A vector is sliced to
+    ``[start:stop]`` when bounds are given."""
+    psi = Sigma_l.get("psi") if isinstance(Sigma_l, dict) else None
+    if psi is not None:
+        psi = np.asarray(psi, dtype=np.float64).ravel()
+        return psi if start is None else psi[start:stop]
+    return float(Sigma_l.get("sigma2", 0.0))
+
+
 def _slice_covariance(Sigma_l, start: int, stop: int):
     """Extract a view-specific covariance block without densifying low-rank fits."""
     if Sigma_l is None:
         return None
     if isinstance(Sigma_l, dict) and Sigma_l.get("type") == "lowrank":
-        return {
+        out = {
             "type": "lowrank",
             "U": np.asarray(Sigma_l["U"], dtype=np.float64)[start:stop, :],
             "eig": np.asarray(Sigma_l["eig"], dtype=np.float64),
             "sigma2": float(Sigma_l.get("sigma2", 0.0)),
         }
+        if Sigma_l.get("psi") is not None:
+            out["psi"] = _lowrank_noise(Sigma_l, start, stop)
+        return out
     S = np.asarray(Sigma_l, dtype=np.float64)
     return S[start:stop] if S.ndim == 1 else S[start:stop, start:stop]
 
@@ -220,8 +235,7 @@ def _marginal_variance(Sigma_l, start: int, stop: int) -> np.ndarray:
     if isinstance(Sigma_l, dict) and Sigma_l.get("type") == "lowrank":
         U = np.asarray(Sigma_l["U"], dtype=np.float64)[start:stop, :]
         eig = np.asarray(Sigma_l["eig"], dtype=np.float64)
-        sigma2 = float(Sigma_l.get("sigma2", 0.0))
-        variance = (U * U * eig[np.newaxis, :]).sum(axis=1) + sigma2
+        variance = (U * U * eig[np.newaxis, :]).sum(axis=1) + _lowrank_noise(Sigma_l, start, stop)
     else:
         S = np.asarray(Sigma_l, dtype=np.float64)
         variance = S[start:stop] if S.ndim == 1 else np.diag(S[start:stop, start:stop])
@@ -244,9 +258,9 @@ def _covariance_rms_radius(Sigma_view, dimension: int) -> float:
     if isinstance(Sigma_view, dict) and Sigma_view.get("type") == "lowrank":
         U = np.asarray(Sigma_view["U"], dtype=np.float64)
         eig = np.asarray(Sigma_view["eig"], dtype=np.float64)
-        sigma2 = float(Sigma_view.get("sigma2", 0.0))
-        trace = float((U * U * eig[np.newaxis, :]).sum()
-                      + sigma2 * dimension)
+        noise = _lowrank_noise(Sigma_view)
+        noise_trace = float(np.sum(noise)) if np.ndim(noise) else float(noise) * dimension
+        trace = float((U * U * eig[np.newaxis, :]).sum() + noise_trace)
     else:
         S = np.asarray(Sigma_view, dtype=np.float64)
         trace = float(S.sum()) if S.ndim == 1 else float(np.trace(S))
@@ -859,7 +873,18 @@ def _cov_oas(X: np.ndarray, extra_ridge: float) -> np.ndarray:
     return S_shrunk
 
 
-def _lowrank_from_Xc(Xc: np.ndarray, rank: int, sigma2: float | str, extra_ridge: float) -> dict:
+def _lowrank_from_Xc(Xc: np.ndarray, rank: int, sigma2: float | str, extra_ridge: float,
+                     noise: str = "isotropic") -> dict:
+    """Low-rank Gaussian ``U diag(eig) U^T + noise``.
+
+    ``noise="isotropic"``: one scalar ``sigma2`` for all dimensions (the
+    residual variance spread evenly over the D - r remaining dimensions).
+    ``noise="diag"``: per-dimension ``psi_i`` = empirical variance of
+    dimension i minus the part explained by the rank-r factor (floored at 0,
+    plus ``extra_ridge``), so every marginal variance matches the data.
+    The returned dict always has ``sigma2`` (scalar; the mean of ``psi`` when
+    ``noise="diag"``) for code that only knows the isotropic form.
+    """
     N, D = Xc.shape
     rmax = min(D, max(1, N - 1))
     r = int(max(1, min(rank, rmax)))
@@ -887,22 +912,82 @@ def _lowrank_from_Xc(Xc: np.ndarray, rank: int, sigma2: float | str, extra_ridge
         
         # Le reste de la variance est attribué au bruit
         residual_variance = max(0.0, total_variance - explained_variance)
-        num_remaining_eigs = min(N, D) - r
-        
-        sigma2_val = float(residual_variance / num_remaining_eigs) if num_remaining_eigs > 0 else 0.0
+        # Variance isotrope PAR DIMENSION: la variance résiduelle totale est
+        # répartie sur les D - r dimensions restantes (PCA probabiliste), de
+        # sorte que trace(Sigma) = total_variance. Diviser par min(N, D) - r
+        # (nombre de valeurs propres non nulles) gonflerait sigma2 d'un
+        # facteur ~ (D - r) / (N - r) lorsque N << D.
+        num_remaining_dims = D - r
+        sigma2_val = float(residual_variance / num_remaining_dims) if num_remaining_dims > 0 else 0.0
     else:
         sigma2_val = float(sigma2)
         
     sigma2_val += extra_ridge
-    return {"type": "lowrank", "U": U_cov, "eig": eig_r, "sigma2": sigma2_val}
+    out = {"type": "lowrank", "U": U_cov, "eig": eig_r, "sigma2": sigma2_val}
+    if str(noise).lower() == "diag":
+        emp_var = np.einsum("nd,nd->d", Xc, Xc, optimize=False) / max(1, (N - 1))
+        explained = (U_cov.astype(np.float64) ** 2) @ eig_r.astype(np.float64)
+        psi = np.clip(emp_var - explained, 0.0, None) + float(extra_ridge)
+        out["psi"] = psi
+        out["sigma2"] = float(psi.mean())
+    elif str(noise).lower() != "isotropic":
+        raise ValueError(f"Unknown low-rank noise model: {noise!r} (expected 'diag' or 'isotropic')")
+    return out
 
 def _lowrank_stats(sig: dict) -> dict:
     eig    = np.asarray(sig.get("eig", []), dtype=float)
-    sigma2 = float(sig.get("sigma2", 0.0))
-    lam_min = float(sigma2)
-    lam_max = float((eig.max() if eig.size > 0 else 0.0) + sigma2)
+    noise = _lowrank_noise(sig)
+    lam_min = float(np.min(noise))
+    lam_max = float((eig.max() if eig.size > 0 else 0.0) + np.max(noise))
     cond    = float(lam_max / (lam_min + 1e-12)) if lam_max > 0 else float("inf")
     return {"lambda_min": lam_min, "lambda_max": lam_max, "cond": cond}
+
+def _gaussian_marginal_summary(mu, Sigma) -> Dict[str, float]:
+    """Ranges of the per-dimension means and variances of a fitted Gaussian.
+
+    ``Sigma`` may be a 1-D vector of variances (diag), a full 2-D covariance,
+    or the low-rank dict from ``_lowrank_from_Xc`` (U diag(eig) U^T + sigma2 I).
+    The variances are those of the fitted model, i.e. including any ridge or
+    shrinkage, not the raw empirical variances.
+    """
+    mu = np.asarray(mu, dtype=np.float64).ravel()
+    if isinstance(Sigma, dict) and Sigma.get("type") == "lowrank":
+        U = np.asarray(Sigma["U"], dtype=np.float64)
+        eig = np.asarray(Sigma["eig"], dtype=np.float64)
+        var = (U ** 2) @ eig + _lowrank_noise(Sigma)
+    else:
+        Sigma = np.asarray(Sigma, dtype=np.float64)
+        var = np.diag(Sigma) if Sigma.ndim == 2 else Sigma.ravel()
+    return {
+        "dims": int(mu.size),
+        "mean_min": float(mu.min()), "mean_max": float(mu.max()),
+        "var_min": float(var.min()), "var_max": float(var.max()),
+    }
+
+
+def _print_gaussian_marginals(mu_list, Sigma_list, cov_mode: str,
+                              empirical_var=None) -> List[Dict[str, float]]:
+    """Print [min, max] of per-dimension means and variances (per level, or merged)."""
+    if cov_mode == "perlevel":
+        pairs = [(f"level {l}", m, S) for l, (m, S) in enumerate(zip(mu_list, Sigma_list))]
+    else:
+        pairs = [("merged", mu_list, Sigma_list)]
+    summaries = []
+    print("[gauss-fit] latent distribution after fit (fitted model, per dimension):")
+    for i, (name, m, S) in enumerate(pairs):
+        sm = _gaussian_marginal_summary(m, S)
+        emp = empirical_var[i] if empirical_var is not None and i < len(empirical_var) else None
+        if emp is not None:
+            sm["empirical_var_min"], sm["empirical_var_max"] = emp
+        summaries.append(dict(sm, name=name))
+        line = (f"  {name} ({sm['dims']} dims): "
+                f"mean in [{sm['mean_min']:.4g}, {sm['mean_max']:.4g}], "
+                f"fitted variance in [{sm['var_min']:.4g}, {sm['var_max']:.4g}]")
+        if emp is not None:
+            line += f", empirical variance in [{emp[0]:.4g}, {emp[1]:.4g}]"
+        print(line)
+    return summaries
+
 
 def _fit_gaussian_blocks(X_blocks: List[np.ndarray], estimator: str, shrinkage: float, cov_lam: float) -> Tuple[np.ndarray, np.ndarray, Dict]:
     """
@@ -1000,6 +1085,8 @@ def _save_gauss_npz(blob: Dict[str, Any], out_path: Path):
                 pack[f"Sigma_{i}_U"]      = np.asarray(S["U"])
                 pack[f"Sigma_{i}_eig"]    = np.asarray(S["eig"])
                 pack[f"Sigma_{i}_sigma2"] = np.asarray([S["sigma2"]], dtype=np.float64)
+                if S.get("psi") is not None:
+                    pack[f"Sigma_{i}_psi"] = np.asarray(S["psi"], dtype=np.float64)
             else:
                 pack[f"Sigma_{i}"] = np.asarray(S)
     else:
@@ -1012,6 +1099,8 @@ def _save_gauss_npz(blob: Dict[str, Any], out_path: Path):
             pack["Sigma_U"]      = np.asarray(S["U"])
             pack["Sigma_eig"]    = np.asarray(S["eig"])
             pack["Sigma_sigma2"] = np.asarray([S["sigma2"]], dtype=np.float64)
+            if S.get("psi") is not None:
+                pack["Sigma_psi"] = np.asarray(S["psi"], dtype=np.float64)
         else:
             pack["Sigma"] = np.asarray(S)
     np.savez_compressed(out_path, **pack)
@@ -1097,12 +1186,15 @@ def _load_gaussian_model(gauss_path: Path) -> Dict[str, Any]:
                 nearest_real_list.append(np.array(npz[f"nearest_real_{i}"]))
             if (f"Sigma_{i}_type" in keys
                     and str(np.array(npz[f"Sigma_{i}_type"]).tolist()) == "lowrank"):
-                Sig_list.append({
+                entry = {
                     "type":   "lowrank",
                     "U":      np.array(npz[f"Sigma_{i}_U"]),
                     "eig":    np.array(npz[f"Sigma_{i}_eig"]),
                     "sigma2": float(np.array(npz[f"Sigma_{i}_sigma2"]).ravel()[0]),
-                })
+                }
+                if f"Sigma_{i}_psi" in keys:
+                    entry["psi"] = np.array(npz[f"Sigma_{i}_psi"])
+                Sig_list.append(entry)
             else:
                 Sig_list.append(np.array(npz.get(f"Sigma_{i}")))
         blob["mu"]    = mu_list
@@ -1123,6 +1215,8 @@ def _load_gaussian_model(gauss_path: Path) -> Dict[str, Any]:
                 "eig":    np.array(npz["Sigma_eig"]),
                 "sigma2": float(np.array(npz["Sigma_sigma2"]).ravel()[0]),
             }
+            if "Sigma_psi" in keys:
+                blob["Sigma"]["psi"] = np.array(npz["Sigma_psi"])
         elif "Sigma" in keys:
             blob["Sigma"] = np.array(npz["Sigma"])
         return blob
@@ -1247,7 +1341,7 @@ def _validate_gauss_blob(g: dict):
 # Lowrank conditional mean (push-through / Woodbury identity)
 # ---------------------------------------------------------------------------
 
-def _cond_mean_block_lowrank(U: np.ndarray, eig: np.ndarray, sigma2: float,
+def _cond_mean_block_lowrank(U: np.ndarray, eig: np.ndarray, sigma2,
                              idx_U: list, idx_O: list,
                              mu: np.ndarray, ZO: np.ndarray,
                              base_ridge: float = 1e-4):
@@ -1261,15 +1355,24 @@ def _cond_mean_block_lowrank(U: np.ndarray, eig: np.ndarray, sigma2: float,
     U_O = U[idx_O, :] 
     U_U = U[idx_U, :] 
     
-    s2 = max(float(sigma2) + float(base_ridge), 1e-6)
+    # ``sigma2`` is the isotropic noise variance (scalar) or the per-dimension
+    # noise variances psi (array over all D dimensions, indexed like U).
+    noise = np.asarray(sigma2, dtype=np.float64)
+    if noise.ndim == 0:
+        psi_O = np.full(len(idx_O), max(float(noise) + float(base_ridge), 1e-6))
+    else:
+        psi_O = np.maximum(noise[idx_O] + float(base_ridge), 1e-6)
         
     dO = (ZO - mu[idx_O][None, :]).T 
     
     sqrt_eig = np.sqrt(np.clip(eig, 0.0, None))
     A_T = U_O.T * sqrt_eig[:, None]  
     
-    K = A_T @ A_T.T + s2 * np.eye(len(eig), dtype=np.float64) 
-    rhs = A_T @ dO 
+    # Woodbury with diagonal noise: A (A^T A + Psi)^-1 = (A Psi^-1 A^T + I)^-1 A Psi^-1.
+    # For isotropic noise this reduces to the previous (A A^T + s2 I)^-1 A.
+    A_Tw = A_T / psi_O[None, :]
+    K = A_Tw @ A_T.T + np.eye(len(eig), dtype=np.float64)
+    rhs = A_Tw @ dO 
     
     try:
         w = np.linalg.solve(K, rhs)
@@ -1404,10 +1507,25 @@ def warmup_actnorm_with_real_batch(model, x_real: torch.Tensor):
 # GlowToolBase — abstract class
 # ---------------------------------------------------------------------------
 
+def _reference_on_working_grid(reference, shape):
+    """Reference geometry on the model's working grid, built like the loaders do:
+    factor = min(target/native), spacing/factor, then pad or crop to `shape`
+    (see image_channel_loaders.read_channels)."""
+    import ants
+    shape = tuple(int(s) for s in shape)
+    factor = min(t / a for t, a in zip(shape, reference.shape))
+    resampled = ants.resample_image(
+        reference, tuple(sp / factor for sp in reference.spacing),
+        use_voxels=False, interp_type=1,
+    )
+    return ants.pad_or_crop_image_to_size(resampled, shape)
+
+
 def copy_reference_header(img, reference, out_path=None):
-    """Copy direction, origin and spacing from `reference` onto `img` in place
-    (the same as ANTs ``CopyImageHeaderInformation ref img img 1 1 1 0``).
-    The voxel grid is not resampled, so the shapes should normally agree."""
+    """Copy direction, origin and spacing onto `img` in place (like ANTs
+    ``CopyImageHeaderInformation ref img img 1 1 1 0``). When the shapes differ,
+    the header is taken from `reference` mapped onto the working grid
+    (min-ratio resample, then pad/crop), so the spacing is the true one."""
     if reference is None:
         return img
     if reference.dimension != img.dimension:
@@ -1416,11 +1534,7 @@ def copy_reference_header(img, reference, out_path=None):
             f"{f' {out_path}' if out_path else ''} is {img.dimension}D."
         )
     if tuple(reference.shape) != tuple(img.shape):
-        print(
-            f"[warn] --reference-image shape {tuple(reference.shape)} differs from the "
-            f"output shape {tuple(img.shape)}; its header is copied without resampling.",
-            file=sys.stderr,
-        )
+        reference = _reference_on_working_grid(reference, img.shape)
     img.set_direction(reference.direction)
     img.set_origin(reference.origin)
     img.set_spacing(reference.spacing)
@@ -1706,20 +1820,28 @@ class GlowToolBase(ABC):
                         dtype=z_level.dtype,
                         device=z_level.device,
                     )
-                    sigma2 = max(float(Sigma_level.get("sigma2", 0.0)), 0.0)
+                    noise = np.maximum(
+                        np.asarray(_lowrank_noise(Sigma_level, start, stop), dtype=np.float64), 0.0
+                    )
+                    noise_trace = float(noise.sum()) if noise.ndim else float(noise) * dimension
                     sum_eig = float(eig.sum().item())
-                    isotropic_var = sigma2 * dimension
-                    frac_modeled = sum_eig / max(sum_eig + isotropic_var, 1e-12)
+                    frac_modeled = sum_eig / max(sum_eig + noise_trace, 1e-12)
+                    noise_kind = "per-dimension psi" if noise.ndim else "isotropic sigma2"
                     print(
                         f"[debug] level {level} sample: rank={eig.numel()} "
-                        f"sum_eig={sum_eig:.4g} sigma2={sigma2:.4g} "
-                        f"isotropic_var(=sigma2*dim)={isotropic_var:.4g} "
+                        f"sum_eig={sum_eig:.4g} noise={noise_kind} "
+                        f"noise_trace={noise_trace:.4g} "
                         f"frac_var_modeled={frac_modeled:.4f}"
                     )
                     eps_rank = _randn(batch, eig.numel())
                     centred = (eps_rank * eig.sqrt()) @ U.T
-                    if sigma2 > 0.0:
-                        centred = centred + math.sqrt(sigma2) * _randn(
+                    if noise.ndim:
+                        noise_scale = torch.as_tensor(
+                            np.sqrt(noise), dtype=z_level.dtype, device=z_level.device
+                        ).view(1, -1)
+                        centred = centred + noise_scale * _randn(batch, dimension)
+                    elif float(noise) > 0.0:
+                        centred = centred + math.sqrt(float(noise)) * _randn(
                             batch, dimension
                         )
                     print(f"[debug] level {level} sample: centred (avant T) {_stats(centred)}")
@@ -2006,7 +2128,14 @@ class GlowToolBase(ABC):
         ap.add_argument("--cov-estimator",   default=self.default_cov_estimator,
                         choices=["full", "diag", "oas", "lw", "lowrank"])
         ap.add_argument("--rank",            type=int, default=self.default_cov_rank)
-        ap.add_argument("--sigma2",          type=str, default="auto")
+        ap.add_argument("--sigma2",          type=str, default="auto",
+                        help="Isotropic noise variance for --lowrank-noise isotropic "
+                             "('auto' = residual variance per remaining dimension).")
+        ap.add_argument("--lowrank-noise",   default="diag", choices=["diag", "isotropic"],
+                        help="Noise model of the low-rank Gaussian: 'diag' = "
+                             "U diag(eig) U^T + diag(psi) with per-dimension psi estimated "
+                             "from the data (marginal variances match); 'isotropic' = "
+                             "... + sigma2 I.")
         ap.add_argument("--shrinkage",       type=str, default="1e-6")
         ap.add_argument("--cov-lam",         type=float, default=1e-6)
         ap.add_argument("--jitter",          type=float, default=1e-4)
@@ -2056,7 +2185,7 @@ class GlowToolBase(ABC):
         N = len(per_view_paths[0])
         print(f"[gauss-fit] {V} view(s), {N} subjects, target_size={target_size}")
         print(f"[gauss-fit] cov-mode={args.cov_mode}, estimator={args.cov_estimator}, "
-              f"rank={args.rank}, sigma2={args.sigma2}")
+              f"rank={args.rank}, lowrank-noise={args.lowrank_noise}, sigma2={args.sigma2}")
 
         fp_dtype = {16: torch.float16, 32: torch.float32, 64: torch.float64}[args.save_fp]
 
@@ -2347,12 +2476,17 @@ class GlowToolBase(ABC):
         nearest_real_image_paths: Dict[str, str] = {}
         nearest_real_candidates_image_paths: List[Dict[str, str]] = []
         X_per_level: List[np.ndarray] = []
+        empirical_var_ranges: List[Tuple[float, float]] = []  # raw per-dimension variances
 
         if args.cov_mode == "perlevel":
             for l in range(L):
                 blocks = [_select(latents_per_view[vi_][l], keep_idx) for vi_ in range(V)]
                 X = np.concatenate(blocks, axis=1) if len(blocks) > 1 else blocks[0]
                 X_per_level.append(X)
+                # X may be a torch tensor or a NumPy array depending on the code path.
+                _ev = torch.as_tensor(X).var(dim=0, unbiased=True)
+                empirical_var_ranges.append((float(_ev.min()), float(_ev.max())))
+                del _ev
 
                 mu = X.mean(axis=0)
                 Xc = X - mu
@@ -2361,7 +2495,8 @@ class GlowToolBase(ABC):
 
                 if args.cov_estimator == "lowrank":
                     Sig = _lowrank_from_Xc(Xc_clean, rank=args.rank,
-                                           sigma2=args.sigma2, extra_ridge=shrinkage)
+                                           sigma2=args.sigma2, extra_ridge=shrinkage,
+                                           noise=args.lowrank_noise)
                     sts = _lowrank_stats(Sig)
                 else:
                     mu, Sig, sts = _fit_gaussian_blocks(
@@ -2422,7 +2557,8 @@ class GlowToolBase(ABC):
                     X[int(np.argmin(np.linalg.norm(X - mu, axis=1)))]
                 )
                 Sig = _lowrank_from_Xc(Xc, rank=args.rank,
-                                       sigma2=args.sigma2, extra_ridge=shrinkage)
+                                       sigma2=args.sigma2, extra_ridge=shrinkage,
+                                       noise=args.lowrank_noise)
                 sts = _lowrank_stats(Sig)
             else:
                 mu, Sig, sts = _fit_gaussian_blocks(
@@ -2433,6 +2569,11 @@ class GlowToolBase(ABC):
             stats_list= [sts]
             del all_blocks
             gc.collect()
+
+        latent_marginals = _print_gaussian_marginals(
+            mu_list, Sigma_list, args.cov_mode,
+            empirical_var=empirical_var_ranges or None,
+        )
 
         # Empirical typical-set radius for each view and level. The median is
         # robust to residual radial outliers and is used consistently by
@@ -2500,6 +2641,7 @@ class GlowToolBase(ABC):
                 "kept_N": int(N_kept),
             }
             js["typical_radii_by_view"] = typical_radii_by_view
+            js["latent_marginals"] = latent_marginals
             js_path = Path(args.gauss_summary)
             js_path.parent.mkdir(parents=True, exist_ok=True)
             with open(js_path, "w") as f:
@@ -2619,7 +2761,7 @@ class GlowToolBase(ABC):
                         "type": "lowrank",
                         "U": np.asarray(Sigma_l["U"], dtype=np.float64),
                         "eig": np.asarray(Sigma_l["eig"], dtype=np.float64),
-                        "sigma2": float(Sigma_l.get("sigma2", 0.0)),
+                        "sigma2": _lowrank_noise(Sigma_l),
                         "obs_idx": obs_idx,
                         "tgt_idx": tgt_idx,
                         "mu_l": mu_l,
@@ -2663,12 +2805,16 @@ class GlowToolBase(ABC):
                     if op["type"] == "lowrank":
                         z_obs_np = z_obs_i.numpy()
                         mu_l_np = mu_l if isinstance(mu_l, np.ndarray) else mu_l.numpy()
-                        z_obs_centered = z_obs_np - mu_l_np[obs_idx]
-                        cond_mean = _cond_mean_block_lowrank(
+                        # _cond_mean_block_lowrank centres the observations itself
+                        # (pass them raw) and returns the full conditional mean of
+                        # the unobserved block, mu included. tau scales the deviation
+                        # from the mean, as in the dense branch below.
+                        cond_full = _cond_mean_block_lowrank(
                             op["U"], op["eig"], op["sigma2"],
-                            idx_U=obs_idx, idx_T=tgt_idx,
-                            mu=mu_l_np, ZO=z_obs_centered[np.newaxis, :],
+                            idx_U=tgt_idx, idx_O=obs_idx,
+                            mu=mu_l_np, ZO=z_obs_np[np.newaxis, :],
                         ).ravel()
+                        cond_mean = cond_full - mu_l_np[tgt_idx]
                         z_tgt = mu_l_np[tgt_idx] + cond_mean * float(args.tau)
                         z_tgt = np.clip(z_tgt, -20.0, 20.0)
                         z_tgt_t = torch.from_numpy(z_tgt.astype(np.float32)).view(1, *op["shapes_l"]).to(device)
@@ -2814,7 +2960,6 @@ class GlowToolBase(ABC):
             help="[--edit-what pc_denoise] Residual attenuation: 0=discard everything beyond the top-k components, 1=no-op.",
         )
         ap.add_argument("--ema",         action=argparse.BooleanOptionalAction, default=True)
-        ap.add_argument("--reference-image", type=str, default=None)
         self._add_size_arg(ap, required=True)
         args = ap.parse_args(argv)
 
@@ -3158,9 +3303,9 @@ class GlowToolBase(ABC):
                     if isinstance(Sig_l, dict) and Sig_l.get("type") == "lowrank":
                         U      = np.asarray(Sig_l["U"], dtype=np.float64)[a:b, :]
                         eig    = np.asarray(Sig_l["eig"], dtype=np.float64)
-                        sigma2 = float(Sig_l.get("sigma2", 0.0))
+                        noise  = np.maximum(np.asarray(_lowrank_noise(Sig_l, a, b), dtype=np.float64), 0.0)
                         xi = np.random.randn(U.shape[1]) * float(args.mc_temp)
-                        eps = np.random.randn(D_l) * (sigma2 ** 0.5) * float(args.mc_temp)
+                        eps = np.random.randn(D_l) * np.sqrt(noise) * float(args.mc_temp)
                         z_np = mu_l + U @ (np.sqrt(eig) * xi) + eps
                     elif Sig_l is not None:
                         S = np.asarray(Sig_l, dtype=np.float64)
@@ -3900,8 +4045,20 @@ class GlowToolBase(ABC):
                 if isinstance(Sigma_view, dict) and Sigma_view.get("type") == "lowrank":
                     U      = np.asarray(Sigma_view["U"], dtype=np.float64)
                     eig    = np.asarray(Sigma_view["eig"], dtype=np.float64)
-                    sigma2 = float(Sigma_view.get("sigma2", args.variance_epsilon))
-                    sigma2 = max(sigma2, args.variance_epsilon)
+                    noise = _lowrank_noise(Sigma_view)
+                    if np.ndim(noise):
+                        # Sigma = U diag(eig) U^T + diag(psi): Woodbury,
+                        # d^T Sigma^-1 d = d^T Psi^-1 d - b^T (I + M)^-1 b with
+                        # b = sqrt(eig) U^T Psi^-1 d, M = sqrt(eig) U^T Psi^-1 U sqrt(eig).
+                        psi = np.maximum(noise, args.variance_epsilon)
+                        sq = np.sqrt(np.clip(eig, 0.0, None))
+                        Uw = U / psi[:, None]
+                        b = sq * (Uw.T @ d)
+                        M = (sq[:, None] * (Uw.T @ U)) * sq[None, :]
+                        q = float((d * d / psi).sum()
+                                  - b @ np.linalg.solve(np.eye(len(eig)) + M, b))
+                        return float(max(q, 0.0) ** 0.5)
+                    sigma2 = max(float(noise), args.variance_epsilon)
                     Ud = U.T @ d
                     mahal2 = float((Ud * Ud / (eig + sigma2)).sum()
                                    + np.dot(d, d) / sigma2

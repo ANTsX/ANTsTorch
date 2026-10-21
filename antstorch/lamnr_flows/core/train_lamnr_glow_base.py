@@ -663,7 +663,9 @@ def screen_dump_run_config(
     
     # Calculs dérivés
     cfg["grad_accum"]     = int(cfg.get("grad_accum", 1))
-    cfg["effective_batch"] = int(cfg.get("batch", 0)) * cfg["grad_accum"]
+    # "batch" is per process: under DDP the global batch is batch * accum * world size.
+    cfg["world_size"] = int(os.environ.get("WORLD_SIZE", 1))
+    cfg["effective_batch"] = int(cfg.get("batch", 0)) * cfg["grad_accum"] * cfg["world_size"]
 
     env = {
         "timestamp":         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -708,7 +710,8 @@ def screen_dump_run_config(
     # Training & Optimization
     add("batch", cfg.get("batch"))
     add("grad_accum", cfg.get("grad_accum"))
-    add("effective_batch", cfg.get("effective_batch"))
+    add("world_size (processes)", cfg.get("world_size"))
+    add("effective_batch (global)", cfg.get("effective_batch"))
     add("max_iter / extra", f"{cfg.get('max_iter')} / {cfg.get('extra_iters')}")
     add("eval / plot interval", f"{cfg.get('eval_interval')} / {cfg.get('plot_interval')}")
     add("lr / warmup", f"{cfg.get('lr')} / {cfg.get('warmup_iters')}")
@@ -1223,7 +1226,8 @@ class BaseLAMNrTrainer(abc.ABC):
                     "val_len":   len(getattr(self.val_loader.dataset,   "images", [])),
                     "batch_size": args.batch,
                     "grad_accum": int(getattr(args, "grad_accum", 1)),
-                    "effective_batch": int(args.batch) * int(getattr(args, "grad_accum", 1)),
+                    "effective_batch": int(args.batch) * int(getattr(args, "grad_accum", 1))
+                                       * int(getattr(self, "world_size", 1)),
                 }
             except Exception:
                 dataset_info = {"note": "dataset stats unavailable"}
