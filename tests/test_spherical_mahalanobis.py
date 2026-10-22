@@ -340,3 +340,84 @@ def test_cli_scale_is_refused_for_non_spherical_methods(stubbed, method):
 def test_cli_non_positive_scale_is_refused(stubbed, scale):
     with pytest.raises(ValueError, match="must be positive"):
         _run(stubbed, "spherical-centered", ["--gauss", "stub.npz", "--spherical-radius-scale", scale])
+
+
+# --------------------------------------------------------------------------- #
+# --spherical-center origin (no subtraction of the Gaussian centre)
+# --------------------------------------------------------------------------- #
+
+class TestCentreOrigin:
+    def test_radius_is_the_median_row_norm(self):
+        flat, _, Sigma_view, _ = _cohort()
+        zero = torch.zeros(flat.shape[1], dtype=F64)
+        mean, info = _spherical_centred_mean(flat, zero, Sigma_view, 999.0, radius_source="rows")
+        expected = float(torch.quantile(flat.norm(dim=1), 0.5))
+        assert mean.norm().item() == pytest.approx(expected, rel=1e-9)
+        assert info["radius"] == pytest.approx(expected, rel=1e-9)
+
+    def test_radius_scale_applies_to_the_row_radius(self):
+        flat, _, Sigma_view, _ = _cohort()
+        zero = torch.zeros(flat.shape[1], dtype=F64)
+        full, _ = _spherical_centred_mean(flat, zero, Sigma_view, 1.0, radius_source="rows")
+        half, _ = _spherical_centred_mean(flat, zero, Sigma_view, 1.0, radius_source="rows",
+                                          radius_scale=0.5)
+        assert torch.allclose(half, 0.5 * full)
+
+    def test_direction_does_not_depend_on_the_radius_source(self):
+        flat, _, Sigma_view, _ = _cohort()
+        zero = torch.zeros(flat.shape[1], dtype=F64)
+        rows, _ = _spherical_centred_mean(flat, zero, Sigma_view, 1.0, radius_source="rows")
+        typ, _ = _spherical_centred_mean(flat, zero, Sigma_view, 1.0, radius_source="typical")
+        assert torch.allclose(rows / rows.norm(), typ / typ.norm())
+
+    def test_default_source_is_unchanged(self):
+        flat, centre, Sigma_view, _ = _cohort()
+        mean, _ = _spherical_centred_mean(flat, centre, Sigma_view, 7.5)
+        assert (mean - centre).norm().item() == pytest.approx(7.5, rel=1e-9)
+
+    def test_rows_radius_needs_the_euclidean_metric(self):
+        flat, centre, Sigma_view, _ = _cohort()
+        with pytest.raises(ValueError, match="euclidean"):
+            _spherical_centred_mean(flat, centre, Sigma_view, 1.0, metric="mahalanobis",
+                                    radius_source="rows")
+
+    def test_unknown_radius_source(self):
+        flat, centre, Sigma_view, _ = _cohort()
+        with pytest.raises(ValueError, match="radius_source"):
+            _spherical_centred_mean(flat, centre, Sigma_view, 1.0, radius_source="bogus")
+
+
+def test_cli_origin_uses_the_median_latent_norm_and_no_centre(stubbed):
+    _run(stubbed, "spherical-centered", ["--gauss", "stub.npz", "--spherical-center", "origin"])
+    encoded = [_encoded(a) for a in stubbed["images"]]
+    for l in range(2):
+        rows = torch.tensor(np.stack([e[l] for e in encoded]), dtype=F64)
+        expected, _ = _spherical_centred_mean(rows, torch.zeros(rows.shape[1], dtype=F64), None,
+                                              1.0, radius_source="rows")
+        assert np.allclose(stubbed["captured"]["z"][l].numpy(), expected.numpy(), atol=1e-5)
+
+
+def test_cli_origin_scale_shrinks_the_sphere(stubbed):
+    _run(stubbed, "spherical-centered", ["--gauss", "stub.npz", "--spherical-center", "origin"])
+    full = [z.clone() for z in stubbed["captured"]["z"]]
+    _run(stubbed, "spherical-centered", ["--gauss", "stub.npz", "--spherical-center", "origin",
+                                         "--spherical-radius-scale", "0.5"])
+    for a, b in zip(full, stubbed["captured"]["z"]):
+        assert np.allclose(b.numpy(), 0.5 * a.numpy(), atol=1e-5)
+
+
+def test_cli_origin_differs_from_the_centred_mean(stubbed):
+    _run(stubbed, "spherical-centered", ["--gauss", "stub.npz"])
+    centred = [z.clone() for z in stubbed["captured"]["z"]]
+    _run(stubbed, "spherical-centered", ["--gauss", "stub.npz", "--spherical-center", "origin"])
+    assert any(not np.allclose(a.numpy(), b.numpy()) for a, b in zip(centred, stubbed["captured"]["z"]))
+
+
+@pytest.mark.parametrize("method", ["euclidean", "image", "spherical-mahalanobis"])
+def test_cli_origin_is_refused_for_other_methods(stubbed, method):
+    with pytest.raises(ValueError, match="spherical-centered"):
+        _run(stubbed, method, ["--gauss", "stub.npz", "--spherical-center", "origin"])
+
+
+def test_cli_mean_centre_is_accepted_for_any_method(stubbed):
+    _run(stubbed, "euclidean", ["--spherical-center", "mean"])

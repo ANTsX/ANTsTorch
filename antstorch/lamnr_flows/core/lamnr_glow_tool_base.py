@@ -388,7 +388,8 @@ class _LowRankWhitener:
 
 
 def _spherical_centred_mean(flat, centre, Sigma_view, typical_radius, metric="euclidean",
-                            max_iterations=100, tolerance=1e-7, radius_scale=1.0):
+                            max_iterations=100, tolerance=1e-7, radius_scale=1.0,
+                            radius_source="typical"):
     """Centred spherical (Frechet) mean of the rows of ``flat`` (N, d), as a (d,) vector.
 
     Each row is centred on ``centre``, optionally whitened (``metric='mahalanobis'``), and
@@ -399,12 +400,19 @@ def _spherical_centred_mean(flat, centre, Sigma_view, typical_radius, metric="eu
     ``radius_scale`` (> 0, default 1) multiplies that radius: decoding is unreliable for latents
     that are not close to the data when they sit on the full typical radius, so values below 1
     (like a sampling temperature) move the point inwards along the same direction.
+    ``radius_source='rows'`` (euclidean metric only) replaces the stored typical radius by the
+    median norm of the rows around ``centre``; it is the radius to use when ``centre`` is the
+    origin (the stored typical radius is measured around the Gaussian centre mu).
     Returns ``(mean_flat, info)``."""
     radius_scale = float(radius_scale)
     if not radius_scale > 0.0:
         raise ValueError("radius_scale must be positive.")
     if metric not in ("euclidean", "mahalanobis"):
         raise ValueError(f"Unknown metric {metric!r}.")
+    if radius_source not in ("typical", "rows"):
+        raise ValueError(f"Unknown radius_source {radius_source!r}.")
+    if radius_source == "rows" and metric != "euclidean":
+        raise ValueError("radius_source='rows' requires the euclidean metric.")
     flat = torch.as_tensor(flat, dtype=torch.float64)
     centre = torch.as_tensor(centre, dtype=torch.float64)
     centred = flat - centre[None, :]
@@ -423,7 +431,9 @@ def _spherical_centred_mean(flat, centre, Sigma_view, typical_radius, metric="eu
     (direction, converged, iterations, tangent_norm,
      objective, resultant_norm) = _frechet_mean_unit_sphere(unit_points, max_iterations, tolerance)
     if whitener is None:
-        radius = radius_scale * float(typical_radius)
+        base_radius = (float(torch.quantile(norms, 0.5)) if radius_source == "rows"
+                       else float(typical_radius))
+        radius = radius_scale * base_radius
         mean_flat = centre + radius * direction
     else:
         radius = radius_scale * float(torch.quantile(norms, 0.5))
@@ -3571,6 +3581,16 @@ class GlowToolBase(ABC):
                 "real subjects decode poorly."
             ),
         )
+        ap.add_argument(
+            "--spherical-center", choices=["mean", "origin"], default="mean",
+            help=(
+                "spherical-centered only: point the directions are measured from. "
+                "'mean' (default) is the Gaussian centre mu of --gauss; 'origin' "
+                "uses z = 0 without subtracting anything, with the median latent "
+                "norm of the cohort as base radius (mu is then scaled like the "
+                "rest of the latent)."
+            ),
+        )
         ap.add_argument("--ema",         action=argparse.BooleanOptionalAction, default=True)
         self._add_size_arg(ap, required=True)
         args = ap.parse_args(argv)
@@ -3589,6 +3609,10 @@ class GlowToolBase(ABC):
         vi = int(args.view_index)
         v_name = view_names[vi]
 
+        if args.spherical_center != "mean" and args.mean_method != "spherical-centered":
+            raise ValueError(
+                "--spherical-center origin only applies to --mean-method spherical-centered."
+            )
         if not args.spherical_radius_scale > 0.0:
             raise ValueError("--spherical-radius-scale must be positive.")
         if args.spherical_radius_scale != 1.0 and args.mean_method not in (
@@ -3689,6 +3713,10 @@ class GlowToolBase(ABC):
                         f"have {flat.shape[1]}."
                     )
                 centre = torch.from_numpy(centre_np)
+                radius_source = "typical"
+                if args.spherical_center == "origin":
+                    centre = torch.zeros_like(centre)
+                    radius_source = "rows"
                 Sigma_list = gauss_blob.get("Sigma", None)
                 Sigma_l = (
                     Sigma_list[l]
@@ -3710,6 +3738,7 @@ class GlowToolBase(ABC):
                         max_iterations=args.spherical_max_iterations,
                         tolerance=args.spherical_tolerance,
                         radius_scale=args.spherical_radius_scale,
+                        radius_source=radius_source,
                     )
                 except ValueError as exc:
                     raise ValueError(f"Level {l}: {exc}") from exc
@@ -3723,7 +3752,8 @@ class GlowToolBase(ABC):
                 print(
                     f"[recon-cohort-template] level={l} {label} "
                     f"radius={info['radius']:.6g} "
-                    f"(scale={info['radius_scale']:g}) iterations={info['iterations']} "
+                    f"(scale={info['radius_scale']:g}, centre={args.spherical_center}) "
+                    f"iterations={info['iterations']} "
                     f"converged={info['converged']} "
                     f"tangent_norm={info['tangent_norm']:.3e} "
                     f"mean_squared_angle={info['objective']:.6g} "
