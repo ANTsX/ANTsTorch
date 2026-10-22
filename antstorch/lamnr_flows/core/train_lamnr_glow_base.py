@@ -240,6 +240,16 @@ def make_warmup(
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
 
+def lr_schedule_needs_step(step: int, warmup_iters: int, decay_gamma: float, decay_steps: int) -> bool:
+    """True while the LambdaLR of :func:`make_warmup` still changes the learning rate.
+
+    The warm-up always does; the exponential decay (``gamma ** (step / steps)``) does for the whole
+    run when it is enabled, so the scheduler must keep stepping after the warm-up."""
+    if step <= warmup_iters:
+        return True
+    return decay_gamma != 1.0 and decay_steps > 0
+
+
 @torch.no_grad()
 def _copy_actnorm_state(src: nn.Module, dst: nn.Module) -> None:
     for ms, md in zip(src.modules(), dst.modules()):
@@ -2379,8 +2389,10 @@ class BaseLAMNrTrainer(abc.ABC):
                                 p.data, alpha=1.0 - args.ema_decay
                             )
 
-            # LR warmup step
-            if self.warm is not None and it <= args.warmup_iters:
+            # LR warm-up and decay step (the decay used to stop at the end of the warm-up)
+            if self.warm is not None and lr_schedule_needs_step(
+                it, args.warmup_iters, args.lr_decay_gamma, args.lr_decay_steps
+            ):
                 self.warm.step()
 
             # Global step counter
