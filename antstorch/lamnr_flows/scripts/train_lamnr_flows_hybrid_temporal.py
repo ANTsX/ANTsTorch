@@ -97,7 +97,12 @@ from antsnormflows.distributions.base import ConditionalDiagGaussian, GlowBase, 
 from antsnormflows.flows import (ActNorm, AffineCouplingBlock, CoupledRationalQuadraticSpline, Invertible1x1Conv, LULinearPermute,
                                  Permute)
 
-from antstorch.lamnr_flows.core.train_lamnr_glow_base import make_warmup, n_params, set_deterministic
+from antstorch.lamnr_flows.core.train_lamnr_glow_base import (
+    LRCoordinator,
+    make_warmup,
+    n_params,
+    set_deterministic,
+)
 from antstorch.lamnr_flows.misc.channel_normalizer import ChannelNormalizer
 from antstorch.lamnr_flows.misc.latent_alignment import LatentAlignmentLossManager, Projector
 from antstorch.lamnr_flows.scripts.train_lamnr_flows_hybrid import (HybridLAMNrTrainer, HybridViewSpec, _is_present, _load_image,
@@ -571,6 +576,10 @@ class HybridTemporalLAMNrTrainer:
         self.warm = make_warmup(self.opt, a.warmup_iters, a.lr_decay_gamma, a.lr_decay_steps)
         self.plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(self.opt, factor=a.plateau_factor, patience=a.plateau_patience,
                                                                   threshold=a.plateau_threshold, cooldown=a.plateau_cooldown, min_lr=a.min_lr)
+        self.lrc = LRCoordinator(
+            self.opt, self.warm, self.plateau, a.warmup_iters, a.lr_decay_gamma, a.lr_decay_steps,
+            min_lr=a.min_lr, recover_after=a.lr_recover_after, recover_factor=a.lr_recover_factor,
+        )
         self.amp_enabled = a.precision == "mixed" and self.dev.type == "cuda"
         self.amp_dtype = torch.bfloat16 if a.amp_dtype == "bf16" else torch.float16
         self.scaler = torch.amp.GradScaler(enabled=(self.amp_enabled and self.amp_dtype == torch.float16))
@@ -965,16 +974,12 @@ class HybridTemporalLAMNrTrainer:
         a = self.args
         self.anomaly_streak += 1
 
-        def _backed_off(lr):
-            return min(lr, max(a.min_lr, lr * a.nan_lr_backoff))
-        backed = _backed_off(self.opt.param_groups[0]["lr"])
-        for g in self.opt.param_groups:
-            g["lr"] = _backed_off(g["lr"])
+        backed = self.lrc.backoff(a.nan_lr_backoff)
+        pre_backoff_scale = self.lrc.backoff_scale
         tqdm.write(f"[anomaly] iter={iteration}: {reason}; update rejected, streak={self.anomaly_streak}, lr={self.opt.param_groups[0]['lr']:.3g}")
         if self.anomaly_streak >= a.anomaly_reload_after and self.state_path.exists():
             self._load_checkpoint(torch.load(self.state_path, map_location=self.dev, weights_only=False), load_iteration=False)
-            for g in self.opt.param_groups:
-                g["lr"] = min(g["lr"], backed)
+            self.lrc.after_reload(pre_backoff_scale, backed)
             self.anomaly_streak = 0
             tqdm.write("[anomaly] restored the last validated checkpoint")
 
@@ -1048,8 +1053,7 @@ class HybridTemporalLAMNrTrainer:
                 continue
             self.anomaly_streak = 0
             self._init_or_update_ema()
-            if self.warm is not None and it <= a.warmup_iters:
-                self.warm.step()
+            self.lrc.step(it)
             n = float(a.accum_steps)
             mean_loss, mean_align, bpds = loss_sum / n, align_sum / n, list(bpd_sum / n)
             sum_bpd = sum(x for x in bpds if math.isfinite(x))
@@ -1058,7 +1062,7 @@ class HybridTemporalLAMNrTrainer:
             do_eval = it % a.eval_interval == 0 or it == a.max_iter
             if do_eval:
                 val_loss = self.validate(it)
-                self.plateau.step(val_loss)
+                self.lrc.plateau_step(val_loss)
             if a.smooth_alpha > 0:
                 ema_l = mean_loss if ema_l is None else (1 - a.smooth_alpha) * ema_l + a.smooth_alpha * mean_loss
                 ema_a = mean_align if ema_a is None else (1 - a.smooth_alpha) * ema_a + a.smooth_alpha * mean_align
@@ -1120,6 +1124,7 @@ class HybridTemporalLAMNrTrainer:
             "optimizer": self.opt.state_dict(),
             "warmup": self.warm.state_dict() if self.warm is not None else None,
             "plateau": self.plateau.state_dict(),
+            "lr_coord": self.lrc.state_dict(),
             "scaler": self.scaler.state_dict(),
             "normalizers": {k: v.state_dict() for k, v in self.normalizers.items()},
             "views": [v.__dict__ for v in self.views],
@@ -1167,6 +1172,10 @@ class HybridTemporalLAMNrTrainer:
             self.warm.load_state_dict(blob["warmup"])
         if blob.get("plateau") is not None:
             self.plateau.load_state_dict(blob["plateau"])
+        if blob.get("lr_coord") is not None:
+            self.lrc.load_state_dict(blob["lr_coord"])
+        else:  # checkpoint written before the coordinator existed
+            self.lrc.resync()
         if blob.get("scaler"):
             self.scaler.load_state_dict(blob["scaler"])
         if self.args.ema and blob.get("ema_models") is not None:
@@ -1433,6 +1442,10 @@ def _build_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--plateau-cooldown", type=int, default=0)
     p.add_argument("--min-lr", type=float, default=1e-7)
     p.add_argument("--nan-lr-backoff", type=float, default=0.5)
+    p.add_argument("--lr-recover-after", type=int, default=0,
+                   help="Consecutive accepted iterations after which the anomaly LR back-off recovers "
+                        "by --lr-recover-factor (0 = permanent).")
+    p.add_argument("--lr-recover-factor", type=float, default=1.05)
     p.add_argument("--anomaly-reload-after", type=int, default=5)
     p.add_argument("--resume", default="")
     p.add_argument("--auto-resume", action="store_true")

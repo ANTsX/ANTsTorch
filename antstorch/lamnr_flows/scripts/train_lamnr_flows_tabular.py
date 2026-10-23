@@ -67,6 +67,7 @@ from antstorch.utilities.dataframe_dataset import (
 
 from antstorch.lamnr_flows.core.train_lamnr_glow_base import (
     BaseLAMNrTrainer,
+    LRCoordinator,
     bits_per_dim,
     make_warmup,
     n_params,
@@ -514,6 +515,7 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
     def _maybe_resume(self, args) -> int:
         """Extend parent resume to also reload TabularNormalizer stats."""
         start_iter = super()._maybe_resume(args)
+        self.lrc.resync()  # plateau reductions survive a resume (no extra checkpoint key needed)
 
         # Reload normalizer stats if present in the checkpoint
         resume_path = None
@@ -744,8 +746,7 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
             self.opt.step()
 
             # LR warmup
-            if self.warm is not None and it <= args.warmup_iters:
-                self.warm.step()
+            self.lrc.step(it)
 
             with self.global_step.get_lock():
                 self.global_step.value += 1
@@ -815,7 +816,7 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
                 if j >= 9:
                     break
         avg_bpd = float(np.mean(bpd_vals)) if bpd_vals else float("nan")
-        self.plateau.step(avg_bpd)
+        self.lrc.plateau_step(avg_bpd)
         lr_now = self.opt.param_groups[0]["lr"]
         tqdm.write(f"[eval] iter={it} avg_bpd={avg_bpd:.4f} lr={lr_now:.2e}")
 
@@ -910,6 +911,11 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
             factor=getattr(args, "plateau_factor", 0.5),
             patience=getattr(args, "plateau_patience", 5),
             threshold=getattr(args, "plateau_threshold", 1e-4),
+            min_lr=getattr(args, "min_lr", 1e-6),
+        )
+        self.lrc = LRCoordinator(
+            self.opt, self.warm, self.plateau, args.warmup_iters,
+            getattr(args, "lr_decay_gamma", 1.0), getattr(args, "lr_decay_steps", 0),
             min_lr=getattr(args, "min_lr", 1e-6),
         )
 

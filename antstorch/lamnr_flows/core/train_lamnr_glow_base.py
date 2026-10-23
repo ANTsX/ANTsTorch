@@ -250,6 +250,113 @@ def lr_schedule_needs_step(step: int, warmup_iters: int, decay_gamma: float, dec
     return decay_gamma != 1.0 and decay_steps > 0
 
 
+class LRCoordinator:
+    """Compose every learning-rate mechanism multiplicatively, with a fixed priority.
+
+    The final LR of each param group is::
+
+        lr = base_lr * warmup(step) * decay(step) * plateau_scale * backoff_scale
+
+    ``LambdaLR`` (warm-up/decay) recomputes the LR from ``base_lr`` on every ``step()``, so it
+    silently erases anything written straight into ``param_groups`` (an anomaly back-off, or the
+    reductions of ``ReduceLROnPlateau``). Here those two are kept as *scales* that are re-applied
+    after every scheduler step, so none of them overrides another.
+
+    Priority when they conflict (highest first):
+      1. anomaly back-off  -- safety; optionally recovers geometrically after ``recover_after``
+         consecutive accepted iterations (``recover_after=0`` keeps it permanent);
+      2. plateau reduction -- sticky, driven by validation;
+      3. warm-up / exponential decay -- the nominal schedule.
+    The floor ``min_lr`` is honoured by back-off and plateau, but never raises an LR that the nominal
+    schedule (e.g. during warm-up) keeps below it.
+    """
+
+    def __init__(
+        self,
+        optimizer: torch.optim.Optimizer,
+        warm: Optional[torch.optim.lr_scheduler.LambdaLR],
+        plateau: torch.optim.lr_scheduler.ReduceLROnPlateau,
+        warmup_iters: int,
+        decay_gamma: float,
+        decay_steps: int,
+        min_lr: float = 0.0,
+        recover_after: int = 0,
+        recover_factor: float = 1.05,
+    ) -> None:
+        self.opt, self.warm, self.plateau = optimizer, warm, plateau
+        self.warmup_iters, self.decay_gamma, self.decay_steps = warmup_iters, decay_gamma, decay_steps
+        self.min_lr = float(min_lr)
+        self.recover_after = int(recover_after)
+        self.recover_factor = float(recover_factor)
+        self.backoff_scale = 1.0
+        self.plateau_scale = 1.0
+        self.stable = 0
+
+    def _mul(self, ratio: float) -> None:
+        if ratio != 1.0:
+            for g in self.opt.param_groups:
+                g["lr"] *= ratio
+
+    def lr(self) -> float:
+        return float(self.opt.param_groups[0]["lr"])
+
+    def step(self, step: int) -> None:
+        """Call once per *accepted* iteration, after ``optimizer.step()``."""
+        if self.warm is not None and lr_schedule_needs_step(
+            step, self.warmup_iters, self.decay_gamma, self.decay_steps
+        ):
+            self.warm.step()  # resets lr to base * lambda(step)
+            self._mul(self.backoff_scale * self.plateau_scale)
+        self.stable += 1
+        if self.recover_after > 0 and self.backoff_scale < 1.0 and self.stable >= self.recover_after:
+            new = min(1.0, self.backoff_scale * self.recover_factor)
+            self._mul(new / self.backoff_scale)
+            self.backoff_scale, self.stable = new, 0
+
+    def plateau_step(self, metric: float) -> None:
+        """Replace ``plateau.step(metric)``: fold the reduction into ``plateau_scale``."""
+        before = self.lr()
+        self.plateau.step(metric)
+        after = self.lr()
+        if before > 0.0 and 0.0 < after < before:
+            self.plateau_scale *= after / before
+
+    def backoff(self, factor: float) -> float:
+        """Anomaly back-off. Returns the new LR of group 0 (for the reload safety floor)."""
+        cur0 = self.lr()
+        for g in self.opt.param_groups:
+            g["lr"] = min(g["lr"], max(self.min_lr, g["lr"] * factor))
+        new0 = self.lr()
+        if cur0 > 0.0:
+            self.backoff_scale *= new0 / cur0
+        self.stable = 0
+        return new0
+
+    def after_reload(self, pre_backoff_scale: float, backed_off_lr: float) -> None:
+        """After restoring a checkpoint, keep the safety back-off that triggered the reload."""
+        self.backoff_scale = min(self.backoff_scale, pre_backoff_scale)
+        for g in self.opt.param_groups:
+            g["lr"] = min(g["lr"], backed_off_lr)
+        self.stable = 0
+
+    def resync(self) -> None:
+        """Infer the combined scale from the optimizer LR (for resumes without saved state)."""
+        if self.warm is None:
+            return
+        nominal = self.opt.param_groups[0]["initial_lr"] * self.warm.lr_lambdas[0](max(1, self.warm.last_epoch))
+        if nominal > 0.0:
+            self.plateau_scale = min(1.0, self.lr() / nominal)
+            self.backoff_scale = 1.0
+
+    def state_dict(self) -> dict:
+        return {"backoff_scale": self.backoff_scale, "plateau_scale": self.plateau_scale, "stable": self.stable}
+
+    def load_state_dict(self, d: dict) -> None:
+        self.backoff_scale = float(d.get("backoff_scale", 1.0))
+        self.plateau_scale = float(d.get("plateau_scale", 1.0))
+        self.stable = int(d.get("stable", 0))
+
+
 @torch.no_grad()
 def _copy_actnorm_state(src: nn.Module, dst: nn.Module) -> None:
     for ms, md in zip(src.modules(), dst.modules()):
@@ -1192,6 +1299,13 @@ class BaseLAMNrTrainer(abc.ABC):
             cooldown=getattr(args, "plateau_cooldown", 0),
             min_lr=getattr(args, "min_lr", 1e-6),
         )
+        # warm-up/decay and plateau both write the LR; compose them instead of letting the
+        # LambdaLR erase the plateau reductions at its next step. (The rollback lr_backoff of
+        # train() is applied transiently around opt.step(), so it does not conflict.)
+        self.lrc = LRCoordinator(
+            self.opt, self.warm, self.plateau, args.warmup_iters, args.lr_decay_gamma,
+            args.lr_decay_steps, min_lr=getattr(args, "min_lr", 1e-6),
+        )
 
         # Paths
         self.run_dir    = Path(args.out_dir)
@@ -1509,6 +1623,9 @@ class BaseLAMNrTrainer(abc.ABC):
         # Warmup scheduler
         if self.warm and blob.get("warm") is not None:
             self.warm.load_state_dict(blob["warm"])
+        # The plateau state is not checkpointed: recover its reductions from the restored LR.
+        if getattr(self, "lrc", None) is not None:
+            self.lrc.resync()
 
         # Model weights
         if blob.get("models") is not None:
@@ -2390,10 +2507,7 @@ class BaseLAMNrTrainer(abc.ABC):
                             )
 
             # LR warm-up and decay step (the decay used to stop at the end of the warm-up)
-            if self.warm is not None and lr_schedule_needs_step(
-                it, args.warmup_iters, args.lr_decay_gamma, args.lr_decay_steps
-            ):
-                self.warm.step()
+            self.lrc.step(it)
 
             # Global step counter
             with self.global_step.get_lock():
@@ -2530,7 +2644,7 @@ class BaseLAMNrTrainer(abc.ABC):
             dist.broadcast(bpd_tensor, src=0)
             avg_bpd = float(bpd_tensor.item())
 
-        self.plateau.step(avg_bpd)
+        self.lrc.plateau_step(avg_bpd)
         if self.rank == 0:
             lr_now = self.opt.param_groups[0]["lr"]
             tqdm.write(f"[eval] iter={it} avg_bpd={avg_bpd:.4f} lr={lr_now:.2e}")

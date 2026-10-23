@@ -120,6 +120,7 @@ from antstorch.lamnr_flows.architectures.create_normalizing_flow_model import (
     create_normalizing_flow_model_1d,
 )
 from antstorch.lamnr_flows.core.train_lamnr_glow_base import (
+    LRCoordinator,
     make_warmup,
     n_params,
     set_deterministic,
@@ -1206,6 +1207,11 @@ class HybridLAMNrTrainer:
             cooldown=args.plateau_cooldown,
             min_lr=args.min_lr,
         )
+        self.lrc = LRCoordinator(
+            self.opt, self.warm, self.plateau, args.warmup_iters, args.lr_decay_gamma,
+            args.lr_decay_steps, min_lr=args.min_lr,
+            recover_after=args.lr_recover_after, recover_factor=args.lr_recover_factor,
+        )
         self.amp_enabled = args.precision == "mixed" and self.dev.type == "cuda"
         self.amp_dtype = torch.bfloat16 if args.amp_dtype == "bf16" else torch.float16
         self.scaler = torch.amp.GradScaler(
@@ -1625,17 +1631,10 @@ class HybridLAMNrTrainer:
 
     def _recover_after_anomaly(self, iteration: int, reason: str) -> None:
         self.anomaly_streak += 1
-        def _backed_off(current_lr: float) -> float:
-            # During warmup the current LR may legitimately be below min_lr.
-            # An anomaly "backoff" must never increase it to the plateau floor.
-            return min(
-                current_lr,
-                max(self.args.min_lr, current_lr * self.args.nan_lr_backoff),
-            )
-
-        backed_off_lr = _backed_off(self.opt.param_groups[0]["lr"])
-        for group in self.opt.param_groups:
-            group["lr"] = _backed_off(group["lr"])
+        # Back-off is a persistent scale (never raises an LR below min_lr, e.g. during warm-up) that
+        # the warm-up/decay scheduler re-applies at every step instead of erasing it.
+        backed_off_lr = self.lrc.backoff(self.args.nan_lr_backoff)
+        pre_backoff_scale = self.lrc.backoff_scale
         if self.rank == 0:
             tqdm.write(
                 f"[anomaly] iter={iteration}: {reason}; update rejected, "
@@ -1645,8 +1644,7 @@ class HybridLAMNrTrainer:
             self._load_checkpoint(self.state_path, load_iteration=False)
             # Loading restores the checkpoint optimizer LR; retain the safety
             # backoff that triggered this recovery.
-            for group in self.opt.param_groups:
-                group["lr"] = min(group["lr"], backed_off_lr)
+            self.lrc.after_reload(pre_backoff_scale, backed_off_lr)
             self.anomaly_streak = 0
             if self.rank == 0:
                 tqdm.write("[anomaly] restored the last validated checkpoint")
@@ -1761,8 +1759,7 @@ class HybridLAMNrTrainer:
                 continue
             self.anomaly_streak = 0
             self._init_or_update_ema()
-            if self.warm is not None and iteration <= self.args.warmup_iters:
-                self.warm.step()
+            self.lrc.step(iteration)
             with self.global_step.get_lock():
                 self.global_step.value = iteration
 
@@ -1778,7 +1775,7 @@ class HybridLAMNrTrainer:
             do_eval = iteration % self.args.eval_interval == 0 or iteration == self.args.max_iter
             if do_eval:
                 val_loss = self.validate(iteration)
-                self.plateau.step(val_loss)
+                self.lrc.plateau_step(val_loss)
             if self.rank == 0:
                 if smooth_alpha > 0:
                     ema_loss_disp = (
@@ -1880,6 +1877,7 @@ class HybridLAMNrTrainer:
             "optimizer": self.opt.state_dict(),
             "warmup": self.warm.state_dict() if self.warm is not None else None,
             "plateau": self.plateau.state_dict(),
+            "lr_coord": self.lrc.state_dict(),
             "scaler": self.scaler.state_dict(),
             "normalizers": {k: v.state_dict() for k, v in self.normalizers.items()},
             "views": [view.__dict__ for view in self.views],
@@ -2014,6 +2012,10 @@ class HybridLAMNrTrainer:
             self.warm.load_state_dict(blob["warmup"])
         if blob.get("plateau") is not None:
             self.plateau.load_state_dict(blob["plateau"])
+        if blob.get("lr_coord") is not None:
+            self.lrc.load_state_dict(blob["lr_coord"])
+        else:  # checkpoint written before the coordinator existed
+            self.lrc.resync()
         # A disabled GradScaler serializes to an empty dict.  Passing that
         # empty state back to load_state_dict raises, even though there is no
         # scaling state to restore (for example, a float32 checkpoint loaded
@@ -2309,6 +2311,10 @@ def _build_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--plateau-cooldown", type=int, default=0)
     parser.add_argument("--min-lr", type=float, default=1e-7)
     parser.add_argument("--nan-lr-backoff", type=float, default=0.5)
+    parser.add_argument("--lr-recover-after", type=int, default=0,
+                        help="After this many consecutive accepted iterations the anomaly LR back-off "
+                             "recovers by --lr-recover-factor (0 = back-off is permanent).")
+    parser.add_argument("--lr-recover-factor", type=float, default=1.05)
     parser.add_argument("--anomaly-reload-after", type=int, default=5)
     parser.add_argument("--resume", default="")
     parser.add_argument("--auto-resume", action="store_true")
