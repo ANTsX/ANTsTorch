@@ -9,6 +9,7 @@ import torch.nn as nn
 def cit168_labeling(t1,
                     brain_mask=None,
                     do_preprocessing=True,
+                    include_template_priors=True,
                     device=None,
                     verbose=False,
                     backend=None):
@@ -263,5 +264,32 @@ def cit168_labeling(t1,
             relabeled_segmentation_image += single_label_image * group_labels[i]
 
         cit168_segmentation_image += relabeled_segmentation_image
-    
+
+    if include_template_priors:
+        # Fill the 18 Pauli CIT168 nuclei not modeled by the two 9-class UNets
+        # (NAC=3/19, EXA=4/20, PBP=10/26, VTA=11/27, VeP=12/28, HN=13/29,
+        # HTH=14/30, MN=15/31, STH=16/32) from the SyN-warped det_atlas_25_pad_LR_adni
+        # template segmentation where the UNet segmentation is background (0).
+        unmodeled_labels = (
+            3, 4, 10, 11, 12, 13, 14, 15, 16,
+            19, 20, 26, 27, 28, 29, 30, 31, 32,
+        )
+        warped_template_seg = ants.apply_transforms(
+            fixed=t1,
+            moving=template_seg,
+            transformlist=reg["invtransforms"],
+            interpolator="genericLabel",
+            singleprecision=True,
+            verbose=verbose,
+        )
+        cit_arr = cit168_segmentation_image.numpy()
+        prior_arr = np.rint(warped_template_seg.numpy()).astype(cit_arr.dtype)
+        fill_mask = (cit_arr == 0) & np.isin(prior_arr, unmodeled_labels)
+        if np.any(fill_mask):
+            cit_arr = cit_arr.copy()
+            cit_arr[fill_mask] = prior_arr[fill_mask]
+            cit168_segmentation_image = ants.copy_image_info(
+                cit168_segmentation_image, ants.from_numpy(cit_arr)
+            )
+
     return cit168_segmentation_image

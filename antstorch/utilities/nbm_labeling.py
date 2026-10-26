@@ -8,6 +8,8 @@ import torch.nn as nn
 
 def nbm_labeling(t1,
                  brain_mask=None,
+                 do_bias_correction=True,
+                 template_transforms=None,
                  device=None,
                  verbose=False,
                  backend=None):
@@ -81,19 +83,35 @@ def nbm_labeling(t1,
     t1 = ants.image_clone(t1, pixeltype="float")
     t1 = ants.iMath(t1, "Normalize")
 
-    t1_preprocessing = preprocess_brain_image(t1,
-        truncate_intensity=[1e-4, 0.999],
-        brain_extraction_modality="t1threetissue",
-        template=which_template,
-        template_transform_type=template_transform_type,
-        do_bias_correction=True,
-        do_denoising=False,
-        brain_mask=brain_mask,
-        device=device,
-        verbose=verbose,
-        backend=backend)
-        
-    t1_preprocessed = t1_preprocessing["preprocessed_image"] * t1_preprocessing['brain_mask']
+    if template_transforms is not None and brain_mask is not None:
+        t1_mask = ants.threshold_image(
+            ants.image_clone(brain_mask, pixeltype="float"), 0.5, 1e9, 1, 0
+        )
+        t1_brain = ants.iMath(t1 * t1_mask, "TruncateIntensity", 1e-4, 0.999)
+        t1_preprocessed = ants.apply_transforms(
+            fixed=template,
+            moving=t1_brain,
+            transformlist=template_transforms["fwdtransforms"],
+            interpolator="linear",
+            singleprecision=True,
+            verbose=verbose,
+        )
+        invtransforms = template_transforms["invtransforms"]
+    else:
+        t1_preprocessing = preprocess_brain_image(t1,
+            truncate_intensity=[1e-4, 0.999],
+            brain_extraction_modality="t1threetissue",
+            template=which_template,
+            template_transform_type=template_transform_type,
+            do_bias_correction=do_bias_correction,
+            do_denoising=False,
+            brain_mask=brain_mask,
+            device=device,
+            verbose=verbose,
+            backend=backend)
+        t1_preprocessed = t1_preprocessing["preprocessed_image"] * t1_preprocessing["brain_mask"]
+        invtransforms = t1_preprocessing["template_transforms"]["invtransforms"]
+
     t1_preprocessed = ants.rank_intensity(t1_preprocessed)
 
     template_seg_masked = ants.mask_image(template_seg, template_seg, center_of_mass_labels, binarize=True)
@@ -207,8 +225,8 @@ def nbm_labeling(t1,
         probability_image = ants.from_numpy_like(0.5 * (probability_array + probability_array_flipped), t1_cropped)
         probability_image = ants.apply_transforms(fixed=t1,
              moving=probability_image,
-             transformlist=t1_preprocessing['template_transforms']['invtransforms'],
-             whichtoinvert=[True], interpolator="linear", singleprecision=True, verbose=verbose)
+             transformlist=invtransforms,
+             whichtoinvert=[True] * len(invtransforms), interpolator="linear", singleprecision=True, verbose=verbose)
         probability_images[i] = probability_image
    
     image_matrix = ants.image_list_to_matrix(probability_images, t1 * 0 + 1)
