@@ -79,6 +79,13 @@ def assemble_channel_paths(view_specs, split_manifest=None, allow_missing=False)
         if any(len(values) > 1 for values in visits.values()):
             raise ValueError('Split leakage between visits')
         unknown = all_keys - set(split)
+        # Acquisitions deliberately excluded by split_cohort.R (exclusions.csv copied next to the manifest)
+        # may still exist on disk; any other image missing from the manifest remains an error.
+        exclusions_file = Path(split_manifest).with_name('exclusions.csv')
+        if unknown and exclusions_file.is_file():
+            with open(exclusions_file, newline='') as stream:
+                excluded = {row['subject_id'] for row in csv.DictReader(stream)}
+            unknown -= excluded
         if unknown:
             raise ValueError(f'Image IDs missing from manifest: {sorted(unknown)[:5]}')
         keys = {key for key, value in split.items() if value != 'testing'}
