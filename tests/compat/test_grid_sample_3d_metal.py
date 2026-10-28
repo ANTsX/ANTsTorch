@@ -2,7 +2,10 @@ import pytest
 import torch
 from antstorch._grid_sample_3d_metal import grid_sample_3d_metal
 
-pytestmark=pytest.mark.skipif(not torch.backends.mps.is_available(),reason='MPS unavailable')
+pytestmark = [
+    pytest.mark.mps,
+    pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS unavailable"),
+]
 
 
 @pytest.mark.parametrize('padding',['zeros','border','reflection'])

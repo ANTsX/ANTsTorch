@@ -4,9 +4,19 @@
 # importing ants first loads a second OpenMP runtime (libomp via scikit-learn) and
 # multithreaded torch ops then segfault (observed: F.pad(mode='replicate') on
 # torch 2.2.2, Intel iMac). pytest loads this file before any test module.
-import torch  # noqa: F401
+import os
+
+# Set before torch is imported; respect an explicit caller setting.
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
+import torch
+import pytest
 
 def pytest_addoption(parser):
+    parser.addoption(
+        "--test-device", choices=("auto", "cpu", "cuda", "mps"), default="auto",
+        help="ANTsTorch default device during tests; explicitly requested devices are unchanged.",
+    )
     parser.addoption(
         "--dump-aug-samples",
         action="store_true",
@@ -54,14 +64,20 @@ def pytest_addoption(parser):
         help="Which modality/channel index to render in the mosaic.",
     )
 
-# tests/conftest.py
-import os
-import pytest
 
-# Cette fixture s'exécutera avant chaque test
+def pytest_configure(config):
+    requested = config.getoption("--test-device")
+    if requested == "cuda" and not torch.cuda.is_available():
+        raise pytest.UsageError("--test-device=cuda requires an available CUDA device")
+    if requested == "mps" and not torch.backends.mps.is_available():
+        raise pytest.UsageError("--test-device=mps requires an available MPS device")
+
+
 @pytest.fixture(autouse=True)
-def force_cpu_env():
-    # Force PyTorch à ignorer les GPU si disponibles
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
-    # Autorise PyTorch à utiliser le CPU pour les opérations non supportées sur MPS
-    os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+def default_test_device(request, monkeypatch):
+    """Choose library defaults without masking accelerator availability."""
+    requested = request.config.getoption("--test-device")
+    if requested != "auto":
+        from antstorch.utilities import device_manager
+
+        monkeypatch.setattr(device_manager, "_GLOBAL_DEVICE", torch.device(requested))

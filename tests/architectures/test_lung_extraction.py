@@ -4,7 +4,7 @@ Architecture-only tests for antstorch.utilities.lung_extraction.
 No pretrained weights are required -- each test builds the same
 architecture (identical class + kwargs) that lung_extraction() builds
 internally for a given `modality`, runs one forward pass on random
-input, and checks output shape / value range.  See tests/_arch_common.py
+input, and checks output shape / value range.  See tests/support/architecture_checks.py
 for the shared assertion helpers and the rationale for this scope.
 
 Two of the branches (protonLobes/maskLobes, ct) size their input
@@ -24,7 +24,7 @@ from antstorch.architectures import (
     create_multihead_unet_model_3d,
 )
 
-from _arch_common import DEVICE, assert_softmax_output, assert_sigmoid_range
+from tests.support.architecture_checks import DEVICE, assert_softmax_output, assert_sigmoid_range
 
 
 class Test_lung_extraction_proton(unittest.TestCase):

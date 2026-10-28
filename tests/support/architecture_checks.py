@@ -12,10 +12,10 @@ shape-level regressions in the modules ported from ANTsPyNet during the
     * antstorch.utilities.white_matter_hyperintensity_segmentation
     * antstorch.utilities.hippmapp3r_segmentation, hypothalamus_segmentation,
       claustrum_segmentation (added 2026-08-22, see
-      test_hippocampus_hypothalamus_claustrum_architectures.py)
+      test_hippocampus_hypothalamus_claustrum.py)
     * antstorch.utilities.quality_assessment (added 2026-08-22, but with a
       materially different -- much lower -- confidence status; see
-      test_quality_assessment_architecture.py's own module docstring)
+      test_quality_assessment.py's own module docstring)
 
 Each test rebuilds the exact same architecture (same class, same kwargs)
 that the corresponding application function builds internally, feeds it
@@ -44,7 +44,7 @@ import torch
 # Tests always run on CPU, regardless of get_default_device(): a couple
 # of the generic U-Net's deconvolution paths are known to be unstable on
 # MPS (see the existing @pytest.mark.skipif(torch.backends.mps.is_available(), ...)
-# pattern in tests/test_brain_extraction.py), so pinning to CPU keeps
+# pattern in tests/pipelines/test_brain_extraction.py), so pinning to CPU keeps
 # this architecture-only suite deterministic and portable.
 DEVICE = torch.device("cpu")
 

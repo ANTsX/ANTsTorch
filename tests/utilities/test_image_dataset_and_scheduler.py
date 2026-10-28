@@ -1,4 +1,4 @@
-# tests/test_image_dataset_and_scheduler.py
+# tests/utilities/test_image_dataset_and_scheduler.py
 import random
 from typing import List
 
@@ -11,7 +11,7 @@ import ants
 from torch.utils.data import DataLoader
 
 # # Quick run:
-# pytest -q tests/test_image_dataset_and_scheduler.py -vv
+# pytest -q tests/utilities/test_image_dataset_and_scheduler.py -vv
 #
 # # Save results:
 #
@@ -23,13 +23,16 @@ from torch.utils.data import DataLoader
 # sd_simulated_bias_field:cos:0.25->0.05@${total_iter},\
 # sd_histogram_warping:cos:0.05->0.01@${total_iter}"
 #
-# pytest -q -s ~/Pkg/ANTsTorch/tests/test_image_dataset_and_scheduler.py -vv \
+# pytest -q -s ~/Pkg/ANTsTorch/tests/utilities/test_image_dataset_and_scheduler.py -vv \
 #   --aug-schedules ${aug_params} \
 #   --aug-steps ${total_iter} --dump-aug-samples --grid 10 --tile-size 128 --preview-channel 0
 
 # -----------------------------
 # Robust CLI option getter
 # -----------------------------
+pytestmark = [pytest.mark.integration, pytest.mark.requires_data]
+
+
 def _opt(request, name: str, default):
     try:
         return request.config.getoption(name, default=default)

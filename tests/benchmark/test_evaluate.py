@@ -15,6 +15,9 @@ import pytest
 from antstorch.benchmark.evaluate import DEFAULT_REG_ITERATIONS, evaluate_mindboggle_pair, evaluate_pair
 
 
+pytestmark = pytest.mark.integration
+
+
 def test_all_models_share_default_iteration_schedule():
     assert DEFAULT_REG_ITERATIONS == (100, 100, 50, 10)
 

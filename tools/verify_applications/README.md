@@ -5,7 +5,7 @@ they're too slow/heavy for the automated pytest suite:
 real network downloads, real pretrained weights, real `ants`
 preprocessing/registration). Run them by hand, individually or all at
 once, whenever you want to confirm a ported application actually works
-end-to-end -- as opposed to `tests/test_*_architectures.py`, which only
+end-to-end -- as opposed to `tests/architectures/`, which only
 checks that the model builds and runs a forward pass on random data,
 without touching real weights or real preprocessing.
 

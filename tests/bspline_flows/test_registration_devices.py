@@ -4,6 +4,7 @@ import torch
 from antstorch.bspline_flows import ImageDomain, DeterministicBSplineRegistration
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
 @pytest.mark.parametrize("dimension", [2, 3])
 def test_cpu_gpu_agreement(dimension):

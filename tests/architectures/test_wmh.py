@@ -12,7 +12,7 @@ functions:
                                          -- both build the identical class, so it is
                                          only exercised once per modality count here)
 
-See tests/_arch_common.py for scope / rationale (architecture-only, no
+See tests/support/architecture_checks.py for scope / rationale (architecture-only, no
 pretrained weights).
 
 The shiva architecture unconditionally pools 7 times (see
@@ -35,7 +35,7 @@ from antstorch.architectures import (
     create_shiva_unet_model_3d,
 )
 
-from _arch_common import DEVICE, assert_sigmoid_range
+from tests.support.architecture_checks import DEVICE, assert_sigmoid_range
 
 
 class Test_sysu_media_wmh_segmentation_flair_only(unittest.TestCase):

@@ -6,7 +6,7 @@ protonLobePriors itself internally. This is the modality that wraps the
 base U-Net in create_multihead_unet_model_3d (1 auxiliary sigmoid head
 for the whole-lung mask) -- a good check that the multihead
 warmup/strict=False load path works with real weights, not just random
-init (see tests/test_lung_extraction_architectures.py for the
+init (see tests/architectures/test_lung_extraction.py for the
 architecture-only version of this check).
 
 Requires converted weights: protonLobes_pytorch. This one was never

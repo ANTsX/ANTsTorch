@@ -1,4 +1,4 @@
-# tests/test_schedulers.py
+# tests/utilities/test_schedulers.py
 import math
 import types
 import pytest

@@ -1,4 +1,4 @@
-# tests/test_factorized_glow3d.py
+# tests/lamnr_flows/architectures/test_factorized_glow3d.py
 """(2+1)D variant of create_glow_normalizing_flow_model_3d (squeeze_time / kernel_size / temporal_init).
 
 The default arguments must reproduce the historical model exactly.
