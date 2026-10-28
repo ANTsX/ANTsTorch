@@ -42,6 +42,8 @@ from pathlib import Path
 
 import numpy as np
 
+from benchmark_timing import summarize, write_timings
+
 
 def synchronize(device) -> None:
     """Wait for asynchronous accelerator work before timing boundaries."""
@@ -128,8 +130,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="ITK thread count for ANTs (1 gives a deterministic reference). Default: ITK default.",
     )
-    parser.add_argument("--repeats", type=int, default=1,
-                        help="Timed runs per implementation; the median is reported (default: 1)")
+    parser.add_argument("--repeats", type=int, default=5,
+                        help="Timed runs per implementation; the median is reported (default: 5)")
     parser.add_argument("--no-warmup", action="store_true",
                         help="Skip the lightweight pipeline warm-up run")
     parser.add_argument("--verbose", action="store_true")
@@ -716,6 +718,11 @@ def main() -> None:
         print("Warm-up:               skipped (--no-warmup)")
 
     threads = args.ants_threads if args.ants_threads is not None else "ITK default"
+    timing_records = {"ANTs denoise_image": summarize(ants_times),
+                      "ANTsTorch denoise_image": summarize(torch_times)}
+    write_timings(args.output_dir / "timings.json", timing_records)
+    for label, record in timing_records.items():
+        print(f"{label} IQR: [{record['q1_seconds']:.6f}, {record['q3_seconds']:.6f}] s")
     print(f"ANTs runtime:          {format_run_times(ants_times)} (threads: {threads})")
     print(f"ANTsTorch runtime:     {format_run_times(torch_times)} on {device}")
     print(f"Speed ratio (ANTs / ANTsTorch): {np.median(ants_times) / np.median(torch_times):.2f}x")

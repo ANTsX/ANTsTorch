@@ -1,0 +1,12 @@
+date:   2026-10-28T09:51:54-07:00
+host:   Mac
+device: mps
+image:  script defaults (S_template3)
+commit: 202cd69 (modified)
+python: 3.11.15
+repeats: 5
+ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS: 2
+commands:
+  /opt/homebrew/anaconda3/envs/antsx/bin/python /Users/ntustison/Pkg/ANTsTorch/tools/benchmarks/compare_denoise_image.py --repeats 5 --device mps --output-dir /private/tmp/antstorch_primitives_20261028_mps_n5/denoise_image --ants-threads 2
+  /opt/homebrew/anaconda3/envs/antsx/bin/python /Users/ntustison/Pkg/ANTsTorch/tools/benchmarks/compare_n4_bias_field_correction.py --repeats 5 --device mps --output-dir /private/tmp/antstorch_primitives_20261028_mps_n5/n4_bias_field_correction --no-stable-accumulation
+  /opt/homebrew/anaconda3/envs/antsx/bin/python /Users/ntustison/Pkg/ANTsTorch/tools/benchmarks/compare_bspline_scattered_data.py --repeats 5 --device mps --output-prefix /private/tmp/antstorch_primitives_20261028_mps_n5/bspline_scattered_data/bspline_scattered_comparison

@@ -1,0 +1,83 @@
+{
+  "device": "mps",
+  "input": "/Users/ntustison/.antstorch/S_template3.nii.gz",
+  "metrics": {
+    "gray_matter": {
+      "ants": {
+        "maximum_mm": 5.7639689445495605,
+        "mean_mm": 2.086215429626149,
+        "median_mm": 2.00978422164917,
+        "nonzero_fraction": 0.9989699958376544,
+        "std_mm": 0.9897432131590074
+      },
+      "antstorch": {
+        "maximum_mm": 6.063965320587158,
+        "mean_mm": 2.2234016267958983,
+        "median_mm": 2.126544952392578,
+        "nonzero_fraction": 0.9992804080509641,
+        "std_mm": 1.0796580362964943
+      },
+      "difference_antstorch_minus_ants": {
+        "mae_mm": 0.13770221447370778,
+        "maximum_absolute_error_mm": 4.788440227508545,
+        "mean_mm": 0.1371861971697491,
+        "median_absolute_error_mm": 0.10516929626464844,
+        "p95_absolute_error_mm": 0.3577228307723998,
+        "pearson_correlation": 0.9958607769512429,
+        "rmse_mm": 0.18907920279512014
+      },
+      "voxel_count": 141747
+    },
+    "segmented_foreground": {
+      "ants": {
+        "maximum_mm": 5.7639689445495605,
+        "mean_mm": 0.6047336983705884,
+        "median_mm": 0.0,
+        "nonzero_fraction": 0.28957259713701433,
+        "std_mm": 1.0862123611304657
+      },
+      "antstorch": {
+        "maximum_mm": 6.063965320587158,
+        "mean_mm": 0.6445000212544748,
+        "median_mm": 0.0,
+        "nonzero_fraction": 0.2896625766871166,
+        "std_mm": 1.1642567452814554
+      },
+      "difference_antstorch_minus_ants": {
+        "mae_mm": 0.03991590142127742,
+        "maximum_absolute_error_mm": 4.788440227508545,
+        "mean_mm": 0.03976632288388635,
+        "median_absolute_error_mm": 0.0,
+        "p95_absolute_error_mm": 0.2410724878311156,
+        "pearson_correlation": 0.9989360992538584,
+        "rmse_mm": 0.10179964675594318
+      },
+      "voxel_count": 489000
+    }
+  },
+  "outputs": {
+    "absolute_difference": "/Users/ntustison/Pkg/ANTsTorch/results/primitive_benchmarks_20261028_mps/cortical_thickness/absolute_difference.nii.gz",
+    "ants_thickness": "/Users/ntustison/Pkg/ANTsTorch/results/primitive_benchmarks_20261028_mps/cortical_thickness/ants_thickness.nii.gz",
+    "antstorch_thickness": "/Users/ntustison/Pkg/ANTsTorch/results/primitive_benchmarks_20261028_mps/cortical_thickness/antstorch_thickness.nii.gz",
+    "difference": "/Users/ntustison/Pkg/ANTsTorch/results/primitive_benchmarks_20261028_mps/cortical_thickness/antstorch_minus_ants.nii.gz",
+    "gray_matter_probability": "/Users/ntustison/Pkg/ANTsTorch/results/primitive_benchmarks_20261028_mps/cortical_thickness/gray_matter_probability.nii.gz",
+    "segmentation": "/Users/ntustison/Pkg/ANTsTorch/results/primitive_benchmarks_20261028_mps/cortical_thickness/direct_segmentation.nii.gz",
+    "t1": "/Users/ntustison/Pkg/ANTsTorch/results/primitive_benchmarks_20261028_mps/cortical_thickness/t1.nii.gz",
+    "white_matter_probability": "/Users/ntustison/Pkg/ANTsTorch/results/primitive_benchmarks_20261028_mps/cortical_thickness/white_matter_probability.nii.gz"
+  },
+  "parameters": {
+    "antstorch_optimizer": "direct",
+    "antstorch_regularizer": "gaussian",
+    "gradient_step": 0.025,
+    "iterations": 45,
+    "velocity_smoothing_variance": 1.5
+  },
+  "preprocessing_device": "mps",
+  "reused_inputs": null,
+  "timing_seconds": {
+    "ants_kelly_kapowski": 304.29970537498593,
+    "antstorch_direct": 221.61613350035623,
+    "antstorch_speedup_vs_ants": 1.3730936487730792,
+    "deep_atropos": 86.06848616711795
+  }
+}

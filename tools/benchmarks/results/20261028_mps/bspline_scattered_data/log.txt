@@ -1,0 +1,57 @@
+NOTE: mps does not support float64; ANTsTorch runs in float32, ANTs in float64.
+
+=== fit_bspline_object_to_scattered_data (scalar) ===
+ANTs compare_object_to_scattered_data run 1/5: 0.002878 s
+ANTs compare_object_to_scattered_data run 2/5: 0.002720 s
+ANTs compare_object_to_scattered_data run 3/5: 0.002703 s
+ANTs compare_object_to_scattered_data run 4/5: 0.002722 s
+ANTs compare_object_to_scattered_data run 5/5: 0.002707 s
+ANTs compare_object_to_scattered_data: median 0.002720 s, IQR [0.002707, 0.002722] s (N=5; first sample cold)
+ANTsTorch compare_object_to_scattered_data run 1/5: 0.211501 s
+ANTsTorch compare_object_to_scattered_data run 2/5: 0.048806 s
+ANTsTorch compare_object_to_scattered_data run 3/5: 0.047994 s
+ANTsTorch compare_object_to_scattered_data run 4/5: 0.047860 s
+ANTsTorch compare_object_to_scattered_data run 5/5: 0.046109 s
+ANTsTorch compare_object_to_scattered_data: median 0.047994 s, IQR [0.047860, 0.048806] s (N=5; first sample cold)
+  points=1920, size=(48, 40), mesh_size=4, levels=4
+  ANTs runtime:      0.003 s
+  ANTsTorch runtime: 0.048 s on mps
+  scattered fit: RMSE=3.45138e-06  MAE=1.87909e-06  correlation=1.00000000
+
+=== fit_bspline_displacement_field (scattered points) ===
+ANTs compare_displacement_field_from_points run 1/5: 0.001186 s
+ANTs compare_displacement_field_from_points run 2/5: 0.001124 s
+ANTs compare_displacement_field_from_points run 3/5: 0.001069 s
+ANTs compare_displacement_field_from_points run 4/5: 0.000988 s
+ANTs compare_displacement_field_from_points run 5/5: 0.000980 s
+ANTs compare_displacement_field_from_points: median 0.001069 s, IQR [0.000988, 0.001124] s (N=5; first sample cold)
+ANTsTorch compare_displacement_field_from_points run 1/5: 0.040048 s
+ANTsTorch compare_displacement_field_from_points run 2/5: 0.010223 s
+ANTsTorch compare_displacement_field_from_points run 3/5: 0.010182 s
+ANTsTorch compare_displacement_field_from_points run 4/5: 0.010049 s
+ANTsTorch compare_displacement_field_from_points run 5/5: 0.010009 s
+ANTsTorch compare_displacement_field_from_points: median 0.010182 s, IQR [0.010049, 0.010223] s (N=5; first sample cold)
+  points=200, size=(60, 45), mesh_size=1, levels=4
+  ANTs runtime:      0.001 s
+  ANTsTorch runtime: 0.010 s on mps
+  component 0: RMSE=8.2009e-05  MAE=2.03049e-05  correlation=0.99999999
+  component 1: RMSE=7.86727e-05  MAE=1.85619e-05  correlation=1.00000000
+
+=== fit_bspline_displacement_field (dense field) ===
+ANTs compare_displacement_field_from_dense_field run 1/5: 0.001182 s
+ANTs compare_displacement_field_from_dense_field run 2/5: 0.001142 s
+ANTs compare_displacement_field_from_dense_field run 3/5: 0.001119 s
+ANTs compare_displacement_field_from_dense_field run 4/5: 0.001111 s
+ANTs compare_displacement_field_from_dense_field run 5/5: 0.001130 s
+ANTs compare_displacement_field_from_dense_field: median 0.001130 s, IQR [0.001119, 0.001142] s (N=5; first sample cold)
+ANTsTorch compare_displacement_field_from_dense_field run 1/5: 0.057769 s
+ANTsTorch compare_displacement_field_from_dense_field run 2/5: 0.013535 s
+ANTsTorch compare_displacement_field_from_dense_field run 3/5: 0.014361 s
+ANTsTorch compare_displacement_field_from_dense_field run 4/5: 0.013472 s
+ANTsTorch compare_displacement_field_from_dense_field run 5/5: 0.014677 s
+ANTsTorch compare_displacement_field_from_dense_field: median 0.014361 s, IQR [0.013535, 0.014677] s (N=5; first sample cold)
+  size=(40, 32), mesh_size=1, levels=4
+  ANTs runtime:      0.001 s
+  ANTsTorch runtime: 0.014 s on mps
+  component 0: RMSE=1.32908e-06  MAE=3.96944e-07  correlation=1.00000000
+  component 1: RMSE=6.67782e-07  MAE=2.17544e-07  correlation=1.00000000
