@@ -181,6 +181,13 @@ def synthesize_bspline_velocity(
     return output
 
 
+class _SeparableGridGeometry(tuple):
+    """4-tuple ``(indices, basis_values, squared_sum, coefficient_count)`` carrying
+    the exact 1-D Kronecker factors for regular-grid B-spline fitting."""
+
+    separable = None
+
+
 def _bspline_fit_geometry(
     sample_shape: Sequence[int],
     lattice_itk: Sequence[int],
@@ -220,6 +227,31 @@ def _bspline_fit_geometry(
         neighbors.append(index)
         basis.append(cubic_bspline_basis(u[..., None] - index.to(u.dtype) + 1.0))
 
+    # Build 1-D Kronecker basis matrices in PyTorch axis order (reversed(lattice_itk))
+    # so regular-grid omega and delta updates can contract along each axis via
+    # tensordot in O(N * K_0) instead of O(N * 4^D * prod(K_d)) one-hot chunks.
+    b2_list, b3_list = [], []
+    s_grid = torch.ones(sample_shape, dtype=dtype, device=device)
+    for ax, (dense_size, lattice_size) in enumerate(zip(sample_shape, reversed(lattice_itk))):
+        spans = lattice_size - 3
+        coord_1d = torch.arange(dense_size, device=device, dtype=dtype)
+        u_1d = coord_1d * (float(spans) / float(dense_size - 1))
+        u_1d = u_1d.clamp_max(
+            torch.nextafter(u_1d.new_tensor(float(spans)), u_1d.new_tensor(float("-inf")))
+        )
+        base_1d = torch.floor(u_1d).to(torch.long)
+        idx_1d = base_1d[:, None] + torch.arange(4, device=device)
+        b_val_1d = cubic_bspline_basis(u_1d[:, None] - idx_1d.to(dtype) + 1.0)
+        b_mat = torch.zeros((dense_size, lattice_size), dtype=dtype, device=device)
+        b_mat.scatter_add_(1, idx_1d, b_val_1d)
+        b2 = b_mat.square()
+        b2_list.append(b2)
+        b3_list.append(b_mat.pow(3))
+        shape_1d = [1] * dimension
+        shape_1d[ax] = int(dense_size)
+        s_grid = s_grid * b2.sum(dim=1).reshape(shape_1d)
+    s_grid = s_grid.clamp_min(eps)
+
     support_indices, support_basis = [], []
     strides, stride = [], 1
     for size in lattice_itk:
@@ -237,7 +269,9 @@ def _bspline_fit_geometry(
     basis_values = torch.stack(support_basis)
     squared_sum = basis_values.square().sum(dim=0).clamp_min(eps)
     coefficient_count = stride
-    return indices, basis_values, squared_sum, coefficient_count
+    geom = _SeparableGridGeometry((indices, basis_values, squared_sum, coefficient_count))
+    geom.separable = (tuple(int(n) for n in sample_shape), tuple(b2_list), tuple(b3_list), s_grid)
+    return geom
 
 
 def _bspline_fit_geometry_points(
@@ -325,6 +359,20 @@ def _bspline_fit_context(weight_flat: Tensor, geometry, stable_accumulation: boo
     """
     indices, basis_values, squared_sum, coefficient_count = geometry
     batch_channels = weight_flat.shape[0]
+    separable = getattr(geometry, "separable", None)
+    if separable is not None:
+        sample_shape, b2_list, b3_list, s_grid = separable
+        omega_t = weight_flat.reshape((batch_channels,) + sample_shape)
+        for b2 in b2_list:
+            omega_t = torch.tensordot(omega_t, b2, dims=([1], [0]))
+        omega = omega_t.reshape(batch_channels, coefficient_count)
+        return {
+            "mode": "separable",
+            "omega": omega,
+            "sample_shape": sample_shape,
+            "b3_list": b3_list,
+            "s_grid": s_grid,
+        }
     omega = weight_flat.new_zeros((batch_channels, coefficient_count))
     support_count, sample_count = indices.shape
     if stable_accumulation:
@@ -374,6 +422,16 @@ def _bspline_fit_solve(residual_flat: Tensor, weight_flat: Tensor, context: dict
     """Per-call scattered-data update given a resolution-fixed context."""
     batch_channels = residual_flat.shape[0]
     omega = context["omega"]
+    if context["mode"] == "separable":
+        sample_shape = context["sample_shape"]
+        delta_t = (
+            (residual_flat * weight_flat).reshape((batch_channels,) + sample_shape)
+            / context["s_grid"].unsqueeze(0)
+        )
+        for b3 in context["b3_list"]:
+            delta_t = torch.tensordot(delta_t, b3, dims=([1], [0]))
+        delta = delta_t.reshape(omega.shape)
+        return torch.where(omega > eps, delta / omega.clamp_min(eps), torch.zeros_like(delta))
     delta = residual_flat.new_zeros(omega.shape)
     if context["mode"] == "stable":
         for begin, end, delta_basis in context["chunks"]:

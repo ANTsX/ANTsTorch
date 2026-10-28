@@ -9,6 +9,7 @@ def cerebellum_morphology(t1,
                           brain_mask=None,
                           compute_thickness_image=False,
                           do_preprocessing=True,
+                          do_bias_correction=True,
                           device=None,
                           verbose=False,
                           backend=None):
@@ -142,7 +143,7 @@ def cerebellum_morphology(t1,
     t1_mask = None
     template_transforms = None
 
-    if do_preprocessing:
+    if do_preprocessing and do_bias_correction:
         if verbose:
             print("Preprocessing T1.")
         # Bias correction only (matches your version)

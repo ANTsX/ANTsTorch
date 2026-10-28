@@ -7,9 +7,12 @@ import ants
 
 def desikan_killiany_tourville_labeling(t1,
                                         do_preprocessing=True,
+                                        do_bias_correction=True,
                                         return_probability_images=False,
                                         do_lobar_parcellation=False,
                                         brain_mask=None,
+                                        template_transforms=None,
+                                        hemi_mask=None,
                                         atropos_segmentation=None,
                                         device=None,
                                         verbose=False,
@@ -262,15 +265,17 @@ def desikan_killiany_tourville_labeling(t1,
     ################################
 
     t1_preprocessed = ants.image_clone(t1)
+    t1_preprocessing = None
     if do_preprocessing:
         t1_preprocessing = preprocess_brain_image(t1,
             truncate_intensity=None,
             brain_extraction_modality="t1threetissue",
             template=which_template,
             template_transform_type=template_transform_type,
-            do_bias_correction=True,
+            do_bias_correction=do_bias_correction,
             do_denoising=False,
             brain_mask=brain_mask,
+            template_transforms=template_transforms,
             device=device,
             verbose=verbose,
             backend=backend)
@@ -399,7 +404,10 @@ def desikan_killiany_tourville_labeling(t1,
 
     labels_sorted = sorted((*dkt_lateral_labels, *dkt_left_labels))
 
-    bext = brain_extraction(t1, modality="t1hemi", device=device, verbose=verbose)
+    if hemi_mask is not None:
+        bext = hemi_mask
+    else:
+        bext = brain_extraction(t1, modality="t1hemi", device=device, verbose=verbose)
 
     probability_all_images = list()
     probability_all_images.append(probability_images[0])
@@ -510,15 +518,24 @@ def desikan_killiany_tourville_labeling(t1,
     if return_probability_images and do_lobar_parcellation:
         return_dict = {'segmentation_image' : dkt_label_image,
                        'lobar_parcellation' : lobar_parcellation,
-                       'probability_images' : probability_all_images }
+                       'probability_images' : probability_all_images,
+                       'hemi_mask' : bext}
+        if t1_preprocessing is not None and 'template_transforms' in t1_preprocessing:
+            return_dict['template_transforms'] = t1_preprocessing['template_transforms']
         return(return_dict)
     elif return_probability_images and not do_lobar_parcellation:
         return_dict = {'segmentation_image' : dkt_label_image,
-                       'probability_images' : probability_all_images }
+                       'probability_images' : probability_all_images,
+                       'hemi_mask' : bext}
+        if t1_preprocessing is not None and 'template_transforms' in t1_preprocessing:
+            return_dict['template_transforms'] = t1_preprocessing['template_transforms']
         return(return_dict)
     elif not return_probability_images and do_lobar_parcellation:
         return_dict = {'segmentation_image' : dkt_label_image,
-                       'lobar_parcellation' : lobar_parcellation }
+                       'lobar_parcellation' : lobar_parcellation,
+                       'hemi_mask' : bext}
+        if t1_preprocessing is not None and 'template_transforms' in t1_preprocessing:
+            return_dict['template_transforms'] = t1_preprocessing['template_transforms']
         return(return_dict)
     else:
         return(dkt_label_image)
