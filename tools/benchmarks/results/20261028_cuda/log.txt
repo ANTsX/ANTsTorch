@@ -1,0 +1,183 @@
+(antsx) ntustison@hyperwolf:~/Pkg/ANTsTorch$ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=2 python tools/benchmarks/run_primitive_benchmarks.py \
+    --device cuda:0 --repeats 5 --ants-threads 2 --out-dir results/primitives_cuda_n5
+2.14.0+cu130 True
+date:   2026-10-28T12:10:34-07:00
+host:   hyperwolf
+device: cuda:0
+image:  script defaults (S_template3)
+commit: ee130c9
+python: 3.11.9
+repeats: 5
+ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS: 2
+commands:
+  /home/ntustison/anaconda3/envs/antsx/bin/python3 /home/ntustison/Pkg/ANTsTorch/tools/benchmarks/compare_denoise_image.py --repeats 5 --device cuda:0 --output-dir /home/ntustison/Pkg/ANTsTorch/results/primitives_cuda_n5/denoise_image --ants-threads 2
+  /home/ntustison/anaconda3/envs/antsx/bin/python3 /home/ntustison/Pkg/ANTsTorch/tools/benchmarks/compare_n4_bias_field_correction.py --repeats 5 --device cuda:0 --output-dir /home/ntustison/Pkg/ANTsTorch/results/primitives_cuda_n5/n4_bias_field_correction --no-stable-accumulation
+  /home/ntustison/anaconda3/envs/antsx/bin/python3 /home/ntustison/Pkg/ANTsTorch/tools/benchmarks/compare_cortical_thickness.py --repeats 5 --device cuda:0 --output-dir /home/ntustison/Pkg/ANTsTorch/results/primitives_cuda_n5/cortical_thickness
+  /home/ntustison/anaconda3/envs/antsx/bin/python3 /home/ntustison/Pkg/ANTsTorch/tools/benchmarks/compare_bspline_scattered_data.py --repeats 5 --device cuda:0 --output-prefix /home/ntustison/Pkg/ANTsTorch/results/primitives_cuda_n5/bspline_scattered_data/bspline_scattered_comparison
+platform: Linux-6.8.0-138-generic-x86_64-with-glibc2.35
+torch: 2.14.0
+antspyx: 0.6.4
+numpy: 1.26.4
+index, name, driver_version, memory.total [MiB]
+0, NVIDIA RTX A6000, 580.178.04, 49140 MiB
+1, NVIDIA RTX A6000, 580.178.04, 49140 MiB
+
+==================================================================
+ denoise_image  (cuda:0)
+==================================================================
+Input: /home/ntustison/.antstorch/S_template3.nii.gz
+Geometry: size=(136, 176, 176), spacing=(1.5022221803665161, 1.4571428298950195, 1.4571428298950195), origin=(202.8000030517578, 0.0, 0.0)
+Parameters: noise_model=Rician, p=1, r=2, shrink_factor=1, mask=none (4212736 voxels compared)
+Warm-up (dummy grid):  ANTs: 0.0027 s | ANTsTorch: 0.2767 s on cuda:0
+ANTs denoise_image IQR: [11.774379, 11.805056] s
+ANTsTorch denoise_image IQR: [1.276617, 1.350959] s
+ANTs runtime:          11.7960 s median of 5 (run 1 [cold]: 11.7354 s, runs 2..5: min 11.7744 s, max 11.8351 s) (threads: 2)
+ANTsTorch runtime:     1.2900 s median of 5 (run 1 [cold]: 1.2766 s, runs 2..5: min 1.0732 s, max 1.7317 s) on cuda:0
+Speed ratio (ANTs / ANTsTorch): 9.14x
+Input intensity range:     -0.877246 to 7.82763
+ANTs output range:         -1.69165e-05 to 7.15067
+ANTsTorch output range:    0 to 7.15052
+Removed-noise std, ANTs:      0.119135
+Removed-noise std, ANTsTorch: 0.119027
+ANTsTorch vs ANTs (denoised image):
+  RMSE:            0.0130643 (0.1827 % of range)
+  MAE:             0.00209057
+  Max |diff|:      1.72953
+  Correlation:     0.9999711985
+ANTsTorch vs ANTs (removed noise):
+  RMSE:            0.0130643 (0.2583 % of range)
+  MAE:             0.00209057
+  Max |diff|:      1.72953
+  Correlation:     0.9940075382
+ANTs run-to-run max |diff|:      0
+ANTsTorch run-to-run max |diff|: 0
+ANTsTorch CUDA peak memory: 3332.0 MiB
+Outputs written with prefix: /home/ntustison/Pkg/ANTsTorch/results/primitives_cuda_n5/denoise_image/denoise_comparison
+HTML comparison report generated: /home/ntustison/Pkg/ANTsTorch/results/primitives_cuda_n5/denoise_image/denoise_comparison_report.html
+To view the HTML report, run: open "/home/ntustison/Pkg/ANTsTorch/results/primitives_cuda_n5/denoise_image/denoise_comparison_report.html"
+
+==================================================================
+ n4_bias_field_correction  (cuda:0)
+==================================================================
+ANTs n4_bias_field_correction run 1/5: 23.772851 s
+ANTs n4_bias_field_correction run 2/5: 25.661651 s
+ANTs n4_bias_field_correction run 3/5: 25.772570 s
+ANTs n4_bias_field_correction run 4/5: 25.697034 s
+ANTs n4_bias_field_correction run 5/5: 25.730944 s
+ANTs n4_bias_field_correction: median 25.697034 s, IQR [25.661651, 25.730944] s (N=5; first sample cold)
+ANTsTorch n4_bias_field_correction run 1/5: 2.104364 s
+ANTsTorch n4_bias_field_correction run 2/5: 2.062174 s
+ANTsTorch n4_bias_field_correction run 3/5: 1.458733 s
+ANTsTorch n4_bias_field_correction run 4/5: 1.761326 s
+ANTsTorch n4_bias_field_correction run 5/5: 2.038956 s
+ANTsTorch n4_bias_field_correction: median 2.038956 s, IQR [1.761326, 2.062174] s (N=5; first sample cold)
+Input: /home/ntustison/.antstorch/S_template3.nii.gz
+Geometry: size=(136, 176, 176), spacing=(1.5022221803665161, 1.4571428298950195, 1.4571428298950195), origin=(202.8000030517578, 0.0, 0.0)
+ANTs runtime:      25.697 s median of 5 (correction + bias-field run)
+ANTsTorch runtime: 2.039 s median of 5 on cuda:0 (correction + bias-field run)
+ANTs intensity range: -0.626659 to 7.2999
+ANTsTorch intensity range: -0.62606 to 7.29621
+ANTs bias-field range: 0.341497 to 4.01637
+ANTsTorch bias-field range: 0.341647 to 4.01536
+B-spline accumulation: vectorized scatter
+Corrected-image RMSE: 0.00175338
+Scale-aligned corrected-image RMSE: 0.000918951 (scale=1.0010063)
+Normalized log-bias MAE: 0.000434736
+Normalized log-bias correlation: 0.99999648
+ANTsTorch CUDA peak memory: 544.9 MiB
+Outputs written with prefix: /home/ntustison/Pkg/ANTsTorch/results/primitives_cuda_n5/n4_bias_field_correction/n4_comparison
+
+==================================================================
+ cortical_thickness  (cuda:0)
+==================================================================
+Input: /home/ntustison/.antstorch/S_template3.nii.gz
+Running Deep Atropos once on cuda:0 for the shared inputs...
+Running ANTs KellyKapowski...
+ANTs cortical_thickness run 1/5: 638.180631 s
+ANTs cortical_thickness run 2/5: 638.706491 s
+ANTs cortical_thickness run 3/5: 639.689667 s
+ANTs cortical_thickness run 4/5: 640.377918 s
+ANTs cortical_thickness run 5/5: 639.168275 s
+ANTs cortical_thickness: median 639.168275 s, IQR [638.706491, 639.689667] s (N=5; first sample cold)
+Running ANTsTorch DiReCT on cuda:0...
+ANTsTorch cortical_thickness run 1/5: 29.430106 s
+ANTsTorch cortical_thickness run 2/5: 31.379565 s
+ANTsTorch cortical_thickness run 3/5: 31.419866 s
+ANTsTorch cortical_thickness run 4/5: 31.372051 s
+ANTsTorch cortical_thickness run 5/5: 31.314776 s
+ANTsTorch cortical_thickness: median 31.372051 s, IQR [31.314776, 31.379565] s (N=5; first sample cold)
+Deep Atropos:        37.219 s (shared; excluded from engine timing)
+ANTs KellyKapowski:  639.168 s median of 5
+ANTsTorch DiReCT:    31.372 s median of 5
+ANTsTorch speed ratio: 20.3738x
+GM MAE:              0.137673 mm
+GM RMSE:             0.189038 mm
+GM Pearson r:        0.995863
+Results: /home/ntustison/Pkg/ANTsTorch/results/primitives_cuda_n5/cortical_thickness
+
+==================================================================
+ bspline_scattered_data  (cuda:0)
+==================================================================
+
+=== fit_bspline_object_to_scattered_data (scalar) ===
+ANTs compare_object_to_scattered_data run 1/5: 0.008983 s
+ANTs compare_object_to_scattered_data run 2/5: 0.005391 s
+ANTs compare_object_to_scattered_data run 3/5: 0.005375 s
+ANTs compare_object_to_scattered_data run 4/5: 0.005284 s
+ANTs compare_object_to_scattered_data run 5/5: 0.005252 s
+ANTs compare_object_to_scattered_data: median 0.005375 s, IQR [0.005284, 0.005391] s (N=5; first sample cold)
+ANTsTorch compare_object_to_scattered_data run 1/5: 0.186360 s
+ANTsTorch compare_object_to_scattered_data run 2/5: 0.011107 s
+ANTsTorch compare_object_to_scattered_data run 3/5: 0.011288 s
+ANTsTorch compare_object_to_scattered_data run 4/5: 0.011029 s
+ANTsTorch compare_object_to_scattered_data run 5/5: 0.011245 s
+ANTsTorch compare_object_to_scattered_data: median 0.011245 s, IQR [0.011107, 0.011288] s (N=5; first sample cold)
+  points=1920, size=(48, 40), mesh_size=4, levels=4
+  ANTs runtime:      0.005 s
+  ANTsTorch runtime: 0.011 s on cuda:0
+  scattered fit: RMSE=3.22197e-06  MAE=1.32643e-06  correlation=1.00000000
+
+=== fit_bspline_displacement_field (scattered points) ===
+ANTs compare_displacement_field_from_points run 1/5: 0.002697 s
+ANTs compare_displacement_field_from_points run 2/5: 0.001472 s
+ANTs compare_displacement_field_from_points run 3/5: 0.001400 s
+ANTs compare_displacement_field_from_points run 4/5: 0.001658 s
+ANTs compare_displacement_field_from_points run 5/5: 0.001843 s
+ANTs compare_displacement_field_from_points: median 0.001658 s, IQR [0.001472, 0.001843] s (N=5; first sample cold)
+ANTsTorch compare_displacement_field_from_points run 1/5: 0.011201 s
+ANTsTorch compare_displacement_field_from_points run 2/5: 0.010921 s
+ANTsTorch compare_displacement_field_from_points run 3/5: 0.010813 s
+ANTsTorch compare_displacement_field_from_points run 4/5: 0.010704 s
+ANTsTorch compare_displacement_field_from_points run 5/5: 0.010719 s
+ANTsTorch compare_displacement_field_from_points: median 0.010813 s, IQR [0.010719, 0.010921] s (N=5; first sample cold)
+  points=200, size=(60, 45), mesh_size=1, levels=4
+  ANTs runtime:      0.002 s
+  ANTsTorch runtime: 0.011 s on cuda:0
+  component 0: RMSE=8.19428e-05  MAE=1.99734e-05  correlation=0.99999999
+  component 1: RMSE=7.85117e-05  MAE=1.79861e-05  correlation=1.00000000
+
+=== fit_bspline_displacement_field (dense field) ===
+ANTs compare_displacement_field_from_dense_field run 1/5: 0.003505 s
+ANTs compare_displacement_field_from_dense_field run 2/5: 0.002261 s
+ANTs compare_displacement_field_from_dense_field run 3/5: 0.002114 s
+ANTs compare_displacement_field_from_dense_field run 4/5: 0.002070 s
+ANTs compare_displacement_field_from_dense_field run 5/5: 0.001997 s
+ANTs compare_displacement_field_from_dense_field: median 0.002114 s, IQR [0.002070, 0.002261] s (N=5; first sample cold)
+ANTsTorch compare_displacement_field_from_dense_field run 1/5: 0.073935 s
+ANTsTorch compare_displacement_field_from_dense_field run 2/5: 0.063561 s
+ANTsTorch compare_displacement_field_from_dense_field run 3/5: 0.065978 s
+ANTsTorch compare_displacement_field_from_dense_field run 4/5: 0.054585 s
+ANTsTorch compare_displacement_field_from_dense_field run 5/5: 0.023308 s
+ANTsTorch compare_displacement_field_from_dense_field: median 0.063561 s, IQR [0.054585, 0.065978] s (N=5; first sample cold)
+  size=(40, 32), mesh_size=1, levels=4
+  ANTs runtime:      0.002 s
+  ANTsTorch runtime: 0.064 s on cuda:0
+  component 0: RMSE=1.33072e-06  MAE=3.95712e-07  correlation=1.00000000
+  component 1: RMSE=6.68318e-07  MAE=2.17243e-07  correlation=1.00000000
+
+Summary (/home/ntustison/Pkg/ANTsTorch/results/primitives_cuda_n5)
+  denoise_image              OK                    74.1 s
+  n4_bias_field_correction   OK                   142.4 s
+  cortical_thickness         OK                  3393.6 s
+  bspline_scattered_data     OK                     4.8 s
