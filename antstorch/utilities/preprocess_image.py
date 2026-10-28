@@ -9,6 +9,26 @@ from typing import Optional, Tuple, Dict, Any
 # The template is fixed across calls, so extracting its brain once is enough.
 _TEMPLATE_MASK_CACHE: Dict[Any, Any] = {}
 
+_KNOWN_TEMPLATE_BRAIN_MASKS: Dict[str, str] = {
+    "hcpyaT1Template": "hcpyaTemplateBrainMask",
+    "hcpyaT2Template": "hcpyaTemplateBrainMask",
+    "hcpyaFATemplate": "hcpyaTemplateBrainMask",
+    "hcpinterT1Template": "hcpinterTemplateBrainMask",
+    "hcpinterT2Template": "hcpinterTemplateBrainMask",
+    "hcpinterFATemplate": "hcpinterTemplateBrainMask",
+    "magetTemplate": "magetTemplateBrainMask",
+    "mraTemplate": "mraTemplateBrainMask",
+    "bsplineT2MouseTemplate": "bsplineT2MouseTemplateBrainMask",
+}
+
+_SKULL_STRIPPED_TEMPLATES = frozenset({
+    "CIT168_T1w_700um_pad_adni",
+    "deepFlashTemplateT1SkullStripped",
+    "deepFlashTemplateT2SkullStripped",
+    "deepFlashTemplate2T1SkullStripped",
+    "S_template3_brain",
+})
+
 
 def _template_mask_key(template_image, modality):
     digest = hashlib.blake2b(template_image.numpy().tobytes(), digest_size=16).hexdigest()
@@ -29,6 +49,7 @@ def preprocess_brain_image(
     reference_image: Optional["ants.ANTsImage"] = None,
     intensity_normalization_type: Optional[str] = None,
     brain_mask: Optional["ants.ANTsImage"] = None,
+    template_transforms: Optional[Dict[str, Any]] = None,
     device=None,
     verbose: bool = True,
     backend=None,
@@ -156,7 +177,23 @@ def preprocess_brain_image(
         else:
             template_image = template
 
-        if mask is None:
+        if template_transforms is not None:
+            transforms = dict(
+                fwdtransforms=list(template_transforms["fwdtransforms"]),
+                invtransforms=list(template_transforms["invtransforms"]),
+            )
+            preprocessed_image = ants.apply_transforms(
+                fixed=template_image, moving=preprocessed_image,
+                transformlist=transforms["fwdtransforms"], interpolator="linear",
+                singleprecision=True, verbose=verbose
+            )
+            if mask is not None:
+                mask = ants.apply_transforms(
+                    fixed=template_image, moving=mask,
+                    transformlist=transforms["fwdtransforms"],
+                    interpolator="genericLabel", singleprecision=True, verbose=verbose
+                )
+        elif mask is None:
             registration = run_registration(
                 template_image, preprocessed_image, template_transform_type,
                 backend=backend, device=device, verbose=verbose
@@ -170,11 +207,19 @@ def preprocess_brain_image(
             mask_key = _template_mask_key(template_image, bext_mod)
             template_mask = _TEMPLATE_MASK_CACHE.get(mask_key)
             if template_mask is None:
-                template_bext = brain_extraction(template_image, modality=bext_mod, device=device, verbose=verbose)
-                if bext_mod == "t1threetissue":
-                    template_mask = ants.threshold_image(template_bext['segmentation_image'], 1, 1, 1, 0)
+                if isinstance(template, str) and template in _KNOWN_TEMPLATE_BRAIN_MASKS:
+                    mask_path = get_antstorch_data(_KNOWN_TEMPLATE_BRAIN_MASKS[template])
+                    template_mask = ants.threshold_image(
+                        ants.image_read(mask_path), 0.5, 1e9, 1, 0
+                    )
+                elif isinstance(template, str) and template in _SKULL_STRIPPED_TEMPLATES:
+                    template_mask = ants.threshold_image(template_image, 1e-6, 1e9, 1, 0)
                 else:
-                    template_mask = ants.threshold_image(template_bext, 0.5, 1, 1, 0)
+                    template_bext = brain_extraction(template_image, modality=bext_mod, device=device, verbose=verbose)
+                    if bext_mod == "t1threetissue":
+                        template_mask = ants.threshold_image(template_bext['segmentation_image'], 1, 1, 1, 0)
+                    else:
+                        template_mask = ants.threshold_image(template_bext, 0.5, 1, 1, 0)
                 _TEMPLATE_MASK_CACHE[mask_key] = template_mask
             template_mask = ants.image_clone(template_mask)
             template_brain_image = template_mask * template_image

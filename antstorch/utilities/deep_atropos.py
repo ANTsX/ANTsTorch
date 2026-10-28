@@ -5,7 +5,9 @@ import torch
 def deep_atropos(
     t1,
     do_preprocessing=True,
+    do_bias_correction=True,
     brain_mask=None,
+    template_transforms=None,
     device=None,
     verbose=False,
     backend=None,
@@ -127,15 +129,19 @@ def deep_atropos(
     preprocessed_images = []
     if do_preprocessing:
         for i, img in enumerate(input_images):
-            n4 = run_n4(
-                truncate_image_intensity(img),
-                img * 0 + 1,
-                convergence={'iters': [50, 50, 50, 50], 'tol': 0.0},
-                rescale_intensities=True,
-                verbose=verbose,
-                backend=backend,
-                device=device
-            )
+            truncated_img = truncate_image_intensity(img)
+            if do_bias_correction:
+                n4 = run_n4(
+                    truncated_img,
+                    img * 0 + 1,
+                    convergence={'iters': [50, 50, 50, 50], 'tol': 0.0},
+                    rescale_intensities=True,
+                    verbose=verbose,
+                    backend=backend,
+                    device=device
+                )
+            else:
+                n4 = truncated_img
             if i == 0:
                 if brain_mask is not None:
                     t1_mask = ants.threshold_image(brain_mask, 0.5, 1e9, 1, 0)
@@ -143,11 +149,24 @@ def deep_atropos(
                     t1_bext = _brain_extraction(input_images[0], modality="t1threetissue", device=device, verbose=verbose)
                     t1_mask = ants.threshold_image(t1_bext['segmentation_image'], 1, 1, 1, 0)
                 n4 = n4 * t1_mask
-                reg = run_registration(hcp_t1_template, n4,
-                                       "antsRegistrationSyNQuick[a]",
-                                       backend=backend, device=device,
-                                       verbose=verbose)
-                preprocessed_images.append(reg['warpedmovout'])
+                if template_transforms is not None:
+                    reg = {
+                        "fwdtransforms": list(template_transforms["fwdtransforms"]),
+                        "invtransforms": list(template_transforms["invtransforms"]),
+                    }
+                    warped_t1 = ants.apply_transforms(
+                        hcp_t1_template,
+                        n4,
+                        transformlist=reg["fwdtransforms"],
+                        verbose=verbose,
+                    )
+                    preprocessed_images.append(warped_t1)
+                else:
+                    reg = run_registration(hcp_t1_template, n4,
+                                           "antsRegistrationSyNQuick[a]",
+                                           backend=backend, device=device,
+                                           verbose=verbose)
+                    preprocessed_images.append(reg['warpedmovout'])
             else:
                 n4 = n4 * t1_mask
                 n4 = ants.apply_transforms(hcp_t1_template, n4,
@@ -288,7 +307,13 @@ def deep_atropos(
         np.expand_dims(segmentation_matrix, axis=0), input_images[0] * 0 + 1
     )[0]
 
-    return {
+    return_dict = {
         "segmentation_image": segmentation_image,
         "probability_images": probability_images,
     }
+    if reg is not None:
+        return_dict["template_transforms"] = {
+            "fwdtransforms": list(reg["fwdtransforms"]),
+            "invtransforms": list(reg["invtransforms"]),
+        }
+    return return_dict

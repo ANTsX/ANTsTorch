@@ -9,6 +9,9 @@ import torch.nn as nn
 def cit168_labeling(t1,
                     brain_mask=None,
                     do_preprocessing=True,
+                    do_bias_correction=None,
+                    template_transforms=None,
+                    return_transforms=False,
                     include_template_priors=True,
                     device=None,
                     verbose=False,
@@ -120,13 +123,14 @@ def cit168_labeling(t1,
     # Preprocess images
     ################################
     t1 = ants.image_clone(t1, pixeltype="float")
+    run_bias = bool(do_preprocessing) if do_bias_correction is None else bool(do_bias_correction)
 
     t1_preprocessing = preprocess_brain_image(t1,
         truncate_intensity=[1e-4, 0.999],
         brain_extraction_modality=None if brain_mask is not None else "t1threetissue",
         brain_mask=brain_mask,
         template=None,
-        do_bias_correction=do_preprocessing,
+        do_bias_correction=run_bias,
         do_denoising=False,
         intensity_normalization_type='01',
         device=device,
@@ -135,8 +139,14 @@ def cit168_labeling(t1,
                         
     t1_preprocessed = t1_preprocessing['preprocessed_image'] * t1_preprocessing['brain_mask']
 
-    reg = run_registration(template_small, t1_preprocessed, template_transform_type,
-                           backend=backend, device=device, verbose=verbose)
+    if template_transforms is not None:
+        reg = {
+            "fwdtransforms": list(template_transforms["fwdtransforms"]),
+            "invtransforms": list(template_transforms["invtransforms"]),
+        }
+    else:
+        reg = run_registration(template_small, t1_preprocessed, template_transform_type,
+                               backend=backend, device=device, verbose=verbose)
     t1_preprocessed = ants.apply_transforms(fixed=template_large, moving=t1_preprocessed,
                                             transformlist=reg['fwdtransforms'][1],
                                             interpolator="linear", singleprecision=True, verbose=verbose)
@@ -278,6 +288,7 @@ def cit168_labeling(t1,
             fixed=t1,
             moving=template_seg,
             transformlist=reg["invtransforms"],
+            whichtoinvert=[str(tx).endswith(".mat") for tx in reg["invtransforms"]],
             interpolator="genericLabel",
             singleprecision=True,
             verbose=verbose,
@@ -292,4 +303,12 @@ def cit168_labeling(t1,
                 cit168_segmentation_image, ants.from_numpy(cit_arr)
             )
 
+    if return_transforms:
+        return {
+            "segmentation_image": cit168_segmentation_image,
+            "template_transforms": {
+                "fwdtransforms": list(reg["fwdtransforms"]),
+                "invtransforms": list(reg["invtransforms"]),
+            },
+        }
     return cit168_segmentation_image
