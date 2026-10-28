@@ -1,6 +1,6 @@
 """
 Tests for antstorch.utilities.quality_assessment -- kept separate from
-test_hippocampus_hypothalamus_claustrum_architectures.py on purpose, because
+test_hippocampus_hypothalamus_claustrum.py on purpose, because
 this module has a materially different (much lower) confidence status: no
 architecture-constructor function for the real tidsQualityAssessment/koniqMS*
 ResNet(s) exists anywhere in ANTsPyNet (they are only ever loaded whole from a

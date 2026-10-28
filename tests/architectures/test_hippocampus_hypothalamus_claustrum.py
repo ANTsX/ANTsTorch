@@ -6,13 +6,13 @@ Architecture-only tests for the three high-confidence applications ported
     * create_hypothalamus_unet_model_3d (hypothalamus_segmentation)
     * create_sysu_media_unet_model_2d(anatomy="claustrum") (claustrum_segmentation
                                         -- the class itself was already covered by
-                                        test_wmh_architectures.py under anatomy="wmh";
+                                        test_wmh.py under anatomy="wmh";
                                         this file adds the anatomy="claustrum" branch,
                                         which uses a different filter schedule and skips
                                         the wmh-only 5x5 first-layer kernel)
 
 quality_assessment is deliberately NOT covered here -- see
-test_quality_assessment_architecture.py, which carries its own confidence
+test_quality_assessment.py, which carries its own confidence
 caveat (no verified architecture exists for that module).
 
 See tests/support/architecture_checks.py for scope / rationale (architecture-only, no
@@ -79,7 +79,7 @@ class Test_hippmapp3r_refine_stage(unittest.TestCase):
         (inside the residual blocks) into train() mode -- see the corresponding
         block in hippmapp3r_segmentation.py. Verify that this actually makes
         consecutive forward passes differ, exactly mirroring the equivalent
-        hypermapp3r test in test_wmh_architectures.py."""
+        hypermapp3r test in test_wmh.py."""
         model = create_hippmapp3r_unet_model_3d(1, do_first_network=False).to(DEVICE).eval()
         for m in model.modules():
             if isinstance(m, torch.nn.Dropout3d):

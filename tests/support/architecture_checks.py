@@ -12,10 +12,10 @@ shape-level regressions in the modules ported from ANTsPyNet during the
     * antstorch.utilities.white_matter_hyperintensity_segmentation
     * antstorch.utilities.hippmapp3r_segmentation, hypothalamus_segmentation,
       claustrum_segmentation (added 2026-08-22, see
-      test_hippocampus_hypothalamus_claustrum_architectures.py)
+      test_hippocampus_hypothalamus_claustrum.py)
     * antstorch.utilities.quality_assessment (added 2026-08-22, but with a
       materially different -- much lower -- confidence status; see
-      test_quality_assessment_architecture.py's own module docstring)
+      test_quality_assessment.py's own module docstring)
 
 Each test rebuilds the exact same architecture (same class, same kwargs)
 that the corresponding application function builds internally, feeds it

@@ -143,6 +143,6 @@ jobs:
           while IFS= read -r -d '' f; do
             echo "🔍 Running $f"
             python -c "import psutil; print('Memory before:', psutil.virtual_memory().used // (1024*1024), 'MB')"
-            pytest -v -s --forked --test-device=cpu "$f" || exit 1
+            pytest -v -s --forked --strict-markers --test-device=cpu "$f" || exit 1
             python -c "import psutil; print('Memory after :', psutil.virtual_memory().used // (1024*1024), 'MB')"
           done < <(find tests -type f -name 'test_*.py' -print0 | sort -z)

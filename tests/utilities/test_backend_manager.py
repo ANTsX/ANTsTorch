@@ -1,4 +1,4 @@
-import sys
+from importlib import import_module
 
 import pytest
 
@@ -93,10 +93,11 @@ def test_antstorch_registration_engine(monkeypatch, name, engine):
         return lambda *a, **k: called.append((label, k)) or {"engine": label}
 
     # `antstorch.syn.robust_affine` is shadowed by the function of the same name,
-    # so patch the modules through sys.modules.
-    monkeypatch.setattr(sys.modules["antstorch.syn.robust_affine"], "robust_affine", fake("robust_affine"))
-    monkeypatch.setattr(sys.modules["antstorch.greedy"], "greedy_registration", fake("greedy_registration"))
-    monkeypatch.setattr(sys.modules["antstorch.syn.syn"], "syn_registration", fake("syn_registration"))
+    # so resolve the actual modules explicitly. Do not rely on other test
+    # files having imported them during collection.
+    monkeypatch.setattr(import_module("antstorch.syn.robust_affine"), "robust_affine", fake("robust_affine"))
+    monkeypatch.setattr(import_module("antstorch.greedy"), "greedy_registration", fake("greedy_registration"))
+    monkeypatch.setattr(import_module("antstorch.syn.syn"), "syn_registration", fake("syn_registration"))
     monkeypatch.setattr(antstorch.syn, "syn_registration", fake("syn_registration"))
 
     out = backend_ops.run_registration(_Img(), _Img(), name, backend="antstorch", device="cpu")
