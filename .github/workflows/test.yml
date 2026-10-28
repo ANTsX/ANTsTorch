@@ -136,7 +136,10 @@ jobs:
 
       - name: Run tests (individually via pytest)
         run: |
-          pip install pytest pytest-xdist pytest-forked psutil
+          # pytest-forked 1.7.5 marshals TestReport.__dict__; pytest 9.2
+          # adds a structured NodeId that marshal cannot serialize (child exit 3).
+          # Keep per-test isolation on compatible pytest until the plugin is fixed.
+          pip install "pytest<9.2" pytest-xdist pytest-forked psutil
           for f in tests/test_*.py; do
             echo "🔍 Running $f"
             python -c "import psutil; print('Memory before:', psutil.virtual_memory().used // (1024*1024), 'MB')"

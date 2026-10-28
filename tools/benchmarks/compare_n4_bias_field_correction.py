@@ -17,7 +17,6 @@ Write the output images to a dedicated directory::
 """
 
 import argparse
-import time
 from pathlib import Path
 
 import ants
@@ -25,6 +24,8 @@ import numpy as np
 import torch
 
 import antstorch
+
+from benchmark_timing import measure, write_timings
 
 
 def normalized_bias_array(image: ants.ANTsImage) -> np.ndarray:
@@ -68,6 +69,7 @@ def cuda_peak_memory(device: torch.device):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repeats", type=int, default=5, help="Timed runs per engine (default: 5; first sample cold).")
     parser.add_argument(
         "image",
         nargs="?",
@@ -117,6 +119,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.repeats < 1:
+        raise ValueError("--repeats must be at least 1")
+    args.timing_records = {}
     device = torch.device(args.device) if args.device else antstorch.get_default_device()
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("--device cuda was requested, but CUDA is not available")
@@ -134,60 +139,66 @@ def main() -> None:
     if stable_accumulation is None:
         stable_accumulation = device.type == "mps"
 
-    start = time.perf_counter()
-    if args.verbose:
-        print("Running ANTs N4 corrected-image pass...")
-    n4_ants = ants.n4_bias_field_correction(
-        t1,
-        mask=mask,
-        shrink_factor=args.shrink_factor,
-        convergence=convergence,
-        spline_param=mesh_size,
-        verbose=args.verbose,
-    )
-    if args.verbose:
-        print("Running ANTs N4 bias-field pass...")
-    bias_ants = ants.n4_bias_field_correction(
-        t1,
-        mask=mask,
-        shrink_factor=args.shrink_factor,
-        convergence=convergence,
-        spline_param=mesh_size,
-        return_bias_field=True,
-        verbose=args.verbose,
-    )
-    ants_seconds = time.perf_counter() - start
+    def run_ants():
+        if args.verbose:
+            print("Running ANTs N4 corrected-image pass...")
+        n4_ants = ants.n4_bias_field_correction(
+            t1,
+            mask=mask,
+            shrink_factor=args.shrink_factor,
+            convergence=convergence,
+            spline_param=mesh_size,
+            verbose=args.verbose,
+        )
+        if args.verbose:
+            print("Running ANTs N4 bias-field pass...")
+        bias_ants = ants.n4_bias_field_correction(
+            t1,
+            mask=mask,
+            shrink_factor=args.shrink_factor,
+            convergence=convergence,
+            spline_param=mesh_size,
+            return_bias_field=True,
+            verbose=args.verbose,
+        )
+        return (n4_ants, bias_ants)
+
+    (n4_ants, bias_ants), ants_seconds = measure(
+        "ANTs n4_bias_field_correction", run_ants, args.repeats, args.timing_records, None)
 
     track_cuda_memory = device.type == "cuda" and reset_cuda_peak_memory(device)
     synchronize(device)
-    start = time.perf_counter()
-    if args.verbose:
-        print("Running ANTsTorch N4 corrected-image pass...")
-    n4_torch = antstorch.n4_bias_field_correction(
-        t1,
-        mask,
-        shrink_factor=args.shrink_factor,
-        convergence=convergence,
-        spline_param=tuple(mesh_size),
-        stable_accumulation=stable_accumulation,
-        device=device,
-        verbose=args.verbose,
-    )
-    if args.verbose:
-        print("Running ANTsTorch N4 bias-field pass...")
-    bias_torch = antstorch.n4_bias_field_correction(
-        t1,
-        mask,
-        shrink_factor=args.shrink_factor,
-        convergence=convergence,
-        spline_param=tuple(mesh_size),
-        return_bias_field=True,
-        stable_accumulation=stable_accumulation,
-        device=device,
-        verbose=args.verbose,
-    )
-    synchronize(device)
-    torch_seconds = time.perf_counter() - start
+    def run_antstorch():
+        if args.verbose:
+            print("Running ANTsTorch N4 corrected-image pass...")
+        n4_torch = antstorch.n4_bias_field_correction(
+            t1,
+            mask,
+            shrink_factor=args.shrink_factor,
+            convergence=convergence,
+            spline_param=tuple(mesh_size),
+            stable_accumulation=stable_accumulation,
+            device=device,
+            verbose=args.verbose,
+        )
+        if args.verbose:
+            print("Running ANTsTorch N4 bias-field pass...")
+        bias_torch = antstorch.n4_bias_field_correction(
+            t1,
+            mask,
+            shrink_factor=args.shrink_factor,
+            convergence=convergence,
+            spline_param=tuple(mesh_size),
+            return_bias_field=True,
+            stable_accumulation=stable_accumulation,
+            device=device,
+            verbose=args.verbose,
+        )
+        synchronize(device)
+        return (n4_torch, bias_torch)
+
+    (n4_torch, bias_torch), torch_seconds = measure(
+        "ANTsTorch n4_bias_field_correction", run_antstorch, args.repeats, args.timing_records, device)
 
     corrected_ants_array = n4_ants.numpy().astype(np.float64)
     corrected_torch_array = n4_torch.numpy().astype(np.float64)
@@ -199,6 +210,7 @@ def main() -> None:
     bias_difference = np.log(normalized_torch_bias) - np.log(normalized_ants_bias)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    write_timings(args.output_dir / "timings.json", args.timing_records)
     prefix = args.output_dir / args.output_prefix
     ants.image_write(n4_ants, f"{prefix}_ants_corrected.nii.gz")
     ants.image_write(n4_torch, f"{prefix}_antstorch_corrected.nii.gz")
@@ -207,8 +219,8 @@ def main() -> None:
 
     print(f"Input: {input_path}")
     print(f"Geometry: size={t1.shape}, spacing={t1.spacing}, origin={t1.origin}")
-    print(f"ANTs runtime:      {ants_seconds:.3f} s (correction + bias-field run)")
-    print(f"ANTsTorch runtime: {torch_seconds:.3f} s on {device} (correction + bias-field run)")
+    print(f"ANTs runtime:      {ants_seconds:.3f} s median of {args.repeats} (correction + bias-field run)")
+    print(f"ANTsTorch runtime: {torch_seconds:.3f} s median of {args.repeats} on {device} (correction + bias-field run)")
     print(f"ANTs intensity range: {corrected_ants_array.min():.6g} to {corrected_ants_array.max():.6g}")
     print(f"ANTsTorch intensity range: {corrected_torch_array.min():.6g} to {corrected_torch_array.max():.6g}")
     print(f"ANTs bias-field range: {normalized_ants_bias.min():.6g} to {normalized_ants_bias.max():.6g}")

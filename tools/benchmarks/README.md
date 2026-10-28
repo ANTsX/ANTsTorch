@@ -252,7 +252,7 @@ python tools/benchmarks/compare_syntx_antstorch_mindboggle.py --ants-only --ants
 
 ## Primitive comparisons: N4, denoising, cortical thickness, B-spline fitting
 
-Each primitive benchmark script one runs an ANTsPy routine and its ANTsTorch counterpart on the same input and reports run time and agreement of the outputs. They are launched together by `run_primitive_benchmarks.py` (`--device` defaults to `antstorch.get_default_device()`; each comparison writes its own `log.txt`, and the run writes `run_info.txt` and `summary.txt`):
+Each primitive benchmark script runs an ANTsPy routine and its ANTsTorch counterpart on the same input and reports run time and agreement of the outputs. They are launched together by `run_primitive_benchmarks.py` (`--device` defaults to `antstorch.get_default_device()`; each comparison writes its own `log.txt`, and the run writes `run_info.txt` and `summary.txt`):
 
 ```bash
 python tools/benchmarks/run_primitive_benchmarks.py --out-dir <dir>                   # default device
@@ -263,30 +263,77 @@ python tools/benchmarks/run_primitive_benchmarks.py --only n4_bias_field_correct
 | | MPS | CUDA |
 |---|---|---|
 | Host | Mac (Apple M4, 24 GB) | NVIDIA RTX A6000 48 GB |
-| Python / ANTsTorch commit | 3.11.15 / `73ee932` | 3.11.9 / `2769e40` |
+| Python / ANTsTorch commit | 3.11.15 / `202cd69` | 3.11.9 / `2769e40` |
 | Input | `S_template3` (136×176×176, ~1.5 mm) for denoising, N4 and cortical thickness; synthetic data for B-spline fitting | same |
+
+The MPS comparisons were rerun on 2026-10-28 at commit `202cd69` (PyTorch 2.14.0,
+ANTsPy 0.6.4, NumPy 2.0.2, macOS 26.6.2). CUDA results are historical
+(commit `2769e40`); no CUDA device was available for this rerun.
+The [MPS run records](results/20261028_mps/) contain the commands, logs and environment.
+
+```bash
+ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=2 python tools/benchmarks/run_primitive_benchmarks.py \
+    --device mps --repeats 5 --ants-threads 2 --out-dir results/primitive_benchmarks_20261028_mps
+```
+
+To reproduce on an NVIDIA GPU, use the same Python environment with a CUDA-enabled
+PyTorch installation and ANTsTorch installed from this checkout:
+
+```bash
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=2 python tools/benchmarks/run_primitive_benchmarks.py \
+    --device cuda:0 --repeats 5 --ants-threads 2 --out-dir results/primitives_cuda_n5
+# N4 only; use --repeats 10 for ten measurements:
+python tools/benchmarks/run_primitive_benchmarks.py --device cuda:0 \
+    --only n4_bias_field_correction --repeats 10 --ants-threads 2 \
+    --out-dir results/n4_cuda_n10
+```
+
+`--repeats` defaults to 5 for all four scripts and the launcher. Each engine is
+measured in the same process; N4 repeats both the corrected-image and bias-field
+calls. Cortical thickness reuses one shared Deep Atropos segmentation across all
+repeats. GPU work is synchronized at timing boundaries; image I/O and agreement
+calculations are excluded. Reported times are medians; the logs and `timings.json`
+files contain every sample, Q1/Q3, minimum and maximum (B-spline:
+`bspline_scattered_comparison_timings.json`). The first sample is included and
+marked cold; denoising additionally retains its lightweight dummy-grid warm-up.
+Agreement metrics and output images use the final repetition. Repeated timings
+measure runtime dispersion, not variability of output agreement. Keep the GPU
+otherwise idle, and retain `run_info.txt` with the results. `--dry-run` prints
+commands without executing them. ANTs always uses the CPU, even with `--device cuda:0`.
 
 How to read the numbers:
 
-- ANTs always runs on the CPU of the host it ran on, and the two hosts differ (ANTs denoising. Speed ratios are therefore meaningful within a column, not between MPS and CUDA.
+- ANTs always runs on the CPU of the host it ran on, and the two hosts differ. Speed ratios are therefore meaningful within a column, not between MPS and CUDA.
 - ``ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=2``.
 - MPS has no float64. `compare_bspline_scattered_data.py` runs ANTsTorch in float32 on MPS and in float64 elsewhere; N4, denoising and cortical thickness use the library's own dtype handling.
 - Ratio = ANTs time / ANTsTorch time.
 
 ### Run time
 
+MPS: median of 5 for denoising and N4; cortical thickness is a single full
+45-iteration measurement (`N=1`), not yet repeated with the new protocol.
+CUDA retains the original protocol (denoising: median of 3; N4/thickness: single run).
+
 | Comparison | Device | ANTs (s) | ANTsTorch (s) | Ratio |
 |---|---|---:|---:|---:|
-| Denoising (`denoise_image`, median of 3) | MPS | 5.687 | 7.127 | 0.80× |
+| Denoising (`denoise_image`) | MPS | 6.209 | 7.197 | 0.86× |
 | | CUDA | 11.421 | 1.110 | 10.29× |
-| N4 bias-field correction (corrected image + bias field) | MPS | 8.086 | 5.089 | 1.59× |
+| N4 bias-field correction (corrected image + bias field) | MPS | 9.194 | 4.043 | 2.27× |
 | | CUDA | 25.174 | 1.201 | 20.96× |
-| Cortical thickness (KellyKapowski, 45 iterations) | MPS | 283.756 | 211.614 | 1.34× |
+| Cortical thickness (KellyKapowski, 45 iterations) | MPS | 304.300 | 221.616 | 1.37× |
 | | CUDA | 607.950 | 17.418 | 34.90× |
 
-- Cortical thickness: Deep Atropos is run once and shared by both engines; it is excluded from these times (60.7 s on MPS, 101.0 s on CUDA).
+MPS timing dispersion (seconds; Q1–Q3, N=5):
+
+| Comparison | ANTs median [Q1, Q3] | ANTsTorch median [Q1, Q3] |
+|---|---:|---:|
+| Denoising | 6.209 [6.107, 6.294] | 7.197 [7.163, 7.215] |
+| N4 (both calls) | 9.194 [9.094, 9.372] | 4.043 [3.953, 4.050] |
+
+- Cortical thickness: Deep Atropos is run once and shared by both engines; it is excluded from these times (86.1 s on MPS, 101.0 s on CUDA).
 - Peak ANTsTorch CUDA memory: 3332 MiB (denoising), 552.5 MiB (N4).
-- B-spline fitting is not in the table: the problems are tiny (ANTs 1–8 ms; ANTsTorch 8–400 ms), so its times measure start-up overhead rather than throughput.
+- B-spline fitting is not in the table: the problems are tiny (MPS medians: ANTs 1.1–2.7 ms; ANTsTorch 10–48 ms), so start-up overhead strongly affects individual measurements; all five samples are retained in the run records.
 
 ### Agreement with ANTs
 
@@ -297,21 +344,21 @@ How to read the numbers:
 | | Max \|diff\| | 1.7295 | 1.7295 |
 | | Correlation, denoised image | 0.99997 | 0.99997 |
 | | Correlation, removed noise | 0.99401 | 0.99401 |
-| N4 | Corrected-image RMSE | 0.003338 | 0.000475 |
-| | Scale-aligned corrected-image RMSE | 0.001652 | 0.000446 |
-| | Normalized log-bias MAE | 0.001320 | 0.000570 |
-| | Normalized log-bias correlation | 0.99998254 | 0.99999517 |
-| Cortical thickness | MAE (mm) | 0.1537 | 0.1453 |
-| | RMSE (mm) | 0.2033 | 0.1931 |
-| | 95th percentile \|error\| (mm) | 0.3969 | 0.3733 |
-| | Pearson correlation | 0.99634 | 0.99649 |
-| | GM voxels compared | 140258 | 140245 |
+| N4 | Corrected-image RMSE | 0.003789 | 0.000475 |
+| | Scale-aligned corrected-image RMSE | 0.001880 | 0.000446 |
+| | Normalized log-bias MAE | 0.001328 | 0.000570 |
+| | Normalized log-bias correlation | 0.99998255 | 0.99999517 |
+| Cortical thickness | MAE (mm) | 0.1377 | 0.1453 |
+| | RMSE (mm) | 0.1891 | 0.1931 |
+| | 95th percentile \|error\| (mm) | 0.3577 | 0.3733 |
+| | Pearson correlation | 0.99586 | 0.99649 |
+| | GM voxels compared | 141747 | 140245 |
 
 Observations:
 
 - **Denoising:** the two devices give the same agreement to the printed precision; the run-to-run difference is 0 for both ANTs and ANTsTorch. The maximum difference (1.73, for an intensity range of about 8.7) is far above the RMSE, so a few voxels disagree strongly. This has not been investigated.
-- **N4:** the corrected-image RMSE is about 7× lower on CUDA than on MPS (2–4× lower for the scale-aligned RMSE and the log-bias MAE). The launcher passes `--no-stable-accumulation` in both runs.
-- **Cortical thickness:** agreement is similar on both devices (MAE ≈ 0.15 mm, r ≈ 0.996). The GM voxel counts differ slightly because each run computes its own Deep Atropos segmentation.
+- **N4:** the MPS corrected-image RMSE is 0.003789 (scale-aligned: 0.001880), measured on the final repetition. The launcher passes `--no-stable-accumulation` in both runs; scatter accumulation can vary the output across repetitions. MPS ANTsTorch median time is 4.043 s (N=5), including a 5.381 s first run; the previous published 5.089 s was a single measurement. This change in timing protocol does not isolate the effect of code changes. CUDA agreement and timing have not been remeasured at the new commit.
+- **Cortical thickness:** agreement is similar on both devices (MAE ≈ 0.14–0.15 mm, r ≈ 0.996). The GM voxel counts differ slightly because each run computes its own Deep Atropos segmentation.
 
 ### B-spline fitting on scattered data
 
@@ -341,7 +388,7 @@ The correlation is ≥ 0.99999999 in every case. The float32 run on MPS is withi
 | `compare_n4_bias_field_correction.py` | ANTs vs ANTsTorch, N4 bias-field correction (not a registration model) | N/A — primitive comparison, no `--models` |
 | `compare_denoise_image.py` | ANTs `denoise_image` vs `antstorch.denoise_image` (adaptive non-local means, Rician or Gaussian noise) | N/A — primitive comparison, no `--models`; `--repeats 2+` also reports ANTs run-to-run variability |
 | `compare_cortical_thickness.py` | ANTs `kelly_kapowski` vs the ANTsTorch tensor DiReCT engine on a shared Deep Atropos segmentation (`S_template3` by default) | N/A — same GM/WM inputs and shared parameters; `--optimizer` and `--regularizer` select the ANTsTorch variant |
-| `run_primitive_benchmarks.py` | Runs `compare_denoise_image.py`, `compare_n4_bias_field_correction.py`, `compare_cortical_thickness.py` and `compare_bspline_scattered_data.py` in sequence on one device (`--device`, default `antstorch.get_default_device()`) with a common `--out-dir`, an optional shared image (positional; B-spline uses synthetic data unless `--bspline-image`), one `log.txt` per comparison, `run_info.txt` and `summary.txt`; `--only`, `--repeats`, `--ants-threads`, `--dry-run` | N/A — launcher for the primitive comparisons |
+| `run_primitive_benchmarks.py` | Runs `compare_denoise_image.py`, `compare_n4_bias_field_correction.py`, `compare_cortical_thickness.py` and `compare_bspline_scattered_data.py` in sequence on one device (`--device`, default `antstorch.get_default_device()`) with a common `--out-dir`, an optional shared image (positional; B-spline uses synthetic data unless `--bspline-image`), one `log.txt` per comparison, `run_info.txt` and `summary.txt`; `--only`, `--repeats` (default 5, all primitives), `--ants-threads` (all ANTs engines), `--dry-run` | N/A — launcher for the primitive comparisons |
 
 </details>
 

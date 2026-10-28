@@ -1,0 +1,29 @@
+Input: /Users/ntustison/.antstorch/S_template3.nii.gz
+Geometry: size=(136, 176, 176), spacing=(1.5022221803665161, 1.4571428298950195, 1.4571428298950195), origin=(202.8000030517578, 0.0, 0.0)
+Parameters: noise_model=Rician, p=1, r=2, shrink_factor=1, mask=none (4212736 voxels compared)
+Warm-up (dummy grid):  ANTs: 0.0036 s | ANTsTorch: 0.1659 s on mps
+ANTs denoise_image IQR: [6.107251, 6.293873] s
+ANTsTorch denoise_image IQR: [7.163458, 7.214588] s
+ANTs runtime:          6.2087 s median of 5 (run 1 [cold]: 6.1029 s, runs 2..5: min 6.1073 s, max 6.3201 s) (threads: 2)
+ANTsTorch runtime:     7.1968 s median of 5 (run 1 [cold]: 7.5768 s, runs 2..5: min 7.0361 s, max 7.2146 s) on mps
+Speed ratio (ANTs / ANTsTorch): 0.86x
+Input intensity range:     -0.877246 to 7.82763
+ANTs output range:         -1.69165e-05 to 7.15067
+ANTsTorch output range:    0 to 7.15052
+Removed-noise std, ANTs:      0.119135
+Removed-noise std, ANTsTorch: 0.119027
+ANTsTorch vs ANTs (denoised image):
+  RMSE:            0.0130643 (0.1827 % of range)
+  MAE:             0.00209057
+  Max |diff|:      1.72951
+  Correlation:     0.9999711985
+ANTsTorch vs ANTs (removed noise):
+  RMSE:            0.0130643 (0.2583 % of range)
+  MAE:             0.00209057
+  Max |diff|:      1.72951
+  Correlation:     0.9940075446
+ANTs run-to-run max |diff|:      0
+ANTsTorch run-to-run max |diff|: 0
+Outputs written with prefix: /private/tmp/antstorch_primitives_20261028_mps_n5/denoise_image/denoise_comparison
+HTML comparison report generated: /private/tmp/antstorch_primitives_20261028_mps_n5/denoise_image/denoise_comparison_report.html
+To view the HTML report, run: open "/private/tmp/antstorch_primitives_20261028_mps_n5/denoise_image/denoise_comparison_report.html"

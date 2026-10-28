@@ -45,7 +45,6 @@ Use 2000 random (off-grid) pixels from an image as scattered points::
 """
 
 import argparse
-import time
 from pathlib import Path
 
 import ants
@@ -53,6 +52,8 @@ import numpy as np
 import torch
 
 import antstorch
+
+from benchmark_timing import measure, write_timings
 
 
 def reverse_axes(array: np.ndarray) -> np.ndarray:
@@ -172,19 +173,25 @@ def compare_object_to_scattered_data(args, rng: np.random.Generator, device: tor
         mesh_size=args.mesh_size[:dimension] if args.mesh_size else 4,
     )
 
-    start = time.perf_counter()
-    ants_result = ants.fit_bspline_object_to_scattered_data(scattered_data, parametric_data, data_weights=weights, **kwargs)
-    ants_seconds = time.perf_counter() - start
+    def run_ants():
+        ants_result = ants.fit_bspline_object_to_scattered_data(scattered_data, parametric_data, data_weights=weights, **kwargs)
+        return ants_result
+
+    ants_result, ants_seconds = measure(
+        "ANTs compare_object_to_scattered_data", run_ants, args.repeats, args.timing_records, None)
     ants_array = ants_result.numpy().astype(np.float64)
 
     torch_device = device
     synchronize(torch_device)
-    start = time.perf_counter()
-    torch_dense = antstorch.fit_bspline_object_to_scattered_data(
-        scattered_data, parametric_data, data_weights=weights, device=torch_device, dtype=working_dtype(torch_device), **kwargs
-    )
-    synchronize(torch_device)
-    torch_seconds = time.perf_counter() - start
+    def run_antstorch():
+        torch_dense = antstorch.fit_bspline_object_to_scattered_data(
+            scattered_data, parametric_data, data_weights=weights, device=torch_device, dtype=working_dtype(torch_device), **kwargs
+        )
+        synchronize(torch_device)
+        return torch_dense
+
+    torch_dense, torch_seconds = measure(
+        "ANTsTorch compare_object_to_scattered_data", run_antstorch, args.repeats, args.timing_records, device)
     torch_array = reverse_axes(torch_dense[0, 0].detach().cpu().numpy().astype(np.float64))
 
     print(f"  points={scattered_data.shape[0]}, size={size}, mesh_size={kwargs['mesh_size']}, levels={kwargs['number_of_fitting_levels']}")
@@ -225,33 +232,39 @@ def compare_displacement_field_from_points(args, rng: np.random.Generator, devic
         enforce_stationary_boundary=args.enforce_stationary_boundary,
     )
 
-    start = time.perf_counter()
-    ants_result = ants.fit_bspline_displacement_field(
-        displacement_origins=points,
-        displacements=deltas,
-        displacement_weights=weights,
-        origin=[0.0] * dimension,
-        spacing=[1.0] * dimension,
-        size=list(size),
-        direction=np.eye(dimension),
-        **kwargs,
-    )
-    ants_seconds = time.perf_counter() - start
+    def run_ants():
+        ants_result = ants.fit_bspline_displacement_field(
+            displacement_origins=points,
+            displacements=deltas,
+            displacement_weights=weights,
+            origin=[0.0] * dimension,
+            spacing=[1.0] * dimension,
+            size=list(size),
+            direction=np.eye(dimension),
+            **kwargs,
+        )
+        return ants_result
+
+    ants_result, ants_seconds = measure(
+        "ANTs compare_displacement_field_from_points", run_ants, args.repeats, args.timing_records, None)
     ants_array = ants_result.numpy().astype(np.float64)
 
     torch_device = device
     domain = antstorch.ImageDomain(size=size, spacing=(1.0,) * dimension, origin=(0.0,) * dimension)
     synchronize(torch_device)
-    start = time.perf_counter()
-    torch_dense = antstorch.fit_bspline_displacement_field(
-        displacement_origins=torch.as_tensor(points, dtype=working_dtype(torch_device), device=torch_device),
-        displacements=torch.as_tensor(deltas, dtype=working_dtype(torch_device), device=torch_device),
-        displacement_weights=None if weights is None else torch.as_tensor(weights, dtype=working_dtype(torch_device), device=torch_device),
-        domain=domain,
-        **kwargs,
-    )
-    synchronize(torch_device)
-    torch_seconds = time.perf_counter() - start
+    def run_antstorch():
+        torch_dense = antstorch.fit_bspline_displacement_field(
+            displacement_origins=torch.as_tensor(points, dtype=working_dtype(torch_device), device=torch_device),
+            displacements=torch.as_tensor(deltas, dtype=working_dtype(torch_device), device=torch_device),
+            displacement_weights=None if weights is None else torch.as_tensor(weights, dtype=working_dtype(torch_device), device=torch_device),
+            domain=domain,
+            **kwargs,
+        )
+        synchronize(torch_device)
+        return torch_dense
+
+    torch_dense, torch_seconds = measure(
+        "ANTsTorch compare_displacement_field_from_points", run_antstorch, args.repeats, args.timing_records, device)
     torch_array = vector_to_ants_order(torch_dense[0].detach().cpu().numpy().astype(np.float64))
 
     print(f"  points={point_count}, size={size}, mesh_size={kwargs['mesh_size']}, levels={kwargs['number_of_fitting_levels']}")
@@ -285,16 +298,20 @@ def compare_displacement_field_from_dense_field(args, rng: np.random.Generator, 
 
     try:
         ants_field_image = ants.from_numpy(field, spacing=(1.0,) * dimension, has_components=True)
-        start = time.perf_counter()
-        ants_result = ants.fit_bspline_displacement_field(
-            displacement_field=ants_field_image,
-            origin=[0.0] * dimension,
-            spacing=[1.0] * dimension,
-            size=list(size),
-            direction=np.eye(dimension),
-            **kwargs,
-        )
-        ants_seconds = time.perf_counter() - start
+        def run_ants_dense():
+            ants_result = ants.fit_bspline_displacement_field(
+                displacement_field=ants_field_image,
+                origin=[0.0] * dimension,
+                spacing=[1.0] * dimension,
+                size=list(size),
+                direction=np.eye(dimension),
+                **kwargs,
+            )
+            return ants_result
+
+        ants_result, ants_seconds = measure(
+            "ANTs compare_displacement_field_from_dense_field", run_ants_dense,
+            args.repeats, args.timing_records)
     except (RuntimeError, AttributeError) as error:
         print(f"  SKIPPED: this ANTsPy build could not run the dense-field path ({error}).")
         return
@@ -311,10 +328,13 @@ def compare_displacement_field_from_dense_field(args, rng: np.random.Generator, 
     ).unsqueeze(0)
     domain = antstorch.ImageDomain(size=size, spacing=(1.0,) * dimension, origin=(0.0,) * dimension)
     synchronize(torch_device)
-    start = time.perf_counter()
-    torch_dense = antstorch.fit_bspline_displacement_field(displacement_field=field_torch, domain=domain, **kwargs)
-    synchronize(torch_device)
-    torch_seconds = time.perf_counter() - start
+    def run_antstorch():
+        torch_dense = antstorch.fit_bspline_displacement_field(displacement_field=field_torch, domain=domain, **kwargs)
+        synchronize(torch_device)
+        return torch_dense
+
+    torch_dense, torch_seconds = measure(
+        "ANTsTorch compare_displacement_field_from_dense_field", run_antstorch, args.repeats, args.timing_records, device)
     torch_array = vector_to_ants_order(torch_dense[0].detach().cpu().numpy().astype(np.float64))
 
     print(f"  size={size}, mesh_size={kwargs['mesh_size']}, levels={kwargs['number_of_fitting_levels']}")
@@ -326,6 +346,7 @@ def compare_displacement_field_from_dense_field(args, rng: np.random.Generator, 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--repeats", type=int, default=5, help="Timed runs per engine (default: 5; first sample cold).")
     parser.add_argument("--image", default=None, help="Image path, or a bundled ANTsPy test image name (e.g. r16). Omit for synthetic data.")
     parser.add_argument("--dimension", type=int, default=2, choices=(2, 3), help="Dimension for synthetic data (ignored when --image is given).")
     parser.add_argument("--size", type=int, nargs="+", default=None, help="Domain size for synthetic data, ITK order.")
@@ -346,6 +367,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.repeats < 1:
+        raise ValueError("--repeats must be at least 1")
+    args.timing_records = {}
     device = torch.device(args.device) if args.device else antstorch.get_default_device()
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("--device cuda was requested, but CUDA is not available")
@@ -361,6 +385,9 @@ def main() -> None:
         compare_displacement_field_from_points(args, rng, device)
     if not args.skip_displacement_dense_field:
         compare_displacement_field_from_dense_field(args, rng, device)
+
+    if args.output_prefix:
+        write_timings(f"{args.output_prefix}_timings.json", args.timing_records)
 
 
 if __name__ == "__main__":

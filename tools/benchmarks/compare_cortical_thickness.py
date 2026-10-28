@@ -27,6 +27,8 @@ import torch
 
 import antstorch
 
+from benchmark_timing import measure, write_timings
+
 
 def _finite_float(value: float) -> Optional[float]:
     """Return a JSON-safe float, or ``None`` for a non-finite value."""
@@ -116,6 +118,7 @@ def _write_summary(path: Path, results: dict) -> None:
         f"Input: `{results['input']}`",
         "",
         "Both engines used the same Deep Atropos segmentation and tissue probabilities.",
+        f"Engine times are medians of {results['parameters']['repeats']} runs; preprocessing is excluded.",
         "",
         "| Measurement | Value |",
         "|---|---:|",
@@ -136,6 +139,7 @@ def _write_summary(path: Path, results: dict) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repeats", type=int, default=5, help="Timed runs per engine (default: 5; first sample cold).")
     parser.add_argument(
         "image",
         nargs="?",
@@ -186,6 +190,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.repeats < 1:
+        raise ValueError("--repeats must be at least 1")
+    args.timing_records = {}
     device = torch.device(args.device) if args.device else antstorch.get_default_device()
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested, but it is not available")
@@ -226,36 +233,42 @@ def main() -> None:
         white_matter = atropos["probability_images"][3] + atropos["probability_images"][4]
 
     print("Running ANTs KellyKapowski...")
-    start = time.perf_counter()
-    ants_thickness = ants.kelly_kapowski(
-        s=segmentation,
-        g=gray_matter,
-        w=white_matter,
-        its=args.iterations,
-        r=args.gradient_step,
-        m=args.velocity_smoothing_variance,
-        x=0,
-        verbose=int(args.verbose),
-    )
-    ants_seconds = time.perf_counter() - start
+    def run_ants():
+        ants_thickness = ants.kelly_kapowski(
+            s=segmentation,
+            g=gray_matter,
+            w=white_matter,
+            its=args.iterations,
+            r=args.gradient_step,
+            m=args.velocity_smoothing_variance,
+            x=0,
+            verbose=int(args.verbose),
+        )
+        return ants_thickness
+
+    ants_thickness, ants_seconds = measure(
+        "ANTs cortical_thickness", run_ants, args.repeats, args.timing_records, None)
 
     print(f"Running ANTsTorch DiReCT on {device}...")
     _synchronize(device)
-    start = time.perf_counter()
-    antstorch_thickness = antstorch.direct.kelly_kapowski(
-        segmentation,
-        gray_matter,
-        white_matter,
-        iterations=args.iterations,
-        gradient_step=args.gradient_step,
-        velocity_smoothing_variance=args.velocity_smoothing_variance,
-        optimizer=args.optimizer,
-        regularizer=args.regularizer,
-        device=device,
-        verbose=args.verbose,
-    )
-    _synchronize(device)
-    antstorch_seconds = time.perf_counter() - start
+    def run_antstorch():
+        antstorch_thickness = antstorch.direct.kelly_kapowski(
+            segmentation,
+            gray_matter,
+            white_matter,
+            iterations=args.iterations,
+            gradient_step=args.gradient_step,
+            velocity_smoothing_variance=args.velocity_smoothing_variance,
+            optimizer=args.optimizer,
+            regularizer=args.regularizer,
+            device=device,
+            verbose=args.verbose,
+        )
+        _synchronize(device)
+        return antstorch_thickness
+
+    antstorch_thickness, antstorch_seconds = measure(
+        "ANTsTorch cortical_thickness", run_antstorch, args.repeats, args.timing_records, device)
 
     ants_array = ants_thickness.numpy().astype(np.float64, copy=False)
     antstorch_array = antstorch_thickness.numpy().astype(np.float64, copy=False)
@@ -294,12 +307,14 @@ def main() -> None:
         "preprocessing_device": None if args.reuse_inputs else str(preprocessing_device),
         "reused_inputs": str(args.reuse_inputs.resolve()) if args.reuse_inputs else None,
         "parameters": {
+            "repeats": args.repeats,
             "iterations": args.iterations,
             "gradient_step": args.gradient_step,
             "velocity_smoothing_variance": args.velocity_smoothing_variance,
             "antstorch_optimizer": args.optimizer,
             "antstorch_regularizer": args.regularizer,
         },
+        "timing_samples": args.timing_records,
         "timing_seconds": {
             "deep_atropos": atropos_seconds,
             "ants_kelly_kapowski": ants_seconds,
@@ -316,6 +331,7 @@ def main() -> None:
         },
         "outputs": {name: str(path) for name, path in outputs.items()},
     }
+    write_timings(args.output_dir / "timings.json", args.timing_records)
     json_path = args.output_dir / "comparison.json"
     summary_path = args.output_dir / "summary.md"
     json_path.write_text(
@@ -328,8 +344,8 @@ def main() -> None:
         "difference_antstorch_minus_ants"
     ]
     print(f"Deep Atropos:        {atropos_seconds:.3f} s (shared; excluded from engine timing)")
-    print(f"ANTs KellyKapowski:  {ants_seconds:.3f} s")
-    print(f"ANTsTorch DiReCT:    {antstorch_seconds:.3f} s")
+    print(f"ANTs KellyKapowski:  {ants_seconds:.3f} s median of {args.repeats}")
+    print(f"ANTsTorch DiReCT:    {antstorch_seconds:.3f} s median of {args.repeats}")
     print(f"ANTsTorch speed ratio: {_format_metric(speedup)}x")
     print(f"GM MAE:              {_format_metric(gm_error['mae_mm'])} mm")
     print(f"GM RMSE:             {_format_metric(gm_error['rmse_mm'])} mm")

@@ -1,0 +1,4 @@
+Summary (/private/tmp/antstorch_primitives_20261028_mps_n5)
+  denoise_image              OK                    71.8 s
+  n4_bias_field_correction   OK                    73.9 s
+  bspline_scattered_data     OK                     3.7 s

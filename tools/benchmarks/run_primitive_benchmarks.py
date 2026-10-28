@@ -38,6 +38,7 @@ Print the commands without running them::
 
 import argparse
 import datetime
+import importlib.metadata
 import os
 import platform
 import shutil
@@ -97,17 +98,19 @@ def parse_args() -> argparse.Namespace:
             "comparison fits (default: synthetic data). Every pixel is a point, so avoid large 3-D images."
         ),
     )
-    parser.add_argument("--repeats", type=int, default=3, help="Timed runs for denoise_image (default: 3).")
+    parser.add_argument("--repeats", type=int, default=5, help="Timed runs per engine for every primitive (default: 5).")
     parser.add_argument(
         "--ants-threads",
         type=int,
         default=None,
-        help="ITK thread count for ANTs denoising (default: ITK default).",
+        help="ITK thread count for all ANTs comparisons (default: ITK default).",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print the commands without running them.")
     args = parser.parse_args()
     if args.repeats < 1:
         parser.error("--repeats must be at least 1")
+    if args.ants_threads is not None and args.ants_threads < 1:
+        parser.error("--ants-threads must be at least 1")
     if args.image is not None:
         if not args.image.is_file():
             parser.error(f"image not found: {args.image}")
@@ -125,7 +128,7 @@ def resolve_device(requested):
 
 
 def build_command(name: str, args: argparse.Namespace, device: str, out_dir: Path) -> list:
-    command = [sys.executable, str(script_path(name))]
+    command = [sys.executable, str(script_path(name)), "--repeats", str(args.repeats)]
     if name == "bspline_scattered_data":
         # This script takes --image and --output-prefix instead of a positional image and --output-dir.
         if args.bspline_image is not None:
@@ -138,7 +141,6 @@ def build_command(name: str, args: argparse.Namespace, device: str, out_dir: Pat
         command.append(str(args.image))
     command += ["--device", device, "--output-dir", str(out_dir / name)]
     if name == "denoise_image":
-        command += ["--repeats", str(args.repeats)]
         if args.ants_threads is not None:
             command += ["--ants-threads", str(args.ants_threads)]
     elif name == "n4_bias_field_correction":
@@ -167,7 +169,17 @@ def write_run_info(out_dir: Path, device: str, args: argparse.Namespace) -> None
         f"image:  {args.image or 'script defaults (S_template3)'}",
         f"commit: {git_state()}",
         f"python: {sys.version.split()[0]}",
+        f"repeats: {args.repeats}",
+        f"ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS: {os.environ.get('ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS', 'ITK default')}",
+        "commands:",
+        *["  " + " ".join(build_command(name, args, device, out_dir)) for name in BENCHMARKS if name in args.only],
     ]
+    lines.append(f"platform: {platform.platform()}")
+    for package in ("torch", "antspyx", "numpy"):
+        try:
+            lines.append(f"{package}: {importlib.metadata.version(package)}")
+        except importlib.metadata.PackageNotFoundError:
+            lines.append(f"{package}: unavailable")
     if shutil.which("nvidia-smi"):
         gpu = subprocess.run(
             ["nvidia-smi", "--query-gpu=index,name,driver_version,memory.total", "--format=csv"],
@@ -194,13 +206,17 @@ def run_benchmark(name: str, command: list, device: str, out_dir: Path) -> tuple
         )
         for line in process.stdout:
             sys.stdout.write(line)
+            sys.stdout.flush()
             log.write(line)
+            log.flush()
         returncode = process.wait()
     return returncode, time.perf_counter() - start
 
 
 def main() -> int:
     args = parse_args()
+    if args.ants_threads is not None:
+        os.environ["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] = str(args.ants_threads)
     device = resolve_device(args.device)
     out_dir = args.out_dir or REPO_ROOT / "results" / (
         "primitive_benchmarks_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")

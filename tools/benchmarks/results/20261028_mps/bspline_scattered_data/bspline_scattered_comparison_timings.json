@@ -1,0 +1,92 @@
+{
+  "ANTs compare_object_to_scattered_data": {
+    "samples_seconds": [
+      0.0028780000284314156,
+      0.0027198330499231815,
+      0.0027031246572732925,
+      0.002721584402024746,
+      0.00270695798099041
+    ],
+    "median_seconds": 0.0027198330499231815,
+    "q1_seconds": 0.00270695798099041,
+    "q3_seconds": 0.002721584402024746,
+    "min_seconds": 0.0027031246572732925,
+    "max_seconds": 0.0028780000284314156,
+    "first_sample_cold": true
+  },
+  "ANTsTorch compare_object_to_scattered_data": {
+    "samples_seconds": [
+      0.2115010409615934,
+      0.04880633391439915,
+      0.04799370840191841,
+      0.04785966733470559,
+      0.04610875016078353
+    ],
+    "median_seconds": 0.04799370840191841,
+    "q1_seconds": 0.04785966733470559,
+    "q3_seconds": 0.04880633391439915,
+    "min_seconds": 0.04610875016078353,
+    "max_seconds": 0.2115010409615934,
+    "first_sample_cold": true
+  },
+  "ANTs compare_displacement_field_from_points": {
+    "samples_seconds": [
+      0.0011857501231133938,
+      0.0011243750341236591,
+      0.0010692081414163113,
+      0.0009883339516818523,
+      0.000979958102107048
+    ],
+    "median_seconds": 0.0010692081414163113,
+    "q1_seconds": 0.0009883339516818523,
+    "q3_seconds": 0.0011243750341236591,
+    "min_seconds": 0.000979958102107048,
+    "max_seconds": 0.0011857501231133938,
+    "first_sample_cold": true
+  },
+  "ANTsTorch compare_displacement_field_from_points": {
+    "samples_seconds": [
+      0.0400479999370873,
+      0.010223416145890951,
+      0.010181582998484373,
+      0.010048958007246256,
+      0.010009374935179949
+    ],
+    "median_seconds": 0.010181582998484373,
+    "q1_seconds": 0.010048958007246256,
+    "q3_seconds": 0.010223416145890951,
+    "min_seconds": 0.010009374935179949,
+    "max_seconds": 0.0400479999370873,
+    "first_sample_cold": true
+  },
+  "ANTs compare_displacement_field_from_dense_field": {
+    "samples_seconds": [
+      0.001182082574814558,
+      0.0011418750509619713,
+      0.001119208987802267,
+      0.0011111670173704624,
+      0.001130459364503622
+    ],
+    "median_seconds": 0.001130459364503622,
+    "q1_seconds": 0.001119208987802267,
+    "q3_seconds": 0.0011418750509619713,
+    "min_seconds": 0.0011111670173704624,
+    "max_seconds": 0.001182082574814558,
+    "first_sample_cold": true
+  },
+  "ANTsTorch compare_displacement_field_from_dense_field": {
+    "samples_seconds": [
+      0.05776941683143377,
+      0.013535374775528908,
+      0.01436075009405613,
+      0.01347175007686019,
+      0.014676958788186312
+    ],
+    "median_seconds": 0.01436075009405613,
+    "q1_seconds": 0.013535374775528908,
+    "q3_seconds": 0.014676958788186312,
+    "min_seconds": 0.01347175007686019,
+    "max_seconds": 0.05776941683143377,
+    "first_sample_cold": true
+  }
+}

@@ -1,0 +1,26 @@
+ANTs n4_bias_field_correction run 1/5: 9.093814 s
+ANTs n4_bias_field_correction run 2/5: 8.995291 s
+ANTs n4_bias_field_correction run 3/5: 9.194168 s
+ANTs n4_bias_field_correction run 4/5: 9.371975 s
+ANTs n4_bias_field_correction run 5/5: 12.147422 s
+ANTs n4_bias_field_correction: median 9.194168 s, IQR [9.093814, 9.371975] s (N=5; first sample cold)
+ANTsTorch n4_bias_field_correction run 1/5: 5.380577 s
+ANTsTorch n4_bias_field_correction run 2/5: 3.952739 s
+ANTsTorch n4_bias_field_correction run 3/5: 4.049777 s
+ANTsTorch n4_bias_field_correction run 4/5: 3.886293 s
+ANTsTorch n4_bias_field_correction run 5/5: 4.043038 s
+ANTsTorch n4_bias_field_correction: median 4.043038 s, IQR [3.952739, 4.049777] s (N=5; first sample cold)
+Input: /Users/ntustison/.antstorch/S_template3.nii.gz
+Geometry: size=(136, 176, 176), spacing=(1.5022221803665161, 1.4571428298950195, 1.4571428298950195), origin=(202.8000030517578, 0.0, 0.0)
+ANTs runtime:      9.194 s median of 5 (correction + bias-field run)
+ANTsTorch runtime: 4.043 s median of 5 on mps (correction + bias-field run)
+ANTs intensity range: -0.626655 to 7.29988
+ANTsTorch intensity range: -0.625281 to 7.28902
+ANTs bias-field range: 0.341498 to 4.01638
+ANTsTorch bias-field range: 0.342047 to 4.01507
+B-spline accumulation: vectorized scatter
+Corrected-image RMSE: 0.00378919
+Scale-aligned corrected-image RMSE: 0.0018795 (scale=1.0022199)
+Normalized log-bias MAE: 0.00132796
+Normalized log-bias correlation: 0.99998255
+Outputs written with prefix: /private/tmp/antstorch_primitives_20261028_mps_n5/n4_bias_field_correction/n4_comparison

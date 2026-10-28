@@ -1,0 +1,32 @@
+{
+  "ANTs n4_bias_field_correction": {
+    "samples_seconds": [
+      9.093814499676228,
+      8.995291125029325,
+      9.19416758324951,
+      9.371975167188793,
+      12.14742200030014
+    ],
+    "median_seconds": 9.19416758324951,
+    "q1_seconds": 9.093814499676228,
+    "q3_seconds": 9.371975167188793,
+    "min_seconds": 8.995291125029325,
+    "max_seconds": 12.14742200030014,
+    "first_sample_cold": true
+  },
+  "ANTsTorch n4_bias_field_correction": {
+    "samples_seconds": [
+      5.380577334202826,
+      3.9527388750575483,
+      4.049776582978666,
+      3.88629262521863,
+      4.043037666939199
+    ],
+    "median_seconds": 4.043037666939199,
+    "q1_seconds": 3.9527388750575483,
+    "q3_seconds": 4.049776582978666,
+    "min_seconds": 3.88629262521863,
+    "max_seconds": 5.380577334202826,
+    "first_sample_cold": true
+  }
+}
