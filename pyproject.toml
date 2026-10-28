@@ -46,8 +46,13 @@ antstorch = ["benchmark/pairs.csv"]
 "Homepage" = "https://github.com/ANTsX/ANTsTorch"
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
+    "integration: exercises a complete pipeline or multiple components",
+    "requires_data: needs external templates or pretrained weights (possibly cached)",
+    "cuda: requires a CUDA accelerator",
+    "mps: requires an Apple Metal accelerator",
     "slow: marks tests as slow (deselect with -m \"not slow\")",
 ]
 filterwarnings = [

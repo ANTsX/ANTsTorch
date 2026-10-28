@@ -215,6 +215,7 @@ def test_gradients_exist_and_finite():
 
 # ---------- CUDA / AMP smoke (optional) ----------
 
+@pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_amp_half_precision_is_finite_cuda():
     device = "cuda"

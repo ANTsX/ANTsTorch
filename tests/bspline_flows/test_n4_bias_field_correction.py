@@ -205,6 +205,7 @@ def test_agrees_with_antspy_n4_multiresolution():
 
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
 def test_cpu_cuda_agreement():
     domain = ImageDomain((14, 12))
@@ -215,6 +216,7 @@ def test_cpu_cuda_agreement():
     torch.testing.assert_close(gpu, cpu, rtol=2e-5, atol=2e-5)
 
 
+@pytest.mark.mps
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS is not available")
 def test_mps_is_repeatable_and_agrees_with_cpu():
     torch.manual_seed(91)

@@ -1,4 +1,4 @@
-# tests/test_glow_architectures.py
+# tests/lamnr_flows/architectures/test_glow.py
 import copy
 import os
 from math import prod

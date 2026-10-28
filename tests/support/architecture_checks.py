@@ -44,7 +44,7 @@ import torch
 # Tests always run on CPU, regardless of get_default_device(): a couple
 # of the generic U-Net's deconvolution paths are known to be unstable on
 # MPS (see the existing @pytest.mark.skipif(torch.backends.mps.is_available(), ...)
-# pattern in tests/test_brain_extraction.py), so pinning to CPU keeps
+# pattern in tests/pipelines/test_brain_extraction.py), so pinning to CPU keeps
 # this architecture-only suite deterministic and portable.
 DEVICE = torch.device("cpu")
 

@@ -4,6 +4,9 @@ import antstorch
 import torch
 import pytest
 
+pytestmark = [pytest.mark.integration, pytest.mark.requires_data, pytest.mark.slow]
+
+
 class Test_t1(unittest.TestCase):
     def setUp(self):
         pass

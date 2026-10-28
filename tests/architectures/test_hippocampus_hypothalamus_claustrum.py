@@ -15,7 +15,7 @@ quality_assessment is deliberately NOT covered here -- see
 test_quality_assessment_architecture.py, which carries its own confidence
 caveat (no verified architecture exists for that module).
 
-See tests/_arch_common.py for scope / rationale (architecture-only, no
+See tests/support/architecture_checks.py for scope / rationale (architecture-only, no
 pretrained weights, no ants image I/O).
 
 hippmapp3r's initial-stage network pools 5 times (do_first_network=True ->
@@ -35,7 +35,7 @@ from antstorch.architectures import (
     create_sysu_media_unet_model_2d,
 )
 
-from _arch_common import DEVICE, assert_sigmoid_range, assert_softmax_output
+from tests.support.architecture_checks import DEVICE, assert_sigmoid_range, assert_softmax_output
 
 
 class Test_hippmapp3r_initial_stage(unittest.TestCase):

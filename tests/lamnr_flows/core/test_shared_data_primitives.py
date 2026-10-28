@@ -1,9 +1,13 @@
+import pytest
 import numpy as np
 import pandas as pd
 import torch
 
 from antstorch.lamnr_flows.scripts.train_lamnr_flows_tabular import TabularNormalizer
 from antstorch.utilities.dataframe_dataset import MultiViewDataFrameDataset
+
+
+pytestmark = pytest.mark.integration
 
 
 def test_tabular_normalizer_matches_dataframe_dataset_without_jitter():

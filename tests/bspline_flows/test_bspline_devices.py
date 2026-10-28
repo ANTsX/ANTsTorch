@@ -11,6 +11,7 @@ def test_cpu_dtype_and_device_are_preserved():
     assert output.dtype == coefficients.dtype
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
 def test_cuda_forward_and_backward():
     coefficients = torch.randn(1, 3, 5, 6, 7, device="cuda", requires_grad=True)

@@ -5,7 +5,7 @@ Covers mouse_brain_extraction ("t2" and "ex5" branches),
 mouse_brain_parcellation ("nick" and "tct"), mouse_histology_brain_mask,
 mouse_histology_hemispherical_coronal_mask,
 mouse_histology_cerebellum_mask, and mouse_histology_super_resolution.
-See tests/_arch_common.py for scope / rationale (architecture-only, no
+See tests/support/architecture_checks.py for scope / rationale (architecture-only, no
 pretrained weights).
 
 mouse_cortical_thickness is not covered directly: it is a thin wrapper
@@ -27,7 +27,7 @@ from antstorch.architectures import (
     create_deep_back_projection_network_model_2d,
 )
 
-from _arch_common import DEVICE, assert_softmax_output, assert_sigmoid_range, assert_finite
+from tests.support.architecture_checks import DEVICE, assert_softmax_output, assert_sigmoid_range, assert_finite
 
 
 class Test_mouse_brain_extraction_t2(unittest.TestCase):

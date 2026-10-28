@@ -2,7 +2,7 @@
 Architecture-only tests for antstorch.utilities.lung_segmentation.
 
 Covers el_bicho, lung_pulmonary_artery_segmentation and
-lung_airway_segmentation -- see tests/_arch_common.py for scope /
+lung_airway_segmentation -- see tests/support/architecture_checks.py for scope /
 rationale (architecture-only, no pretrained weights).
 """
 import unittest
@@ -11,7 +11,7 @@ import torch
 
 from antstorch.architectures import create_unet_model_2d, create_unet_model_3d
 
-from _arch_common import DEVICE, assert_softmax_output, assert_sigmoid_range
+from tests.support.architecture_checks import DEVICE, assert_softmax_output, assert_sigmoid_range
 
 
 class Test_el_bicho(unittest.TestCase):

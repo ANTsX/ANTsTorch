@@ -30,6 +30,7 @@ def test_singleton_and_edges(padding, align):
     torch.testing.assert_close(grid_sample_3d(image, grid, padding_mode=padding, align_corners=align), expected)
 
 
+@pytest.mark.mps
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason='MPS unavailable')
 def test_mps_forward_and_backward():
     torch.manual_seed(4)

@@ -19,6 +19,7 @@ def test_zero_displacement_is_identity(size):
     torch.testing.assert_close(warp_image(image, zero, domain), image, rtol=0, atol=2e-15)
 
 
+@pytest.mark.mps
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS unavailable")
 @pytest.mark.parametrize("padding_mode", ["zeros", "border", "reflection"])
 def test_mps_3d_interpolation_fallback(monkeypatch, padding_mode):
