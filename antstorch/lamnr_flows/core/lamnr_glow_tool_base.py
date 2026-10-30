@@ -3925,13 +3925,46 @@ class GlowToolBase(ABC):
                         choices=["slerp", "nlerp", "lerp"])
         ap.add_argument("--ema",           action=argparse.BooleanOptionalAction,
                         default=True)
+        ap.add_argument(
+            "--radius-scale", type=float, default=1.0,
+            help="Factor applied to the typical radius of the interpolation sphere "
+                 "(default 1 = empirical median radius of the real latents; < 1 stays "
+                 "closer to the mean, like the cohort templates' spherical-centered:<factor>). "
+                 "Only used by slerp and nlerp.",
+        )
+        ap.add_argument(
+            "--slerp-center", choices=["mu", "loc"], default="mu",
+            help="Centre of the interpolation sphere: 'mu' = empirical mean of the encoded "
+                 "cohort (default); 'loc' = mean of the learned base distribution, i.e. the "
+                 "centre the trainer samples around. The radius is still --radius-scale times "
+                 "the empirical typical radius.",
+        )
+        ap.add_argument(
+            "--shift-cap", default=None, metavar="VALUE|none",
+            help="Override the inference-time bound on the affine coupling shift "
+                 "(default: the checkpoint's shift_cap, else 15). 'none' removes "
+                 "it, as in the trainer, which builds its model without a shift cap.",
+        )
+        ap.add_argument(
+            "--gen-clamp", default=None, metavar="VALUE",
+            help="Override the inference-time clamp on inter-block activations "
+                 "(default: the checkpoint's gen_clamp, else 25). The trainer "
+                 "builds its model with 1e4, i.e. effectively no clamp.",
+        )
         self._add_size_arg(ap, required=True)
         args = ap.parse_args(argv)
+        if not (args.radius_scale > 0.0 and np.isfinite(args.radius_scale)):
+            raise ValueError("--radius-scale must be a finite number > 0.")
 
         device = torch.device(args.devices)
         ckpt_path = resolve_ckpt_path(Path(args.ckpt))
         blob      = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
-        cfg       = blob.get("config", blob.get("cfg", {}))
+        cfg       = dict(blob.get("config", blob.get("cfg", {})))
+        if args.shift_cap is not None:
+            cfg["shift_cap"] = (None if str(args.shift_cap).lower() == "none"
+                                else float(args.shift_cap))
+        if args.gen_clamp is not None:
+            cfg["gen_clamp"] = float(args.gen_clamp)
         _require_to01_intensity(cfg, ckpt_path)
         cfg_views = cfg.get("views", None)
         target_size = self._get_target_size(args, cfg)
@@ -3957,6 +3990,21 @@ class GlowToolBase(ABC):
             raise RuntimeError(f"Could not load weights for view '{v_name}'")
         print(f"[recon-interpolate] loaded from {src}")
         self.prime_if_needed(model, target_size, device)
+
+        loc_flats = None
+        if args.slerp_center == "loc":
+            core = getattr(model, "module", model)
+            bases = list(core.q0)
+            if len(bases) == 1 and L > 1:
+                bases = bases * L
+            if len(bases) != L:
+                raise RuntimeError(f"Model has {len(bases)} levels but the Gaussian model has {L}.")
+            loc_flats = []
+            with torch.no_grad():
+                for base in bases:
+                    loc_t, _ = base._prep_params()
+                    loc_flats.append(
+                        loc_t.detach().cpu().double().expand(1, *base.shape).reshape(-1).numpy())
 
         # Per-level t overrides
         t_level: Dict[int, float] = {}
@@ -4058,6 +4106,8 @@ class GlowToolBase(ABC):
 
             # Interpolate with µ-centring at each level
             z_interp_list = []
+            diag_cols: Dict[str, str] = {"radius_scale": f"{args.radius_scale:.6g}",
+                                        "slerp_center": args.slerp_center}
             for l in range(len(z_src_list)):
                 t_l = t_level.get(l, interpolation_t)
 
@@ -4071,12 +4121,32 @@ class GlowToolBase(ABC):
                     else Sigma_list
                 )
                 Sigma_view = _slice_covariance(Sigma_l, a, b)
-                radius = _typical_radius(
+                typical_radius = _typical_radius(
                     gauss_blob, l, v_idx_gauss, Sigma_view, b - a
                 )
+                if loc_flats is not None:
+                    if loc_flats[l].size != (b - a):
+                        raise RuntimeError(f"Level {l}: base has {loc_flats[l].size} dims, expected {b - a}.")
+                    mu_flat = loc_flats[l]
+                radius = typical_radius * float(args.radius_scale)
 
                 z_s_flat = z_src_list[l].cpu().float().numpy().ravel()
                 z_t_flat = z_tgt_list[l].cpu().float().numpy().ravel()
+
+                # Diagnostics (written to samples.csv): distance of each endpoint to
+                # the empirical mean in units of the typical radius (1 = on the typical
+                # sphere; much larger = atypical subject) and the angle between the
+                # two centred endpoints (degrees).
+                diag_cols[f"src_radius_ratio_L{l}"] = (
+                    f"{float(np.linalg.norm(z_s_flat - mu_flat) / typical_radius):.6g}")
+                if not target_is_gauss:
+                    diag_cols[f"tgt_radius_ratio_L{l}"] = (
+                        f"{float(np.linalg.norm(z_t_flat - mu_flat) / typical_radius):.6g}")
+                    c_s = z_s_flat - mu_flat
+                    c_t = z_t_flat - mu_flat
+                    cosang = float(np.dot(c_s, c_t) / (np.linalg.norm(c_s) * np.linalg.norm(c_t) + 1e-12))
+                    diag_cols[f"omega_deg_L{l}"] = (
+                        f"{math.degrees(math.acos(max(-1.0, min(1.0, cosang)))):.6g}")
 
                 if args.interp_type == "slerp":
                     z_interp_flat = _slerp_on_typical_sphere(
@@ -4108,6 +4178,7 @@ class GlowToolBase(ABC):
                         "t": f"{interpolation_t:.17g}",
                         "interp_type": args.interp_type,
                         "seed": args.seed,
+                        **diag_cols,
                     }
                 )
             del x_src, z_src_list, z_tgt_list, z_interp_list, x_interp
@@ -4121,7 +4192,7 @@ class GlowToolBase(ABC):
                     fieldnames=[
                         "output", "source_image", "target_image", "t",
                         "interp_type", "seed",
-                    ],
+                    ] + (list(metadata_rows[0].keys())[6:] if metadata_rows else []),
                 )
                 writer.writeheader()
                 writer.writerows(metadata_rows)
@@ -4506,3 +4577,154 @@ class GlowToolBase(ABC):
                 xi = x[i:i+1]
                 self.save_volume(xi, out_path / f"sample_{i:04d}.nii.gz")
             print(f"[sample] {x.shape[0]} volumes saved → {out_path}")
+
+    # ------------------------------------------------------------------
+    # prior-radius
+    # ------------------------------------------------------------------
+
+    def cmd_prior_radius(self, argv=None):
+        """
+        Measure the latent radius of prior samples drawn exactly as the trainer draws them
+        (EMA weights, ``base(n)`` with the base temperature set), and compare it with the
+        empirical typical radius stored by gauss-fit. This gives the ``--radius-scale`` of
+        ``recon-interpolate`` that is equivalent, level by level, to a sampling temperature T.
+
+        Two radii are reported for every level and temperature:
+          * ``r_loc``: ||z - loc||, the distance to the learned base mean (what T scales);
+          * ``r_mu``:  ||z - mu||, the distance to the empirical mean of the encoded cohort
+            (the centre used by the slerp).
+        ``scale_loc`` and ``scale_mu`` divide them by the empirical typical radius. These are
+        the values to compare with ``--radius-scale``.
+        """
+        ap = argparse.ArgumentParser("prior-radius")
+        ap.add_argument("--ckpt",        type=str, required=True)
+        ap.add_argument("--gauss",       type=str, required=True)
+        ap.add_argument("--views",       type=str, required=True)
+        ap.add_argument("--view-index",  type=int, default=0)
+        ap.add_argument("--temperatures", type=str, default="0.8,1.0",
+                        help="Comma-separated sampling temperatures (the trainer uses --sample-temp, 0.8).")
+        ap.add_argument("--n-samples",   type=int, default=20)
+        ap.add_argument("--seed",        type=int, default=12345)
+        ap.add_argument("--devices",     type=str, default="cpu")
+        ap.add_argument("--ema",         action=argparse.BooleanOptionalAction, default=True)
+        ap.add_argument("--out",         type=str, default=None, help="Optional CSV with the table.")
+        self._add_size_arg(ap, required=True)
+        args = ap.parse_args(argv)
+
+        temps = [float(s) for s in args.temperatures.split(",") if s.strip()]
+        if not temps or any(not (t > 0.0 and np.isfinite(t)) for t in temps):
+            raise ValueError("--temperatures must be finite numbers > 0.")
+        if int(args.n_samples) < 1:
+            raise ValueError("--n-samples must be >= 1.")
+
+        set_deterministic(int(args.seed))
+        device = torch.device(args.devices)
+        ckpt_path = resolve_ckpt_path(Path(args.ckpt))
+        blob = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
+        cfg = dict(blob.get("config", blob.get("cfg", {})))
+        _require_to01_intensity(cfg, ckpt_path)
+        cfg_views = cfg.get("views", None)
+        target_size = self._get_target_size(args, cfg)
+
+        gauss_blob = _load_gaussian_model(Path(args.gauss))
+        gauss_views, _, shapes_by_view, L = _validate_gauss_blob(gauss_blob)
+        if cfg_views is None:
+            cfg_views = gauss_views
+        view_names = [v.strip() for v in args.views.split(",") if v.strip()]
+        vi = int(args.view_index)
+        v_name = view_names[vi]
+        v_idx_gauss = gauss_views.index(v_name)
+        mu_list = gauss_blob["mu"]
+        Sigma_list = gauss_blob.get("Sigma", None)
+
+        model = self.build_model(cfg, device, target_size)
+        ok, src = load_weights_into_model(
+            model, blob, vi, prefer_ema=args.ema, view_name=v_name, cfg_views=cfg_views)
+        if not ok:
+            raise RuntimeError(f"Could not load weights for view '{v_name}'")
+        print(f"[prior-radius] loaded from {src}")
+        self.prime_if_needed(model, target_size, device)
+
+        core = getattr(model, "module", model)
+        bases = list(core.q0)
+        latent_shapes = core._latent_shapes
+        if latent_shapes is None:
+            raise RuntimeError("Latent shapes unknown after priming; cannot sample the base.")
+        if len(bases) == 1 and len(latent_shapes) > 1:
+            bases = bases * len(latent_shapes)
+        if len(bases) != L:
+            raise RuntimeError(f"Model has {len(bases)} levels but the Gaussian model has {L}.")
+
+        rows = []
+        n = int(args.n_samples)
+        for T in temps:
+            gen = torch.Generator(device="cpu").manual_seed(int(args.seed))
+            for l, base in enumerate(bases):
+                event_shape = tuple(latent_shapes[l])
+                a, b = _level_view_slice(gauss_blob, l, v_idx_gauss)
+                D = b - a
+                mu_flat = np.asarray(mu_list[l], dtype=np.float64).ravel()[a:b]
+                Sigma_l = Sigma_list[l] if isinstance(Sigma_list, (list, tuple)) else Sigma_list
+                Sigma_view = _slice_covariance(Sigma_l, a, b)
+                r_emp = _typical_radius(gauss_blob, l, v_idx_gauss, Sigma_view, D)
+
+                prev_T = getattr(base, "temperature", None)
+                base.temperature = float(T)
+                try:
+                    with torch.no_grad():
+                        loc, log_scale = base._prep_params()
+                        # Same draw as GlowBase.forward (loc + exp(log_scale) * eps), but with a
+                        # CPU generator so the table is reproducible across devices.
+                        eps = torch.randn((n,) + tuple(base.shape), generator=gen,
+                                          dtype=torch.float32).to(loc.device)
+                        z = loc + torch.exp(log_scale) * eps
+                finally:
+                    base.temperature = prev_T
+
+                z_np = z.detach().cpu().double().reshape(n, -1).numpy()
+                loc_full = loc.detach().cpu().double().expand(1, *base.shape).reshape(-1).numpy()
+                sigma_full = torch.exp(log_scale).detach().cpu().double().expand(1, *base.shape).reshape(-1).numpy()
+                if z_np.shape[1] != D:
+                    raise RuntimeError(
+                        f"Level {l}: prior has {z_np.shape[1]} dims but the Gaussian slice has {D}.")
+
+                r_loc = np.linalg.norm(z_np - loc_full[None, :], axis=1)
+                r_mu = np.linalg.norm(z_np - mu_flat[None, :], axis=1)
+                rows.append({
+                    "temperature": f"{T:g}",
+                    "level": l,
+                    "event_shape": "x".join(str(s) for s in event_shape),
+                    "D": D,
+                    "sqrtD": f"{math.sqrt(D):.6g}",
+                    "sigma_rms": f"{float(np.sqrt(np.mean(sigma_full ** 2))):.6g}",
+                    "expected_r_loc": f"{float(np.sqrt(np.sum(sigma_full ** 2))):.6g}",
+                    "r_loc_mean": f"{float(r_loc.mean()):.6g}",
+                    "r_loc_std": f"{float(r_loc.std()):.6g}",
+                    "r_mu_mean": f"{float(r_mu.mean()):.6g}",
+                    "loc_to_mu": f"{float(np.linalg.norm(loc_full - mu_flat)):.6g}",
+                    "r_emp": f"{float(r_emp):.6g}",
+                    "r_emp_over_sqrtD": f"{float(r_emp) / math.sqrt(D):.6g}",
+                    "scale_loc": f"{float(r_loc.mean()) / float(r_emp):.6g}",
+                    "scale_mu": f"{float(r_mu.mean()) / float(r_emp):.6g}",
+                })
+
+        cols = list(rows[0].keys())
+        widths = {c: max(len(c), max(len(str(r[c])) for r in rows)) for c in cols}
+        print("\n" + "  ".join(c.rjust(widths[c]) for c in cols))
+        for r in rows:
+            print("  ".join(str(r[c]).rjust(widths[c]) for c in cols))
+        print(
+            "\n[prior-radius] scale_loc = mean ||z - loc|| / r_emp ; scale_mu = mean ||z - mu|| / r_emp.\n"
+            "  r_emp is the empirical median radius of the encoded cohort around its mean (gauss-fit).\n"
+            "  A recon-interpolate run with --radius-scale equal to scale_mu puts the slerp at the same\n"
+            "  distance from mu as the prior samples of the trainer at that temperature."
+        )
+        if args.out:
+            import csv
+            out = Path(args.out)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            with open(out, "w", newline="") as fh:
+                w = csv.DictWriter(fh, fieldnames=cols)
+                w.writeheader()
+                w.writerows(rows)
+            print(f"[prior-radius] table saved → {out}")
