@@ -123,52 +123,98 @@ def _invert_norm(z_np: np.ndarray, stats: Optional[Dict[str, np.ndarray]]) -> np
 
 # ---------- Whitening helpers (latent-space transforms) ----------
 
-def _extract_whitened_from_z(model, z: torch.Tensor) -> torch.Tensor:
-    q0 = model.q0
-    if hasattr(q0, "W") and hasattr(q0, "loc") and hasattr(q0, "log_sigma"):
-        zc = (z - q0.loc).to(torch.float64)       # (N, D)
-        W  = q0.W.to(torch.float64)               # (L, D)
-        sigma2 = torch.exp(2.0 * q0.log_sigma.to(torch.float64))  # scalar
-        A = W @ W.T + sigma2 * torch.eye(W.shape[0], dtype=W.dtype, device=W.device)  # (L, L)
-        A_inv = torch.linalg.inv(A)
-        return zc @ W.T @ A_inv                    # (N, L)
-    # DiagGaussian fallback
+def _diag_loc_scale(q0, target_ndim: Optional[int] = None) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """Extract (loc, scale) from a diagonal Gaussian base (DiagGaussian log_scale or custom scale)."""
     loc = getattr(q0, "loc", None)
-    scale = getattr(q0, "scale", None)
+    if not isinstance(loc, torch.Tensor):
+        return None, None
+    log_scale = getattr(q0, "log_scale", None)
+    if isinstance(log_scale, torch.Tensor):
+        temp = getattr(q0, "temperature", None)
+        if temp is not None:
+            log_scale = log_scale + float(np.log(temp))
+        min_log = getattr(q0, "min_log", None)
+        max_log = getattr(q0, "max_log", None)
+        if (min_log is not None) and (max_log is not None):
+            log_scale = torch.clamp(log_scale, float(min_log), float(max_log))
+        scale = torch.exp(log_scale)
+    else:
+        scale = getattr(q0, "scale", None)
+        if not isinstance(scale, torch.Tensor):
+            return None, None
+    if target_ndim == 1:
+        if loc.dim() == 2 and loc.shape[0] == 1:
+            loc = loc.squeeze(0)
+        if scale.dim() == 2 and scale.shape[0] == 1:
+            scale = scale.squeeze(0)
+    return loc, scale
+
+
+def _extract_whitened_from_z(
+    model, z: torch.Tensor, *, dtype: Optional[torch.dtype] = torch.float64
+) -> torch.Tensor:
+    target_dtype = z.dtype if dtype is None else dtype
+    q0 = model.q0
+    if hasattr(q0, "W") and hasattr(q0, "loc"):
+        loc = q0.loc.to(target_dtype)
+        if z.dim() == 1 and loc.dim() == 2 and loc.shape[0] == 1:
+            loc = loc.squeeze(0)
+        zc = z.to(target_dtype) - loc             # (N, D) or (D,)
+        W  = q0.W.to(target_dtype)                # (L, D)
+        if hasattr(q0, "log_sigma") and q0.log_sigma is not None:
+            sigma2 = torch.exp(2.0 * q0.log_sigma.to(target_dtype))
+        else:
+            sigma2 = torch.tensor(0.0, dtype=target_dtype, device=W.device)
+        A = W @ W.T + sigma2 * torch.eye(W.shape[0], dtype=target_dtype, device=W.device)  # (L, L)
+        proj = zc @ W.T
+        if proj.dim() == 1:
+            return torch.linalg.solve(A, proj)
+        return torch.linalg.solve(A, proj.T).T    # (N, L) = zc @ W.T @ A^{-1}
+    # DiagGaussian fallback
+    loc, scale = _diag_loc_scale(q0, target_ndim=z.dim())
     if (loc is not None) and (scale is not None):
-        return ((z - loc) / (scale + 1e-12)).to(torch.float64)
-    return z.to(torch.float64)
+        return (z.to(target_dtype) - loc.to(target_dtype)) / scale.to(target_dtype).clamp_min(1e-12)
+    return z.to(target_dtype)
 
 
 def _z_from_whitened(model, eps: torch.Tensor) -> torch.Tensor:
     q0 = model.q0
     if hasattr(q0, "W") and hasattr(q0, "loc"):
         return eps.to(torch.float64) @ q0.W.to(torch.float64) + q0.loc.to(torch.float64)
-    loc = getattr(q0, "loc", None)
-    scale = getattr(q0, "scale", None)
+    loc, scale = _diag_loc_scale(q0, target_ndim=eps.dim())
     if (loc is not None) and (scale is not None):
-        return eps * scale + loc
-    raise ValueError("Expected GaussianPCA with W/loc or DiagGaussian with loc/scale.")
+        return eps.to(torch.float64) * scale.to(torch.float64).clamp_min(1e-12) + loc.to(torch.float64)
+    raise ValueError("Expected GaussianPCA with W/loc or DiagGaussian with loc/log_scale (or scale).")
 
 
 def _extract_whitened_from_z_full(model, z: torch.Tensor) -> torch.Tensor:
     q0 = model.q0
-    zc = (z - q0.loc).to(torch.float64)                 # (N, D)
-    W  = q0.W.to(torch.float64)                         # (L, D)
-    sigma2 = torch.exp(2.0 * q0.log_sigma.to(torch.float64))
-    Sigma = W.T @ W + sigma2 * torch.eye(W.shape[1], dtype=W.dtype, device=W.device)  # (D, D)
-    L = torch.linalg.cholesky(Sigma)                    # lower
-    yT = torch.linalg.solve(L.T, zc.T)                  # (D, N)
-    return yT.T                                         # (N, D)
+    if hasattr(q0, "W") and hasattr(q0, "loc") and hasattr(q0, "log_sigma"):
+        zc = (z - q0.loc).to(torch.float64)                 # (N, D)
+        W  = q0.W.to(torch.float64)                         # (L, D)
+        sigma2 = torch.exp(2.0 * q0.log_sigma.to(torch.float64))
+        Sigma = W.T @ W + sigma2 * torch.eye(W.shape[1], dtype=W.dtype, device=W.device)  # (D, D)
+        L = torch.linalg.cholesky(Sigma)                    # lower: Sigma = L @ L.T
+        yT = torch.linalg.solve_triangular(L, zc.T, upper=False)  # (D, N): L @ yT = zc.T
+        return yT.T                                         # (N, D): zc @ L^{-T}
+    loc, scale = _diag_loc_scale(q0, target_ndim=z.dim())
+    if (loc is not None) and (scale is not None):
+        return (z.to(torch.float64) - loc.to(torch.float64)) / scale.to(torch.float64).clamp_min(1e-12)
+    raise ValueError("Expected GaussianPCA with W/loc/log_sigma or DiagGaussian with loc/log_scale (or scale).")
 
 
 def _z_from_whitened_full(model, eps_full: torch.Tensor) -> torch.Tensor:
     q0 = model.q0
-    W  = q0.W.to(torch.float64)
-    sigma2 = torch.exp(2.0 * q0.log_sigma.to(torch.float64))
-    Sigma = W.T @ W + sigma2 * torch.eye(W.shape[1], dtype=W.dtype, device=W.device)
-    L = torch.linalg.cholesky(Sigma)
-    return eps_full.to(torch.float64) @ L.T + q0.loc.to(torch.float64)
+    if hasattr(q0, "W") and hasattr(q0, "loc") and hasattr(q0, "log_sigma"):
+        W  = q0.W.to(torch.float64)
+        sigma2 = torch.exp(2.0 * q0.log_sigma.to(torch.float64))
+        Sigma = W.T @ W + sigma2 * torch.eye(W.shape[1], dtype=W.dtype, device=W.device)
+        L = torch.linalg.cholesky(Sigma)                    # lower: Sigma = L @ L.T
+        return eps_full.to(torch.float64) @ L.T + q0.loc.to(torch.float64)
+    loc, scale = _diag_loc_scale(q0, target_ndim=eps_full.dim())
+    if (loc is not None) and (scale is not None):
+        return eps_full.to(torch.float64) * scale.to(torch.float64).clamp_min(1e-12) + loc.to(torch.float64)
+    raise ValueError("Expected GaussianPCA with W/loc/log_sigma or DiagGaussian with loc/log_scale (or scale).")
 
 
 # -------------------------------
@@ -240,7 +286,7 @@ def apply_lamnr_flows_whitener(
 
     outputs: List[pd.DataFrame] = []
     for v_idx, (df, model, mode) in enumerate(zip(data_list, models, modes)):
-        X_np = df.to_numpy().astype(np.float64, copy=False)
+        X_np = df.to_numpy(dtype=np.float64, copy=True)
 
         # Ensure stats present if a mode is requested
         stats = stats_list[v_idx]

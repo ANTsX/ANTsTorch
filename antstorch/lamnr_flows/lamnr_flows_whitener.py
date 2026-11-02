@@ -16,6 +16,7 @@ try:
 except Exception:  # tqdm is optional
     tqdm = None
 
+from .apply_lamnr_flows_whitener import _extract_whitened_from_z as _extract_whitened_impl
 from .misc import alignment_losses as la
 
 
@@ -126,19 +127,7 @@ def _inverse_with_guard(model, xb):
 
 def _extract_whitened_from_z(model, z: torch.Tensor) -> torch.Tensor:
     """Return L-dim whitened (GaussianPCA) or standardized (DiagGaussian) coords."""
-    q0 = model.q0
-    if hasattr(q0, "W") and hasattr(q0, "loc"):
-        W, loc = q0.W, q0.loc
-        if isinstance(loc, torch.Tensor) and loc.dim() == 2 and loc.shape[0] == 1:
-            loc = loc.squeeze(0)
-        return torch.matmul(z - loc, W.T).to(z.dtype)
-    loc = getattr(q0, "loc", None)
-    scale = getattr(q0, "scale", None)
-    if isinstance(loc, torch.Tensor) and isinstance(scale, torch.Tensor):
-        if loc.dim() == 2 and loc.shape[0] == 1: loc = loc.squeeze(0)
-        if scale.dim() == 2 and scale.shape[0] == 1: scale = scale.squeeze(0)
-        return ((z - loc) / (scale + 1e-12)).to(z.dtype)
-    return z.to(z.dtype)
+    return _extract_whitened_impl(model, z, dtype=z.dtype)
 
 
 def _barlow_twins_align_square(h1: torch.Tensor, h2: torch.Tensor, lam_diag: float, lam_off: float, eps: float = 1e-5) -> torch.Tensor:
