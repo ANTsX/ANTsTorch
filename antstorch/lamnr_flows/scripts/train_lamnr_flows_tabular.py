@@ -57,6 +57,9 @@ from tqdm.auto import tqdm
 
 import antsnormflows as nf
 
+from antstorch.lamnr_flows.apply_lamnr_flows_whitener import (
+    _extract_whitened_from_z as _extract_whitened_impl,
+)
 from antstorch.lamnr_flows.architectures.create_normalizing_flow_model import (
     create_real_nvp_normalizing_flow_model as create_rnvp,
 )
@@ -307,19 +310,7 @@ def _inverse_with_guard(
 
 def _extract_whitened(model: nn.Module, z: torch.Tensor) -> torch.Tensor:
     """Extract whitened / PCA-projected latents from base distribution."""
-    q0 = model.q0
-    if hasattr(q0, "W") and hasattr(q0, "loc"):
-        W, loc = q0.W, q0.loc
-        if isinstance(loc, torch.Tensor) and loc.dim() == 2:
-            loc = loc.squeeze(0)
-        return torch.matmul(z - loc, W.T).to(z.dtype)
-    loc   = getattr(q0, "loc",   None)
-    scale = getattr(q0, "scale", None)
-    if isinstance(loc, torch.Tensor) and isinstance(scale, torch.Tensor):
-        if loc.dim()   == 2: loc   = loc.squeeze(0)
-        if scale.dim() == 2: scale = scale.squeeze(0)
-        return ((z - loc) / (scale + 1e-12)).to(z.dtype)
-    return z.to(z.dtype)
+    return _extract_whitened_impl(model, z, dtype=z.dtype)
 
 
 # ---------------------------------------------------------------------------
