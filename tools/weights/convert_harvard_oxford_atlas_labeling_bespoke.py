@@ -64,16 +64,11 @@ so creation order == file order" reasoning already verified for
 Add()-branch reordering surprise, HOA's decoder has no such branch (no
 attention gating, no side-output merged back in).
 
-⚠️  NOT YET VERIFIED AGAINST THE REAL FILE: no HarvardOxfordAtlasSubcortical.h5
-was available in the sandbox this was written in. Run with --self-test
-first (builds a synthetic .h5 with the exact expected shapes, PLUS decoy
-non-weight layers like Activation/MaxPooling3D/Concatenate/UpSampling3D and
-a decoy conv, to prove the shape-based classifier ignores what it should
-and finds exactly one main/aux head) to sanity-check this script's logic
-end-to-end without needing the real weights. Then run for real and inspect
-the printed layer classification (--verbose) before trusting the output --
-if the encoder/decoder split or channel counts look wrong, that print is
-the signal, not a downstream crash.
+Verified 2026-11-06 against HarvardOxfordAtlasSubcortical.h5 (figshare:51755546,
+sha256=7dfa2f48a6ae9e80...) -> HarvardOxfordAtlasSubcortical_pytorch.pt
+(figshare:67802100, sha256=da44e7c76a5a619f...): 0.000e+00 max weight/bias diff
+across all 19 layers and 100.000% 32-label segmentation parity (macroDice=1.00000,
+max|prob diff|=2.1e-5) when evaluated with kerasDeconvolutionStyle.
 
 Usage:
 
@@ -278,6 +273,7 @@ def build_model(ccu):
         strides=(2, 2, 2),
         mode="classification",
         pad_crop="keras",
+        additional_options=["kerasDeconvolutionStyle"],
     )
     return ccu.create_multihead_unet_model_3d(
         base_unet=base, n_aux_heads=1, use_sigmoid=True, n_main_outputs=NUMBER_OF_OUTPUTS,

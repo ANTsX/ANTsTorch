@@ -2,9 +2,10 @@
 """
 ANTsTorch port of harvard_oxford_atlas_labeling (line-by-line analog of the Keras version).
 """
+import ants
 import numpy as np
 import torch
-import ants
+
 
 def harvard_oxford_atlas_labeling(t1,
                                   do_preprocessing=True,
@@ -99,12 +100,13 @@ def harvard_oxford_atlas_labeling(t1,
     >>> hoa = harvard_oxford_atlas_labeling(image)
     """
 
-    from ..utilities import brain_extraction
-    from ..utilities import get_antstorch_data
-    from ..utilities import get_pretrained_network
-    from ..utilities import preprocess_brain_image
-    from ..architectures import create_unet_model_3d
-    from ..architectures import create_multihead_unet_model_3d
+    from ..architectures import create_multihead_unet_model_3d, create_unet_model_3d
+    from ..utilities import (
+        brain_extraction,
+        get_antstorch_data,
+        get_pretrained_network,
+        preprocess_brain_image,
+    )
     from ..utilities.device_manager import get_default_device
 
     if device is None:
@@ -171,6 +173,7 @@ def harvard_oxford_atlas_labeling(t1,
         strides=(2, 2, 2),
         mode="classification",
         pad_crop="keras",
+        additional_options=["kerasDeconvolutionStyle"],
     )
 
     unet_model = create_multihead_unet_model_3d(
@@ -185,7 +188,7 @@ def harvard_oxford_atlas_labeling(t1,
 
     weights_path = get_pretrained_network("HarvardOxfordAtlasSubcortical_pytorch")
     state = torch.load(weights_path, map_location="cpu")
-    unet_model.load_state_dict(state, strict=False)
+    unet_model.load_state_dict(state, strict=True)
     unet_model.eval()
     unet_model = unet_model.to(device)
 

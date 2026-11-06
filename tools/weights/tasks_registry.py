@@ -245,6 +245,7 @@ _TASKS: Dict[str, Dict[str, Any]] = {
     )),
     "hoa_labeling": _with_defaults(dict(
         dimension=3,
+        additional_options="kerasDeconvolutionStyle",
         input_image_size=(160, 176, 160, 1),
         number_of_outputs=23,
         number_of_filters=(16, 32, 64, 128),
