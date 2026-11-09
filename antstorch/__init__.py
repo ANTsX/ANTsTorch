@@ -12,3 +12,5 @@ from . import syn
 from . import registration
 from . import direct
 from . import benchmark
+
+from .syn import label_image_registration
