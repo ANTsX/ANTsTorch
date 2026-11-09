@@ -152,6 +152,7 @@ Registration comparisons use a shared affine initialization in the default fair 
 - **[Documentation](docs/index.md)** — installation, examples, API conventions, and tutorials.
 - **[API guide](docs/api.md)** — entry points, tensor layouts, image geometry, and transform conventions.
 - **[SyN registration](docs/antsx_tutorial_syn.md)** — registration workflows and transform handling.
+- **[Label-guided registration](docs/label_image_registration.md)** — weighted segmentation and optional intensity metrics on CPU, CUDA, or MPS.
 - **[N4 & B-spline registration](docs/antsx_tutorial_bspline_flows.md)** — tensor-based processing and physical image domains.
 - **[LAMNR hybrid training](docs/lamnr_hybrid_trainer.md)** — normalizing-flow training workflows.
 - **[Development tools](tools/README.md)** — application checks, benchmarks, and supporting utilities.

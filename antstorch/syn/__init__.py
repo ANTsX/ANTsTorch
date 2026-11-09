@@ -38,6 +38,7 @@ from .bridge import (
     tensor_to_ants_image,
 )
 from .syn import syn_registration
+from .label_registration import label_image_registration
 from .template import build_template
 from .robust_affine import (
     robust_affine,
@@ -49,6 +50,7 @@ from .robust_affine import (
 __all__ = [
     'core',
     'syn_registration',
+    'label_image_registration',
     'build_template',
     'robust_affine',
     'robust_center_of_mass',

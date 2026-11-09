@@ -68,6 +68,7 @@ from .bridge import (
 )
 from .._torch_compat import grid_sample, grid_sample_for_probe
 from .core.grid import (
+    grid_sample_nd,
     get_physical_grid_torch,
     physical_to_normalized_torch_cached,
     prepare_mid_images_and_gradients_torch,
@@ -222,11 +223,11 @@ def _downsample_metadata(meta: Dict[str, tuple], factor: int, syntx_parity: bool
     return new_meta
 
 
-def _downsample_image(image: Tensor, meta: Dict[str, tuple], factor: int, syntx_parity: bool = False) -> Tuple[Tensor, Dict[str, tuple]]:
+def _downsample_image(image: Tensor, meta: Dict[str, tuple], factor: int, syntx_parity: bool = False, smoothing_sigma=None) -> Tuple[Tensor, Dict[str, tuple]]:
     """Gaussian-presmooth (``sigma = log2(factor)`` voxels) then resample, preserving physical extent."""
-    if factor == 1:
+    if factor == 1 and (smoothing_sigma is None or smoothing_sigma == 0):
         return image, meta
-    sigma = math.log2(factor)
+    sigma = math.log2(factor) if smoothing_sigma is None else smoothing_sigma
     blurred = _gaussian_blur_image(image, sigma)
     new_meta = _downsample_metadata(meta, factor, syntx_parity)
     mode = "bilinear" if len(new_meta["torch_shape"]) == 2 else "trilinear"
@@ -445,6 +446,8 @@ def _fit_syn_level(
     use_analytical_gradients: bool = True,
     sobolev_alpha: Optional[float] = None,
     optimizer_lr: float = 1.0,
+    metric_terms=None,
+    metric_masks=None,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor, list]:
     device, dtype = I_curr.device, I_curr.dtype
     fixed_meta_t = metadata_tensors_from_dict(fixed_meta, device, dtype)
@@ -497,35 +500,47 @@ def _fit_syn_level(
         if _mesh_size_active(total_field_mesh_size_at_base_level):
             total_mesh_size_level = _scale_mesh_size(total_field_mesh_size_at_base_level, level_scale)
 
+    def objective(left, right, left_inv, right_inv):
+        if metric_terms is None:
+            a, b, _, _, valid = prepare_mid_images_and_gradients_torch(
+                left, right, left_inv, right_inv, I_curr, J_curr, X_phys,
+                fixed_meta_t["shape_t"], fixed_meta_t["spacing_t"], fixed_meta_t["origin_t"], fixed_meta_t["direction_t"],
+                moving_meta_t["shape_t"], moving_meta_t["spacing_t"], moving_meta_t["origin_t"], moving_meta_t["direction_t"],
+                fixed_meta["spacing"], moving_meta["spacing"], M_phys, t_phys, None,
+                use_analytical_gradients=use_analytical_gradients,
+            )
+            return _similarity_loss(similarity, a, b, valid, window_size, num_bins)
+        fixed_grid = physical_to_normalized_torch_cached(
+            X_phys + left, fixed_meta_t["shape_t"], fixed_meta_t["spacing_t"],
+            fixed_meta_t["origin_t"], fixed_meta_t["direction_t"],
+        )
+        moving_grid = physical_to_normalized_torch_cached(
+            (X_phys + right) @ M_phys.t() + t_phys,
+            moving_meta_t["shape_t"], moving_meta_t["spacing_t"],
+            moving_meta_t["origin_t"], moving_meta_t["direction_t"],
+        )
+        valid = (((fixed_grid >= -1) & (fixed_grid <= 1)).all(-1)
+                 & ((moving_grid >= -1) & (moving_grid <= 1)).all(-1)).unsqueeze(1).to(dtype)
+        if metric_masks is not None:
+            for mask, grid in zip(metric_masks, (fixed_grid, moving_grid)):
+                if mask is not None:
+                    sampled = grid_sample(mask, grid.detach(), mode="nearest", padding_mode="zeros", align_corners=True)
+                    valid = valid * (sampled > 0).to(dtype)
+        loss = left.sum() * 0 + right.sum() * 0
+        for name, a, b, weight, parameter in metric_terms:
+            a_mid = grid_sample_nd(a, fixed_grid, use_analytical_gradients=use_analytical_gradients)
+            b_mid = grid_sample_nd(b, moving_grid, use_analytical_gradients=use_analytical_gradients)
+            radius = int(parameter) if name in ("cc", "lncc", "cc2", "lncc2", "box_cc2") else 0
+            bins = int(parameter) if name in ("mi", "mattes") else num_bins
+            loss = loss + weight * _similarity_loss(name, a_mid, b_mid, valid, 2 * radius + 1, bins)
+        return loss
+
     history = []
     for iteration in range(iterations):
         warp_l2r_leaf = warp_l2r.detach().requires_grad_(True)
         warp_r2l_leaf = warp_r2l.detach().requires_grad_(True)
 
-        I_mid, J_mid, _, _, in_bounds_mask = prepare_mid_images_and_gradients_torch(
-            warp_l2r_leaf,
-            warp_r2l_leaf,
-            warp_l2r_inv,
-            warp_r2l_inv,
-            I_curr,
-            J_curr,
-            X_phys,
-            fixed_meta_t["shape_t"],
-            fixed_meta_t["spacing_t"],
-            fixed_meta_t["origin_t"],
-            fixed_meta_t["direction_t"],
-            moving_meta_t["shape_t"],
-            moving_meta_t["spacing_t"],
-            moving_meta_t["origin_t"],
-            moving_meta_t["direction_t"],
-            fixed_meta["spacing"],
-            moving_meta["spacing"],
-            M_phys,
-            t_phys,
-            None,
-            use_analytical_gradients=use_analytical_gradients,
-        )
-        loss = _similarity_loss(similarity, I_mid, J_mid, in_bounds_mask, window_size, num_bins)
+        loss = objective(warp_l2r_leaf, warp_r2l_leaf, warp_l2r_inv, warp_r2l_inv)
         if not torch.isfinite(loss):
             raise FloatingPointError(f"non-finite SyN loss at resolution level {level_index + 1}")
         if syntx_parity and float(loss.detach().item()) < best_loss:
@@ -700,14 +715,7 @@ def _fit_syn_level(
 
     if syntx_parity and best_state is not None and len(history) > 0:
         with torch.no_grad():
-            I_f, J_f, _, _, m_f = prepare_mid_images_and_gradients_torch(
-                warp_l2r, warp_r2l, warp_l2r_inv, warp_r2l_inv, I_curr, J_curr, X_phys,
-                fixed_meta_t["shape_t"], fixed_meta_t["spacing_t"], fixed_meta_t["origin_t"], fixed_meta_t["direction_t"],
-                moving_meta_t["shape_t"], moving_meta_t["spacing_t"], moving_meta_t["origin_t"], moving_meta_t["direction_t"],
-                fixed_meta["spacing"], moving_meta["spacing"], M_phys, t_phys, None,
-                use_analytical_gradients=False,
-            )
-            final_loss = float(_similarity_loss(similarity, I_f, J_f, m_f, window_size, num_bins).item())
+            final_loss = float(objective(warp_l2r, warp_r2l, warp_l2r_inv, warp_r2l_inv).item())
         if final_loss >= best_loss:
             warp_l2r, warp_r2l, warp_l2r_inv, warp_r2l_inv = best_state
 
@@ -897,6 +905,11 @@ def syn_registration(
     device: Optional[Union[str, torch.device]] = None,
     dtype: torch.dtype = torch.float32,
     verbose: bool = False,
+    smoothing_sigmas=None,
+    multivariate_extras=None,
+    primary_metric_weight: float = 1.0,
+    mask=None,
+    moving_mask=None,
 ) -> Dict[str, object]:
     """Register ``moving`` onto ``fixed`` with (optionally affine-initialized) greedy symmetric SyN.
 
@@ -916,6 +929,15 @@ def syn_registration(
     ``ants.apply_transforms(transformlist=...)`` or any other ANTsX tool
     that expects file-based transforms — see
     :mod:`antstorch.ants_transform_io` for the exact conventions matched.
+
+    ``multivariate_extras`` adds (metric, fixed_image, moving_image, weight,
+    parameter) terms to the same SyN objective. Images must share their
+    respective primary domains. MSQ/MeanSquares aliases retain raw image
+    amplitudes; other metrics use the standard intensity normalization.
+    ``primary_metric_weight=0`` disables the primary metric. ``mask`` and
+    ``moving_mask`` restrict midpoint sampling to their nonzero regions.
+    ``smoothing_sigmas`` optionally sets the pyramid image smoothing in
+    voxel units, one value per level. These options affect SyN only.
 
     **Defaults.** ``syn_metric``, ``levels``, ``reg_iterations``, ``grad_step``,
     ``flow_sigma``, ``gaussian_sigma_mode``, ``conservative_smooth``,
@@ -1215,6 +1237,11 @@ def syn_registration(
     if len(levels) != len(reg_iterations):
         raise ValueError("levels and reg_iterations must have the same length")
 
+    if smoothing_sigmas is not None:
+        smoothing_sigmas = tuple(smoothing_sigmas)
+        if len(smoothing_sigmas) != len(levels) or any(not math.isfinite(v) or v < 0 for v in smoothing_sigmas):
+            raise ValueError("smoothing_sigmas must contain one finite nonnegative value per level")
+
     dimension = fixed.dimension
     if device is None:
         # Respect an explicit antstorch.set_default_device(); otherwise fall through to auto-detection below.
@@ -1397,6 +1424,44 @@ def syn_registration(
     I_full = ants_image_to_tensor(fixed, resolved_device, dtype)
     J_full = ants_image_to_tensor(moving, resolved_device, dtype)
 
+    # Extra images share the respective primary image domains. MSE masks
+    # retain their binary amplitudes; intensity metrics use the usual normalization.
+    metric_terms_full = None
+    metric_masks_full = None
+    if multivariate_extras is not None or mask is not None or moving_mask is not None or primary_metric_weight != 1:
+        from .label_registration import _validate_image_domain, _metric_name
+        if not math.isfinite(primary_metric_weight) or primary_metric_weight < 0:
+            raise ValueError("primary_metric_weight must be finite and nonnegative")
+        if syn_metric == "box_cc2" and primary_metric_weight and (mask is not None or moving_mask is not None):
+            raise ValueError("box_cc2 does not support metric masks; use cc2 instead")
+        metric_terms_full = []
+        if primary_metric_weight:
+            metric_terms_full.append((syn_metric, I_full, J_full, primary_metric_weight,
+                                      neighborhood_radius if syn_metric not in ("mi", "mattes") else num_bins))
+        for name, a, b, weight, parameter in (multivariate_extras or []):
+            name = _metric_name(name)
+            _validate_image_domain(a, fixed, "fixed metric image")
+            _validate_image_domain(b, moving, "moving metric image")
+            if not math.isfinite(weight) or weight < 0 or not math.isfinite(parameter) or parameter < 0:
+                raise ValueError("metric weights and parameters must be finite and nonnegative")
+            if name in ("cc", "lncc", "cc2", "lncc2", "mi", "mattes") and parameter != int(parameter):
+                raise ValueError("Metric radius/bin count must be an integer")
+            if name in ("mi", "mattes") and parameter < 2:
+                raise ValueError("MI metrics require at least two histogram bins")
+            if weight:
+                metric_terms_full.append((name,
+                    ants_image_to_tensor(a, resolved_device, dtype, normalize=name != "mse"),
+                    ants_image_to_tensor(b, resolved_device, dtype, normalize=name != "mse"), weight, parameter))
+        if not metric_terms_full:
+            raise ValueError("At least one metric must have a positive weight")
+        masks = []
+        for value, reference in ((mask, fixed), (moving_mask, moving)):
+            if value is not None:
+                _validate_image_domain(value, reference, "metric mask")
+                value = ants_image_to_tensor(value != 0, resolved_device, dtype, normalize=False)
+            masks.append(value)
+        metric_masks_full = masks
+
     # Resolve any spline-distance parameter into the base-level mesh size it
     # replaces, once, against fixed's FULL native-resolution domain -- matching
     # real ANTs' own CalculateMeshSizeForSpecifiedKnotSpacing, which is always
@@ -1449,13 +1514,17 @@ def syn_registration(
     # _validate_pyramid_levels's docstring for why this is not specific to
     # 'dsti'/'sobolev' even though that is where it was first observed to
     # silently produce dice=0.0.
+    if metric_terms_full is not None:
+        window_size = max([1] + [2 * int(term[4]) + 1 for term in metric_terms_full
+                                  if term[0] in ("cc", "lncc", "cc2", "lncc2", "box_cc2")])
     _validate_pyramid_levels(fixed_meta_full["torch_shape"], levels, window_size, syntx_parity)
 
     warp_l2r = warp_r2l = warp_l2r_inv = warp_r2l_inv = None
     level_loss_history = []
     for level_index, (factor, iteration_count) in enumerate(zip(levels, reg_iterations)):
-        I_level, fixed_meta_level = _downsample_image(I_full, fixed_meta_full, factor, syntx_parity)
-        J_level, moving_meta_level = _downsample_image(J_full, moving_meta_full, factor, syntx_parity)
+        sigma = None if smoothing_sigmas is None else smoothing_sigmas[level_index]
+        I_level, fixed_meta_level = _downsample_image(I_full, fixed_meta_full, factor, syntx_parity, sigma)
+        J_level, moving_meta_level = _downsample_image(J_full, moving_meta_full, factor, syntx_parity, sigma)
         if warp_l2r is None:
             zeros = torch.zeros(
                 (1,) + fixed_meta_level["torch_shape"] + (dimension,), device=resolved_device, dtype=dtype
@@ -1497,10 +1566,23 @@ def syn_registration(
             message += f"iterations={iteration_count}"
             print(message)
 
+        metric_terms_level = None
+        metric_masks_level = None
+        if metric_terms_full is not None:
+            metric_terms_level = [(name,
+                _downsample_image(a, fixed_meta_full, factor, syntx_parity, sigma)[0],
+                _downsample_image(b, moving_meta_full, factor, syntx_parity, sigma)[0], weight, parameter)
+                for name, a, b, weight, parameter in metric_terms_full]
+            metric_masks_level = [None if value is None else F.interpolate(
+                value, size=meta["torch_shape"], mode="nearest")
+                for value, meta in zip(metric_masks_full, (fixed_meta_level, moving_meta_level))]
+
         warp_l2r, warp_r2l, warp_l2r_inv, warp_r2l_inv, history = _fit_syn_level(
             I_level, J_level, fixed_meta_level, moving_meta_level,
             warp_l2r, warp_r2l, warp_l2r_inv, warp_r2l_inv, M_phys, t_phys,
             iterations=iteration_count,
+            metric_terms=metric_terms_level,
+            metric_masks=metric_masks_level,
             similarity=syn_metric,
             window_size=window_size,
             num_bins=num_bins,
@@ -1622,6 +1704,11 @@ def syn_registration(
         "provenance": {
             "type_of_transform": type_of_transform,
             "syn_metric": syn_metric,
+            "smoothing_sigmas": smoothing_sigmas,
+            "primary_metric_weight": primary_metric_weight,
+            "multivariate_metrics": [] if metric_terms_full is None else [
+                {"metric": term[0], "weight": term[3], "parameter": term[4]} for term in metric_terms_full],
+            "metric_masks": (mask is not None, moving_mask is not None),
             "levels": tuple(levels),
             "reg_iterations": tuple(reg_iterations),
             "grad_step": grad_step,
