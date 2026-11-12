@@ -666,3 +666,36 @@ def test_affine_time_is_cached_and_reported_separately(mock_mindboggle_dataset, 
     for rec in (first, second):
         assert rec["deformable_seconds"] >= 0.0
         assert rec["runtime_seconds"] == pytest.approx(rec["affine_seconds"] + rec["deformable_seconds"])
+
+
+@pytest.mark.parametrize('model', ['label_syn', 'label_intensity_syn'])
+def test_label_guided_benchmark_uses_shared_affine_and_marks_supervision(
+        mock_mindboggle_dataset, tmp_path, model):
+    import torch
+    from antstorch.ants_transform_io import write_affine_transform
+    pairs_csv, data_dir = mock_mindboggle_dataset
+    affine_dir = tmp_path / 'affines'
+    affine_dir.mkdir()
+    affine_path = affine_dir / 'pair_000_0GenericAffine.mat'
+    write_affine_transform(torch.eye(3), torch.zeros(3), 3, str(affine_path))
+    original = affine_path.read_bytes()
+    out = tmp_path / model
+    rec = evaluate_mindboggle_pair(
+        0, model=model, device='cpu', pairs_csv=pairs_csv, data_dir=data_dir,
+        canonical_affine_dir=str(affine_dir), registration_output_dir=str(out),
+        use_n4=False, levels=(2, 1), reg_iterations=(1, 1), label_image_weighting=.5,
+    )
+    _assert_valid_success_record(rec, model)
+    assert affine_path.read_bytes() == original
+    assert rec['supervision'] == 'evaluation_labels'
+    assert rec['labels_used_for_optimization'] is True
+    assert rec['intensity_images_used_for_deformation'] == (model == 'label_intensity_syn')
+    provenance = rec['registration_provenance']
+    assert provenance['affine_fit'] is False
+    assert provenance['reg_iterations'] == (1, 1)
+    assert provenance['intensity_image_pairs'] == (1 if model == 'label_intensity_syn' else 0)
+    assert provenance['label_image_weighting'] == [.5]
+    # warped_moving must still be a T1 image rather than the label output.
+    assert ants.image_read(rec['warped_moving']).max() > 10
+    assert os.path.exists(rec['warped_moving_labels'])
+    assert os.path.exists(rec['loss_history'])

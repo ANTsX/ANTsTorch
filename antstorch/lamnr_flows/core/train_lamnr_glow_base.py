@@ -50,6 +50,12 @@ from antstorch.lamnr_flows.misc.latent_alignment import (
     ScreenState,
     flatten_latents,
 )
+from antstorch.lamnr_flows.misc.pcf_terms import (
+    add_pcf_args,
+    axis_alignment_loss,
+    pcf_penalty_bpd,
+    ramp,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -868,6 +874,10 @@ def screen_dump_run_config(
     add("barlow_lambda", cfg.get("barlow_lambda"))
     add("hsic_sigma", cfg.get("hsic_sigma"))
     add("init_logvar (nll/align)", f"{cfg.get('init_logvar_nll')} / {cfg.get('init_logvar_align')}")
+
+    # Principal component flow
+    add("pcf_alpha / dims / warmup", f"{cfg.get('pcf_alpha', 0.0)} / {cfg.get('pcf_dims', 1)} / {cfg.get('pcf_warmup', 0)}")
+    add("axis_beta / dims / warmup", f"{cfg.get('axis_beta', 0.0)} / {cfg.get('axis_dims', 1)} / {cfg.get('axis_warmup', 0)}")
 
     # CCA Screening
     add("screen", cfg.get("screen"))
@@ -1878,6 +1888,18 @@ class BaseLAMNrTrainer(abc.ABC):
         n_views   = len(models)
         n_dims    = int(np.prod(getattr(args, "input_shape", (1, args.H, args.W))))
 
+        # Principal component flow terms (see antstorch/lamnr_flows/misc/pcf_terms.py).
+        pcf_on  = float(getattr(args, "pcf_alpha", 0.0)) > 0.0
+        axis_on = float(getattr(args, "axis_beta", 0.0)) > 0.0
+        if (pcf_on or axis_on) and self.is_ddp:
+            # The extra encoder passes run on the unwrapped flow, outside DDP's
+            # forward(); gradient synchronization for them is not guaranteed.
+            raise NotImplementedError("--pcf-alpha / --axis-beta are not supported with DDP (torchrun) yet.")
+        if axis_on and n_views < 2:
+            raise ValueError("--axis-beta needs at least two views (--view ... --view ...).")
+        if pcf_on and int(args.pcf_dims) < 1 or axis_on and int(args.axis_dims) < 1:
+            raise ValueError("--pcf-dims and --axis-dims must be >= 1.")
+
         alpha             = float(args.smooth_alpha)
         ema_loss_disp     = None
         ema_sum_bpd_disp  = None
@@ -1931,6 +1953,8 @@ class BaseLAMNrTrainer(abc.ABC):
             # Logging accumulators
             loss_acc  = torch.tensor(0.0, device=dev, dtype=torch.float32)
             align_acc = torch.tensor(0.0, device=dev, dtype=torch.float32)
+            pcf_acc   = torch.tensor(0.0, device=dev, dtype=torch.float32)
+            axis_acc  = torch.tensor(0.0, device=dev, dtype=torch.float32)
             bpd_acc   = 0.0
             bpd_views_acc: Optional[List[float]] = None
 
@@ -1962,6 +1986,7 @@ class BaseLAMNrTrainer(abc.ABC):
                 curr_bpd_views: List[float] = []
                 sum_bpd       = 0.0
                 lat_flat: List[torch.Tensor] = []
+                xs_pcf: List[torch.Tensor] = []   # view inputs for the PCF / axis terms
 
                 amp_ctx = (
                     torch.amp.autocast(dev.type, dtype=self.amp_dtype)
@@ -2071,6 +2096,8 @@ class BaseLAMNrTrainer(abc.ABC):
                         curr_bpd_views.append(bpd_v.item())
                         sum_bpd += bpd_v.item()
                         lat_flat.append(torch.nan_to_num(zflat))
+                        if pcf_on or axis_on:
+                            xs_pcf.append(x_v.detach())
 
                         # Explicit cleanup of view tensor and intermediates
                         del x_v, logp_v, zflat
@@ -2111,6 +2138,18 @@ class BaseLAMNrTrainer(abc.ABC):
                     s_align=self.s_align,
                 )
 
+                # Principal component flow terms (--pcf-alpha, --axis-beta), in
+                # float32 outside autocast: alpha * sum_v(-I_hat^(v)) + beta * L_axis.
+                L_pcf = torch.tensor(0.0, device=dev, dtype=torch.float32)
+                L_axis = torch.tensor(0.0, device=dev, dtype=torch.float32)
+                if pcf_on:
+                    L_pcf = sum(pcf_penalty_bpd(m_, x_, args.pcf_dims, n_dims) for m_, x_ in zip(models, xs_pcf))
+                    loss_total = loss_total + args.pcf_alpha * ramp(it, args.pcf_warmup) * L_pcf
+                if axis_on:
+                    L_axis = axis_alignment_loss(models, xs_pcf, args.axis_dims)
+                    loss_total = loss_total + args.axis_beta * ramp(it, args.axis_warmup) * L_axis
+                del xs_pcf
+
                 local_bad = not torch.isfinite(loss_total)
                 if self._sync_skip_flag(local_bad):
                     tqdm.write(
@@ -2132,6 +2171,8 @@ class BaseLAMNrTrainer(abc.ABC):
                 # Accumulate for logging
                 loss_acc  = loss_acc  + loss_total.detach().float()
                 align_acc = align_acc + L_align.detach().float()
+                pcf_acc   = pcf_acc + L_pcf.detach().float()
+                axis_acc  = axis_acc + L_axis.detach().float()
                 bpd_acc  += float(sum_bpd)
                 if bpd_views_acc is None:
                     bpd_views_acc = [0.0] * len(curr_bpd_views)
@@ -2419,6 +2460,8 @@ class BaseLAMNrTrainer(abc.ABC):
             # Averaged metrics
             curr_loss      = float(loss_acc.item())  / float(grad_accum)
             L_align_log    = float(align_acc.item()) / float(grad_accum)
+            L_pcf_log      = float(pcf_acc.item()) / float(grad_accum)
+            L_axis_log     = float(axis_acc.item()) / float(grad_accum)
             sum_bpd        = bpd_acc / float(grad_accum)
             curr_bpd_views = [v / float(grad_accum) for v in (bpd_views_acc or [])]
 
@@ -2550,6 +2593,10 @@ class BaseLAMNrTrainer(abc.ABC):
             if n_views > 1:
                 for i in range(n_views):
                     postfix[f"v{i}"] = f"{curr_bpd_views[i]:.3f}/{ema_bpd_views_disp[i]:.3f}"
+            if pcf_on:
+                postfix["pcf"] = f"{L_pcf_log:.4f}"
+            if axis_on:
+                postfix["axis"] = f"{L_axis_log:.4f}"
             # Progress bar, file writes (input grids, CSV, samples, plots,
             # checkpoints) are rank-0-only under DDP: every rank computes an
             # identical (synced-gradient) update, so having every rank also

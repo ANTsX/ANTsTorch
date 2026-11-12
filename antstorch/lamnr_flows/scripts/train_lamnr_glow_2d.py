@@ -47,6 +47,7 @@ from torch.utils.data.distributed import DistributedSampler
 from antstorch.lamnr_flows.core.train_lamnr_glow_base import (
     BaseLAMNrTrainer,
     add_stability_args,
+    add_pcf_args,
     GlowDataParallel,
     GlowDDP,
     GlowStepWrapper,
@@ -723,6 +724,7 @@ def _build_args(argv=None) -> argparse.Namespace:
              "exact forward op responsible for a NaN/Inf gradient (much "
              "slower — use for a short diagnostic run only, not full training).")
     add_stability_args(ap)
+    add_pcf_args(ap)
     ap.add_argument("--grad-checkpoint", default="auto", choices=["auto", "on", "off"],
         help="Control torch.utils.checkpoint on each level's flow sequence "
              "(trades compute for activation memory). 'auto' (default) "

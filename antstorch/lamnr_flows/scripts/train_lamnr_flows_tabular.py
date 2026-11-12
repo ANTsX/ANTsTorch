@@ -81,6 +81,7 @@ from antstorch.lamnr_flows.misc.latent_alignment import (
     LatentAlignmentLossManager,
     Projector,
 )
+from antstorch.lamnr_flows.misc.pcf_terms import add_pcf_args, pcf_penalty_bpd, ramp
 
 
 # ---------------------------------------------------------------------------
@@ -630,6 +631,11 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
         ema_loss_disp    = None
         ema_bpd_disp: List[Optional[float]] = [None] * n_views
 
+        # Principal component flow penalty (see antstorch/lamnr_flows/misc/pcf_terms.py).
+        pcf_on = float(getattr(args, "pcf_alpha", 0.0)) > 0.0
+        if pcf_on and int(args.pcf_dims) < 1:
+            raise ValueError("--pcf-dims must be >= 1.")
+
         train_iter = iter(self.train_loader)
 
         pbar = tqdm(
@@ -645,6 +651,7 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
 
             loss_acc  = torch.tensor(0.0, device=dev, dtype=torch.float32)
             align_acc = torch.tensor(0.0, device=dev, dtype=torch.float32)
+            pcf_acc   = torch.tensor(0.0, device=dev, dtype=torch.float32)
             bpd_acc:   List[float] = [0.0] * n_views
             bad_update = False
             x_last     = None
@@ -663,6 +670,7 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
 
                 L_nll      = torch.tensor(0.0, device=dev, dtype=torch.float32)
                 lat_flat:  List[torch.Tensor] = []
+                xs_pcf:    List[torch.Tensor] = []   # view inputs for the PCF penalty
                 bad_batch  = False
 
                 for vi, m in enumerate(models):
@@ -687,6 +695,8 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
                     z_v, _ = _inverse_with_guard(m, x_v)
                     # Tabular: z is already flat (B, D) — no pooling needed
                     lat_flat.append(torch.nan_to_num(z_v.float()))
+                    if pcf_on:
+                        xs_pcf.append(x_v.detach())
 
                     del x_v, z_v, logp_v
 
@@ -706,6 +716,14 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
                     s_align=self.s_align,
                 )
 
+                # alpha * sum_v(-I_hat^(v)), in bits per dimension of each view.
+                L_pcf = torch.tensor(0.0, device=dev, dtype=torch.float32)
+                if pcf_on:
+                    L_pcf = sum(pcf_penalty_bpd(m_, x_, args.pcf_dims, int(x_.shape[1]))
+                                for m_, x_ in zip(models, xs_pcf))
+                    loss_total = loss_total + args.pcf_alpha * ramp(it, args.pcf_warmup) * L_pcf
+                del xs_pcf
+
                 if not torch.isfinite(loss_total):
                     tqdm.write(f"[nan] loss_total non-finite @ iter {it}")
                     bad_update = True
@@ -717,6 +735,7 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
 
                 loss_acc  = loss_acc  + loss_total.detach().float()
                 align_acc = align_acc + L_align.detach().float()
+                pcf_acc   = pcf_acc + L_pcf.detach().float()
 
                 # ── Strict per-micro-step cleanup ─────────────────────
                 del lat_flat
@@ -768,6 +787,8 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
             }
             for i in range(n_views):
                 postfix[f"bpd{i}"] = f"{curr_bpd[i]:.3f}"
+            if pcf_on:
+                postfix["pcf"] = f"{float(pcf_acc.item()) / float(grad_accum):.4f}"
             pbar.set_postfix(postfix)
             pbar.update(1)
 
@@ -1196,6 +1217,8 @@ def _build_args() -> argparse.Namespace:
     # Image-specific args set to None (unused but needed by BaseLAMNrTrainer)
     ap.set_defaults(H=None, W=None, D=None, sample_mode="off",
                     sample_temp=1.0, sample_grid_norm="to01")
+
+    add_pcf_args(ap, axis=False)
 
     args = ap.parse_args()
     args.num_views = len(args.views)  # updated in build_loaders anyway
