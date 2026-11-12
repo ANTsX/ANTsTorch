@@ -44,14 +44,26 @@ def ramp(it: int, warmup: int) -> float:
 
 
 def pcf_penalty_bpd(model: nn.Module, x: torch.Tensor, num_dims: int, n_dims: int) -> torch.Tensor:
-    """Batch-mean PCF penalty of one view, in bits per dimension (differentiable)."""
+    """Batch-mean PCF penalty of one view, in bits per dimension (differentiable).
+
+    Works for any antsnormflows flow with ``inverse_and_log_det`` (Glow, RealNVP,
+    ConvFlow1d) through ``antsnormflows.utils.pcf_penalty``; falls back to
+    ``MultiscaleFlow.pcf_regularizer`` with older antsnormflows versions.
+    """
     flow = unwrap_flow(model)
-    if not hasattr(flow, "pcf_regularizer"):
+    try:
+        from antsnormflows.utils import pcf_penalty
+    except ImportError:
+        pcf_penalty = None
+    if pcf_penalty is not None:
+        penalty = pcf_penalty(flow, x.float(), num_dims=num_dims, create_graph=True)
+    elif hasattr(flow, "pcf_regularizer"):
+        penalty = flow.pcf_regularizer(x.float(), num_dims=num_dims, create_graph=True)
+    else:
         raise RuntimeError(
-            "--pcf-alpha requires antsnormflows with MultiscaleFlow.pcf_regularizer "
-            "(ANTsNormalizingFlows core.py); update the installed antsnormflows."
+            "--pcf-alpha requires antsnormflows with utils.pcf_penalty (or "
+            "MultiscaleFlow.pcf_regularizer); update the installed antsnormflows."
         )
-    penalty = flow.pcf_regularizer(x.float(), num_dims=num_dims, create_graph=True)
     return penalty.mean() / (n_dims * math.log(2.0))
 
 
@@ -94,16 +106,20 @@ def axis_alignment_loss(models: Sequence[nn.Module], xs: Sequence[torch.Tensor],
     return torch.stack(terms).mean()
 
 
-def add_pcf_args(ap) -> None:
-    """Register the PCF / axis-alignment options shared by the Glow trainers."""
+def add_pcf_args(ap, axis: bool = True) -> None:
+    """Register the PCF options, and the axis-alignment options unless axis=False
+    (views without a common spatial grid, e.g. tabular)."""
     g = ap.add_argument_group("principal component flow")
     g.add_argument("--pcf-alpha", type=float, default=0.0, metavar="ALPHA",
         help="Weight of the PCF penalty -I_hat (bits/dim), summed over views. 0 (default): off.")
     g.add_argument("--pcf-dims", type=int, default=1, metavar="N",
         help="Latent coordinates sampled per level and per sample for the PCF penalty "
-             "(one encoder vector-Jacobian product each). Default 1.")
+             "(one encoder vector-Jacobian product each); >= the latent size gives the "
+             "exact penalty (cheap for tabular views). Default 1.")
     g.add_argument("--pcf-warmup", type=int, default=0, metavar="ITERS",
         help="Linear warm-up of --pcf-alpha over ITERS iterations. Default 0.")
+    if not axis:
+        return
     g.add_argument("--axis-beta", type=float, default=0.0, metavar="BETA",
         help="Weight of the cross-view axis alignment 1 - cos(|g_k^(v)|, |g_k^(w)|) "
              "(needs >= 2 views on the same grid). 0 (default): off.")
