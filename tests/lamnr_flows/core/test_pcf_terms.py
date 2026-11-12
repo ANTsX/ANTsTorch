@@ -82,7 +82,8 @@ def _cli(tmp_path, views, channels_per_view, dim, extra):
 def test_pcf_cpu_training_two_channels(tmp_path, dim, module, trainer_class):
     views, _, _, _ = cohort(tmp_path)
     args = module._build_args(_cli(tmp_path, [views[0], views[1]], 2, dim,
-                                   ['--pcf-alpha', '0.1', '--pcf-dims', '2', '--pcf-warmup', '1']))
+                                   ['--pcf-alpha', '0.1', '--pcf-dims', '2', '--pcf-warmup', '1',
+                                    '--pcf-every', '2', '--pcf-levels-per-step', '1']))
     assert args.pcf_alpha == 0.1 and args.pcf_dims == 2
     trainer = trainer_class()
     trainer.setup(args)

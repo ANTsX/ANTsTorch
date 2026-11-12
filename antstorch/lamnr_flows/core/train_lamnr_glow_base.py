@@ -78,14 +78,32 @@ class GlowStepWrapper(nn.Module):
         self.alignment_pool_size = alignment_pool_size
 
     def forward(self, x: torch.Tensor, pcf_dims: int = 0, axis_dims: int = 0,
-                axis_seed: int = 0):
+                axis_seed: int = 0, pcf_samples: int = 0, pcf_levels: int = 0):
         """Returns (log_prob, z_flat); with pcf_dims or axis_dims > 0, returns
         (log_prob, z_flat, pcf_penalty, axis_magnitudes) where pcf_penalty is -I_hat
         per sample (or None) and axis_magnitudes the encoder-row magnitudes for the
-        coordinates drawn with axis_seed (or None). Computing them here, in the same
-        encoder pass and inside DataParallel/DDP's forward, keeps gradient
-        synchronization correct. With these terms the encoder pass runs in float32.
+        coordinates drawn with axis_seed (or None). Computing them here, inside
+        DataParallel/DDP's forward, keeps gradient synchronization correct.
+
+        By default the terms share the likelihood's encoder pass, which then runs in
+        float32. With pcf_samples = M > 0 (and no axis term), the likelihood pass is
+        unchanged (full batch, caller's precision) and the PCF penalty uses a separate
+        float32 pass on the first M samples only. pcf_levels = K > 0 draws K latent
+        levels per call for the penalty.
         """
+        if pcf_dims > 0 and pcf_samples > 0 and axis_dims <= 0:
+            log_prob, z_flat = self._forward(x, 0, 0, 0)
+            xs = x[:pcf_samples].detach()
+            if xs.dtype in (torch.float16, torch.bfloat16):
+                xs = xs.float()
+            xs = xs.requires_grad_(True)
+            from antsnormflows.utils import pcf_penalty_from_latents
+            with torch.amp.autocast(device_type=xs.device.type, enabled=False):
+                zs, lds = self.model.inverse_and_log_det(xs)
+                penalty = pcf_penalty_from_latents(xs, zs, lds, num_dims=pcf_dims, create_graph=True,
+                                                   num_levels=pcf_levels or None)
+            return log_prob, z_flat, penalty, None
+        self._pcf_levels = pcf_levels
         extras = pcf_dims > 0 or axis_dims > 0
         if extras:
             x = x.detach()
@@ -122,7 +140,8 @@ class GlowStepWrapper(nn.Module):
         if pcf_dims <= 0 and axis_dims <= 0:
             return log_prob, z_flat
         from antsnormflows.utils import pcf_penalty_from_latents
-        penalty = (pcf_penalty_from_latents(x, z, logdet, num_dims=pcf_dims, create_graph=True)
+        penalty = (pcf_penalty_from_latents(x, z, logdet, num_dims=pcf_dims, create_graph=True,
+                                            num_levels=getattr(self, "_pcf_levels", 0) or None)
                    if pcf_dims > 0 else None)
         mags = axis_row_magnitudes(x, z, axis_dims, axis_seed) if axis_dims > 0 else None
         return log_prob, z_flat, penalty, mags
@@ -903,6 +922,7 @@ def screen_dump_run_config(
 
     # Principal component flow
     add("pcf_alpha / dims / warmup", f"{cfg.get('pcf_alpha', 0.0)} / {cfg.get('pcf_dims', 1)} / {cfg.get('pcf_warmup', 0)}")
+    add("pcf every / samples / levels", f"{cfg.get('pcf_every', 1)} / {cfg.get('pcf_samples', 0)} / {cfg.get('pcf_levels_per_step', 0)}")
     add("axis_beta / dims / warmup", f"{cfg.get('axis_beta', 0.0)} / {cfg.get('axis_dims', 1)} / {cfg.get('axis_warmup', 0)}")
 
     # CCA Screening
@@ -1925,17 +1945,21 @@ class BaseLAMNrTrainer(abc.ABC):
                     "--pcf-alpha / --axis-beta require antsnormflows with "
                     "utils.pcf_penalty_from_latents; update the installed antsnormflows."
                 ) from ex
-        pcf_kwargs = {}
+        pcf_every = max(1, int(getattr(args, "pcf_every", 1)))
+        pcf_base_kwargs = {}
         if pcf_on:
-            pcf_kwargs["pcf_dims"] = int(args.pcf_dims)
+            pcf_base_kwargs["pcf_dims"] = int(args.pcf_dims)
+            pcf_base_kwargs["pcf_samples"] = int(getattr(args, "pcf_samples", 0))
+            pcf_base_kwargs["pcf_levels"] = int(getattr(args, "pcf_levels_per_step", 0))
         if axis_on:
-            pcf_kwargs["axis_dims"] = int(args.axis_dims)
+            pcf_base_kwargs["axis_dims"] = int(args.axis_dims)
         if axis_on and n_views < 2:
             raise ValueError("--axis-beta needs at least two views (--view ... --view ...).")
         if pcf_on and int(args.pcf_dims) < 1 or axis_on and int(args.axis_dims) < 1:
             raise ValueError("--pcf-dims and --axis-dims must be >= 1.")
 
         alpha             = float(args.smooth_alpha)
+        last_pcf_log: Optional[float] = None
         ema_loss_disp     = None
         ema_sum_bpd_disp  = None
         ema_bpd_views_disp = [None] * n_views
@@ -1984,6 +2008,13 @@ class BaseLAMNrTrainer(abc.ABC):
         for it in range(self.start_iter, args.max_iter + 1):
             grad_accum = max(1, int(getattr(args, "grad_accum", 1)))
             self.opt.zero_grad(set_to_none=True)
+            # Lazy PCF regularization: the penalty runs every pcf_every iterations (same
+            # iterations on every rank), weighted by pcf_every.
+            pcf_step = pcf_on and (it % pcf_every == 0)
+            pcf_kwargs = dict(pcf_base_kwargs)
+            if pcf_on and not pcf_step:
+                for _k in ("pcf_dims", "pcf_samples", "pcf_levels"):
+                    pcf_kwargs.pop(_k, None)
 
             # Logging accumulators
             loss_acc  = torch.tensor(0.0, device=dev, dtype=torch.float32)
@@ -2098,7 +2129,7 @@ class BaseLAMNrTrainer(abc.ABC):
                                 alignment_pool_size=args.alignment_pool_size,
                             )(x_v.float(), **pcf_kwargs)
                             logp_v, zflat = out_v[0], out_v[1]
-                        if pcf_on:
+                        if pcf_step:
                             pcf_pen.append(out_v[2])
                         if axis_on:
                             axis_mags.append(out_v[3])
@@ -2187,9 +2218,9 @@ class BaseLAMNrTrainer(abc.ABC):
                 # per dimension + beta * L_axis.
                 L_pcf = torch.tensor(0.0, device=dev, dtype=torch.float32)
                 L_axis = torch.tensor(0.0, device=dev, dtype=torch.float32)
-                if pcf_on:
+                if pcf_step:
                     L_pcf = sum(p_.float().mean() for p_ in pcf_pen) / (n_dims * math.log(2.0))
-                    loss_total = loss_total + args.pcf_alpha * ramp(it, args.pcf_warmup) * L_pcf
+                    loss_total = loss_total + args.pcf_alpha * pcf_every * ramp(it, args.pcf_warmup) * L_pcf
                 if axis_on:
                     L_axis = axis_loss_from_magnitudes(axis_mags)
                     loss_total = loss_total + args.axis_beta * ramp(it, args.axis_warmup) * L_axis
@@ -2639,7 +2670,10 @@ class BaseLAMNrTrainer(abc.ABC):
                 for i in range(n_views):
                     postfix[f"v{i}"] = f"{curr_bpd_views[i]:.3f}/{ema_bpd_views_disp[i]:.3f}"
             if pcf_on:
-                postfix["pcf"] = f"{L_pcf_log:.4f}"
+                if pcf_step:
+                    last_pcf_log = L_pcf_log
+                if last_pcf_log is not None:
+                    postfix["pcf"] = f"{last_pcf_log:.4f}"
             if axis_on:
                 postfix["axis"] = f"{L_axis_log:.4f}"
             # Progress bar, file writes (input grids, CSV, samples, plots,

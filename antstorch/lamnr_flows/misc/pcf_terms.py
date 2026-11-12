@@ -43,7 +43,8 @@ def ramp(it: int, warmup: int) -> float:
     return min(1.0, max(0.0, it / float(warmup)))
 
 
-def pcf_penalty_bpd(model: nn.Module, x: torch.Tensor, num_dims: int, n_dims: int) -> torch.Tensor:
+def pcf_penalty_bpd(model: nn.Module, x: torch.Tensor, num_dims: int, n_dims: int,
+                    num_levels: int = 0) -> torch.Tensor:
     """Batch-mean PCF penalty of one view, in bits per dimension (differentiable).
 
     Works for any antsnormflows flow with ``inverse_and_log_det`` (Glow, RealNVP,
@@ -56,7 +57,8 @@ def pcf_penalty_bpd(model: nn.Module, x: torch.Tensor, num_dims: int, n_dims: in
     except ImportError:
         pcf_penalty = None
     if pcf_penalty is not None:
-        penalty = pcf_penalty(flow, x.float(), num_dims=num_dims, create_graph=True)
+        penalty = pcf_penalty(flow, x.float(), num_dims=num_dims, create_graph=True,
+                              num_levels=num_levels or None)
     elif hasattr(flow, "pcf_regularizer"):
         penalty = flow.pcf_regularizer(x.float(), num_dims=num_dims, create_graph=True)
     else:
@@ -153,6 +155,18 @@ def add_pcf_args(ap, axis: bool = True) -> None:
              "exact penalty (cheap for tabular views). Default 1.")
     g.add_argument("--pcf-warmup", type=int, default=0, metavar="ITERS",
         help="Linear warm-up of --pcf-alpha over ITERS iterations. Default 0.")
+    g.add_argument("--pcf-every", type=int, default=1, metavar="N",
+        help="Lazy regularization: compute the PCF penalty every N iterations only, "
+             "with its weight multiplied by N (same expected gradient). Default 1.")
+    g.add_argument("--pcf-samples", type=int, default=0, metavar="M",
+        help="Compute the PCF penalty on the first M samples of each micro-batch (per "
+             "process/replica), in a separate float32 pass, while the likelihood keeps the "
+             "full batch and its precision. 0 (default): the whole micro-batch, sharing the "
+             "likelihood's encoder pass (which then runs in float32).")
+    g.add_argument("--pcf-levels-per-step", type=int, default=0, metavar="K",
+        help="Multiscale flows: draw K latent levels at random for the PCF penalty at each "
+             "step (unbiased reweighting), i.e. K vector-Jacobian products instead of one per "
+             "level. 0 (default): every level.")
     if not axis:
         return
     g.add_argument("--axis-beta", type=float, default=0.0, metavar="BETA",

@@ -635,6 +635,8 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
         pcf_on = float(getattr(args, "pcf_alpha", 0.0)) > 0.0
         if pcf_on and int(args.pcf_dims) < 1:
             raise ValueError("--pcf-dims must be >= 1.")
+        pcf_every = max(1, int(getattr(args, "pcf_every", 1)))
+        pcf_samples = int(getattr(args, "pcf_samples", 0))
 
         train_iter = iter(self.train_loader)
 
@@ -695,8 +697,8 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
                     z_v, _ = _inverse_with_guard(m, x_v)
                     # Tabular: z is already flat (B, D) — no pooling needed
                     lat_flat.append(torch.nan_to_num(z_v.float()))
-                    if pcf_on:
-                        xs_pcf.append(x_v.detach())
+                    if pcf_on and it % pcf_every == 0:
+                        xs_pcf.append(x_v.detach()[:pcf_samples] if pcf_samples > 0 else x_v.detach())
 
                     del x_v, z_v, logp_v
 
@@ -718,10 +720,11 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
 
                 # alpha * sum_v(-I_hat^(v)), in bits per dimension of each view.
                 L_pcf = torch.tensor(0.0, device=dev, dtype=torch.float32)
-                if pcf_on:
+                if xs_pcf:
+                    # Lazy regularization: every pcf_every iterations, weighted by pcf_every.
                     L_pcf = sum(pcf_penalty_bpd(m_, x_, args.pcf_dims, int(x_.shape[1]))
                                 for m_, x_ in zip(models, xs_pcf))
-                    loss_total = loss_total + args.pcf_alpha * ramp(it, args.pcf_warmup) * L_pcf
+                    loss_total = loss_total + args.pcf_alpha * pcf_every * ramp(it, args.pcf_warmup) * L_pcf
                 del xs_pcf
 
                 if not torch.isfinite(loss_total):

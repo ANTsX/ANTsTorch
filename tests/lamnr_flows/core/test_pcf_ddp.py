@@ -100,3 +100,44 @@ def test_wrapper_penalty_matches_standalone():
     _, _, pen, mags = GlowStepWrapper(model)(x, pcf_dims=10 ** 6)
     assert mags is None
     torch.testing.assert_close(pen, pcf_penalty(model, x, num_dims=10 ** 6), rtol=1e-6, atol=1e-6)
+
+
+def test_wrapper_subset_and_levels():
+    """pcf_samples: likelihood on the full batch, penalty on the first M samples."""
+    from antsnormflows.utils import pcf_penalty
+    model = _glow(0).double().eval()
+    x = torch.rand(4, 2, 8, 8, dtype=torch.float64)
+    logp, _, pen, mags = GlowStepWrapper(model)(x, pcf_dims=10 ** 6, pcf_samples=2)
+    assert logp.shape == (4,) and pen.shape == (2,) and mags is None
+    torch.testing.assert_close(pen, pcf_penalty(model, x[:2], num_dims=10 ** 6), rtol=1e-6, atol=1e-6)
+    _, _, pen1, _ = GlowStepWrapper(model)(x, pcf_dims=10 ** 6, pcf_samples=2, pcf_levels=1)
+    assert pen1.shape == (2,) and torch.isfinite(pen1).all()
+
+
+def _worker_lazy(rank, world, init_file, out_dir):
+    os.environ["OMP_NUM_THREADS"] = "1"
+    dist.init_process_group("gloo", init_method=f"file://{init_file}", rank=rank, world_size=world)
+    model = GlowDDP(GlowStepWrapper(_glow(0)))
+    x = _data()[0][4 * rank:4 * rank + 4]
+    logp, _, pen, _ = model(x, pcf_dims=10 ** 6, pcf_samples=2)
+    n = x[0].numel()
+    (-logp.mean() / (n * math.log(2.0)) + ALPHA * pen.mean() / (n * math.log(2.0))).backward()
+    torch.save([p.grad.detach().clone() for p in model.module.model.parameters()],
+               os.path.join(out_dir, f"lazy_{rank}.pt"))
+    dist.destroy_process_group()
+
+
+def test_ddp_gradients_with_pcf_subset(tmp_path):
+    mp.spawn(_worker_lazy, args=(2, str(tmp_path / "init"), str(tmp_path)), nprocs=2, join=True)
+    ranks = [torch.load(tmp_path / f"lazy_{r}.pt") for r in range(2)]
+    model = GlowStepWrapper(_glow(0))
+    total = 0
+    for r in range(2):
+        x = _data()[0][4 * r:4 * r + 4]
+        logp, _, pen, _ = model(x, pcf_dims=10 ** 6, pcf_samples=2)
+        n = x[0].numel()
+        total = total + 0.5 * (-logp.mean() / (n * math.log(2.0)) + ALPHA * pen.mean() / (n * math.log(2.0)))
+    total.backward()
+    for g0, g1, gr in zip(ranks[0], ranks[1], [p.grad for p in model.model.parameters()]):
+        torch.testing.assert_close(g0, g1, rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(g0, gr, rtol=1e-4, atol=1e-5)
