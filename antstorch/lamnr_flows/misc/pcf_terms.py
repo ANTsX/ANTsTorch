@@ -67,6 +67,41 @@ def pcf_penalty_bpd(model: nn.Module, x: torch.Tensor, num_dims: int, n_dims: in
     return penalty.mean() / (n_dims * math.log(2.0))
 
 
+def axis_row_magnitudes(x: torch.Tensor, z, num_dims: int, seed: int) -> torch.Tensor:
+    """Per-voxel magnitudes |g_k| of encoder rows for shared random coordinates k.
+
+    x must require grad and be the input z was computed from. The coordinates are
+    drawn with a CPU generator seeded by ``seed``, so every view (and every
+    DataParallel replica) given the same seed, batch size and latent layout draws
+    the same k. Returns a tensor (batch, levels * num_dims, voxels), kept in the
+    graph (create_graph=True).
+    """
+    gen = torch.Generator(device="cpu"); gen.manual_seed(int(seed))
+    batch = x.shape[0]; rows = torch.arange(batch, device=x.device)
+    mags = []
+    for zl in _flat_levels(z):
+        for _ in range(num_dims):
+            idx = torch.randint(zl.shape[1], (batch,), generator=gen).to(x.device)
+            sel = torch.zeros_like(zl); sel[rows, idx] = 1.0
+            g = torch.autograd.grad(zl, x, grad_outputs=sel, create_graph=True, retain_graph=True)[0]
+            mags.append(g.abs().sum(dim=1).reshape(batch, -1))
+    return torch.stack(mags, dim=1)
+
+
+def axis_loss_from_magnitudes(mags: Sequence[torch.Tensor]) -> torch.Tensor:
+    """1 - cos between views of the row magnitudes from `axis_row_magnitudes`, averaged."""
+    if len(mags) < 2:
+        raise ValueError("--axis-beta needs at least two views.")
+    shapes = {tuple(m.shape) for m in mags}
+    if len(shapes) != 1:
+        raise ValueError(f"--axis-beta needs the same grid and latent layout in every view; got {sorted(shapes)}.")
+    terms = []
+    for a in range(len(mags)):
+        for b in range(a + 1, len(mags)):
+            terms.append(1.0 - torch.nn.functional.cosine_similarity(mags[a], mags[b], dim=2, eps=1e-12))
+    return torch.stack(terms).mean()
+
+
 def _flat_levels(z) -> List[torch.Tensor]:
     z = z if isinstance(z, (list, tuple)) else [z]
     return [zl.reshape(zl.shape[0], -1) for zl in z]

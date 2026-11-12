@@ -22,6 +22,7 @@ import copy
 import csv
 import gc
 import json
+import math
 import os
 import platform
 from contextlib import nullcontext
@@ -52,8 +53,8 @@ from antstorch.lamnr_flows.misc.latent_alignment import (
 )
 from antstorch.lamnr_flows.misc.pcf_terms import (
     add_pcf_args,
-    axis_alignment_loss,
-    pcf_penalty_bpd,
+    axis_loss_from_magnitudes,
+    axis_row_magnitudes,
     ramp,
 )
 
@@ -76,7 +77,26 @@ class GlowStepWrapper(nn.Module):
         self.alignment_latents = alignment_latents
         self.alignment_pool_size = alignment_pool_size
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, pcf_dims: int = 0, axis_dims: int = 0,
+                axis_seed: int = 0):
+        """Returns (log_prob, z_flat); with pcf_dims or axis_dims > 0, returns
+        (log_prob, z_flat, pcf_penalty, axis_magnitudes) where pcf_penalty is -I_hat
+        per sample (or None) and axis_magnitudes the encoder-row magnitudes for the
+        coordinates drawn with axis_seed (or None). Computing them here, in the same
+        encoder pass and inside DataParallel/DDP's forward, keeps gradient
+        synchronization correct. With these terms the encoder pass runs in float32.
+        """
+        extras = pcf_dims > 0 or axis_dims > 0
+        if extras:
+            x = x.detach()
+            if x.dtype in (torch.float16, torch.bfloat16):
+                x = x.float()
+            x = x.requires_grad_(True)
+            with torch.amp.autocast(device_type=x.device.type, enabled=False):
+                return self._forward(x, pcf_dims, axis_dims, axis_seed)
+        return self._forward(x, 0, 0, 0)
+
+    def _forward(self, x, pcf_dims, axis_dims, axis_seed):
         z, logdet = self.model.inverse_and_log_det(x)
         m = self.model
         if hasattr(m, "q0s"):
@@ -99,7 +119,13 @@ class GlowStepWrapper(nn.Module):
             target_pool_size=self.alignment_pool_size,
             strategy=self.alignment_latents,
         )
-        return log_prob, z_flat
+        if pcf_dims <= 0 and axis_dims <= 0:
+            return log_prob, z_flat
+        from antsnormflows.utils import pcf_penalty_from_latents
+        penalty = (pcf_penalty_from_latents(x, z, logdet, num_dims=pcf_dims, create_graph=True)
+                   if pcf_dims > 0 else None)
+        mags = axis_row_magnitudes(x, z, axis_dims, axis_seed) if axis_dims > 0 else None
+        return log_prob, z_flat, penalty, mags
 
     def inverse_and_log_det(self, x):
         return self.model.inverse_and_log_det(x)
@@ -1891,10 +1917,19 @@ class BaseLAMNrTrainer(abc.ABC):
         # Principal component flow terms (see antstorch/lamnr_flows/misc/pcf_terms.py).
         pcf_on  = float(getattr(args, "pcf_alpha", 0.0)) > 0.0
         axis_on = float(getattr(args, "axis_beta", 0.0)) > 0.0
-        if (pcf_on or axis_on) and self.is_ddp:
-            # The extra encoder passes run on the unwrapped flow, outside DDP's
-            # forward(); gradient synchronization for them is not guaranteed.
-            raise NotImplementedError("--pcf-alpha / --axis-beta are not supported with DDP (torchrun) yet.")
+        if pcf_on or axis_on:
+            try:
+                from antsnormflows.utils import pcf_penalty_from_latents  # noqa: F401
+            except ImportError as ex:
+                raise RuntimeError(
+                    "--pcf-alpha / --axis-beta require antsnormflows with "
+                    "utils.pcf_penalty_from_latents; update the installed antsnormflows."
+                ) from ex
+        pcf_kwargs = {}
+        if pcf_on:
+            pcf_kwargs["pcf_dims"] = int(args.pcf_dims)
+        if axis_on:
+            pcf_kwargs["axis_dims"] = int(args.axis_dims)
         if axis_on and n_views < 2:
             raise ValueError("--axis-beta needs at least two views (--view ... --view ...).")
         if pcf_on and int(args.pcf_dims) < 1 or axis_on and int(args.axis_dims) < 1:
@@ -1986,7 +2021,11 @@ class BaseLAMNrTrainer(abc.ABC):
                 curr_bpd_views: List[float] = []
                 sum_bpd       = 0.0
                 lat_flat: List[torch.Tensor] = []
-                xs_pcf: List[torch.Tensor] = []   # view inputs for the PCF / axis terms
+                pcf_pen: List[torch.Tensor] = []   # -I_hat per sample, per view
+                axis_mags: List[torch.Tensor] = []  # encoder-row magnitudes, per view
+                if axis_on:
+                    # Same seed for every view: the same latent coordinates k are compared.
+                    pcf_kwargs["axis_seed"] = int(torch.randint(0, 2 ** 31 - 1, (1,)).item())
 
                 amp_ctx = (
                     torch.amp.autocast(dev.type, dtype=self.amp_dtype)
@@ -2045,18 +2084,25 @@ class BaseLAMNrTrainer(abc.ABC):
                         # wouldn't just be a perf issue, it would silently
                         # stop gradient synchronization across ranks.
                         if isinstance(m, (GlowDataParallel, GlowDDP)):
-                            logp_v, zflat = m(x_v.float())
+                            out_v = m(x_v.float(), **pcf_kwargs)
+                            logp_v, zflat = out_v[0], out_v[1]
                         else:
                             # Single pass through inverse_and_log_det, as under
                             # DDP (GlowStepWrapper.forward). MultiscaleFlow
                             # .log_prob() bypasses gradient checkpointing, and
                             # calling it next to inverse_and_log_det() ran the
                             # forward twice and kept an un-checkpointed graph.
-                            logp_v, zflat = GlowStepWrapper(
+                            out_v = GlowStepWrapper(
                                 m,
                                 alignment_latents=args.alignment_latents,
                                 alignment_pool_size=args.alignment_pool_size,
-                            )(x_v.float())
+                            )(x_v.float(), **pcf_kwargs)
+                            logp_v, zflat = out_v[0], out_v[1]
+                        if pcf_on:
+                            pcf_pen.append(out_v[2])
+                        if axis_on:
+                            axis_mags.append(out_v[3])
+                        del out_v
 
                         if not torch.isfinite(logp_v).all():
                             tqdm.write(f"[nan] non-finite logp at view {vi}, iter {it}")
@@ -2096,8 +2142,6 @@ class BaseLAMNrTrainer(abc.ABC):
                         curr_bpd_views.append(bpd_v.item())
                         sum_bpd += bpd_v.item()
                         lat_flat.append(torch.nan_to_num(zflat))
-                        if pcf_on or axis_on:
-                            xs_pcf.append(x_v.detach())
 
                         # Explicit cleanup of view tensor and intermediates
                         del x_v, logp_v, zflat
@@ -2138,17 +2182,18 @@ class BaseLAMNrTrainer(abc.ABC):
                     s_align=self.s_align,
                 )
 
-                # Principal component flow terms (--pcf-alpha, --axis-beta), in
-                # float32 outside autocast: alpha * sum_v(-I_hat^(v)) + beta * L_axis.
+                # Principal component flow terms (--pcf-alpha, --axis-beta), computed in
+                # the views' forward passes (float32): alpha * sum_v(-I_hat^(v)) in bits
+                # per dimension + beta * L_axis.
                 L_pcf = torch.tensor(0.0, device=dev, dtype=torch.float32)
                 L_axis = torch.tensor(0.0, device=dev, dtype=torch.float32)
                 if pcf_on:
-                    L_pcf = sum(pcf_penalty_bpd(m_, x_, args.pcf_dims, n_dims) for m_, x_ in zip(models, xs_pcf))
+                    L_pcf = sum(p_.float().mean() for p_ in pcf_pen) / (n_dims * math.log(2.0))
                     loss_total = loss_total + args.pcf_alpha * ramp(it, args.pcf_warmup) * L_pcf
                 if axis_on:
-                    L_axis = axis_alignment_loss(models, xs_pcf, args.axis_dims)
+                    L_axis = axis_loss_from_magnitudes(axis_mags)
                     loss_total = loss_total + args.axis_beta * ramp(it, args.axis_warmup) * L_axis
-                del xs_pcf
+                del pcf_pen, axis_mags
 
                 local_bad = not torch.isfinite(loss_total)
                 if self._sync_skip_flag(local_bad):
