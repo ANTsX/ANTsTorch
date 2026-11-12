@@ -48,6 +48,64 @@ Most of ANTsTorch's registration code follows [syntx](https://github.com/stnava/
 - **Greedy** estimates one forward displacement field and has no native inverse; its `dice_moving` and `dice_sym` depend on a post-hoc inverse, so `dice_fixed` is its primary measure.
 - **SVF** parameterizes a velocity field (B-spline or dense Gaussian-smoothed) and exponentiates it.
 
+### Label-guided ANTsTorch arms
+
+Two optional supervised arms call `antstorch.label_image_registration`:
+
+| Model | Deformable objective | Initialization |
+|---|---|---|
+| `label_syn` | One binary MeanSquares term per common nonzero DKT31 label | Shared canonical affine |
+| `label_intensity_syn` | The same label terms plus T1 local CC (radius 2, weight 1) | Same shared canonical affine |
+
+Both use Gaussian SyN, a 4–2–1 pyramid and 100/100/20 iterations by
+default, with per-label MSQ weight 1 (`--label-weight` to change it).
+They have no syntx counterpart and run after the paired comparison arms.
+They keep ANTsTorch's native optimizer/inverse settings and analytical
+sampling gradients, including in fair mode; the syntx-specific fair-mode
+loop overrides do not apply. Explicit ANTsTorch CLI overrides still apply.
+The affine is supplied as a transform file, so neither arm computes a
+label-centroid initialization. In particular, “labels only” refers to the
+**deformable objective**: its affine is still derived from image intensities.
+
+**These arms optimize the same manual DKT31 labels used to calculate
+Dice.** Their Dice measures fit to the supplied anatomy, rather than
+held-out anatomical accuracy, and should not be interpreted as an unbiased
+improvement over the intensity-only arms. JSON records identify this with
+`supervision: "evaluation_labels"`; summaries and plot labels also identify
+the supervised arms. The existing results table below predates these arms;
+no label-guided results are reported there yet.
+
+For example, run the usual comparison and the two new arms together:
+
+```bash
+python tools/benchmarks/compare_syntx_antstorch_mindboggle.py \
+  --pairs 0 24 88 \
+  --models gaussian sobolev dsti label_syn label_intensity_syn \
+  --device cuda --label-weight 1.0 \
+  --out-dir ~/Desktop/mindboggle_with_labels
+```
+
+Use `--device mps` or `--device cpu` as appropriate. To run only the two
+new arms after an earlier fair-mode comparison, reuse its output directory
+(the syntx affine must already be cached for each requested pair):
+
+```bash
+python tools/benchmarks/compare_syntx_antstorch_mindboggle.py \
+  --pairs 0 24 88 --models label_syn label_intensity_syn \
+  --skip-syntx --device mps \
+  --out-dir ~/Desktop/mindboggle_with_labels
+```
+
+Without cached syntx affines, the evaluator fits canonical ANTsTorch
+intensity affines and records their source; the comparison script warns
+that the start is not shared with syntx. A label-only run writes a new
+`comparison_results.json` in that directory, so archive prior result files
+first if you need to preserve them. As for the other arms, timings exclude
+the canonical affine and evaluation, while including the registration call
+and its transform export. Label-mask construction is part of that call.
+Memory use grows with the number of labels; full 3-D volumes can require
+substantial accelerator memory.
+
 ### Optimizers
 
 | Optimizer | Where | What it does | Benchmark arms (ANTsTorch) | Benchmark arms (syntx) |
@@ -91,7 +149,7 @@ By default the script runs in the *fair mode*: syntx runs first and produces the
 | Option | Default | Meaning |
 |---|---|---|
 | `--pairs N [N ...]` | `0 24 88` | Pair indices (0-89; 0-39 intra-subject, 40-89 inter-subject). Use `$(seq 0 3 89)` for 30 pairs, `$(seq 0 89)` for all. |
-| `--models M [M ...]` | `gaussian sobolev dsti` | Models to run: `gaussian`, `sobolev`, `dsti`, `bspline`, their `_regadam` variants, `greedy`, `greedy_regadam`, `bspline_svf`, `gaussian_svf`. The default models are those with a syntx counterpart of the same algorithm. The SVF models have none: ANTsTorch only, from the shared affine, scored with the same Dice, time and Jacobian measures; they run after the others. |
+| `--models M [M ...]` | `gaussian sobolev dsti` | Models to run: `gaussian`, `sobolev`, `dsti`, `bspline`, their `_regadam` variants, `greedy`, `greedy_regadam`, `bspline_svf`, `gaussian_svf`, `label_syn`, `label_intensity_syn`. The default models are those with a syntx counterpart of the same algorithm. The SVF and label-guided models have none: ANTsTorch only, from the shared affine, scored with the same Dice, time and Jacobian measures; they run after the others. |
 | `--device` | auto-detect | `cuda`, `mps` or `cpu` (cuda, then mps, then cpu), passed identically to both libraries. |
 | `--out-dir` | `~/Desktop/syntx_antstorch_mindboggle_comparison` | Output directory (JSON, Markdown summary, cached affines). Reuse the same directory for `--fireants-only`, `--fireants-sweep` and `--ants-only`, which read the syntx affines cached there. |
 | `--tmp-dir` | `<out-dir>/_scratch` | Base of the per-run scratch folders. syntx and several ANTsTorch paths write displacement fields to the system temp directory and never delete them; each run now gets its own folder, deleted after scoring. Put it on a disk, not on a tmpfs. |

@@ -74,11 +74,18 @@ import contextlib
 import json
 import math
 import os
+from pathlib import Path
 import shutil
 import sys
 import time
 import traceback
 import warnings
+
+# Select this checkout before syntx (or another dependency) can import an
+# installed ANTsTorch. Changing sys.path inside _run_antstorch is too late
+# once Python has cached that installed package in sys.modules.
+ANTSTORCH_ROOT = str(Path(__file__).resolve().parents[2])
+sys.path.insert(0, ANTSTORCH_ROOT)
 
 # syntx's own benchmark (syntx.benchmark.evaluate_mindboggle_pair) passes flow_sigma=3.0 to every SyN model, and syntx.syn warns that
 # flow_sigma only acts as an on/off gate with the spectral regularizers (sobolev / dsti). That is expected here (the value is
@@ -88,10 +95,11 @@ warnings.filterwarnings("ignore", message=r"flow_sigma=.*has no effect", categor
 PAIR_INDICES_DEFAULT = [0, 24, 88]
 _BASE_MODELS = ["gaussian", "sobolev", "dsti", "bspline"]
 SVF_MODELS = ["bspline_svf", "gaussian_svf"]  # ANTsTorch stationary velocity fields: no syntx counterpart, antstorch-only arms
-MODELS = _BASE_MODELS + [f"{m}_regadam" for m in _BASE_MODELS] + ["greedy", "greedy_regadam"] + SVF_MODELS  # syntx.greedy vs antstorch.greedy, optimizer adam / regadam (see _run_greedy)
+LABEL_MODELS = ["label_syn", "label_intensity_syn"]
+ANTSTORCH_ONLY_MODELS = SVF_MODELS + LABEL_MODELS
+MODELS = _BASE_MODELS + [f"{m}_regadam" for m in _BASE_MODELS] + ["greedy", "greedy_regadam"] + ANTSTORCH_ONLY_MODELS  # syntx.greedy vs antstorch.greedy, optimizer adam / regadam (see _run_greedy)
 
 SYNTX_ROOT = os.path.expanduser("~/Pkg/syntx")
-ANTSTORCH_ROOT = os.path.expanduser("~/Pkg/ANTsTorch")
 DATA_DIR = os.path.expanduser("~/Data/Public/Mindboggle/Volumes")
 
 
@@ -119,7 +127,7 @@ _SYNTX_MODEL_NAME = {
 # _SYN_REGULARIZERS/_SYN_OPTIMIZER_OVERRIDE registry key directly.
 _ANTSTORCH_MODEL_NAME = {m: f"{m}_syn" for m in _BASE_MODELS}
 _ANTSTORCH_MODEL_NAME.update({f"{m}_regadam": f"{m}_regadam" for m in _BASE_MODELS})
-_ANTSTORCH_MODEL_NAME.update({m: m for m in SVF_MODELS})
+_ANTSTORCH_MODEL_NAME.update({m: m for m in ANTSTORCH_ONLY_MODELS})
 
 
 # antstorch side: nothing to set here any more. The matched hyperparameters
@@ -134,6 +142,7 @@ SYNTX_KWARGS = {
 }
 
 
+LABEL_WEIGHT = 1.0
 ANTSTORCH_EXTRA = {}  # set from CLI in main(); antstorch arms only (syntx arms are unaffected)
 
 # --- "fair" mode (default of the CLI; module default False so tools importing _run_* keep their behavior) ---
@@ -165,12 +174,14 @@ def _run_antstorch(reg, pair_idx, device, out_dir, matched=True):  # `matched` k
     model = _ANTSTORCH_MODEL_NAME[reg]
     extra = {}
     if reg not in SVF_MODELS:  # the SyN-specific options (fair-mode loop settings, inverse options) do not apply to SVF
-        if FAIR:
+        if FAIR and reg not in LABEL_MODELS:
             extra.update(FAIR_ANTSTORCH_KWARGS)
             if reg in FAIR_MODEL_OVERRIDES:
                 model, model_extra = FAIR_MODEL_OVERRIDES[reg]
                 extra.update(model_extra)
         extra.update(ANTSTORCH_EXTRA)
+        if reg in LABEL_MODELS:
+            extra["label_image_weighting"] = LABEL_WEIGHT
     t0 = time.time()
     try:
         rec = antstorch_eval(
@@ -475,12 +486,12 @@ def _drop_dir(path):
 def _run_pair_model(reg, pair_idx, device, out_dir, libs):
     """One (pair, model): libs run in the given order; in fair mode syntx goes first and shares its affine."""
     recs = []
-    if reg in SVF_MODELS:  # no syntx counterpart: antstorch only, from the shared affine if syntx produced one for this pair
+    if reg in ANTSTORCH_ONLY_MODELS:  # no syntx counterpart: antstorch only, from the shared affine if syntx produced one for this pair
         libs = tuple(l for l in libs if l[0] == "antstorch")
     for lib, fn in libs:
         with _scratch(f"{lib}_{reg}_pair{pair_idx:03d}"):
             rec = _add_jacobian(fn(reg, pair_idx, device, out_dir), pair_idx)
-            if reg in SVF_MODELS and rec.get("_status") == "SUCCESS":
+            if reg in ANTSTORCH_ONLY_MODELS and rec.get("_status") == "SUCCESS":
                 rec["_affine_source"] = _affine_source(out_dir, pair_idx)
                 if FAIR and rec["_affine_source"] != "syntx":
                     print(f"    !! {reg}: affine source is {rec['_affine_source']!r}, not syntx's (run a syntx model on this pair first "
@@ -514,15 +525,16 @@ def _aggregate(results, models, skip_syntx):
             by.setdefault((r["_regularizer"], r["_library"]), {})[r["pair_idx"]] = r
     for reg in models:
         A, S = by.get((reg, "antstorch"), {}), by.get((reg, "syntx"), {})
-        svf = reg in SVF_MODELS
-        pairs = sorted(set(A) & set(S)) if not (skip_syntx or svf) else sorted(A)
+        standalone = reg in ANTSTORCH_ONLY_MODELS
+        pairs = sorted(set(A) & set(S)) if not (skip_syntx or standalone) else sorted(A)
         if not pairs:
             continue
         da = np.array([A[p]["dice_sym"] for p in pairs])
         ta = np.array([A[p]["_deformable_seconds"] for p in pairs])
         fa = np.nanmedian([_jv(A[p], "jac_folding_pct") for p in pairs])
-        if skip_syntx or svf:
-            lines.append(f"| {reg}{' (antstorch seul)' if svf else ''} | {len(pairs)} | — | {da.mean():.4f} | — | — | — | — | {ta.mean():.1f} | — | — / {fa:.4f} |")
+        if skip_syntx or standalone:
+            display = reg + (' (supervised)' if reg in LABEL_MODELS else '')
+            lines.append(f"| {display}{' (antstorch seul)' if standalone else ''} | {len(pairs)} | — | {da.mean():.4f} | — | — | — | — | {ta.mean():.1f} | — | — / {fa:.4f} |")
             continue
         ds = np.array([S[p]["dice_sym"] for p in pairs])
         ts = np.array([S[p]["_deformable_seconds"] for p in pairs])
@@ -1122,7 +1134,7 @@ def _fireants_pair_table(results, pairs, models):
         f = by_key.get((pair_idx, FIREANTS_LABEL), {}).get("fireants", {})
         f_ok = f.get("_status") == "SUCCESS"
         for reg in models:
-            if reg in SVF_MODELS:  # antstorch-only arms are not part of the three-way table
+            if reg in ANTSTORCH_ONLY_MODELS:  # antstorch-only arms are not part of the three-way table
                 continue
             e = by_key.get((pair_idx, reg), {})
             s, a = e.get("syntx", {}), e.get("antstorch", {})
@@ -1138,14 +1150,18 @@ def _fireants_pair_table(results, pairs, models):
 
 
 def main():
-    global FAIR, KEEP_FIELDS, SCRATCH_BASE
+    global FAIR, KEEP_FIELDS, SCRATCH_BASE, LABEL_WEIGHT
     global FIREANTS_PRESET, FIREANTS_TOLERANCE, FIREANTS_OVERRIDES, SWEEP_SET, FIREANTS_NORMALIZE, FIREANTS_VERBOSE, ANTS_MODEL
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--pairs", type=int, nargs="+", default=PAIR_INDICES_DEFAULT)
     ap.add_argument("--models", nargs="+", default=DEFAULT_MODELS, choices=MODELS,
                     help="Default: gaussian sobolev dsti (the arms with a syntx counterpart of the same algorithm). "
                          "bspline_svf / gaussian_svf are ANTsTorch stationary-velocity-field models with no syntx counterpart: "
-                         "antstorch only, from the shared affine, scored with the same Dice / time / Jacobian measures.")
+                         "antstorch only, from the shared affine, scored with the same Dice / time / Jacobian measures. "
+                         "label_syn / label_intensity_syn are supervised label-only / label+T1 SyN arms, also antstorch only.")
+    ap.add_argument("--label-weight", type=float, default=1.0,
+                    help="Per-label MSQ weight for label_syn / label_intensity_syn (default 1). "
+                         "These supervised arms optimize the same DKT31 labels used for Dice scoring.")
     ap.add_argument("--device", default=None,
                     help="cuda / mps / cpu. Default: auto-detect (cuda, then mps, then cpu), passed identically to both libraries.")
     ap.add_argument("--inverse-schedule", choices=["per_iteration", "end_of_level"], default=None,
@@ -1254,8 +1270,11 @@ def main():
         base = os.path.expanduser("~/Desktop/syntx_antstorch_mindboggle_comparison")
         args.out_dir = base + ("_legacy" if args.legacy_defaults else "") + ("_own" if args.own_defaults or args.legacy_defaults else "")
     FAIR = not (args.own_defaults or args.legacy_defaults)
-    # SVF arms (antstorch only) go last, so syntx has already produced the shared affine of each pair's earlier arms.
-    args.models = [m for m in args.models if m not in SVF_MODELS] + [m for m in args.models if m in SVF_MODELS]
+    # ANTsTorch-only arms go last, so syntx has already produced the shared affine of each pair's earlier arms.
+    LABEL_WEIGHT = args.label_weight
+    if not math.isfinite(LABEL_WEIGHT) or LABEL_WEIGHT <= 0:
+        ap.error("--label-weight must be finite and positive")
+    args.models = [m for m in args.models if m not in ANTSTORCH_ONLY_MODELS] + [m for m in args.models if m in ANTSTORCH_ONLY_MODELS]
     if args.fireants:
         import torch  # (local: main() imports torch locally elsewhere, which makes the name local to this function)
         if not (str(args.device).startswith("cuda") and torch.cuda.is_available()):
@@ -1327,12 +1346,13 @@ def main():
             _run_fireants(args.pairs[0], args.device, warm_dir, DATA_DIR)
         if any(m.startswith("greedy") for m in args.models) and not args.models[0].startswith("greedy"):
             _run_pair_model("greedy", args.pairs[0], args.device, warm_dir, libs)
-        if any(m in SVF_MODELS for m in args.models) and args.models[0] not in SVF_MODELS:
-            _run_pair_model(next(m for m in args.models if m in SVF_MODELS), args.pairs[0], args.device, warm_dir, libs)
+        for model in args.models[1:]:
+            if model in ANTSTORCH_ONLY_MODELS:
+                _run_pair_model(model, args.pairs[0], args.device, warm_dir, libs)
         _SHARED_AFFINE_DONE.clear()
         shutil.rmtree(warm_dir, ignore_errors=True)  # the warm-up fields are never needed
 
-    total = len(args.pairs) * sum(1 if m in SVF_MODELS else len(libs) for m in args.models)
+    total = len(args.pairs) * sum(1 if m in ANTSTORCH_ONLY_MODELS else len(libs) for m in args.models)
     done = 0
     for pair_idx in args.pairs:
         for reg in args.models:
@@ -1378,7 +1398,7 @@ def main():
             pair = by_key.get((pair_idx, reg), {})
             s, a = pair.get("syntx", {}), pair.get("antstorch", {})
             s_ok, a_ok = s.get("_status") == "SUCCESS", a.get("_status") == "SUCCESS"
-            s_dice = f"{s['dice_sym']:.4f}" if s_ok else ("—" if (args.skip_syntx or reg in SVF_MODELS) else "ÉCHEC")
+            s_dice = f"{s['dice_sym']:.4f}" if s_ok else ("—" if (args.skip_syntx or reg in ANTSTORCH_ONLY_MODELS) else "ÉCHEC")
             a_dice = f"{a['dice_sym']:.4f}" if a_ok else "ÉCHEC"
             delta = f"{(a['dice_sym'] - s['dice_sym']):+.4f}" if (s_ok and a_ok) else "—"
             s_t = f"{s.get('_deformable_seconds', float('nan')):.1f}" if s_ok else "—"
@@ -1405,6 +1425,16 @@ f"antstorch inverse_schedule : {_eff_schedule}"
                 f"syntx arms : {'skipped' if args.skip_syntx else 'run'}", ""]
     md_lines.append("## Résumé apparié (paires où les deux bibliothèques ont réussi ; temps = partie déformable seule)")
     md_lines.append("")
+    if any(model in LABEL_MODELS for model in args.models):
+        md_lines.extend([
+            "", "**Supervised label-guided arms:** `label_syn` (labels only) and `label_intensity_syn` (labels + T1) "
+            "optimize the same DKT31 labels used for Dice scoring. Their Dice measures fit to supplied anatomy, "
+            "not held-out accuracy, and is not a like-for-like comparison with intensity-only arms. "
+            f"Per-label MSQ weight: {LABEL_WEIGHT}. Both start from the cached canonical affine "
+            "(see each record’s `_affine_source`), levels 4/2/1 and iterations 100/100/20; "
+            "the T1 term uses CC radius 2 with weight 1. Label arms keep native ANTsTorch optimizer settings "
+            "unless explicitly overridden; fair-mode syntx loop overrides do not apply.", "",
+        ])
     md_lines.extend(_aggregate(results, args.models, args.skip_syntx))
     md_lines.append("")
     md_lines.append("## Détail par paire")

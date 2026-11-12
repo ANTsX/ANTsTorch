@@ -37,7 +37,8 @@ from matplotlib.patches import Patch  # noqa: E402
 COLORS = {"syntx": "#2a78d6", "ANTsTorch": "#eb6834", "FireANTs": "#1baf7a", "ANTs C++": "#eda100"}
 INK, INK2, GRID, SURFACE = "#0b0b0b", "#52514e", "#e4e3df", "#ffffff"
 ORDER = ["gaussian", "gaussian_regadam", "sobolev", "sobolev_regadam", "dsti", "dsti_regadam", "bspline", "bspline_regadam",
-         "greedy", "greedy_regadam", "bspline_svf", "gaussian_svf"]
+         "greedy", "greedy_regadam", "bspline_svf", "gaussian_svf",
+         "label_syn (supervised)", "label_intensity_syn (supervised)"]
 
 
 def _load(path):
@@ -62,6 +63,8 @@ def collect(results_dir):
         if lib == "syntx" and reg.endswith("_regadam") and reg != "greedy_regadam":
             continue  # same syntx run as the base model
         if lib in ("syntx", "antstorch"):
+            if reg in ("label_syn", "label_intensity_syn"):
+                reg += " (supervised)"
             add(reg, "syntx" if lib == "syntx" else "ANTsTorch", r)
         elif lib == "fireants":
             add("FireANTs\nmatched", "FireANTs", r)

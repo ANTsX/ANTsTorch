@@ -56,7 +56,7 @@ import ants
 from antstorch.benchmark.data import load_mindboggle_pair
 from antstorch.benchmark.metrics import compute_bidirectional_dice, compute_jacobian_metrics
 from antstorch.ants_transform_io import read_affine_transform
-from antstorch.syn import syn_registration
+from antstorch.syn import syn_registration, label_image_registration
 
 # The '_syn' suffix on every key here is deliberate, not decorative: it
 # disambiguates these dense-SyN-stage model names from _BSPLINE_SVF_MODELS
@@ -101,6 +101,7 @@ _SYN_OPTIMIZER_OVERRIDE = {
 }
 _BSPLINE_SVF_MODELS = ("bspline_svf", "svf")
 _GAUSSIAN_SVF_MODELS = ("gaussian_svf",)
+_LABEL_MODELS = ("label_syn", "label_intensity_syn")
 
 # Traditional (non-ANTsTorch) ANTs baselines, run via a direct
 # ants.registration(type_of_transform=...) call (see _run_ants_traditional()
@@ -123,6 +124,19 @@ _GAUSSIAN_SVF_MODELS = ("gaussian_svf",)
 _ANTS_TRADITIONAL_MODELS = {
     "ants_syn_quick": "antsRegistrationSyNQuick[so]",
 }
+
+
+_SYN_FORWARDED_KWARGS = (
+    "levels", "grad_step", "flow_sigma", "total_sigma",
+    "update_field_mesh_size_at_base_level", "total_field_mesh_size_at_base_level",
+    "update_field_spline_distance", "total_field_spline_distance",
+    "bspline_enforce_stationary_boundary", "syn_metric", "neighborhood_radius",
+    "antisymmetric", "inverse_method", "in_loop_inverse_steps", "padding_mode",
+    "inverse_schedule", "end_of_level_inverse_steps", "syntx_parity", "use_analytical_gradients", "sobolev_alpha",
+    "gaussian_sigma_mode", "conservative_smooth", "syntx_defaults",
+    "optimizer", "optimizer_lr", "adam_betas", "adam_eps",
+    "smoothing_sigmas",
+)
 
 
 def _is_deformable_only_ants_transform(type_of_transform: str) -> bool:
@@ -611,6 +625,13 @@ def evaluate_mindboggle_pair(
     pair_idx : int
         Index of the pair (0 to 89 for the bundled default pairs.csv).
     model : str
+        ``label_syn`` and ``label_intensity_syn`` use the evaluation labels
+        to guide SyN (without/with T1 intensities). These supervised arms
+        start from the canonical affine and default to levels (4,2,1),
+        iterations (100,100,20), label weight 1, and CC radius 2 for T1.
+        Their Dice is an in-objective fit measure, not held-out accuracy.
+        ``label_image_weighting`` and SyN options can be overridden.
+
         Registration model: ``'gaussian_syn'``, ``'sobolev_syn'``,
         ``'dsti_syn'``, or ``'bspline_syn'`` (all four dispatch to the same
         dense symmetric SyN stage, ``antstorch.syn.syn_registration(...,
@@ -775,16 +796,7 @@ def evaluate_mindboggle_pair(
             syn_kwargs["reg_iterations"] = reg_iters
             if "levels" not in kwargs and len(reg_iters) == len(DEFAULT_REGISTRATION_LEVELS):
                 syn_kwargs["levels"] = DEFAULT_REGISTRATION_LEVELS
-        for key in (
-            "levels", "grad_step", "flow_sigma", "total_sigma",
-            "update_field_mesh_size_at_base_level", "total_field_mesh_size_at_base_level",
-            "update_field_spline_distance", "total_field_spline_distance",
-            "bspline_enforce_stationary_boundary", "syn_metric", "neighborhood_radius",
-            "antisymmetric", "inverse_method", "in_loop_inverse_steps", "padding_mode",
-            "inverse_schedule", "end_of_level_inverse_steps", "syntx_parity", "use_analytical_gradients", "sobolev_alpha",
-            "gaussian_sigma_mode", "conservative_smooth", "syntx_defaults",
-            "optimizer", "optimizer_lr", "adam_betas", "adam_eps",
-        ):
+        for key in _SYN_FORWARDED_KWARGS:
             if key in kwargs:
                 syn_kwargs[key] = kwargs[key]
         if model_lower in _SYN_OPTIMIZER_OVERRIDE:
@@ -800,6 +812,23 @@ def evaluate_mindboggle_pair(
         # without any special-casing here (project doc, "default spline
         # distance" update).
         res_reg = syn_registration(**syn_kwargs)
+    elif model_lower in _LABEL_MODELS:
+        # Both supervised arms share the same intensity-derived canonical
+        # affine as the unsupervised arms; do not fit label centroids here.
+        label_kwargs = {key: kwargs[key] for key in _SYN_FORWARDED_KWARGS + ("reg_iterations", "regularizer") if key in kwargs}
+        label_kwargs.setdefault("levels", (4, 2, 1))
+        label_kwargs.setdefault("reg_iterations", (100, 100, 20))
+        with_intensity = model_lower == "label_intensity_syn"
+        res_reg = label_image_registration(
+            fixed_label_images=fl, moving_label_images=ml,
+            fixed_intensity_images=fi if with_intensity else None,
+            moving_intensity_images=mi if with_intensity else None,
+            initial_transforms=[affine_path],
+            type_of_deformable_transform="antsRegistrationSyN[so]",
+            label_image_weighting=kwargs.get("label_image_weighting", 1.0),
+            output_prefix=registration_outprefix or "",
+            device=device, verbose=verbose, **label_kwargs,
+        )
     elif model_lower in _BSPLINE_SVF_MODELS:
         svf_kwargs = {k: v for k, v in kwargs.items() if k in (
             "reg_iterations", "shrink_factors", "smoothing_sigmas", "mesh_size", "spline_distance",
@@ -845,7 +874,7 @@ def evaluate_mindboggle_pair(
     else:
         raise ValueError(
             f"Unknown registration model: '{model}'. Supported: "
-            f"{sorted(set(_SYN_REGULARIZERS) | set(_BSPLINE_SVF_MODELS) | set(_GAUSSIAN_SVF_MODELS) | set(_ANTS_TRADITIONAL_MODELS))}, "
+            f"{sorted(set(_SYN_REGULARIZERS) | set(_BSPLINE_SVF_MODELS) | set(_GAUSSIAN_SVF_MODELS) | set(_LABEL_MODELS) | set(_ANTS_TRADITIONAL_MODELS))}, "
             "or any deformable-only ants.registration type_of_transform string "
             "directly (e.g. 'antsRegistrationSyNQuick[so]', 'SyNOnly', "
             "'antsRegistrationSyN[bo]') -- one whose bracketed suffix ends in "
@@ -859,7 +888,12 @@ def evaluate_mindboggle_pair(
     warped_image_path = None
     if registration_output_dir is not None:
         warped_image_path = os.path.join(registration_output_dir, "warped_moving.nii.gz")
-        ants.image_write(res_reg["warpedmovout"], warped_image_path)
+        warped_image = res_reg["warpedmovout"]
+        if model_lower in _LABEL_MODELS:
+            # label_image_registration's primary images are segmentations;
+            # the benchmark's warped_moving output always denotes T1 intensity.
+            warped_image = ants.apply_transforms(fixed=fi, moving=mi, transformlist=res_reg["fwdtransforms"])
+        ants.image_write(warped_image, warped_image_path)
 
     # 4. Evaluate Structural and Topological Metrics
     fwd_tx = res_reg["fwdtransforms"]
@@ -934,6 +968,14 @@ def evaluate_mindboggle_pair(
         "loss_history": loss_history_path,
     }
 
+    if model_lower in _LABEL_MODELS:
+        record.update(
+            supervision="evaluation_labels",
+            labels_used_for_optimization=True,
+            intensity_images_used_for_deformation=model_lower == "label_intensity_syn",
+            label_image_weighting=kwargs.get("label_image_weighting", 1.0),
+            registration_provenance=res_reg.get("provenance", {}),
+        )
     clean_device_cache()
     return record
 
