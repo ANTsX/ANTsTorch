@@ -83,7 +83,8 @@ def test_pcf_cpu_training_two_channels(tmp_path, dim, module, trainer_class):
     views, _, _, _ = cohort(tmp_path)
     args = module._build_args(_cli(tmp_path, [views[0], views[1]], 2, dim,
                                    ['--pcf-alpha', '0.1', '--pcf-dims', '2', '--pcf-warmup', '1',
-                                    '--pcf-every', '2', '--pcf-levels-per-step', '1']))
+                                    '--pcf-every', '2', '--pcf-levels-per-step', '1',
+                                    '--grad-norm-every', '2']))
     assert args.pcf_alpha == 0.1 and args.pcf_dims == 2
     trainer = trainer_class()
     trainer.setup(args)
@@ -99,6 +100,30 @@ def test_pcf_cpu_training_two_channels(tmp_path, dim, module, trainer_class):
     assert not pd.isna(r2["pcf"])                                   # --pcf-every 2
     expected = r2["loss"] - r2["pcf_weight"] * 2 * r2["pcf"] + r2["pcf_weight"] * r2["pcf"]
     assert r2["objective"] == pytest.approx(expected, abs=1e-3)
+    assert df["grad_norm"].notna().all() and (df["grad_norm"] > 0).all()
+    assert pd.isna(r1["grad_norm_main"]) and r2["grad_norm_main"] > 0 and r2["grad_norm_reg"] > 0
+    assert -1.0 <= r2["grad_cos"] <= 1.0
+
+
+def test_grad_norm_decomposition_matches_manual():
+    from antstorch.lamnr_flows.misc.pcf_terms import grad_norm_decomposition
+    torch.manual_seed(0)
+    net = torch.nn.Linear(3, 2)
+    x = torch.randn(5, 3)
+    main = (net(x) ** 2).mean()
+    reg = net.weight.abs().sum() * 0.1
+    n_main, n_reg, cos = grad_norm_decomposition(main, reg, net.parameters())
+    gm = torch.cat([g.reshape(-1) for g in torch.autograd.grad(main, list(net.parameters()), retain_graph=True)])
+    gr = torch.cat([g.reshape(-1) if g is not None else torch.zeros_like(p).reshape(-1)
+                    for g, p in zip(torch.autograd.grad(reg, list(net.parameters()), retain_graph=True,
+                                                        allow_unused=True), net.parameters())])
+    assert n_main == pytest.approx(float(gm.norm()), rel=1e-5)
+    assert n_reg == pytest.approx(float(gr.norm()), rel=1e-5)
+    assert cos == pytest.approx(float(gm @ gr / (gm.norm() * gr.norm())), rel=1e-4)
+    (main + reg).backward()                     # graph still usable afterwards
+    assert n_main and net.weight.grad is not None
+    out = grad_norm_decomposition((net(x) ** 2).mean(), None, net.parameters())
+    assert out[0] > 0 and out[1] is None and out[2] is None
 
 
 def test_metrics_csv_upgrade_and_plots(tmp_path):

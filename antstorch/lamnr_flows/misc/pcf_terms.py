@@ -143,9 +143,45 @@ def axis_alignment_loss(models: Sequence[nn.Module], xs: Sequence[torch.Tensor],
     return torch.stack(terms).mean()
 
 
+def grad_norm_decomposition(main_loss: torch.Tensor, reg_loss, params):
+    """Gradient norms of the main objective and of the regularizers, and their cosine.
+
+    Uses torch.autograd.grad with retain_graph=True, so the graph stays usable for the
+    real backward(); it does not accumulate .grad and (checked with DDP/gloo) does not
+    disturb DistributedDataParallel's gradient synchronization. Values are local to the
+    process (not averaged over ranks). Returns (norm_main, norm_reg, cos); norm_reg and
+    cos are None when reg_loss is None.
+    """
+    params = [p for p in params if p.requires_grad]
+    g_main = torch.autograd.grad(main_loss, params, retain_graph=True, allow_unused=True)
+    flat_main = torch.cat([(g if g is not None else torch.zeros_like(p)).reshape(-1).float()
+                           for g, p in zip(g_main, params)])
+    n_main = float(flat_main.norm())
+    if reg_loss is None or not torch.is_tensor(reg_loss) or not reg_loss.requires_grad:
+        return n_main, None, None
+    g_reg = torch.autograd.grad(reg_loss, params, retain_graph=True, allow_unused=True)
+    flat_reg = torch.cat([(g if g is not None else torch.zeros_like(p)).reshape(-1).float()
+                          for g, p in zip(g_reg, params)])
+    n_reg = float(flat_reg.norm())
+    cos = float(torch.dot(flat_main, flat_reg) / (flat_main.norm() * flat_reg.norm() + 1e-30))
+    return n_main, n_reg, cos
+
+
+def add_grad_norm_args(ap) -> None:
+    """--grad-norm-every: gradient-norm diagnostics (all LAMNr trainers)."""
+    g = ap.add_argument_group("gradient diagnostics")
+    g.add_argument("--grad-norm-every", type=int, default=0, metavar="N",
+        help="Every N iterations, log in metrics.csv the gradient norms of the main objective "
+             "(likelihood + alignment) and of the regularizers (PCF, axis) separately, and their "
+             "cosine, before clipping (first micro-batch, rank 0; costs two extra backward passes "
+             "on those iterations). With lazy PCF choose N a multiple of --pcf-every. 0 (default): "
+             "off. The total gradient norm before clipping is always logged.")
+
+
 def add_pcf_args(ap, axis: bool = True) -> None:
     """Register the PCF options, and the axis-alignment options unless axis=False
-    (views without a common spatial grid, e.g. tabular)."""
+    (views without a common spatial grid, e.g. tabular). Also registers --grad-norm-every."""
+    add_grad_norm_args(ap)
     g = ap.add_argument_group("principal component flow")
     g.add_argument("--pcf-alpha", type=float, default=0.0, metavar="ALPHA",
         help="Weight of the PCF penalty -I_hat (bits/dim), summed over views. 0 (default): off.")
