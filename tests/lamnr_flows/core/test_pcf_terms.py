@@ -90,6 +90,34 @@ def test_pcf_cpu_training_two_channels(tmp_path, dim, module, trainer_class):
     trainer.train_loader.dataset.do_data_augmentation = False
     trainer.train()
     assert all(torch.isfinite(p).all() for m in trainer.models for p in m.parameters())
+    import pandas as pd
+    from antstorch.lamnr_flows.core.train_lamnr_glow_base import METRIC_COLUMNS
+    df = pd.read_csv(tmp_path / "run" / "metrics.csv")
+    assert list(df.columns) == METRIC_COLUMNS
+    r1, r2 = df.set_index("iter").loc[1], df.set_index("iter").loc[2]
+    assert pd.isna(r1["pcf"]) and r1["objective"] == pytest.approx(r1["loss"], abs=1e-4)
+    assert not pd.isna(r2["pcf"])                                   # --pcf-every 2
+    expected = r2["loss"] - r2["pcf_weight"] * 2 * r2["pcf"] + r2["pcf_weight"] * r2["pcf"]
+    assert r2["objective"] == pytest.approx(expected, abs=1e-3)
+
+
+def test_metrics_csv_upgrade_and_plots(tmp_path):
+    import pandas as pd
+    from antstorch.lamnr_flows.core.train_lamnr_glow_base import (
+        METRIC_COLUMNS, _metrics_row, _prepare_metrics_csv, _save_metric_plots)
+    csv = tmp_path / "metrics.csv"
+    csv.write_text("iter,loss,sum_bpd,lr\n" + "".join(f"{i},{3 - i * 0.01},{3 - i * 0.01},1e-4\n" for i in range(1, 31)))
+    _prepare_metrics_csv(csv, start_iter=21)                       # resume at 21 from an old-format file
+    df = pd.read_csv(csv)
+    assert list(df.columns) == METRIC_COLUMNS and df["iter"].max() == 20
+    with open(csv, "a") as f:
+        for i in range(21, 41):
+            f.write(_metrics_row(i, 2.5, 2.4, 1e-4, pcf=1.0 - i * 0.01 if i % 4 == 0 else None,
+                                 pcf_weight=0.1, objective=2.5))
+    _save_metric_plots(csv, tmp_path, remove_spikes=True)
+    for name in ("loss_curve.png", "bpd_curve.png", "pcf_curve.png"):
+        assert (tmp_path / name).exists()
+    assert not (tmp_path / "axis_curve.png").exists()
 
 
 def test_axis_alignment_cpu_training_two_views(tmp_path):

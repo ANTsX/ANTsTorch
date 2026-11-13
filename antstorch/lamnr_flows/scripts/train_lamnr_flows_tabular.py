@@ -75,6 +75,8 @@ from antstorch.lamnr_flows.core.train_lamnr_glow_base import (
     make_warmup,
     n_params,
     set_deterministic,
+    _metrics_row,
+    _prepare_metrics_csv,
     _save_metric_plots,
 )
 from antstorch.lamnr_flows.misc.latent_alignment import (
@@ -637,6 +639,7 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
             raise ValueError("--pcf-dims must be >= 1.")
         pcf_every = max(1, int(getattr(args, "pcf_every", 1)))
         pcf_samples = int(getattr(args, "pcf_samples", 0))
+        last_pcf_log: Optional[float] = None
 
         train_iter = iter(self.train_loader)
 
@@ -770,6 +773,10 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
             curr_loss  = float(loss_acc.item()) / float(grad_accum)
             L_align_log= float(align_acc.item()) / float(grad_accum)
             curr_bpd   = [b / float(grad_accum) for b in bpd_acc]
+            pcf_step   = pcf_on and it % pcf_every == 0
+            L_pcf_log  = float(pcf_acc.item()) / float(grad_accum)
+            if pcf_step:
+                last_pcf_log = L_pcf_log
 
             # EMA display
             if ema_loss_disp is None:
@@ -790,14 +797,27 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
             }
             for i in range(n_views):
                 postfix[f"bpd{i}"] = f"{curr_bpd[i]:.3f}"
-            if pcf_on:
-                postfix["pcf"] = f"{float(pcf_acc.item()) / float(grad_accum):.4f}"
+            if pcf_on and last_pcf_log is not None:
+                postfix["pcf"] = f"{last_pcf_log:.4f}"
             pbar.set_postfix(postfix)
             pbar.update(1)
 
-            # CSV row
+            # CSV row (columns: METRIC_COLUMNS of train_lamnr_glow_base)
+            pcf_w = args.pcf_alpha * ramp(it, args.pcf_warmup) if pcf_on else None
+            objective = curr_loss
+            if pcf_on:
+                if pcf_step:
+                    objective -= pcf_w * pcf_every * L_pcf_log
+                if last_pcf_log is not None:
+                    objective += pcf_w * last_pcf_log
             with open(self.csv_path, "a") as f:
-                f.write(f"{it},{curr_loss:.6f},{sum(curr_bpd):.6f},{lr_now:.6g}\n")
+                f.write(_metrics_row(
+                    it, curr_loss, sum(curr_bpd), lr_now,
+                    align=L_align_log if args.align != "none" else None,
+                    pcf=L_pcf_log if pcf_step else None,
+                    pcf_weight=pcf_w,
+                    objective=objective,
+                ))
 
             # Eval + checkpoint
             if it % args.eval_interval == 0:
@@ -948,10 +968,8 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
         with self.global_step.get_lock():
             self.global_step.value = int(self.start_iter)
 
-        # CSV header
-        if not self.csv_path.exists():
-            with open(self.csv_path, "w") as f:
-                f.write("iter,loss,sum_bpd,lr\n")
+        # CSV header (or, on resume, rows before start_iter with the current columns)
+        _prepare_metrics_csv(self.csv_path, self.start_iter)
 
         # Screen dump
         print(f"\n[tabular trainer] {len(self.models)} view(s), dims={self._view_dims}")

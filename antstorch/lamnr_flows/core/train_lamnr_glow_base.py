@@ -765,37 +765,90 @@ def _save_samples_grid(
         return False, str(e)
 
 
+METRIC_COLUMNS = ["iter", "loss", "sum_bpd", "lr", "align", "pcf", "pcf_weight", "axis", "objective"]
+"""Columns of metrics.csv (Glow and tabular LAMNr trainers).
+
+loss       : value optimized at this iteration (on lazy PCF iterations it includes the
+             penalty multiplied by --pcf-every, so it jumps every N iterations);
+sum_bpd    : likelihood term, bits per dimension summed over views;
+align      : raw alignment loss (empty with --align none);
+pcf        : PCF penalty -I_hat in bits/dim, on the iterations where it is computed;
+pcf_weight : nominal weight alpha * warm-up ramp (without the --pcf-every factor);
+axis       : cross-view axis-alignment loss (empty without --axis-beta);
+objective  : smooth training objective: loss without the lazy PCF spike, plus
+             pcf_weight * the latest pcf value (equals loss when PCF is off).
+"""
+
+
+def _fmt_metric(v) -> str:
+    if v is None:
+        return ""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return ""
+    return f"{v:.6g}" if np.isfinite(v) else ""
+
+
+def _metrics_row(it, loss, sum_bpd, lr, align=None, pcf=None, pcf_weight=None,
+                 axis=None, objective=None) -> str:
+    vals = [loss, sum_bpd, lr, align, pcf, pcf_weight, axis, objective]
+    return ",".join([str(int(it))] + [_fmt_metric(v) for v in vals]) + "\n"
+
+
+def _prepare_metrics_csv(csv_path: Path, start_iter: int) -> None:
+    """Create metrics.csv with METRIC_COLUMNS, or, on resume, keep the rows before
+    start_iter and upgrade an older header (iter,loss,sum_bpd,lr) to the new columns."""
+    if not csv_path.exists():
+        with open(csv_path, "w") as f:
+            f.write(",".join(METRIC_COLUMNS) + "\n")
+        return
+    try:
+        df = pd.read_csv(csv_path)
+        df = df[df["iter"] < start_iter]
+        for c in METRIC_COLUMNS:
+            if c not in df.columns:
+                df[c] = np.nan
+        df[METRIC_COLUMNS].to_csv(csv_path, index=False)
+    except Exception as e:
+        print(f"[warn] Could not clean CSV: {e}")
+
+
 def _save_metric_plots(
     csv_path: Path, out_dir: Path, remove_spikes: bool = False
 ) -> None:
+    """Write loss_curve.png (objective), bpd_curve.png and, when present,
+    pcf_curve.png, align_curve.png and axis_curve.png from metrics.csv.
+
+    Spikes are detected on sum_bpd only, so the iterations where a lazy
+    regularizer runs are not mistaken for spikes. Older CSVs (iter,loss,
+    sum_bpd,lr) still work: the loss curve then shows `loss`."""
     if not csv_path.exists():
         return
-    iters, losses, bpds = [], [], []
     try:
-        with open(csv_path, "r") as f:
-            reader = csv.reader(f)
-            next(reader, None)
-            for row in reader:
-                if len(row) < 4:
-                    continue
-                try:
-                    it, loss, bpd = int(float(row[0])), float(row[1]), float(row[2])
-                    iters.append(it)
-                    losses.append(loss)
-                    bpds.append(bpd)
-                except ValueError:
-                    continue
-        if len(iters) < 2:
+        df = pd.read_csv(csv_path)
+        if len(df) < 2 or "iter" not in df:
             return
-        if remove_spikes and len(losses) > 10:
-            s_losses = pd.Series(losses)
-            w = min(50, max(5, len(losses) // 10))
-            rolling_med = s_losses.rolling(window=w, center=True, min_periods=1).median()
-            diff = np.abs(s_losses - rolling_med)
-            rolling_mad = diff.rolling(window=w, center=True, min_periods=1).median()
-            is_spike = diff > (5 * rolling_mad + 1e-6)
-            losses = np.where(is_spike, np.nan, losses)
-            bpds   = np.where(is_spike, np.nan, bpds)
+        iters = df["iter"].to_numpy()
+        bpd = df["sum_bpd"].to_numpy(dtype=float)
+        keep = np.ones(len(df), dtype=bool)
+        if remove_spikes and len(df) > 10:
+            s = pd.Series(bpd)
+            w = min(50, max(5, len(s) // 10))
+            med = s.rolling(window=w, center=True, min_periods=1).median()
+            diff = (s - med).abs()
+            mad = diff.rolling(window=w, center=True, min_periods=1).median()
+            keep = ~(diff > (5 * mad + 1e-6)).to_numpy()
+
+        def col(name):
+            return df[name].to_numpy(dtype=float) if name in df else np.full(len(df), np.nan)
+
+        objective = col("objective")
+        if np.isfinite(objective).any():
+            loss_values, loss_label = objective, "objective (bpd + weighted terms)"
+        else:
+            loss_values, loss_label = col("loss"), "loss"
+
         # Use the object-oriented Figure API rather than pyplot. These curves
         # are written straight to disk, so no interactive backend is needed and
         # attaching an Agg canvas explicitly keeps the rendering path
@@ -803,19 +856,47 @@ def _save_metric_plots(
         from matplotlib.backends.backend_agg import FigureCanvasAgg
         from matplotlib.figure import Figure
 
-        for values, ylabel, title, fname in [
-            (losses, "loss",    "Training loss",        "loss_curve.png"),
-            (bpds,   "sum_bpd", "Sum BPD (train)",      "bpd_curve.png"),
-        ]:
+        def plot(fname, title, series):
             fig = Figure()
             FigureCanvasAgg(fig)
             ax = fig.subplots()
-            ax.plot(iters, values)
+            for values, label in series:
+                m = keep & np.isfinite(values)
+                if m.sum() >= 2:
+                    ax.plot(iters[m], values[m], label=label, linewidth=1)
             ax.set_xlabel("iter")
-            ax.set_ylabel(ylabel)
+            ax.set_ylabel(series[0][1] if len(series) == 1 else "")
+            if len(series) > 1:
+                ax.legend(frameon=False)
             ax.set_title(title)
             fig.tight_layout()
             fig.savefig(out_dir / fname)
+
+        plot("loss_curve.png", "Training objective", [(loss_values, loss_label)])
+        plot("bpd_curve.png", "Sum BPD (train)", [(bpd, "sum_bpd")])
+        pcf = col("pcf")
+        if np.isfinite(pcf).sum() >= 2:
+            weight = col("pcf_weight")
+            fig = Figure()
+            FigureCanvasAgg(fig)
+            ax1, ax2 = fig.subplots(2, 1, sharex=True)
+            m = keep & np.isfinite(pcf)
+            ax1.plot(iters[m], pcf[m], linewidth=1)
+            ax1.set_ylabel("-I_hat (bits/dim)")
+            ax1.set_title("PCF penalty (train)")
+            mw = np.isfinite(weight)
+            if mw.any():
+                ax2.plot(iters[mw], weight[mw], linewidth=1)
+            ax2.set_ylabel("weight")
+            ax2.set_xlabel("iter")
+            fig.tight_layout()
+            fig.savefig(out_dir / "pcf_curve.png")
+        align = col("align")
+        if np.isfinite(align).sum() >= 2 and np.nanmax(np.abs(align)) > 0:
+            plot("align_curve.png", "Alignment loss (train)", [(align, "align")])
+        axis = col("axis")
+        if np.isfinite(axis).sum() >= 2:
+            plot("axis_curve.png", "Axis alignment loss (train)", [(axis, "axis")])
     except Exception:
         pass
 
@@ -1389,16 +1470,7 @@ class BaseLAMNrTrainer(abc.ABC):
 
         # CSV header + run-config dump: rank-0-only file writes.
         if self.rank == 0:
-            if not self.csv_path.exists():
-                with open(self.csv_path, "w") as f:
-                    f.write("iter,loss,sum_bpd,lr\n")
-            else:
-                try:
-                    df = pd.read_csv(self.csv_path)
-                    df = df[df["iter"] < self.start_iter]
-                    df.to_csv(self.csv_path, index=False)
-                except Exception as e:
-                    print(f"[warn] Could not clean CSV: {e}")
+            _prepare_metrics_csv(self.csv_path, self.start_iter)
 
             try:
                 dataset_info = {
@@ -2696,9 +2768,23 @@ class BaseLAMNrTrainer(abc.ABC):
                     else:
                         tqdm.write(f"[warn] input data grid failed: {err}")
 
-                # CSV row
+                # CSV row (columns: METRIC_COLUMNS)
+                pcf_w = args.pcf_alpha * ramp(it, args.pcf_warmup) if pcf_on else None
+                objective = curr_loss
+                if pcf_on:
+                    if pcf_step:   # remove the lazy spike (weight x pcf_every) ...
+                        objective -= pcf_w * pcf_every * L_pcf_log
+                    if last_pcf_log is not None:   # ... and add the nominal term
+                        objective += pcf_w * last_pcf_log
                 with open(self.csv_path, "a") as f:
-                    f.write(f"{it},{curr_loss:.6f},{sum_bpd:.6f},{lr_now:.6g}\n")
+                    f.write(_metrics_row(
+                        it, curr_loss, sum_bpd, lr_now,
+                        align=L_align_log if args.align != "none" else None,
+                        pcf=L_pcf_log if pcf_step else None,
+                        pcf_weight=pcf_w,
+                        axis=L_axis_log if axis_on else None,
+                        objective=objective,
+                    ))
 
             # Eval + checkpoint. _run_eval must be called by *every* rank
             # (it does a dist.broadcast internally to keep each rank's LR
