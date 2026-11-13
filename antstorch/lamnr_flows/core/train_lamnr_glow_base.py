@@ -845,7 +845,9 @@ def _save_metric_plots(
 
         objective = col("objective")
         if np.isfinite(objective).any():
-            loss_values, loss_label = objective, "objective (bpd + weighted terms)"
+            # rows written before the column existed (resumed runs) fall back to loss
+            loss_values = np.where(np.isfinite(objective), objective, col("loss"))
+            loss_label = "objective (bpd + weighted terms)"
         else:
             loss_values, loss_label = col("loss"), "loss"
 
