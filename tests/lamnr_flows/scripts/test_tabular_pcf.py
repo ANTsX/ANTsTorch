@@ -48,6 +48,8 @@ def test_pcf_cli_and_training(tmp_path, monkeypatch):
     trainer.setup(args)
     trainer.train()
     assert all(torch.isfinite(p).all() for m in trainer.models for p in m.parameters())
+    df = pd.read_csv(tmp_path / "run" / "metrics.csv")
+    assert {"pcf", "pcf_weight", "objective"} <= set(df.columns) and df["pcf"].notna().all()
 
 
 def test_defaults_leave_pcf_off(tmp_path, monkeypatch):
