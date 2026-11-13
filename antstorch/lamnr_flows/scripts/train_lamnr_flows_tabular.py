@@ -83,7 +83,7 @@ from antstorch.lamnr_flows.misc.latent_alignment import (
     LatentAlignmentLossManager,
     Projector,
 )
-from antstorch.lamnr_flows.misc.pcf_terms import add_pcf_args, pcf_penalty_bpd, ramp
+from antstorch.lamnr_flows.misc.pcf_terms import add_pcf_args, grad_norm_decomposition, pcf_penalty_bpd, ramp
 
 
 # ---------------------------------------------------------------------------
@@ -640,6 +640,7 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
         pcf_every = max(1, int(getattr(args, "pcf_every", 1)))
         pcf_samples = int(getattr(args, "pcf_samples", 0))
         last_pcf_log: Optional[float] = None
+        grad_diag_every = max(0, int(getattr(args, "grad_norm_every", 0)))
 
         train_iter = iter(self.train_loader)
 
@@ -663,6 +664,7 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
             w_nll, w_align = 1.0, 0.0
 
             # ── Gradient accumulation micro-steps ──────────────────────
+            grad_diag = None
             for _micro in range(grad_accum):
                 try:
                     batch = next(train_iter)
@@ -727,7 +729,10 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
                     # Lazy regularization: every pcf_every iterations, weighted by pcf_every.
                     L_pcf = sum(pcf_penalty_bpd(m_, x_, args.pcf_dims, int(x_.shape[1]))
                                 for m_, x_ in zip(models, xs_pcf))
-                    loss_total = loss_total + args.pcf_alpha * pcf_every * ramp(it, args.pcf_warmup) * L_pcf
+                    reg_term = args.pcf_alpha * pcf_every * ramp(it, args.pcf_warmup) * L_pcf
+                    loss_total = loss_total + reg_term
+                else:
+                    reg_term = None
                 del xs_pcf
 
                 if not torch.isfinite(loss_total):
@@ -736,6 +741,17 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
                     del lat_flat
                     gc.collect()
                     break
+
+                if grad_diag_every > 0 and it % grad_diag_every == 0 and _micro == 0:
+                    try:
+                        _params = [p for g in self.opt.param_groups for p in g["params"]]
+                        _main = (loss_total - reg_term) if reg_term is not None else loss_total
+                        grad_diag = grad_norm_decomposition(
+                            _main / float(grad_accum),
+                            reg_term / float(grad_accum) if reg_term is not None else None, _params)
+                    except RuntimeError as _e:
+                        tqdm.write(f"[warn] --grad-norm-every disabled: {_e}")
+                        grad_diag_every = 0
 
                 (loss_total / float(grad_accum)).backward()
 
@@ -756,7 +772,7 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
 
             # Gradient clip + step
             all_params = [p for g in self.opt.param_groups for p in g["params"]]
-            torch.nn.utils.clip_grad_norm_(
+            total_norm = torch.nn.utils.clip_grad_norm_(
                 all_params, max_norm=float(getattr(args, "grad_clip", 5.0))
             )
             self.opt.step()
@@ -817,12 +833,17 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
                     pcf=L_pcf_log if pcf_step else None,
                     pcf_weight=pcf_w,
                     objective=objective,
+                    grad_norm=float(total_norm),
+                    grad_norm_main=grad_diag[0] if grad_diag else None,
+                    grad_norm_reg=grad_diag[1] if grad_diag else None,
+                    grad_cos=grad_diag[2] if grad_diag else None,
                 ))
 
             # Eval + checkpoint
             if it % args.eval_interval == 0:
                 self._run_val_tabular(it)
-                _save_metric_plots(self.csv_path, self.run_dir, remove_spikes=True)
+                _save_metric_plots(self.csv_path, self.run_dir, remove_spikes=True,
+                                   grad_clip=float(getattr(args, "grad_clip", 5.0)))
                 self.save_checkpoint(it)
 
             # ── End-of-iteration cleanup ──────────────────────────────

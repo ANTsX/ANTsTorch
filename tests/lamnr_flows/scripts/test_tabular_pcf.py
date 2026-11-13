@@ -41,7 +41,7 @@ def test_pcf_cli_and_training(tmp_path, monkeypatch):
         "train_lamnr_flows_tabular.py", "--views", *views, "--out-dir", str(tmp_path / "run"),
         "--K", "2", "--batch-size", "32", "--max-iter", "3", "--eval-interval", "3",
         "--pca-latent-dimension", "2", "--warmup-iters", "1",
-        "--pcf-alpha", "0.5", "--pcf-dims", "8", "--pcf-warmup", "2"])
+        "--pcf-alpha", "0.5", "--pcf-dims", "8", "--pcf-warmup", "2", "--grad-norm-every", "1"])
     args = tab._build_args()
     assert args.pcf_alpha == 0.5 and args.pcf_dims == 8 and not hasattr(args, "axis_beta")
     trainer = tab.TabularLAMNrTrainer()
@@ -50,6 +50,7 @@ def test_pcf_cli_and_training(tmp_path, monkeypatch):
     assert all(torch.isfinite(p).all() for m in trainer.models for p in m.parameters())
     df = pd.read_csv(tmp_path / "run" / "metrics.csv")
     assert {"pcf", "pcf_weight", "objective"} <= set(df.columns) and df["pcf"].notna().all()
+    assert df["grad_norm"].notna().all() and df["grad_norm_reg"].notna().all()
 
 
 def test_defaults_leave_pcf_off(tmp_path, monkeypatch):

@@ -257,6 +257,8 @@ def test_hybrid_trainer_real_flow_smoke(tmp_path):
     trainer.opt.zero_grad(set_to_none=True)
     trainer.train()
     assert (tmp_path / "run" / "training_state.pt").exists()
+    metrics = pd.read_csv(tmp_path / "run" / "metrics.csv")
+    assert "grad_norm" in metrics and metrics["grad_norm"].notna().all() and (metrics["grad_norm"] > 0).all()
     assert (tmp_path / "run" / "previews" / "im2_recon_it000001.png").exists()
     assert (tmp_path / "run" / "export" / "tau_latents.csv").exists()
     assert (tmp_path / "run" / "export" / "tau_whitened.csv").exists()
