@@ -391,6 +391,20 @@ def build_manifest_from_config(
     return result.sort_values(join_key).reset_index(drop=True)
 
 
+def _upgrade_metrics_header(csv_path: Path, columns) -> None:
+    """Add columns missing from an existing metrics.csv (older runs), as empty values."""
+    try:
+        frame = pd.read_csv(csv_path)
+        if list(frame.columns) == list(columns):
+            return
+        for column in columns:
+            if column not in frame:
+                frame[column] = np.nan
+        frame[list(columns)].to_csv(csv_path, index=False, float_format="%.8g")
+    except Exception as error:
+        print(f"[warn] could not upgrade {csv_path.name}: {error}")
+
+
 def _save_hybrid_metric_plots(csv_path: Path, out_dir: Path) -> None:
     """Write global and per-view training/validation metric figures."""
     if not csv_path.exists():
@@ -408,6 +422,8 @@ def _save_hybrid_metric_plots(csv_path: Path, out_dir: Path) -> None:
              "bits per dimension", "bpd_by_view.png"),
             ([c for c in frame if c.startswith("val_bpd_")],
              "validation bits per dimension", "val_bpd_by_view.png"),
+            ([c for c in ("grad_norm",) if c in frame and frame[c].notna().sum() >= 2],
+             "gradient norm before clipping", "grad_norm.png"),
         ]
         for columns, ylabel, filename in plot_groups:
             if not columns:
@@ -1243,13 +1259,17 @@ class HybridLAMNrTrainer:
             self.start_iter = self._load_checkpoint(self._resume_path)
         if args.extra_iters > 0:
             args.max_iter = (self.start_iter - 1) + args.extra_iters
-        if self.rank == 0 and not self.metrics_path.exists():
+        if self.rank == 0:
             columns = ["iter", "loss", "align", "sum_bpd", "val_loss", "lr"]
             columns.extend(f"bpd_{view.name}" for view in self.views)
             columns.extend(f"val_bpd_{view.name}" for view in self.views)
+            columns.append("grad_norm")   # total gradient norm before clipping
             if self.pcf_on:
                 columns.extend(["pcf", "pcf_weight"])
-            self.metrics_path.write_text(",".join(columns) + "\n")
+            if not self.metrics_path.exists():
+                self.metrics_path.write_text(",".join(columns) + "\n")
+            else:
+                _upgrade_metrics_header(self.metrics_path, columns)
         self.last_val_bpds = [float("nan")] * len(self.views)
 
         availability = {
@@ -1842,7 +1862,7 @@ class HybridLAMNrTrainer:
                 pbar.set_postfix(loss=f"{disp_loss:.4f}", align=f"{disp_align:.4f}")
                 row = [
                     iteration, mean_loss, mean_align, sum_bpd, val_loss, lr,
-                    *bpds, *self.last_val_bpds,
+                    *bpds, *self.last_val_bpds, float(grad_norm),
                 ]
                 if self.pcf_on:
                     pcf_weight = float(self.args.pcf_alpha) * ramp(iteration, int(self.args.pcf_warmup))

@@ -587,12 +587,16 @@ class HybridTemporalLAMNrTrainer:
             self.start_iter = self._load_checkpoint(self.ck)
         if a.extra_iters > 0:
             a.max_iter = (self.start_iter - 1) + a.extra_iters
+        cols = (["iter", "loss", "align", "sum_bpd", "val_loss", "lr"] + [f"bpd_{n}" for n in self.names]
+                + [f"val_bpd_{n}" for n in self.names] + ["grad_norm"])   # grad_norm: before clipping
         if not self.metrics_path.exists() or self.start_iter == 1:
-            cols = ["iter", "loss", "align", "sum_bpd", "val_loss", "lr"] + [f"bpd_{n}" for n in self.names] + [f"val_bpd_{n}" for n in self.names]
             self.metrics_path.write_text(",".join(cols) + "\n")
         elif self.metrics_path.exists():
             df = pd.read_csv(self.metrics_path)
-            df[df["iter"] < self.start_iter].to_csv(self.metrics_path, index=False, float_format="%.8g")
+            for c in cols:
+                if c not in df:
+                    df[c] = np.nan
+            df[df["iter"] < self.start_iter][cols].to_csv(self.metrics_path, index=False, float_format="%.8g")
         availability = {v.name: int(len(self.train_ix)) for v in self.views}
         (self.run_dir / "run_config.json").write_text(json.dumps({
             "trainer": "hybrid-temporal", "world_size": 1, "device": str(self.dev), "arguments": vars(a),
@@ -1071,7 +1075,8 @@ class HybridTemporalLAMNrTrainer:
                 dl, da = mean_loss, mean_align
             pbar.set_postfix(loss=f"{dl:.4f}", align=f"{da:.4f}")
             with open(self.metrics_path, "a") as fh:
-                fh.write(",".join(f"{x:.8g}" for x in [it, mean_loss, mean_align, sum_bpd, val_loss, lr, *bpds, *self.last_val_bpds]) + "\n")
+                fh.write(",".join(f"{x:.8g}" for x in [it, mean_loss, mean_align, sum_bpd, val_loss, lr, *bpds, *self.last_val_bpds,
+                                                       float(grad_norm)]) + "\n")
             if do_eval:
                 vsum = sum(x for x in self.last_val_bpds if math.isfinite(x))
                 improved = vsum < self.best - 1e-4

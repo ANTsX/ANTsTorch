@@ -55,6 +55,7 @@ from antstorch.lamnr_flows.misc.pcf_terms import (
     add_pcf_args,
     axis_loss_from_magnitudes,
     axis_row_magnitudes,
+    grad_norm_decomposition,
     ramp,
 )
 
@@ -765,7 +766,8 @@ def _save_samples_grid(
         return False, str(e)
 
 
-METRIC_COLUMNS = ["iter", "loss", "sum_bpd", "lr", "align", "pcf", "pcf_weight", "axis", "objective"]
+METRIC_COLUMNS = ["iter", "loss", "sum_bpd", "lr", "align", "pcf", "pcf_weight", "axis", "objective",
+                  "grad_norm", "grad_norm_main", "grad_norm_reg", "grad_cos"]
 """Columns of metrics.csv (Glow and tabular LAMNr trainers).
 
 loss       : value optimized at this iteration (on lazy PCF iterations it includes the
@@ -776,7 +778,12 @@ pcf        : PCF penalty -I_hat in bits/dim, on the iterations where it is compu
 pcf_weight : nominal weight alpha * warm-up ramp (without the --pcf-every factor);
 axis       : cross-view axis-alignment loss (empty without --axis-beta);
 objective  : smooth training objective: loss without the lazy PCF spike, plus
-             pcf_weight * the latest pcf value (equals loss when PCF is off).
+             pcf_weight * the latest pcf value (equals loss when PCF is off);
+grad_norm  : total gradient norm before clipping (every iteration);
+grad_norm_main, grad_norm_reg, grad_cos : with --grad-norm-every N, every N iterations, the
+             gradient norms of the main objective (likelihood + alignment) and of the
+             regularizer terms as weighted in the loss (PCF, axis), and their cosine (first
+             micro-batch, rank 0, before clipping; empty otherwise).
 """
 
 
@@ -791,8 +798,10 @@ def _fmt_metric(v) -> str:
 
 
 def _metrics_row(it, loss, sum_bpd, lr, align=None, pcf=None, pcf_weight=None,
-                 axis=None, objective=None) -> str:
-    vals = [loss, sum_bpd, lr, align, pcf, pcf_weight, axis, objective]
+                 axis=None, objective=None, grad_norm=None, grad_norm_main=None,
+                 grad_norm_reg=None, grad_cos=None) -> str:
+    vals = [loss, sum_bpd, lr, align, pcf, pcf_weight, axis, objective,
+            grad_norm, grad_norm_main, grad_norm_reg, grad_cos]
     return ",".join([str(int(it))] + [_fmt_metric(v) for v in vals]) + "\n"
 
 
@@ -815,7 +824,7 @@ def _prepare_metrics_csv(csv_path: Path, start_iter: int) -> None:
 
 
 def _save_metric_plots(
-    csv_path: Path, out_dir: Path, remove_spikes: bool = False
+    csv_path: Path, out_dir: Path, remove_spikes: bool = False, grad_clip: Optional[float] = None
 ) -> None:
     """Write loss_curve.png (objective), bpd_curve.png and, when present,
     pcf_curve.png, align_curve.png and axis_curve.png from metrics.csv.
@@ -899,6 +908,26 @@ def _save_metric_plots(
         axis = col("axis")
         if np.isfinite(axis).sum() >= 2:
             plot("axis_curve.png", "Axis alignment loss (train)", [(axis, "axis")])
+        gn = col("grad_norm")
+        if np.isfinite(gn).sum() >= 2:
+            fig = Figure()
+            FigureCanvasAgg(fig)
+            ax = fig.subplots()
+            for values, label in [(gn, "total (before clipping)"), (col("grad_norm_main"), "main objective"),
+                                  (col("grad_norm_reg"), "regularizers (as weighted)")]:
+                m = np.isfinite(values) & (values > 0)
+                if m.sum() >= 2:
+                    ax.plot(iters[m], values[m], label=label, linewidth=1 if label.startswith("total") else 0,
+                            marker=None if label.startswith("total") else ".", markersize=3)
+            if grad_clip is not None:
+                ax.axhline(grad_clip, color="gray", linestyle="--", linewidth=1, label=f"clip = {grad_clip:g}")
+            ax.set_yscale("log")
+            ax.set_xlabel("iter")
+            ax.set_ylabel("gradient norm")
+            ax.set_title("Gradient norms (train)")
+            ax.legend(frameon=False, fontsize=8)
+            fig.tight_layout()
+            fig.savefig(out_dir / "grad_norm_curve.png")
     except Exception:
         pass
 
@@ -2019,6 +2048,7 @@ class BaseLAMNrTrainer(abc.ABC):
                     "--pcf-alpha / --axis-beta require antsnormflows with "
                     "utils.pcf_penalty_from_latents; update the installed antsnormflows."
                 ) from ex
+        grad_diag_every = max(0, int(getattr(args, "grad_norm_every", 0)))
         pcf_every = max(1, int(getattr(args, "pcf_every", 1)))
         pcf_base_kwargs = {}
         if pcf_on:
@@ -2085,6 +2115,8 @@ class BaseLAMNrTrainer(abc.ABC):
             # Lazy PCF regularization: the penalty runs every pcf_every iterations (same
             # iterations on every rank), weighted by pcf_every.
             pcf_step = pcf_on and (it % pcf_every == 0)
+            grad_diag = None
+            do_grad_diag = grad_diag_every > 0 and it % grad_diag_every == 0 and self.rank == 0
             pcf_kwargs = dict(pcf_base_kwargs)
             if pcf_on and not pcf_step:
                 for _k in ("pcf_dims", "pcf_samples", "pcf_levels"):
@@ -2292,12 +2324,16 @@ class BaseLAMNrTrainer(abc.ABC):
                 # per dimension + beta * L_axis.
                 L_pcf = torch.tensor(0.0, device=dev, dtype=torch.float32)
                 L_axis = torch.tensor(0.0, device=dev, dtype=torch.float32)
+                reg_term = None
                 if pcf_step:
                     L_pcf = sum(p_.float().mean() for p_ in pcf_pen) / (n_dims * math.log(2.0))
-                    loss_total = loss_total + args.pcf_alpha * pcf_every * ramp(it, args.pcf_warmup) * L_pcf
+                    reg_term = args.pcf_alpha * pcf_every * ramp(it, args.pcf_warmup) * L_pcf
+                    loss_total = loss_total + reg_term
                 if axis_on:
                     L_axis = axis_loss_from_magnitudes(axis_mags)
-                    loss_total = loss_total + args.axis_beta * ramp(it, args.axis_warmup) * L_axis
+                    axis_term = args.axis_beta * ramp(it, args.axis_warmup) * L_axis
+                    reg_term = axis_term if reg_term is None else reg_term + axis_term
+                    loss_total = loss_total + axis_term
                 del pcf_pen, axis_mags
 
                 local_bad = not torch.isfinite(loss_total)
@@ -2310,6 +2346,19 @@ class BaseLAMNrTrainer(abc.ABC):
                     del xs_train, lat_flat
                     gc.collect()
                     break
+
+                # Gradient-norm diagnostics (--grad-norm-every), before the real backward.
+                if do_grad_diag and micro == 0 and grad_diag_every > 0:
+                    try:
+                        _params = [p for g in self.opt.param_groups for p in g["params"]]
+                        _main = (loss_total - reg_term) if reg_term is not None else loss_total
+                        grad_diag = grad_norm_decomposition(
+                            _main / float(grad_accum),
+                            reg_term / float(grad_accum) if reg_term is not None else None,
+                            _params)
+                    except RuntimeError as _e:
+                        tqdm.write(f"[warn] --grad-norm-every disabled: {_e}")
+                        grad_diag_every = 0
 
                 # Backward
                 loss_scaled = loss_total / float(grad_accum)
@@ -2786,6 +2835,10 @@ class BaseLAMNrTrainer(abc.ABC):
                         pcf_weight=pcf_w,
                         axis=L_axis_log if axis_on else None,
                         objective=objective,
+                        grad_norm=float(total_norm),
+                        grad_norm_main=grad_diag[0] if grad_diag else None,
+                        grad_norm_reg=grad_diag[1] if grad_diag else None,
+                        grad_cos=grad_diag[2] if grad_diag else None,
                     ))
 
             # Eval + checkpoint. _run_eval must be called by *every* rank
@@ -2795,7 +2848,8 @@ class BaseLAMNrTrainer(abc.ABC):
                 self._run_eval(it, n_dims)
                 if self.rank == 0:
                     self._run_sample_plots(it)
-                    _save_metric_plots(self.csv_path, self.run_dir, remove_spikes=True)
+                    _save_metric_plots(self.csv_path, self.run_dir, remove_spikes=True,
+                                       grad_clip=float(getattr(args, "grad_clip", 2.0)))
                     self.save_checkpoint(it)
                 if self.is_ddp:
                     dist.barrier()
