@@ -126,6 +126,7 @@ from antstorch.lamnr_flows.core.train_lamnr_glow_base import (
     set_deterministic,
     to01,
 )
+from antstorch.lamnr_flows.misc.pcf_terms import add_pcf_args, pcf_penalty_bpd, ramp
 from antstorch.lamnr_flows.misc.latent_alignment import (
     LatentAlignmentLossManager,
     Projector,
@@ -1184,6 +1185,22 @@ class HybridLAMNrTrainer:
                 ])
         self.align_mgr = LatentAlignmentLossManager(args, self.projectors, self.dev)
 
+        # Principal component flow penalty (antstorch/lamnr_flows/misc/pcf_terms.py): applied to
+        # every view unless its config sets "pcf": false. Computed in a separate float32 pass.
+        self.pcf_on = float(getattr(args, "pcf_alpha", 0.0)) > 0.0
+        self.pcf_every = max(1, int(getattr(args, "pcf_every", 1)))
+        self._last_pcf: Optional[float] = None
+        if self.pcf_on:
+            if int(args.pcf_dims) < 1:
+                raise ValueError("--pcf-dims must be >= 1.")
+            if self.is_ddp:
+                raise NotImplementedError(
+                    "--pcf-alpha is not supported with torchrun/DDP in the hybrid trainer yet "
+                    "(the penalty runs outside DDP's forward); use a single process."
+                )
+            if not any(bool(self._cfg(view, "pcf", True)) for view in self.views):
+                raise ValueError("--pcf-alpha > 0 but every view sets \"pcf\": false.")
+
         self.s_nll = self.s_align = None
         parameters = list(self.models.parameters())
         if self.projectors is not None:
@@ -1230,6 +1247,8 @@ class HybridLAMNrTrainer:
             columns = ["iter", "loss", "align", "sum_bpd", "val_loss", "lr"]
             columns.extend(f"bpd_{view.name}" for view in self.views)
             columns.extend(f"val_bpd_{view.name}" for view in self.views)
+            if self.pcf_on:
+                columns.extend(["pcf", "pcf_weight"])
             self.metrics_path.write_text(",".join(columns) + "\n")
         self.last_val_bpds = [float("nan")] * len(self.views)
 
@@ -1324,6 +1343,10 @@ class HybridLAMNrTrainer:
         add("subject column", subject_column)
         add("train / val rows", f"{len(train_frame)} / {len(val_frame)}")
         add("validation mode", val_mode)
+        add("pcf alpha / dims / warmup",
+            f"{getattr(args, 'pcf_alpha', 0.0)} / {getattr(args, 'pcf_dims', 1)} / {getattr(args, 'pcf_warmup', 0)}")
+        add("pcf every / samples / levels",
+            f"{getattr(args, 'pcf_every', 1)} / {getattr(args, 'pcf_samples', 0)} / {getattr(args, 'pcf_levels_per_step', 0)}")
         add("train / val virtual len", f"{len(self.train_dataset)} / {len(self.val_dataset)}")
         add("train / val samples", f"{args.train_samples} / {args.val_samples}")
         add("augmentation disabled", args.disable_augmentation)
@@ -1546,6 +1569,7 @@ class HybridLAMNrTrainer:
         iteration: int,
         models: Optional[Sequence[nn.Module]] = None,
         projectors: Optional[Sequence[nn.Module]] = None,
+        pcf_step: bool = False,
     ):
         values, masks = batch
         models = self.models if models is None else models
@@ -1580,6 +1604,29 @@ class HybridLAMNrTrainer:
             latents, L_nll, iteration, self.s_nll, self.s_align,
             masks=alignment_masks,
         )
+        self._last_pcf = None
+        if pcf_step:
+            args = self.args
+            pcf_total = torch.zeros((), device=self.dev, dtype=torch.float32)
+            for value, mask, view, model in zip(values, masks, self.views, models):
+                if not bool(self._cfg(view, "pcf", True)):
+                    continue
+                x = self._prepare(value, view)[mask.to(device=self.dev, dtype=torch.bool)]
+                if int(args.pcf_samples) > 0:
+                    x = x[: int(args.pcf_samples)]
+                if len(x) == 0:
+                    continue
+                # Float32 pass outside autocast; levels only apply to multiscale (image) flows.
+                with torch.autocast(device_type=self.dev.type, enabled=False):
+                    pcf_total = pcf_total + pcf_penalty_bpd(
+                        self._flow(model), x.detach().float(), int(args.pcf_dims),
+                        int(x[0].numel()),
+                        num_levels=0 if view.kind in ("tabular", "signal1d")
+                        else int(args.pcf_levels_per_step),
+                    )
+            # Lazy regularization: every pcf_every iterations, weight multiplied by pcf_every.
+            loss = loss + float(args.pcf_alpha) * self.pcf_every * ramp(iteration, int(args.pcf_warmup)) * pcf_total
+            self._last_pcf = float(pcf_total.detach())
         return loss, align, bpds
 
     def _sync_bad(self, bad: bool) -> bool:
@@ -1665,7 +1712,8 @@ class HybridLAMNrTrainer:
         )
         for iteration in pbar:
             self.opt.zero_grad(set_to_none=True)
-            loss_sum = align_sum = 0.0
+            loss_sum = align_sum = pcf_sum = 0.0
+            pcf_step = self.pcf_on and iteration % self.pcf_every == 0
             bpd_sum = np.zeros(len(self.views), dtype=np.float64)
             bpd_count = np.zeros(len(self.views), dtype=np.int64)
             bad = False
@@ -1684,7 +1732,7 @@ class HybridLAMNrTrainer:
                         dtype=self.amp_dtype,
                         enabled=self.amp_enabled,
                     ):
-                        loss, align, bpds = self._batch_loss(batch, iteration)
+                        loss, align, bpds = self._batch_loss(batch, iteration, pcf_step=pcf_step)
                         scaled_loss = loss / self.args.accum_steps
                     if self._sync_bad(not bool(torch.isfinite(loss).item())):
                         bad = True
@@ -1692,6 +1740,8 @@ class HybridLAMNrTrainer:
                     self.scaler.scale(scaled_loss).backward()
                     loss_sum += float(loss.detach())
                     align_sum += float(align.detach())
+                    if self._last_pcf is not None:
+                        pcf_sum += self._last_pcf
                     for vi, bpd in enumerate(bpds):
                         if math.isfinite(bpd):
                             bpd_sum[vi] += bpd
@@ -1794,6 +1844,14 @@ class HybridLAMNrTrainer:
                     iteration, mean_loss, mean_align, sum_bpd, val_loss, lr,
                     *bpds, *self.last_val_bpds,
                 ]
+                if self.pcf_on:
+                    pcf_weight = float(self.args.pcf_alpha) * ramp(iteration, int(self.args.pcf_warmup))
+                    # penalty (bits/dim, summed over views) on the iterations where it is computed
+                    pcf_value = pcf_sum / denom if pcf_step else float("nan")
+                    row += [pcf_value, pcf_weight]
+                    if pcf_step:
+                        pbar.set_postfix(loss=f"{disp_loss:.4f}", align=f"{disp_align:.4f}",
+                                         pcf=f"{pcf_value:.4f}")
                 with open(self.metrics_path, "a") as stream:
                     stream.write(",".join(f"{x:.8g}" for x in row) + "\n")
                 if do_eval:
@@ -2375,6 +2433,7 @@ def _build_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         choices=["none", "infonce", "barlow", "vicreg", "hsic", "pearson", "mse"])
     parser.add_argument("--align-weight", type=float, default=0.05)
     parser.add_argument("--align-warmup", type=int, default=200)
+    add_pcf_args(parser, axis=False)
     parser.add_argument("--proj-dim", type=int, default=64)
     parser.add_argument("--proj-hidden", type=int, default=128)
     parser.add_argument("--alignment-latents", default="all-pooled",
