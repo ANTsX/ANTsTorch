@@ -8,7 +8,8 @@ from antsnormflows import MultiscaleFlow
 from antsnormflows.distributions.base import DiagGaussian
 from antsnormflows.flows import GlowBlock2d, Merge, Squeeze2d
 
-from antstorch.lamnr_flows.misc.pcf_terms import axis_alignment_loss, pcf_penalty_bpd, ramp
+from antstorch.lamnr_flows.misc.pcf_terms import (
+    axis_alignment_loss, pcf_penalty_bpd, pcf_ramp, pcf_started, ramp)
 from antstorch.lamnr_flows.scripts import train_lamnr_glow_2d as g2
 from antstorch.lamnr_flows.scripts import train_lamnr_glow_3d as g3
 
@@ -164,3 +165,31 @@ def test_axis_beta_requires_two_views(tmp_path):
     trainer.setup(args)
     with pytest.raises(ValueError):
         trainer.train()
+
+
+def test_pcf_ramp_counts_from_pcf_start():
+    from argparse import Namespace
+    a = Namespace(pcf_warmup=100, pcf_start=0)            # default: identical to ramp(it, warmup)
+    assert all(pcf_ramp(it, a) == ramp(it, 100) for it in (0, 1, 50, 100, 500))
+    a = Namespace(pcf_warmup=100, pcf_start=150000)       # fine-tuning a resumed checkpoint
+    assert not pcf_started(149999, a) and pcf_ramp(149999, a) == 0.0
+    assert pcf_started(150000, a) and pcf_ramp(150000, a) == 0.0
+    assert pcf_ramp(150050, a) == pytest.approx(0.5) and pcf_ramp(150200, a) == 1.0
+    assert pcf_ramp(10, Namespace(pcf_warmup=0)) == 1.0   # older argument namespaces
+
+
+def test_pcf_start_cpu_training(tmp_path):
+    import pandas as pd
+    views, _, _, _ = cohort(tmp_path)
+    args = g2._build_args(_cli(tmp_path, [views[0], views[1]], 2, 2,
+                               ['--pcf-alpha', '0.1', '--pcf-start', '3', '--pcf-warmup', '2',
+                                '--max-iter', '6', '--eval-interval', '6']))
+    assert args.pcf_start == 3
+    trainer = g2.LAMNrGlow2DTrainer()
+    trainer.setup(args)
+    trainer.train_loader.dataset.do_data_augmentation = False
+    trainer.train()
+    df = pd.read_csv(tmp_path / "run" / "metrics.csv").set_index("iter")
+    assert df.loc[[1, 2], "pcf"].isna().all()                       # off before --pcf-start
+    assert df.loc[[3, 4, 5, 6], "pcf"].notna().all()
+    assert list(df.loc[[1, 2, 3, 4, 5, 6], "pcf_weight"]) == pytest.approx([0, 0, 0, 0.05, 0.1, 0.1])

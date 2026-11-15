@@ -83,7 +83,7 @@ from antstorch.lamnr_flows.misc.latent_alignment import (
     LatentAlignmentLossManager,
     Projector,
 )
-from antstorch.lamnr_flows.misc.pcf_terms import add_pcf_args, grad_norm_decomposition, pcf_penalty_bpd, ramp
+from antstorch.lamnr_flows.misc.pcf_terms import add_pcf_args, grad_norm_decomposition, pcf_penalty_bpd, pcf_ramp, pcf_started
 
 
 # ---------------------------------------------------------------------------
@@ -702,7 +702,7 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
                     z_v, _ = _inverse_with_guard(m, x_v)
                     # Tabular: z is already flat (B, D) — no pooling needed
                     lat_flat.append(torch.nan_to_num(z_v.float()))
-                    if pcf_on and it % pcf_every == 0:
+                    if pcf_on and it % pcf_every == 0 and pcf_started(it, args):
                         xs_pcf.append(x_v.detach()[:pcf_samples] if pcf_samples > 0 else x_v.detach())
 
                     del x_v, z_v, logp_v
@@ -729,7 +729,7 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
                     # Lazy regularization: every pcf_every iterations, weighted by pcf_every.
                     L_pcf = sum(pcf_penalty_bpd(m_, x_, args.pcf_dims, int(x_.shape[1]))
                                 for m_, x_ in zip(models, xs_pcf))
-                    reg_term = args.pcf_alpha * pcf_every * ramp(it, args.pcf_warmup) * L_pcf
+                    reg_term = args.pcf_alpha * pcf_every * pcf_ramp(it, args) * L_pcf
                     loss_total = loss_total + reg_term
                 else:
                     reg_term = None
@@ -789,7 +789,7 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
             curr_loss  = float(loss_acc.item()) / float(grad_accum)
             L_align_log= float(align_acc.item()) / float(grad_accum)
             curr_bpd   = [b / float(grad_accum) for b in bpd_acc]
-            pcf_step   = pcf_on and it % pcf_every == 0
+            pcf_step   = pcf_on and it % pcf_every == 0 and pcf_started(it, args)
             L_pcf_log  = float(pcf_acc.item()) / float(grad_accum)
             if pcf_step:
                 last_pcf_log = L_pcf_log
@@ -819,7 +819,7 @@ class TabularLAMNrTrainer(BaseLAMNrTrainer):
             pbar.update(1)
 
             # CSV row (columns: METRIC_COLUMNS of train_lamnr_glow_base)
-            pcf_w = args.pcf_alpha * ramp(it, args.pcf_warmup) if pcf_on else None
+            pcf_w = args.pcf_alpha * pcf_ramp(it, args) if pcf_on else None
             objective = curr_loss
             if pcf_on:
                 if pcf_step:

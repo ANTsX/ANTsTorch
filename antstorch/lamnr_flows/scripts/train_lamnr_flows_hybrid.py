@@ -126,7 +126,7 @@ from antstorch.lamnr_flows.core.train_lamnr_glow_base import (
     set_deterministic,
     to01,
 )
-from antstorch.lamnr_flows.misc.pcf_terms import add_pcf_args, pcf_penalty_bpd, ramp
+from antstorch.lamnr_flows.misc.pcf_terms import add_pcf_args, pcf_penalty_bpd, pcf_ramp, pcf_started
 from antstorch.lamnr_flows.misc.latent_alignment import (
     LatentAlignmentLossManager,
     Projector,
@@ -1645,7 +1645,7 @@ class HybridLAMNrTrainer:
                         else int(args.pcf_levels_per_step),
                     )
             # Lazy regularization: every pcf_every iterations, weight multiplied by pcf_every.
-            loss = loss + float(args.pcf_alpha) * self.pcf_every * ramp(iteration, int(args.pcf_warmup)) * pcf_total
+            loss = loss + float(args.pcf_alpha) * self.pcf_every * pcf_ramp(iteration, args) * pcf_total
             self._last_pcf = float(pcf_total.detach())
         return loss, align, bpds
 
@@ -1733,7 +1733,7 @@ class HybridLAMNrTrainer:
         for iteration in pbar:
             self.opt.zero_grad(set_to_none=True)
             loss_sum = align_sum = pcf_sum = 0.0
-            pcf_step = self.pcf_on and iteration % self.pcf_every == 0
+            pcf_step = self.pcf_on and iteration % self.pcf_every == 0 and pcf_started(iteration, self.args)
             bpd_sum = np.zeros(len(self.views), dtype=np.float64)
             bpd_count = np.zeros(len(self.views), dtype=np.int64)
             bad = False
@@ -1865,7 +1865,7 @@ class HybridLAMNrTrainer:
                     *bpds, *self.last_val_bpds, float(grad_norm),
                 ]
                 if self.pcf_on:
-                    pcf_weight = float(self.args.pcf_alpha) * ramp(iteration, int(self.args.pcf_warmup))
+                    pcf_weight = float(self.args.pcf_alpha) * pcf_ramp(iteration, self.args)
                     # penalty (bits/dim, summed over views) on the iterations where it is computed
                     pcf_value = pcf_sum / denom if pcf_step else float("nan")
                     row += [pcf_value, pcf_weight]

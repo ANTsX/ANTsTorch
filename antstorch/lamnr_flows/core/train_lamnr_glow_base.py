@@ -56,6 +56,8 @@ from antstorch.lamnr_flows.misc.pcf_terms import (
     axis_loss_from_magnitudes,
     axis_row_magnitudes,
     grad_norm_decomposition,
+    pcf_ramp,
+    pcf_started,
     ramp,
 )
 
@@ -1034,6 +1036,7 @@ def screen_dump_run_config(
 
     # Principal component flow
     add("pcf_alpha / dims / warmup", f"{cfg.get('pcf_alpha', 0.0)} / {cfg.get('pcf_dims', 1)} / {cfg.get('pcf_warmup', 0)}")
+    add("pcf_start", f"{cfg.get('pcf_start', 0)}")
     add("pcf every / samples / levels", f"{cfg.get('pcf_every', 1)} / {cfg.get('pcf_samples', 0)} / {cfg.get('pcf_levels_per_step', 0)}")
     add("axis_beta / dims / warmup", f"{cfg.get('axis_beta', 0.0)} / {cfg.get('axis_dims', 1)} / {cfg.get('axis_warmup', 0)}")
 
@@ -2114,7 +2117,7 @@ class BaseLAMNrTrainer(abc.ABC):
             self.opt.zero_grad(set_to_none=True)
             # Lazy PCF regularization: the penalty runs every pcf_every iterations (same
             # iterations on every rank), weighted by pcf_every.
-            pcf_step = pcf_on and (it % pcf_every == 0)
+            pcf_step = pcf_on and (it % pcf_every == 0) and pcf_started(it, args)
             grad_diag = None
             do_grad_diag = grad_diag_every > 0 and it % grad_diag_every == 0 and self.rank == 0
             pcf_kwargs = dict(pcf_base_kwargs)
@@ -2327,7 +2330,7 @@ class BaseLAMNrTrainer(abc.ABC):
                 reg_term = None
                 if pcf_step:
                     L_pcf = sum(p_.float().mean() for p_ in pcf_pen) / (n_dims * math.log(2.0))
-                    reg_term = args.pcf_alpha * pcf_every * ramp(it, args.pcf_warmup) * L_pcf
+                    reg_term = args.pcf_alpha * pcf_every * pcf_ramp(it, args) * L_pcf
                     loss_total = loss_total + reg_term
                 if axis_on:
                     L_axis = axis_loss_from_magnitudes(axis_mags)
@@ -2820,7 +2823,7 @@ class BaseLAMNrTrainer(abc.ABC):
                         tqdm.write(f"[warn] input data grid failed: {err}")
 
                 # CSV row (columns: METRIC_COLUMNS)
-                pcf_w = args.pcf_alpha * ramp(it, args.pcf_warmup) if pcf_on else None
+                pcf_w = args.pcf_alpha * pcf_ramp(it, args) if pcf_on else None
                 objective = curr_loss
                 if pcf_on:
                     if pcf_step:   # remove the lazy spike (weight x pcf_every) ...

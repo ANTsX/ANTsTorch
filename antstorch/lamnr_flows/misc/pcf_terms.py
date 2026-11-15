@@ -43,6 +43,20 @@ def ramp(it: int, warmup: int) -> float:
     return min(1.0, max(0.0, it / float(warmup)))
 
 
+def pcf_started(it: int, args) -> bool:
+    """True once the PCF penalty is active (iteration >= --pcf-start)."""
+    return it >= int(getattr(args, "pcf_start", 0) or 0)
+
+
+def pcf_ramp(it: int, args) -> float:
+    """Warm-up factor of --pcf-alpha: 0 before --pcf-start, then linear over --pcf-warmup
+    iterations counted from --pcf-start (so fine-tuning a resumed checkpoint warms up too)."""
+    if not pcf_started(it, args):
+        return 0.0
+    start = int(getattr(args, "pcf_start", 0) or 0)
+    return ramp(it - start, int(getattr(args, "pcf_warmup", 0) or 0))
+
+
 def pcf_penalty_bpd(model: nn.Module, x: torch.Tensor, num_dims: int, n_dims: int,
                     num_levels: int = 0) -> torch.Tensor:
     """Batch-mean PCF penalty of one view, in bits per dimension (differentiable).
@@ -190,7 +204,12 @@ def add_pcf_args(ap, axis: bool = True) -> None:
              "(one encoder vector-Jacobian product each); >= the latent size gives the "
              "exact penalty (cheap for tabular views). Default 1.")
     g.add_argument("--pcf-warmup", type=int, default=0, metavar="ITERS",
-        help="Linear warm-up of --pcf-alpha over ITERS iterations. Default 0.")
+        help="Linear warm-up of --pcf-alpha over ITERS iterations, counted from --pcf-start. "
+             "Default 0.")
+    g.add_argument("--pcf-start", type=int, default=0, metavar="ITER",
+        help="Iteration at which the PCF penalty starts (off before it; the warm-up counts from "
+             "it). Use the checkpoint's iteration when fine-tuning a resumed model with "
+             "--resume, otherwise the warm-up is skipped. Default 0.")
     g.add_argument("--pcf-every", type=int, default=1, metavar="N",
         help="Lazy regularization: compute the PCF penalty every N iterations only, "
              "with its weight multiplied by N (same expected gradient). Default 1.")
