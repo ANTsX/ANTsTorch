@@ -189,6 +189,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--affine-num-bins", type=int, default=32, help="Histogram bins for affine mattes/mi")
     parser.add_argument("--affine-shrink-factors", type=int, nargs="+", default=(4, 2, 1))
     parser.add_argument("--affine-smoothing-sigmas", type=float, nargs="+", default=(2.0, 1.0, 0.0))
+    parser.add_argument(
+        "--affine-smoothing-sigmas-units",
+        choices=("vox", "mm"),
+        default="vox",
+        help="Units of --affine-smoothing-sigmas: full-resolution voxels (default, as ANTs' 2x1x0vox) or mm",
+    )
     parser.add_argument("--affine-iterations", type=int, nargs="+", default=(100, 75, 50))
     parser.add_argument("--affine-learning-rate", type=float, nargs="+", default=(0.05, 0.03, 0.02))
     parser.add_argument(
@@ -250,6 +256,7 @@ def main() -> None:
         affine_num_bins=args.affine_num_bins,
         affine_shrink_factors=tuple(args.affine_shrink_factors),
         affine_smoothing_sigmas=tuple(args.affine_smoothing_sigmas),
+        affine_smoothing_sigmas_units=args.affine_smoothing_sigmas_units,
         affine_iterations=tuple(args.affine_iterations),
         affine_learning_rate=tuple(args.affine_learning_rate),
         affine_multi_start=not args.affine_single_start,
