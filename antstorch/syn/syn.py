@@ -504,7 +504,14 @@ def _fit_syn_level(
         if _mesh_size_active(total_field_mesh_size_at_base_level):
             total_mesh_size_level = _scale_mesh_size(total_field_mesh_size_at_base_level, level_scale)
 
-    def objective(left, right, left_inv, right_inv):
+    def objective(left, right, left_inv, right_inv, backward=False):
+        # With metric_terms and backward=True, each term is backpropagated as
+        # soon as it is evaluated (into detached copies of the two sampling
+        # grids), so only one term's graph -- and, for 'label_msq', one
+        # label's on-the-fly masks -- is alive at a time; the accumulated grid
+        # gradients are then pushed back to the half-warps. The returned loss
+        # has the same value, but its graph only carries a zero term (its
+        # backward() adds nothing). Ignored for the single-metric path.
         if metric_terms is None:
             a, b, _, _, valid = prepare_mid_images_and_gradients_torch(
                 left, right, left_inv, right_inv, I_curr, J_curr, X_phys,
@@ -531,13 +538,30 @@ def _fit_syn_level(
                 if mask is not None:
                     sampled = grid_sample(mask, grid.detach(), mode="nearest", padding_mode="zeros", align_corners=True)
                     valid = valid * (sampled > 0).to(dtype)
+        per_term = backward and torch.is_grad_enabled()
+        if per_term:
+            sample_fixed = fixed_grid.detach().requires_grad_(True)
+            sample_moving = moving_grid.detach().requires_grad_(True)
+        else:
+            sample_fixed, sample_moving = fixed_grid, moving_grid
         loss = left.sum() * 0 + right.sum() * 0
         for name, a, b, weight, parameter in metric_terms:
-            a_mid = grid_sample_nd(a, fixed_grid, use_analytical_gradients=use_analytical_gradients)
-            b_mid = grid_sample_nd(b, moving_grid, use_analytical_gradients=use_analytical_gradients)
+            if name == "label_msq":
+                a, b, name = (a == parameter).to(dtype), (b == parameter).to(dtype), "mse"
+            a_mid = grid_sample_nd(a, sample_fixed, use_analytical_gradients=use_analytical_gradients)
+            b_mid = grid_sample_nd(b, sample_moving, use_analytical_gradients=use_analytical_gradients)
+            a = b = None
             radius = int(parameter) if name in ("cc", "lncc", "cc2", "lncc2", "box_cc2") else 0
             bins = int(parameter) if name in ("mi", "mattes") else num_bins
-            loss = loss + weight * _similarity_loss(name, a_mid, b_mid, valid, 2 * radius + 1, bins)
+            term = weight * _similarity_loss(name, a_mid, b_mid, valid, 2 * radius + 1, bins)
+            a_mid = b_mid = None
+            if per_term:
+                term.backward()
+                term = term.detach()
+            loss = loss + term
+            term = None
+        if per_term:
+            torch.autograd.backward((fixed_grid, moving_grid), (sample_fixed.grad, sample_moving.grad))
         return loss
 
     history = []
@@ -545,7 +569,7 @@ def _fit_syn_level(
         warp_l2r_leaf = warp_l2r.detach().requires_grad_(True)
         warp_r2l_leaf = warp_r2l.detach().requires_grad_(True)
 
-        loss = objective(warp_l2r_leaf, warp_r2l_leaf, warp_l2r_inv, warp_r2l_inv)
+        loss = objective(warp_l2r_leaf, warp_r2l_leaf, warp_l2r_inv, warp_r2l_inv, backward=True)
         if not torch.isfinite(loss):
             raise FloatingPointError(f"non-finite SyN loss at resolution level {level_index + 1}")
         if syntx_parity and float(loss.detach().item()) < best_loss:
@@ -952,6 +976,12 @@ def syn_registration(
     parameter) terms to the same SyN objective. Images must share their
     respective primary domains. MSQ/MeanSquares aliases retain raw image
     amplitudes; other metrics use the standard intensity normalization.
+    ``label_msq`` (alias ``LabelMSQ``) takes label maps and a label value as
+    ``parameter``: it is MeanSquares between the binary masks
+    ``fixed_image == parameter`` and ``moving_image == parameter``, built on
+    the fly from the shared label maps instead of being stored per label.
+    With multivariate terms, each term is backpropagated separately, so only
+    one term's autograd graph is alive at a time.
     ``primary_metric_weight=0`` disables the primary metric. ``mask`` and
     ``moving_mask`` restrict midpoint sampling to their nonzero regions.
     ``smoothing_sigmas`` optionally sets the pyramid image smoothing in
@@ -1466,20 +1496,32 @@ def syn_registration(
         if primary_metric_weight:
             metric_terms_full.append((syn_metric, I_full, J_full, primary_metric_weight,
                                       neighborhood_radius if syn_metric not in ("mi", "mattes") else num_bins))
+        # Each distinct metric image is validated and converted once, so the
+        # 'label_msq' terms of one label map share a single tensor per side.
+        converted = {}
+
+        def metric_tensor(image, reference, role, normalize):
+            key = (id(image), normalize)
+            if key not in converted:
+                _validate_image_domain(image, reference, role)
+                converted[key] = (image, ants_image_to_tensor(image, resolved_device, dtype, normalize=normalize))
+            return converted[key][1]
+
         for name, a, b, weight, parameter in (multivariate_extras or []):
             name = _metric_name(name)
-            _validate_image_domain(a, fixed, "fixed metric image")
-            _validate_image_domain(b, moving, "moving metric image")
             if not math.isfinite(weight) or weight < 0 or not math.isfinite(parameter) or parameter < 0:
                 raise ValueError("metric weights and parameters must be finite and nonnegative")
-            if name in ("cc", "lncc", "cc2", "lncc2", "mi", "mattes") and parameter != int(parameter):
-                raise ValueError("Metric radius/bin count must be an integer")
+            if name in ("cc", "lncc", "cc2", "lncc2", "mi", "mattes", "label_msq") and parameter != int(parameter):
+                raise ValueError("Metric radius/bin count/label value must be an integer")
+            if name == "label_msq" and parameter > 2**24:
+                raise ValueError("label_msq label values must be representable exactly in float32 (<= 2^24)")
             if name in ("mi", "mattes") and parameter < 2:
                 raise ValueError("MI metrics require at least two histogram bins")
+            normalize = name not in ("mse", "label_msq")
+            tensor_a = metric_tensor(a, fixed, "fixed metric image", normalize)
+            tensor_b = metric_tensor(b, moving, "moving metric image", normalize)
             if weight:
-                metric_terms_full.append((name,
-                    ants_image_to_tensor(a, resolved_device, dtype, normalize=name != "mse"),
-                    ants_image_to_tensor(b, resolved_device, dtype, normalize=name != "mse"), weight, parameter))
+                metric_terms_full.append((name, tensor_a, tensor_b, weight, parameter))
         if not metric_terms_full:
             raise ValueError("At least one metric must have a positive weight")
         masks = []
@@ -1603,10 +1645,23 @@ def syn_registration(
         metric_terms_level = None
         metric_masks_level = None
         if metric_terms_full is not None:
-            metric_terms_level = [(name,
-                _downsample_image(a, fixed_meta_full, factor, syntx_parity, sigma)[0],
-                _downsample_image(b, moving_meta_full, factor, syntx_parity, sigma)[0], weight, parameter)
-                for name, a, b, weight, parameter in metric_terms_full]
+            metric_terms_level = []
+            full_resolution = factor == 1 and (sigma is None or sigma == 0)
+            for name, a, b, weight, parameter in metric_terms_full:
+                if name == "label_msq":
+                    if full_resolution:
+                        # Masks are rebuilt from the label maps on the fly.
+                        metric_terms_level.append((name, a, b, weight, parameter))
+                        continue
+                    # Coarser levels cache each label's downsampled mask (the
+                    # full-resolution mask exists only while it is reduced).
+                    a = (a == parameter).to(dtype)
+                    b = (b == parameter).to(dtype)
+                    name = "mse"
+                metric_terms_level.append((name,
+                    _downsample_image(a, fixed_meta_full, factor, syntx_parity, sigma)[0],
+                    _downsample_image(b, moving_meta_full, factor, syntx_parity, sigma)[0], weight, parameter))
+                a = b = None
             metric_masks_level = [None if value is None else F.interpolate(
                 value, size=meta["torch_shape"], mode="nearest")
                 for value, meta in zip(metric_masks_full, (fixed_meta_level, moving_meta_level))]
