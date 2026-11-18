@@ -12,6 +12,7 @@ from .bspline_synthesis import refine_bspline_coefficients
 from .deterministic_registration import DeterministicBSplineRegistration
 from .physical_gradient_descent import PhysicalGradientDescent
 from antstorch.syn.core.pipeline import relocate_tensors_avoiding_mps_grid_sample_3d
+from antstorch.syn.core.smoothing import gaussian_blur_replicate
 from .similarity import SIMILARITY_METRICS
 from .spatial_transform import affine_displacement_field
 
@@ -124,12 +125,9 @@ def _smooth_image(image: Tensor, domain: ImageDomain, sigma: float, units: str =
 
     ``sigma`` is in physical domain units (``units='mm'``, the default) or in
     voxels of ``image`` (``units='vox'``, as ANTs' ``2x1x0vox``; the same
-    voxel sigma on every axis whatever the spacing). The image is
-    replicate-padded once on every axis, then filtered along each axis in
-    turn (weighted sum of shifted slices): the dense N-D Gaussian (a
-    separable kernel) up to
-    floating-point rounding, at O(radius) rather than O(radius^dim) cost per
-    voxel.
+    voxel sigma on every axis whatever the spacing). Separable, via
+    :func:`antstorch.syn.core.smoothing.gaussian_blur_replicate` (the dense
+    N-D Gaussian up to floating-point rounding).
     """
     if units not in ("mm", "vox"):
         raise ValueError(f"smoothing sigma units must be 'mm' or 'vox', got {units!r}")
@@ -139,24 +137,7 @@ def _smooth_image(image: Tensor, domain: ImageDomain, sigma: float, units: str =
         sigma_torch = (float(sigma),) * domain.dimension
     else:
         sigma_torch = tuple(reversed(tuple(sigma / spacing for spacing in domain.spacing)))
-    radii = [max(1, int(3.0 * axis_sigma + 0.5)) for axis_sigma in sigma_torch]
-    # Replicate-pad every axis once, exactly as the dense kernel did, then
-    # filter one axis at a time as a weighted sum of shifted slices (no
-    # convolution backend involved, so the result does not depend on the
-    # platform's conv implementation): identical to the dense result.
-    padding = tuple(value for radius in reversed(radii) for value in (radius, radius))
-    smoothed = F.pad(image, padding, mode="replicate")
-    for axis, (axis_sigma, radius) in enumerate(zip(sigma_torch, radii)):
-        coordinate = torch.arange(-radius, radius + 1, dtype=image.dtype, device=image.device)
-        axis_kernel = torch.exp(-0.5 * (coordinate / axis_sigma).square())
-        axis_kernel = axis_kernel / axis_kernel.sum()
-        spatial_axis = 2 + axis
-        length = smoothed.shape[spatial_axis] - 2 * radius
-        filtered = smoothed.narrow(spatial_axis, 0, length) * axis_kernel[0]
-        for offset in range(1, 2 * radius + 1):
-            filtered = filtered + smoothed.narrow(spatial_axis, offset, length) * axis_kernel[offset]
-        smoothed = filtered
-    return smoothed
+    return gaussian_blur_replicate(image, sigma_torch)
 
 
 def _validate_initial_affine(initial_affine, fixed: Tensor, dimension: int) -> Optional[Tuple[Tensor, Tensor]]:
