@@ -84,3 +84,33 @@ def test_parity_with_syntx_greedy_cpu_anisotropic():
     wa = greedy_registration(fx, mv, **kw)["model"].warp.detach().numpy()
     ws = sg.greedy_registration(fx, mv, **kw)["model"].warp.detach().numpy()
     np.testing.assert_allclose(wa, ws, atol=1e-5)
+
+
+def test_return_inverse_is_a_true_inverse(tmp_path):
+    """Since 2026-11-18 (syntx >= 6.36) the physical inverse is solved in the tensor layout (axes and vector
+    components reversed); before, the components stayed in (x, y, z) order and the 'inverse' was wrong by ~mm."""
+    import torch
+    from antstorch.greedy import _ants_displacement_to_zyx
+    from antstorch.syn.core.inverse import compute_inverse_identity_error_nd
+    fx, mv = _blob((0, 0)), _blob((3, -2))
+    reg = greedy_registration(fx, mv, reg_iterations=[20, 10, 5], initial_transform=False, device="cpu",
+                              return_inverse=True, outprefix=str(tmp_path / "g"))
+    fwd = _ants_displacement_to_zyx(ants.image_read(reg["fwdtransforms"][0]), "cpu").double()
+    inv = _ants_displacement_to_zyx(ants.image_read(reg["invtransforms"][0]), "cpu").double()
+    assert float(fwd.abs().max()) > 1.0
+    # Median over the volume: the flat background of these blobs is poorly constrained (syntx's own inverse has a
+    # ~15 mm maximum error there too). Measured 2026-11-18: median 0.024 mm (the former layout gave 0.198 mm).
+    err = compute_inverse_identity_error_nd(inv, fwd, spacing=fx.spacing, origin=fx.origin, direction=np.eye(3))
+    assert float(err.median()) < 0.06
+
+
+def test_convergence_record_and_options():
+    fx, mv = _blob((0, 0)), _blob((3, -2))
+    reg = greedy_registration(fx, mv, reg_iterations=[12, 8], initial_transform=False, device="cpu")
+    conv = reg["provenance"]["convergence"]
+    assert conv["slope_threshold"] == 1e-6 and [r["level"] for r in conv["levels"]] == [0, 1]
+    assert reg["provenance"]["digital_diffeomorphism"] is True
+    off = greedy_registration(fx, mv, reg_iterations=[12, 8], initial_transform=False, device="cpu",
+                              convergence_slope=None, digital_diffeomorphism=False)
+    assert off["provenance"]["convergence"]["slope_threshold"] is None
+    assert all(r["iterations"] == r["cap"] for r in off["provenance"]["convergence"]["levels"])

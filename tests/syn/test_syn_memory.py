@@ -169,15 +169,16 @@ def test_prepare_mid_images_without_gradients_matches_images_and_mask():
 
 # --- Anderson inverse with contiguous ring-buffer history --------------------
 
-# Statistics of the list-based implementation at commit d4f15ad (float64,
-# CPU) on the same field: the ring buffer reorders storage, not arithmetic.
+# Statistics of syntx.core.inverse.update_inverse_field_nd_anderson at syntx v6.39.0 (float64, CPU) on
+# the same field -- the reference since the 2026-11-18 port of syntx's idempotent exit and residual-based
+# acceptance test (antstorch matches it to < 1e-14 here). The ring buffer reorders storage, not arithmetic.
 _ANDERSON_GOLDEN = {
     (True, 1): (-89.81999707335363, 257.357588412169, -0.28652247780238876),
-    (True, 3): (-91.66151355884601, 260.47161437386217, -0.2972190223616291),
-    (True, 12): (-92.72016592220258, 262.1394262952167, -0.3029467908546647),
+    (True, 3): (-91.92258185942762, 260.82856794576685, -0.29867993835779433),
+    (True, 12): (-92.72775612683773, 262.1478778310141, -0.3029903868871553),
     (False, 1): (-4.182388069467968, 12.782067913265521, -0.013056976674428683),
-    (False, 3): (-4.173233483308354, 12.824457639391746, -0.013004364671500856),
-    (False, 12): (-4.170278132549515, 12.839712009678724, -0.01298194956220624),
+    (False, 3): (-4.17326557231775, 12.825266481842029, -0.013000787761016918),
+    (False, 12): (-4.170280372062036, 12.839730527577682, -0.012981872089752513),
 }
 
 
