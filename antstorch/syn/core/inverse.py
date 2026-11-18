@@ -473,8 +473,16 @@ def update_inverse_field_nd_anderson(
         return v_new, max_error_norm, mean_error_norm
 
     v_k = W_inv_disp.clone()
-    R_history = []
-    G_history = []
+    # Residual / fixed-point histories live in two contiguous (window, N)
+    # buffers used as a ring (``order`` lists their rows oldest -> newest).
+    # The difference columns r_newest - r_j and g_newest - g_j are formed
+    # one at a time when needed instead of being materialized together, so
+    # beyond the 2 * (m + 1) history rows at most two extra full-size
+    # vectors are alive. Same arithmetic, in the same order, as building
+    # the columns up front.
+    window = max(1, min(int(steps), m + 1))
+    R_buf = G_buf = None
+    order = []
 
     for iteration in range(steps):
         g_k, max_err, mean_err = itk_fixed_point_step(v_k, iteration)
@@ -483,33 +491,37 @@ def update_inverse_field_nd_anderson(
             v_k = g_k
             break
 
-        r_k = (g_k - v_k).reshape(-1)
-        R_history.append(r_k)
-        G_history.append(g_k.reshape(-1))
+        if R_buf is None:
+            R_buf = torch.empty((window, g_k.numel()), device=g_k.device, dtype=g_k.dtype)
+            G_buf = torch.empty_like(R_buf)
+        slot = order.pop(0) if len(order) == window else len(order)
+        order.append(slot)
+        r_k = R_buf[slot]
+        torch.sub(g_k.reshape(-1), v_k.reshape(-1), out=r_k)
+        G_buf[slot].copy_(g_k.reshape(-1))
 
-        if len(R_history) > m + 1:
-            R_history.pop(0)
-            G_history.pop(0)
-
-        m_k = len(R_history)
+        m_k = len(order)
 
         if m_k < 2:
             v_k = g_k
         else:
             n_cols = m_k - 1
-            r_newest = R_history[-1]
-            dR_cols = []
-            for j in range(n_cols):
-                dR_cols.append(r_newest - R_history[j])
+            r_newest = R_buf[order[-1]]
+            g_newest = G_buf[order[-1]]
 
             gram = torch.zeros(n_cols, n_cols, device=device, dtype=dtype)
             rhs = torch.zeros(n_cols, device=device, dtype=dtype)
             for i_col in range(n_cols):
-                rhs[i_col] = torch.dot(dR_cols[i_col], r_newest)
-                for j_col in range(i_col, n_cols):
-                    val = torch.dot(dR_cols[i_col], dR_cols[j_col])
+                dR_i = r_newest - R_buf[order[i_col]]
+                rhs[i_col] = torch.dot(dR_i, r_newest)
+                gram[i_col, i_col] = torch.dot(dR_i, dR_i)
+                for j_col in range(i_col + 1, n_cols):
+                    dR_j = r_newest - R_buf[order[j_col]]
+                    val = torch.dot(dR_i, dR_j)
                     gram[i_col, j_col] = val
                     gram[j_col, i_col] = val
+                    del dR_j
+                del dR_i
 
             gram += 1e-10 * torch.eye(n_cols, device=device, dtype=dtype)
 
@@ -519,30 +531,32 @@ def update_inverse_field_nd_anderson(
                 v_k = g_k
                 continue
 
-            g_newest = G_history[-1]
             v_new_flat = g_newest.clone()
             for j in range(n_cols):
-                dG_j = g_newest - G_history[j]
-                v_new_flat = v_new_flat - gamma[j] * (dG_j + dR_cols[j])
+                column = g_newest - G_buf[order[j]]
+                column += r_newest - R_buf[order[j]]
+                v_new_flat.sub_(gamma[j] * column)
+                del column
 
             v_candidate = v_new_flat.reshape(W_inv_disp.shape)
             v_candidate = v_candidate * boundary_mask
+            del v_new_flat
 
             if use_physical:
-                coords_phys_c = X_phys + v_candidate
-                coords_norm_c = physical_to_normalized_torch_cached(coords_phys_c, shape_t, spacing_t, origin_t, direction_t)
-                fwd_at_c = torch.movedim(
+                coords_norm_c = physical_to_normalized_torch_cached(X_phys + v_candidate, shape_t, spacing_t, origin_t, direction_t)
+                error_c = torch.movedim(
                     grid_sample(W_disp_cf, coords_norm_c, padding_mode='border', align_corners=True), 1, -1
                 )
-                error_c = v_candidate + fwd_at_c
+                del coords_norm_c
+                error_c += v_candidate
                 residual_aa = float(torch.sum((error_c / spacing_t) ** 2).sqrt())
             else:
-                coords_c = identity + v_candidate
-                fwd_at_c = torch.movedim(
-                    grid_sample(W_disp_cf, coords_c, padding_mode='border', align_corners=True), 1, -1
+                error_c = torch.movedim(
+                    grid_sample(W_disp_cf, identity + v_candidate, padding_mode='border', align_corners=True), 1, -1
                 )
-                error_c = v_candidate + fwd_at_c
+                error_c += v_candidate
                 residual_aa = float(torch.sum((error_c * voxel_scale) ** 2).sqrt())
+            del error_c
 
             residual_fp = float(torch.dot(r_k, r_k).sqrt())
 
@@ -552,6 +566,7 @@ def update_inverse_field_nd_anderson(
                 v_k = v_candidate
             else:
                 v_k = g_k
+            del v_candidate
 
     return torch.movedim(v_k, -1, 1) if channels_first else v_k
 

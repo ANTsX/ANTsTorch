@@ -402,7 +402,8 @@ def prepare_mid_images_and_gradients_torch(
     M_phys, t_phys, initial_grid_level,
     interpolator='linear',
     grad_I_curr=None, grad_J_curr=None,
-    use_analytical_gradients=True
+    use_analytical_gradients=True,
+    compute_gradients=True,
 ):
     """Sample both images (and their gradients) at the symmetric SyN midpoint.
 
@@ -412,13 +413,18 @@ def prepare_mid_images_and_gradients_torch(
     supplied, their spatial gradients) at the midpoint locations, and
     returns an in-bounds mask marking where both samples are valid.
 
+    ``compute_gradients=False`` skips the image gradients and their
+    resampling (returning ``None`` in their place): callers that only need
+    the midpoint images, such as the SyN objective (whose gradient comes from
+    autograd/:class:`AnalyticalGridSample`), save two full gradient images on
+    each grid and two three-channel resamplings per call.
+
     Returns
     -------
     tuple of torch.Tensor
-        ``(I_mid, J_mid, grad_I_mid_sampled, grad_J_mid_sampled, in_bounds_mask)``.
+        ``(I_mid, J_mid, grad_I_mid_sampled, grad_J_mid_sampled, in_bounds_mask)``;
+        the two gradients are ``None`` when ``compute_gradients`` is ``False``.
     """
-    from .jacobian import _spatial_jacobian_nd
-
     phi_l2r_phys = X_phys + warp_l2r
     coords_norm = physical_to_normalized_torch_cached(
         phi_l2r_phys, fixed_shape_t, fixed_spacing_t, fixed_origin_t, fixed_direction_t
@@ -439,17 +445,14 @@ def prepare_mid_images_and_gradients_torch(
 
     J_mid = grid_sample_nd(J_curr, y_norm, padding_mode='border', align_corners=True, interpolator=interpolator, use_analytical_gradients=use_analytical_gradients)
 
-    if grad_I_curr is None:
-        grad_I_curr = _spatial_jacobian_nd(I_curr.movedim(1, -1), physical_spacing=tuple(reversed(fixed_spacing))).squeeze(-2)
-    if grad_J_curr is None:
-        grad_J_curr = _spatial_jacobian_nd(J_curr.movedim(1, -1), physical_spacing=tuple(reversed(moving_spacing))).squeeze(-2)
-
-    grad_I_mid_sampled = grid_sample_nd(grad_I_curr.movedim(-1, 1), coords_norm, padding_mode='border', align_corners=True, interpolator=interpolator, use_analytical_gradients=use_analytical_gradients).movedim(1, -1).contiguous()
-    grad_I_mid_sampled = torch.matmul(grad_I_mid_sampled, fixed_direction_t.t())
-
-    grad_J_mid_sampled = grid_sample_nd(grad_J_curr.movedim(-1, 1), y_norm, padding_mode='border', align_corners=True, interpolator=interpolator, use_analytical_gradients=use_analytical_gradients).movedim(1, -1).contiguous()
-    grad_J_mid_sampled = torch.matmul(grad_J_mid_sampled, moving_direction_t.t())
-    grad_J_mid_sampled = torch.matmul(grad_J_mid_sampled, M_phys)
+    if not compute_gradients:
+        grad_I_mid_sampled = grad_J_mid_sampled = None
+    else:
+        grad_I_mid_sampled, grad_J_mid_sampled = _sample_mid_gradients(
+            I_curr, J_curr, coords_norm, y_norm, grad_I_curr, grad_J_curr,
+            fixed_spacing, moving_spacing, fixed_direction_t, moving_direction_t, M_phys,
+            interpolator, use_analytical_gradients,
+        )
 
     dim = coords_norm.shape[-1]
     mask_I = (coords_norm[..., 0] >= -1.0) & (coords_norm[..., 0] <= 1.0)
@@ -463,3 +466,25 @@ def prepare_mid_images_and_gradients_torch(
     in_bounds_mask = (mask_I & mask_J).unsqueeze(1).to(dtype=I_mid.dtype)
 
     return I_mid, J_mid, grad_I_mid_sampled, grad_J_mid_sampled, in_bounds_mask
+
+
+def _sample_mid_gradients(
+    I_curr, J_curr, coords_norm, y_norm, grad_I_curr, grad_J_curr,
+    fixed_spacing, moving_spacing, fixed_direction_t, moving_direction_t, M_phys,
+    interpolator, use_analytical_gradients,
+):
+    """Image gradients resampled at the midpoint (physical axes, moving side mapped by ``M_phys``)."""
+    from .jacobian import _spatial_jacobian_nd
+
+    if grad_I_curr is None:
+        grad_I_curr = _spatial_jacobian_nd(I_curr.movedim(1, -1), physical_spacing=tuple(reversed(fixed_spacing))).squeeze(-2)
+    if grad_J_curr is None:
+        grad_J_curr = _spatial_jacobian_nd(J_curr.movedim(1, -1), physical_spacing=tuple(reversed(moving_spacing))).squeeze(-2)
+
+    grad_I_mid_sampled = grid_sample_nd(grad_I_curr.movedim(-1, 1), coords_norm, padding_mode='border', align_corners=True, interpolator=interpolator, use_analytical_gradients=use_analytical_gradients).movedim(1, -1).contiguous()
+    grad_I_mid_sampled = torch.matmul(grad_I_mid_sampled, fixed_direction_t.t())
+
+    grad_J_mid_sampled = grid_sample_nd(grad_J_curr.movedim(-1, 1), y_norm, padding_mode='border', align_corners=True, interpolator=interpolator, use_analytical_gradients=use_analytical_gradients).movedim(1, -1).contiguous()
+    grad_J_mid_sampled = torch.matmul(grad_J_mid_sampled, moving_direction_t.t())
+    grad_J_mid_sampled = torch.matmul(grad_J_mid_sampled, M_phys)
+    return grad_I_mid_sampled, grad_J_mid_sampled
