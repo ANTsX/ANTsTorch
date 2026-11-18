@@ -81,6 +81,7 @@ from .core.smoothing import (
     apply_dsti_green_operator,
     apply_sobolev_green_operator,
     get_boundary_mask,
+    gaussian_blur_replicate,
     separable_gaussian_filter,
 )
 
@@ -114,23 +115,10 @@ def _level_values(value, levels: int, name: str) -> tuple:
 
 
 def _gaussian_blur_image(image: Tensor, sigma: float) -> Tensor:
-    """Isotropic separable Gaussian blur, ``sigma`` in voxel units."""
+    """Isotropic separable Gaussian blur, ``sigma`` in voxel units (replicate padding)."""
     if sigma <= 0:
         return image
-    dim = image.ndim - 2
-    device, dtype = image.device, image.dtype
-    radius = max(1, int(3.0 * sigma + 0.5))
-    coordinate = torch.arange(-radius, radius + 1, dtype=dtype, device=device)
-    kernel_1d = torch.exp(-0.5 * (coordinate / sigma).square())
-    kernel_1d = kernel_1d / kernel_1d.sum()
-    kernel = kernel_1d
-    for _ in range(dim - 1):
-        kernel = kernel.unsqueeze(-1) * kernel_1d.reshape((1,) * kernel.ndim + (-1,))
-    kernel = kernel.reshape((1, 1) + kernel.shape).expand((image.shape[1], 1) + kernel.shape)
-    padding = tuple(value for _ in range(dim) for value in (radius, radius))
-    padded = F.pad(image, padding, mode="replicate")
-    convolution = F.conv2d if dim == 2 else F.conv3d
-    return convolution(padded, kernel, groups=image.shape[1])
+    return gaussian_blur_replicate(image, (sigma,) * (image.ndim - 2))
 
 
 def _shrunk_torch_shape(torch_shape: Tuple[int, ...], factor: int, syntx_parity: bool = False) -> Tuple[int, ...]:
