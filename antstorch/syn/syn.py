@@ -46,7 +46,7 @@ regularization are relied on for stability instead.
 
 import math
 import warnings
-from typing import Dict, Optional, Sequence, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import ants
 import numpy as np
@@ -408,10 +408,7 @@ def _fit_syn_level(
     J_curr: Tensor,
     fixed_meta: Dict[str, tuple],
     moving_meta: Dict[str, tuple],
-    warp_l2r: Tensor,
-    warp_r2l: Tensor,
-    warp_l2r_inv: Tensor,
-    warp_r2l_inv: Tensor,
+    warps: List[Optional[Tensor]],
     M_phys: Tensor,
     t_phys: Tensor,
     *,
@@ -449,6 +446,13 @@ def _fit_syn_level(
     metric_terms=None,
     metric_masks=None,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor, list]:
+    # ``warps`` is the caller's [l2r, r2l, l2r_inv, r2l_inv] list, consumed
+    # here: emptying it drops the caller's references, so each level-start
+    # field is freed as soon as this function rebinds its own name (instead
+    # of staying alive for the whole level). The inverses may be None when
+    # inverse_schedule='end_of_level' (nothing reads them before the end).
+    warp_l2r, warp_r2l, warp_l2r_inv, warp_r2l_inv = warps
+    warps.clear()
     device, dtype = I_curr.device, I_curr.dtype
     fixed_meta_t = metadata_tensors_from_dict(fixed_meta, device, dtype)
     moving_meta_t = metadata_tensors_from_dict(moving_meta, device, dtype)
@@ -508,6 +512,7 @@ def _fit_syn_level(
                 moving_meta_t["shape_t"], moving_meta_t["spacing_t"], moving_meta_t["origin_t"], moving_meta_t["direction_t"],
                 fixed_meta["spacing"], moving_meta["spacing"], M_phys, t_phys, None,
                 use_analytical_gradients=use_analytical_gradients,
+                compute_gradients=False,
             )
             return _similarity_loss(similarity, a, b, valid, window_size, num_bins)
         fixed_grid = physical_to_normalized_torch_cached(
@@ -546,11 +551,16 @@ def _fit_syn_level(
         if syntx_parity and float(loss.detach().item()) < best_loss:
             # syntx keeps the (pre-update) warps of the best loss seen.
             best_loss = float(loss.detach().item())
-            best_state = (warp_l2r.detach().clone(), warp_r2l.detach().clone(),
-                          warp_l2r_inv.detach().clone(), warp_r2l_inv.detach().clone())
+            best_state = tuple(None if field is None else field.detach().clone()
+                               for field in (warp_l2r, warp_r2l, warp_l2r_inv, warp_r2l_inv))
         loss.backward()
-        grad_l = warp_l2r_leaf.grad
-        grad_r = warp_r2l_leaf.grad
+        current = float(loss.detach().item())
+        # Drop the loss (and with it the autograd graph, whose AccumulateGrad
+        # nodes would otherwise keep this iteration's leaves alive into the
+        # next one) and detach the gradients from their leaves.
+        del loss
+        grad_l, warp_l2r_leaf.grad = warp_l2r_leaf.grad, None
+        grad_r, warp_r2l_leaf.grad = warp_r2l_leaf.grad, None
         if grad_l is None or grad_r is None or not torch.isfinite(grad_l).all() or not torch.isfinite(grad_r).all():
             raise FloatingPointError(f"non-finite SyN half-warp gradient at resolution level {level_index + 1}")
 
@@ -666,6 +676,11 @@ def _fit_syn_level(
 
         warp_l2r = _eulerian_update(warp_l2r_leaf.detach(), delta_l, X_phys, fixed_meta_t)
         warp_r2l = _eulerian_update(warp_r2l_leaf.detach(), delta_r, X_phys, fixed_meta_t)
+        # Release this iteration's leaves, gradients and steps now rather than
+        # when the next iteration rebinds them (they would otherwise sit on
+        # top of the next forward pass's peak).
+        warp_l2r_leaf = warp_r2l_leaf = grad_l = grad_r = delta_l = delta_r = None
+        common_mode = u_raw_l = u_raw_r = u_reg_l = u_reg_r = None
 
         if regularizer == "bspline":
             if _mesh_size_active(total_mesh_size_level):
@@ -698,7 +713,6 @@ def _fit_syn_level(
                 spacing=fixed_meta["spacing"], origin=fixed_meta["origin"], direction=fixed_meta["direction"], X_phys=X_phys,
             )
 
-        current = float(loss.detach().item())
         history.append(current)
         if verbose:
             print(
@@ -733,7 +747,8 @@ def _fit_syn_level(
             spacing=fixed_meta["spacing"], origin=fixed_meta["origin"], direction=fixed_meta["direction"], X_phys=X_phys,
         )
 
-    return warp_l2r.detach(), warp_r2l.detach(), warp_l2r_inv.detach(), warp_r2l_inv.detach(), history
+    return tuple(None if field is None else field.detach()
+                 for field in (warp_l2r, warp_r2l, warp_l2r_inv, warp_r2l_inv)) + (history,)
 
 
 def _fit_affine_from_ants(
@@ -753,6 +768,7 @@ def _fit_affine_from_ants(
     multi_start: bool,
     center_of_mass_init: bool,
     verbose: bool,
+    smoothing_sigmas_units: str = "mm",
 ):
     """Fit the affine initialization with :func:`antstorch.bspline_flows.affine_registration.affine_registration`."""
     # Imported lazily (not at module scope): antstorch.bspline_flows itself
@@ -781,6 +797,7 @@ def _fit_affine_from_ants(
         num_bins=num_bins,
         shrink_factors=shrink_factors,
         smoothing_sigmas=smoothing_sigmas,
+        smoothing_sigmas_units=smoothing_sigmas_units,
         iterations=iterations,
         learning_rate=learning_rate,
         multi_start=multi_start,
@@ -865,6 +882,7 @@ def syn_registration(
     affine_num_bins: int = 32,
     affine_shrink_factors: Sequence[int] = (4, 2, 1),
     affine_smoothing_sigmas: Optional[Union[float, Sequence[float]]] = (2.0, 1.0, 0.0),
+    affine_smoothing_sigmas_units: str = "vox",
     affine_iterations: Union[int, Sequence[int]] = (100, 100, 50),
     affine_learning_rate: Union[float, Sequence[float]] = (0.05, 0.03, 0.02),
     affine_multi_start: bool = True,
@@ -938,6 +956,12 @@ def syn_registration(
     ``moving_mask`` restrict midpoint sampling to their nonzero regions.
     ``smoothing_sigmas`` optionally sets the pyramid image smoothing in
     voxel units, one value per level. These options affect SyN only.
+
+    ``affine_smoothing_sigmas`` are in full-resolution voxels by default
+    (``affine_smoothing_sigmas_units='vox'``, as ANTs' ``2x1x0vox``), so the
+    default (2, 1, 0) means the same amount of smoothing whatever the image
+    spacing; ``'mm'`` gives physical units (the behaviour before this
+    option existed, identical for 1 mm isotropic images).
 
     **Defaults.** ``syn_metric``, ``levels``, ``reg_iterations``, ``grad_step``,
     ``flow_sigma``, ``gaussian_sigma_mode``, ``conservative_smooth``,
@@ -1198,6 +1222,8 @@ def syn_registration(
             "optimizer='syn_reg_adam' reproduces syntx.syn()'s reg_adam for the spectral regularizers only "
             "('sobolev', 'dsti'); syntx smooths the Adam quotient differently for 'gaussian'/'bspline'"
         )
+    if affine_smoothing_sigmas_units not in ("mm", "vox"):
+        raise ValueError("affine_smoothing_sigmas_units must be 'mm' or 'vox'")
     if inverse_schedule not in ("per_iteration", "end_of_level"):
         raise ValueError("inverse_schedule must be 'per_iteration' or 'end_of_level'")
     if end_of_level_inverse_steps < 1:
@@ -1352,6 +1378,7 @@ def syn_registration(
             num_bins=affine_num_bins,
             shrink_factors=affine_shrink_factors,
             smoothing_sigmas=affine_smoothing_sigmas,
+            smoothing_sigmas_units=affine_smoothing_sigmas_units,
             iterations=affine_iterations,
             learning_rate=affine_learning_rate,
             multi_start=affine_multi_start,
@@ -1409,6 +1436,7 @@ def syn_registration(
             "provenance": {
                 "type_of_transform": type_of_transform,
                 "affine_transform_type": type_of_transform,
+                "affine_smoothing_sigmas_units": affine_smoothing_sigmas_units,
                 "device": str(resolved_device),
                 "outprefix": resolved_outprefix,
             },
@@ -1530,12 +1558,18 @@ def syn_registration(
                 (1,) + fixed_meta_level["torch_shape"] + (dimension,), device=resolved_device, dtype=dtype
             )
             warp_l2r, warp_r2l = zeros.clone(), zeros.clone()
-            warp_l2r_inv, warp_r2l_inv = zeros.clone(), zeros.clone()
+            if inverse_schedule == "per_iteration":
+                warp_l2r_inv, warp_r2l_inv = zeros.clone(), zeros.clone()
+            del zeros
         else:
             warp_l2r = _upsample_field(warp_l2r, fixed_meta_level["torch_shape"])
             warp_r2l = _upsample_field(warp_r2l, fixed_meta_level["torch_shape"])
-            warp_l2r_inv = _upsample_field(warp_l2r_inv, fixed_meta_level["torch_shape"])
-            warp_r2l_inv = _upsample_field(warp_r2l_inv, fixed_meta_level["torch_shape"])
+            # 'end_of_level' never reads the inverses before the last level,
+            # which restarts from -W: they are None until then, and are not
+            # carried (or upsampled) across levels.
+            if inverse_schedule == "per_iteration":
+                warp_l2r_inv = _upsample_field(warp_l2r_inv, fixed_meta_level["torch_shape"])
+                warp_r2l_inv = _upsample_field(warp_r2l_inv, fixed_meta_level["torch_shape"])
 
         if verbose:
             message = (
@@ -1577,9 +1611,13 @@ def syn_registration(
                 value, size=meta["torch_shape"], mode="nearest")
                 for value, meta in zip(metric_masks_full, (fixed_meta_level, moving_meta_level))]
 
+        # Hand the level-start fields over in a list that _fit_syn_level()
+        # empties, so this frame keeps no reference to them during the level.
+        level_warps = [warp_l2r, warp_r2l, warp_l2r_inv, warp_r2l_inv]
+        warp_l2r = warp_r2l = warp_l2r_inv = warp_r2l_inv = None
         warp_l2r, warp_r2l, warp_l2r_inv, warp_r2l_inv, history = _fit_syn_level(
             I_level, J_level, fixed_meta_level, moving_meta_level,
-            warp_l2r, warp_r2l, warp_l2r_inv, warp_r2l_inv, M_phys, t_phys,
+            level_warps, M_phys, t_phys,
             iterations=iteration_count,
             metric_terms=metric_terms_level,
             metric_masks=metric_masks_level,
@@ -1733,6 +1771,7 @@ def syn_registration(
             "optimizer_lr": optimizer_lr,
             "use_analytical_gradients": use_analytical_gradients,
             "affine_fit": affine_result is not None,
+            "affine_smoothing_sigmas_units": affine_smoothing_sigmas_units,
             "device": str(resolved_device),
             "outprefix": resolved_outprefix,
         },

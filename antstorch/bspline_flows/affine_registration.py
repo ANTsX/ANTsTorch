@@ -84,6 +84,7 @@ def _fit_single_affine(
     level_iterations,
     level_rates,
     multi_start: bool,
+    sigma_units: str = "mm",
     center_of_mass_init: bool,
     padding_mode: str,
     convergence_tolerance: Optional[float],
@@ -100,8 +101,8 @@ def _fit_single_affine(
         # explicitly freeze it to keep rotation out of the optimization.
         module.omega.requires_grad_(False)
 
-    coarse_fixed, coarse_fixed_domain = _downsample(_smooth_image(fixed_item, fixed_domain, sigmas[0]), fixed_domain, factors[0])
-    coarse_moving, coarse_moving_domain = _downsample(_smooth_image(moving_item, moving_domain, sigmas[0]), moving_domain, factors[0])
+    coarse_fixed, coarse_fixed_domain = _downsample(_smooth_image(fixed_item, fixed_domain, sigmas[0], sigma_units), fixed_domain, factors[0])
+    coarse_moving, coarse_moving_domain = _downsample(_smooth_image(moving_item, moving_domain, sigmas[0], sigma_units), moving_domain, factors[0])
 
     with torch.no_grad():
         fixed_com = _center_of_mass(fixed_item, fixed_domain) if center_of_mass_init else torch.zeros(dimension, device=device, dtype=dtype)
@@ -123,8 +124,8 @@ def _fit_single_affine(
 
     history, level_history = [], []
     for level, (factor, sigma, iteration_count, rate) in enumerate(zip(factors, sigmas, level_iterations, level_rates)):
-        fixed_level, fixed_level_domain = _downsample(_smooth_image(fixed_item, fixed_domain, sigma), fixed_domain, factor)
-        moving_level, moving_level_domain = _downsample(_smooth_image(moving_item, moving_domain, sigma), moving_domain, factor)
+        fixed_level, fixed_level_domain = _downsample(_smooth_image(fixed_item, fixed_domain, sigma, sigma_units), fixed_domain, factor)
+        moving_level, moving_level_domain = _downsample(_smooth_image(moving_item, moving_domain, sigma, sigma_units), moving_domain, factor)
         optimizer = torch.optim.Adam(module.parameters(), lr=rate)
         current_level_history = []
         previous = None
@@ -177,6 +178,7 @@ def affine_registration(
     learning_rate: Union[float, Sequence[float]] = 1e-2,
     shrink_factors: Sequence[int] = (4, 2, 1),
     smoothing_sigmas: Optional[Union[float, Sequence[float]]] = None,
+    smoothing_sigmas_units: str = "mm",
     multi_start: bool = True,
     center_of_mass_init: bool = True,
     padding_mode: str = "border",
@@ -219,6 +221,11 @@ def affine_registration(
     iterations, learning_rate, shrink_factors, smoothing_sigmas :
         Multi-resolution pyramid configuration, matching
         ``bspline_svf_registration()``'s parameters of the same name.
+    smoothing_sigmas_units : {'mm', 'vox'}
+        Units of ``smoothing_sigmas``: physical units (``'mm'``, default,
+        unchanged behaviour) or full-resolution voxels (``'vox'``, as ANTs'
+        ``--smoothing-sigmas 2x1x0vox``). Sigmas are applied before each
+        level's downsampling, so voxels are those of the input images.
     multi_start : bool
         If ``True``, seed the optimization from whichever of a small set of
         candidate rotations (identity plus a 180-degree rotation about each
@@ -284,6 +291,8 @@ def affine_registration(
     if padding_mode not in ("zeros", "border", "reflection"):
         raise ValueError("padding_mode must be 'zeros', 'border', or 'reflection'")
 
+    if smoothing_sigmas_units not in ("mm", "vox"):
+        raise ValueError(f"smoothing_sigmas_units must be 'mm' or 'vox', got {smoothing_sigmas_units!r}")
     factors, sigmas, level_iterations, level_rates = _pyramid_configuration(
         shrink_factors, smoothing_sigmas, iterations, learning_rate
     )
@@ -306,6 +315,7 @@ def affine_registration(
             level_iterations=level_iterations,
             level_rates=level_rates,
             multi_start=multi_start,
+            sigma_units=smoothing_sigmas_units,
             center_of_mass_init=center_of_mass_init,
             padding_mode=padding_mode,
             convergence_tolerance=convergence_tolerance,

@@ -119,27 +119,44 @@ def _pyramid_configuration(shrink_factors, smoothing_sigmas, iterations, learnin
     return factors, sigmas, level_iterations, level_rates
 
 
-def _smooth_image(image: Tensor, domain: ImageDomain, sigma: float) -> Tensor:
-    """Gaussian smoothing with ``sigma`` in physical domain units."""
+def _smooth_image(image: Tensor, domain: ImageDomain, sigma: float, units: str = "mm") -> Tensor:
+    """Separable Gaussian smoothing of ``image``.
+
+    ``sigma`` is in physical domain units (``units='mm'``, the default) or in
+    voxels of ``image`` (``units='vox'``, as ANTs' ``2x1x0vox``; the same
+    voxel sigma on every axis whatever the spacing). The image is
+    replicate-padded once on every axis, then filtered along each axis in
+    turn (weighted sum of shifted slices): the dense N-D Gaussian (a
+    separable kernel) up to
+    floating-point rounding, at O(radius) rather than O(radius^dim) cost per
+    voxel.
+    """
+    if units not in ("mm", "vox"):
+        raise ValueError(f"smoothing sigma units must be 'mm' or 'vox', got {units!r}")
     if sigma == 0:
         return image
-    sigma_torch = tuple(reversed(tuple(sigma / spacing for spacing in domain.spacing)))
-    axes = []
-    radii = []
-    for axis_sigma in sigma_torch:
-        radius = max(1, int(3.0 * axis_sigma + 0.5))
-        radii.append(radius)
+    if units == "vox":
+        sigma_torch = (float(sigma),) * domain.dimension
+    else:
+        sigma_torch = tuple(reversed(tuple(sigma / spacing for spacing in domain.spacing)))
+    radii = [max(1, int(3.0 * axis_sigma + 0.5)) for axis_sigma in sigma_torch]
+    # Replicate-pad every axis once, exactly as the dense kernel did, then
+    # filter one axis at a time as a weighted sum of shifted slices (no
+    # convolution backend involved, so the result does not depend on the
+    # platform's conv implementation): identical to the dense result.
+    padding = tuple(value for radius in reversed(radii) for value in (radius, radius))
+    smoothed = F.pad(image, padding, mode="replicate")
+    for axis, (axis_sigma, radius) in enumerate(zip(sigma_torch, radii)):
         coordinate = torch.arange(-radius, radius + 1, dtype=image.dtype, device=image.device)
         axis_kernel = torch.exp(-0.5 * (coordinate / axis_sigma).square())
-        axes.append(axis_kernel / axis_kernel.sum())
-    kernel = axes[0]
-    for axis_kernel in axes[1:]:
-        kernel = kernel.unsqueeze(-1) * axis_kernel.reshape((1,) * kernel.ndim + (-1,))
-    kernel = kernel.reshape((1, 1) + kernel.shape).expand((image.shape[1], 1) + kernel.shape)
-    padding = tuple(value for radius in reversed(radii) for value in (radius, radius))
-    padded = F.pad(image, padding, mode="replicate")
-    convolution = F.conv2d if domain.dimension == 2 else F.conv3d
-    return convolution(padded, kernel, groups=image.shape[1])
+        axis_kernel = axis_kernel / axis_kernel.sum()
+        spatial_axis = 2 + axis
+        length = smoothed.shape[spatial_axis] - 2 * radius
+        filtered = smoothed.narrow(spatial_axis, 0, length) * axis_kernel[0]
+        for offset in range(1, 2 * radius + 1):
+            filtered = filtered + smoothed.narrow(spatial_axis, offset, length) * axis_kernel[offset]
+        smoothed = filtered
+    return smoothed
 
 
 def _validate_initial_affine(initial_affine, fixed: Tensor, dimension: int) -> Optional[Tuple[Tensor, Tensor]]:
