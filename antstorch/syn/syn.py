@@ -75,7 +75,7 @@ from .core.grid import (
 )
 from .core.inverse import update_inverse_field_nd
 from .core.jacobian import compute_jacobian_determinant_nd
-from .core.losses import local_ncc_loss_nd, mattes_mi_loss_nd, box_cc2_loss_nd, soft_dice_loss_nd
+from .core.losses import local_ncc_loss_chunked, local_ncc_loss_nd, mattes_mi_loss_nd, box_cc2_loss_nd, soft_dice_loss_nd
 from .core.pipeline import auto_detect_device, mps_grid_sample_3d_available, mps_grid_sample_3d_forward_available
 from .core.smoothing import (
     apply_dsti_green_operator,
@@ -86,6 +86,7 @@ from .core.smoothing import (
 )
 
 _LINEAR_TRANSFORM_TYPES = ("Translation", "Rigid", "Similarity", "Affine")
+_CC_METRICS = ("cc", "lncc", "cc2", "lncc2")
 _SYN_TRANSFORM_TYPES = ("SyN", "SyNOnly")
 _SIMILARITY_METRICS = ("mse", "lncc", "cc", "lncc2", "cc2", "mattes", "mi", "box_cc2", "dice")
 _REGULARIZERS = ("gaussian", "sobolev", "dsti", "bspline")
@@ -433,6 +434,7 @@ def _fit_syn_level(
     optimizer_lr: float = 1.0,
     metric_terms=None,
     metric_masks=None,
+    metric_chunks: int = 1,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor, list]:
     # ``warps`` is the caller's [l2r, r2l, l2r_inv, r2l_inv] list, consumed
     # here: emptying it drops the caller's references, so each level-start
@@ -492,6 +494,21 @@ def _fit_syn_level(
         if _mesh_size_active(total_field_mesh_size_at_base_level):
             total_mesh_size_level = _scale_mesh_size(total_field_mesh_size_at_base_level, level_scale)
 
+    def _chunked_cc_term(left, right, a, b, valid, name, window, weight):
+        # Slab-wise CC (core.losses.local_ncc_loss_chunked): backpropagates
+        # weight * loss into a/b (and through them to the half-warps) slab by
+        # slab, and returns the detached weighted loss -- plus a zero term
+        # tied to the half-warps when they are given, so the caller's
+        # loss.backward() still works and adds nothing.
+        value, grad_a, grad_b = local_ncc_loss_chunked(
+            a, b, valid, window_size=window, squared=name in ("cc2", "lncc2"), chunks=metric_chunks,
+        )
+        torch.autograd.backward((a, b), (grad_a * weight, grad_b * weight))
+        value = weight * value
+        if left is not None:
+            return left.sum() * 0 + right.sum() * 0 + value
+        return value
+
     def objective(left, right, left_inv, right_inv, backward=False):
         # With metric_terms and backward=True, each term is backpropagated as
         # soon as it is evaluated (into detached copies of the two sampling
@@ -509,6 +526,8 @@ def _fit_syn_level(
                 use_analytical_gradients=use_analytical_gradients,
                 compute_gradients=False,
             )
+            if metric_chunks > 1 and similarity in _CC_METRICS and backward and torch.is_grad_enabled():
+                return _chunked_cc_term(left, right, a, b, valid, similarity, window_size, 1.0)
             return _similarity_loss(similarity, a, b, valid, window_size, num_bins)
         fixed_grid = physical_to_normalized_torch_cached(
             X_phys + left, fixed_meta_t["shape_t"], fixed_meta_t["spacing_t"],
@@ -541,9 +560,12 @@ def _fit_syn_level(
             a = b = None
             radius = int(parameter) if name in ("cc", "lncc", "cc2", "lncc2", "box_cc2") else 0
             bins = int(parameter) if name in ("mi", "mattes") else num_bins
-            term = weight * _similarity_loss(name, a_mid, b_mid, valid, 2 * radius + 1, bins)
+            if per_term and metric_chunks > 1 and name in _CC_METRICS:
+                term = _chunked_cc_term(None, None, a_mid, b_mid, valid, name, 2 * radius + 1, weight)
+            else:
+                term = weight * _similarity_loss(name, a_mid, b_mid, valid, 2 * radius + 1, bins)
             a_mid = b_mid = None
-            if per_term:
+            if per_term and term.requires_grad:
                 term.backward()
                 term = term.detach()
             loss = loss + term
@@ -927,6 +949,7 @@ def syn_registration(
     use_analytical_gradients: bool = True,
     sobolev_alpha: Optional[float] = None,
     optimizer_lr: float = 1.0,
+    metric_chunks: int = 1,
     antisymmetric: bool = True,
     gaussian_sigma_mode: Optional[str] = None,
     conservative_smooth: Optional[bool] = None,
@@ -974,6 +997,13 @@ def syn_registration(
     ``moving_mask`` restrict midpoint sampling to their nonzero regions.
     ``smoothing_sigmas`` optionally sets the pyramid image smoothing in
     voxel units, one value per level. These options affect SyN only.
+
+    ``metric_chunks`` (default 1) evaluates CC-family metrics (``cc``,
+    ``lncc``, ``cc2``, ``lncc2``; primary and multivariate) in that many
+    slabs along the longest axis, each with a ``2 * radius`` halo and
+    backpropagated on its own, so the CC autograd graph is never held for
+    the whole image (the per-voxel values, and hence the loss, are those of
+    the unchunked metric). Lower peak memory for more kernel launches.
 
     ``affine_smoothing_sigmas`` are in full-resolution voxels by default
     (``affine_smoothing_sigmas_units='vox'``, as ANTs' ``2x1x0vox``), so the
@@ -1240,6 +1270,11 @@ def syn_registration(
             "optimizer='syn_reg_adam' reproduces syntx.syn()'s reg_adam for the spectral regularizers only "
             "('sobolev', 'dsti'); syntx smooths the Adam quotient differently for 'gaussian'/'bspline'"
         )
+    if isinstance(metric_chunks, bool) or not isinstance(metric_chunks, int) or metric_chunks < 1:
+        raise ValueError("metric_chunks must be a positive integer")
+    if (metric_chunks > 1 and multivariate_extras is None and syn_metric not in _CC_METRICS
+            and type_of_transform in _SYN_TRANSFORM_TYPES):
+        raise ValueError("metric_chunks > 1 requires a CC-family syn_metric (cc, lncc, cc2, lncc2)")
     if affine_smoothing_sigmas_units not in ("mm", "vox"):
         raise ValueError("affine_smoothing_sigmas_units must be 'mm' or 'vox'")
     if inverse_schedule not in ("per_iteration", "end_of_level"):
@@ -1664,6 +1699,7 @@ def syn_registration(
             iterations=iteration_count,
             metric_terms=metric_terms_level,
             metric_masks=metric_masks_level,
+            metric_chunks=metric_chunks,
             similarity=syn_metric,
             window_size=window_size,
             num_bins=num_bins,
@@ -1806,6 +1842,7 @@ def syn_registration(
             "bspline_enforce_stationary_boundary": bspline_enforce_stationary_boundary,
             "antisymmetric": antisymmetric,
             "inverse_method": inverse_method,
+            "metric_chunks": metric_chunks,
             "inverse_schedule": inverse_schedule,
             "end_of_level_inverse_steps": end_of_level_inverse_steps,
             "syntx_parity": syntx_parity,

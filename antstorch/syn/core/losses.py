@@ -295,6 +295,116 @@ def local_ncc_loss_nd(
         return -torch.mean(cc_metric)
 
 
+def _lncc_terms(I, J, mask, window_size, squared):
+    """Per-voxel clamped (squared) LNCC and active mask, exactly as in :func:`local_ncc_loss_nd`."""
+    pad = window_size // 2
+    pool_fn = F.avg_pool2d if I.dim() == 4 else F.avg_pool3d
+
+    def box_filter(x):
+        return pool_fn(x, kernel_size=window_size, stride=1, padding=pad, count_include_pad=False)
+
+    I_mean = box_filter(I)
+    J_mean = box_filter(J)
+    I_var = torch.clamp(box_filter((I - I_mean) ** 2), min=0.0)
+    J_var = torch.clamp(box_filter((J - J_mean) ** 2), min=0.0)
+    IJ_cov = box_filter((I - I_mean) * (J - J_mean))
+    var_floor = 1e-6
+    safe_I_var = torch.clamp(I_var, min=var_floor)
+    safe_J_var = torch.clamp(J_var, min=var_floor)
+    if squared:
+        cc_metric = torch.clamp((IJ_cov ** 2) / (safe_I_var * safe_J_var + 1e-8), min=0.0, max=1.0)
+    else:
+        cc_metric = torch.clamp(IJ_cov / (torch.sqrt(safe_I_var * safe_J_var) + 1e-6), min=-1.0, max=1.0)
+    active = ((I_var > 1e-6) & (J_var > 1e-6) & (mask > 0.5)).to(dtype=I.dtype)
+    return cc_metric, active
+
+
+def _slab_bounds(length, chunks):
+    chunks = max(1, min(int(chunks), int(length)))
+    edges = [round(i * length / chunks) for i in range(chunks + 1)]
+    return [(edges[i], edges[i + 1]) for i in range(chunks) if edges[i + 1] > edges[i]]
+
+
+def local_ncc_loss_chunked(I, J, mask, window_size=9, squared=False, chunks=1, axis=None):
+    r"""Masked local NCC loss and its gradients, evaluated in slabs to bound memory.
+
+    Computes the same quantity as ``local_ncc_loss_nd(I, J, mask, window_size,
+    squared=squared)`` (``mask`` is required) without ever holding the
+    autograd graph of the whole image: the image is cut into ``chunks`` slabs
+    along ``axis`` (default: the longest spatial axis). Each slab is evaluated
+    with a halo of ``2 * (window_size // 2)`` voxels on each side -- the two
+    nested box filters (local means, then local moments) each reach
+    ``window_size // 2`` voxels -- so every interior voxel sees exactly the
+    data it sees in the full computation (true image borders keep the full
+    computation's ``count_include_pad=False`` behaviour), and only interior
+    voxels are summed. Each slab's numerator is backpropagated on its own;
+    since the active-voxel count does not depend on ``I``/``J`` smoothly
+    (it is a mask), the gradient of ``-numerator / (count + 1e-8)`` is the
+    accumulated numerator gradient times ``-1 / (count + 1e-8)``, applied
+    once at the end.
+
+    Parameters
+    ----------
+    I, J : torch.Tensor
+        ``(B, 1, *spatial)`` images (any autograd history is ignored; they
+        are used as detached leaves).
+    mask : torch.Tensor
+        ``(B, 1, *spatial)`` evaluation mask, as in :func:`local_ncc_loss_nd`.
+    window_size : int
+        Box window; reduced (and forced odd) like :func:`local_ncc_loss_nd`
+        if larger than the smallest spatial dimension of the full image.
+    squared : bool
+        CC^2 (``True``) or CC.
+    chunks : int
+        Number of slabs (clamped to the axis length); 1 evaluates in one go.
+    axis : int, optional
+        Spatial axis (0-based) to cut along.
+
+    Returns
+    -------
+    loss, grad_I, grad_J : torch.Tensor
+        Detached scalar loss and the gradients of the loss w.r.t. ``I``/``J``.
+    """
+    dim = I.dim() - 2
+    if dim not in (2, 3):
+        raise ValueError(f"Only 2-D and 3-D images are supported, got {dim}D.")
+    if mask is None:
+        raise ValueError("local_ncc_loss_chunked requires a mask (use an all-ones mask for none)")
+    min_spatial = min(I.shape[2:])
+    if window_size > min_spatial:
+        window_size = min_spatial
+        if window_size % 2 == 0:
+            window_size = max(1, window_size - 1)
+    halo = 2 * (window_size // 2)
+    if axis is None:
+        axis = max(range(dim), key=lambda d: I.shape[2 + d])
+    tensor_axis = 2 + axis
+    length = I.shape[tensor_axis]
+
+    I_leaf = I.detach().requires_grad_(True)
+    J_leaf = J.detach().requires_grad_(True)
+    numerator = torch.zeros((), device=I.device, dtype=I.dtype)
+    count = torch.zeros((), device=I.device, dtype=I.dtype)
+    for start, stop in _slab_bounds(length, chunks):
+        lo, hi = max(0, start - halo), min(length, stop + halo)
+        cc_metric, active = _lncc_terms(
+            I_leaf.narrow(tensor_axis, lo, hi - lo), J_leaf.narrow(tensor_axis, lo, hi - lo),
+            mask.narrow(tensor_axis, lo, hi - lo), window_size, squared,
+        )
+        interior = slice(start - lo, start - lo + (stop - start))
+        index = (slice(None),) * tensor_axis + (interior,)
+        slab_numerator = torch.sum(cc_metric[index] * active[index])
+        count = count + torch.sum(active[index]).detach()
+        slab_numerator.backward()
+        numerator = numerator + slab_numerator.detach()
+        cc_metric = active = slab_numerator = None
+    scale = -1.0 / (count + 1e-8)
+    loss = numerator * scale
+    grad_I = I_leaf.grad.mul_(scale) if I_leaf.grad is not None else torch.zeros_like(I_leaf)
+    grad_J = J_leaf.grad.mul_(scale) if J_leaf.grad is not None else torch.zeros_like(J_leaf)
+    return loss, grad_I, grad_J
+
+
 def b_spline_3(x: torch.Tensor) -> torch.Tensor:
     """Cubic (3rd-order) B-spline kernel, used as the Parzen window in :func:`mattes_mi_loss_core`."""
     abs_x = torch.abs(x)

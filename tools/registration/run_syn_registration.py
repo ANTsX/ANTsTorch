@@ -190,6 +190,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--affine-shrink-factors", type=int, nargs="+", default=(4, 2, 1))
     parser.add_argument("--affine-smoothing-sigmas", type=float, nargs="+", default=(2.0, 1.0, 0.0))
     parser.add_argument(
+        "--metric-chunks",
+        type=int,
+        default=1,
+        help="Evaluate CC-family SyN metrics in this many slabs (lower peak memory, same loss)",
+    )
+    parser.add_argument(
         "--affine-smoothing-sigmas-units",
         choices=("vox", "mm"),
         default="vox",
@@ -257,6 +263,7 @@ def main() -> None:
         affine_shrink_factors=tuple(args.affine_shrink_factors),
         affine_smoothing_sigmas=tuple(args.affine_smoothing_sigmas),
         affine_smoothing_sigmas_units=args.affine_smoothing_sigmas_units,
+        metric_chunks=args.metric_chunks,
         affine_iterations=tuple(args.affine_iterations),
         affine_learning_rate=tuple(args.affine_learning_rate),
         affine_multi_start=not args.affine_single_start,
