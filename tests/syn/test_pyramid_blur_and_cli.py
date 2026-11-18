@@ -93,3 +93,21 @@ def test_cli_rejects_unknown_affine_smoothing_sigmas_units(tmp_path):
     with patch.object(sys, "argv", ["run_syn_registration.py", "--affine-smoothing-sigmas-units", "pixels"]):
         with pytest.raises(SystemExit):
             tool.parse_args()
+
+
+def test_cli_passes_metric_chunks(tmp_path):
+    image = ants.from_numpy(np.random.default_rng(0).random((8, 8, 8)).astype(np.float32))
+    ants.image_write(image, str(tmp_path / "f.nii.gz"))
+    tool = _load_tool()
+    captured = {}
+
+    def fake_registration(**kwargs):
+        captured.update(kwargs)
+        raise _Captured
+
+    argv = ["run_syn_registration.py", "--fixed", str(tmp_path / "f.nii.gz"), "--moving", str(tmp_path / "f.nii.gz"),
+            "--output-dir", str(tmp_path / "out"), "--device", "cpu", "--metric-chunks", "8"]
+    with patch.object(sys, "argv", argv), patch.object(tool, "syn_registration", fake_registration):
+        with pytest.raises(_Captured):
+            tool.main()
+    assert captured["metric_chunks"] == 8
