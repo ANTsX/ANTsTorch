@@ -874,6 +874,7 @@ def update_inverse_field_nd(
     X_phys=None,
     max_iters=None,
     convergence_criterion=None,
+    itk_stopping: bool = False,
     **kwargs
 ) -> torch.Tensor:
     """Dimension-agnostic inversion of a displacement field.
@@ -919,6 +920,13 @@ def update_inverse_field_nd(
         tolerance is satisfied. None preserves historical defaults ('both'
         for physical coordinates, 'either' for normalized coordinates).
         Explicit values require method='fixed_point'.
+    itk_stopping : bool
+        Fixed-point solver only. ``False`` (default, syntx >= 6.35.4): the
+        thresholds are tested on the current iterate before it is updated, so
+        an already converged guess is returned unchanged. ``True``: ITK's
+        ``InvertDisplacementFieldImageFilter`` order, where the norms measured
+        in one iteration gate the next and the step that measured convergence
+        is still applied (used by :mod:`antstorch.direct` to match ANTs).
 
     Returns
     -------
@@ -929,6 +937,8 @@ def update_inverse_field_nd(
         raise ValueError("convergence_criterion must be None, 'both', or 'either'")
     if convergence_criterion is not None and method != "fixed_point":
         raise ValueError("convergence_criterion requires method='fixed_point'")
+    if itk_stopping and method != "fixed_point":
+        raise ValueError("itk_stopping requires method='fixed_point'")
 
     def converged(maximum, mean, default):
         checks = (maximum <= max_error_threshold, mean <= mean_error_threshold)
@@ -991,6 +1001,8 @@ def update_inverse_field_nd(
         mean_error_norm = float('inf')
 
         for iteration in range(steps):
+            if itk_stopping and converged(max_error_norm, mean_error_norm, "both"):
+                break
 
             coords_phys = X_phys + W_inv_disp
             coords_norm = physical_to_normalized_torch_cached(coords_phys, shape_t, spacing_t, origin_t, direction_t)
@@ -1001,8 +1013,10 @@ def update_inverse_field_nd(
             scaled_norm = torch.sqrt(torch.sum((error / spacing_t) ** 2, dim=-1, keepdim=True))
             max_error_norm = float(scaled_norm.max())
             mean_error_norm = float(scaled_norm.mean())
-            # Idempotent (syntx >= 6.35.4): test the current iterate before updating it.
-            if converged(max_error_norm, mean_error_norm, "both"):
+            # Idempotent (syntx >= 6.35.4): test the current iterate before updating it. With
+            # itk_stopping=True, ITK's InvertDisplacementFieldImageFilter order instead: the norms
+            # gate the NEXT iteration, so the step that measured convergence is still applied.
+            if converged(max_error_norm, mean_error_norm, "both") and not itk_stopping:
                 break
 
             update = -error
@@ -1037,6 +1051,8 @@ def update_inverse_field_nd(
         mean_error_norm = float('inf')
 
         for iteration in range(steps):
+            if itk_stopping and converged(max_error_norm, mean_error_norm, "either"):
+                break
 
             coords = identity + W_inv_disp
             forward_at_inv = torch.movedim(
@@ -1046,8 +1062,10 @@ def update_inverse_field_nd(
             scaled_norm = torch.sqrt(torch.sum((error * voxel_scale) ** 2, dim=-1, keepdim=True))
             max_error_norm = float(scaled_norm.max())
             mean_error_norm = float(scaled_norm.mean())
-            # Idempotent (syntx >= 6.35.4): test the current iterate before updating it.
-            if converged(max_error_norm, mean_error_norm, "either"):
+            # Idempotent (syntx >= 6.35.4): test the current iterate before updating it. With
+            # itk_stopping=True, ITK's InvertDisplacementFieldImageFilter order instead: the norms
+            # gate the NEXT iteration, so the step that measured convergence is still applied.
+            if converged(max_error_norm, mean_error_norm, "either") and not itk_stopping:
                 break
 
             epsilon = 0.75 if iteration == 0 else 0.5

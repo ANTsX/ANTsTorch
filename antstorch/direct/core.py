@@ -30,6 +30,7 @@ def _invert(field: Tensor, initial: Tensor, domain: ImageDomain, iterations: int
         steps=iterations,
         method="fixed_point",
         convergence_criterion="either",
+        itk_stopping=True,
         spacing=domain.spacing,
         origin=domain.origin,
         direction=domain.direction,
