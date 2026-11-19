@@ -133,8 +133,12 @@ def test_auto_registration_matches_cpu(monkeypatch,algorithm):
         else:
             f=ants.from_numpy(fixed[0,0].numpy().transpose(2,1,0).copy())
             m=ants.from_numpy(moving[0,0].numpy().transpose(2,1,0).copy())
+            # stationary_boundary=False: this tiny 16^3 problem is ill-conditioned with syntx's stationary boundary
+            # (the default since 2026-11-18): a 1e-7 relative perturbation of the image already moves warpedmovout by
+            # ~4e-5 on CPU alone, so CPU-vs-MPS float32 rounding cannot meet the tolerance below. Without it, the same
+            # perturbation moves it by ~4e-7. This test checks the Metal sampler, not the SyN defaults.
             result=syn_registration(f,m,type_of_transform='SyNOnly',levels=(1,),reg_iterations=(5,),
-                                    device=device,syn_metric='mse')
+                                    device=device,syn_metric='mse',stationary_boundary=False)
             outputs.append(result['warpedmovout'].numpy())
     np.testing.assert_allclose(outputs[0],outputs[1],atol=2e-5,rtol=2e-4)
     mps_grid_sample_3d_available.cache_clear()

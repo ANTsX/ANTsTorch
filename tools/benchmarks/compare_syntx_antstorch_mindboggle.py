@@ -147,8 +147,9 @@ ANTSTORCH_EXTRA = {}  # set from CLI in main(); antstorch arms only (syntx arms 
 
 # --- "fair" mode (default of the CLI; module default False so tools importing _run_* keep their behavior) ---
 # Isolates the dense-SyN algorithm: (1) antstorch starts from the SAME affine file syntx used (copied from the
-# syntx result, see _share_affine); (2) antstorch runs syntx's loop: in-loop inverses of both half-warps at every
-# iteration with in_loop_inv_steps=10 (syntx.syn()/registration() default, passed to SyNTo in all three arms),
+# syntx result, see _share_affine); (2) antstorch runs syntx's loop: syntx >= 6.35 "Option A" inverse handling --
+# warm-started in-loop inverses of both half-warps refreshed every (1, 2, 4) iterations per level with in_loop_inv_steps=10 (syntx.syn()/registration() default),
+# a 30-step end-of-level polish and an LM polish of the composed inverse;
 # syntx's CFL scale / slope early stop / best-state restore / floor pyramid (syntx_parity), and autograd through
 # the image interpolation (use_analytical_gradients=False, as every syntx benchmark arm); (3) "dsti" is compared
 # with antstorch's 'syn_reg_adam' optimizer, a port of syntx.syn()'s reg_adam (syntx's dsti arm = reg_adam + dsti1,
@@ -156,7 +157,7 @@ ANTSTORCH_EXTRA = {}  # set from CLI in main(); antstorch arms only (syntx arms 
 # (4) times compared are DEFORMABLE-ONLY on both sides (affine time reported separately).
 FAIR = False
 FAIR_ANTSTORCH_KWARGS = dict(
-    inverse_schedule="per_iteration", in_loop_inverse_steps=10, syntx_parity=True, use_analytical_gradients=False,
+    inverse_schedule="refresh", in_loop_inverse_steps=10, syntx_parity=True, use_analytical_gradients=False,
 )
 FAIR_MODEL_OVERRIDES = {  # reg -> (antstorch evaluate model name, extra kwargs)
     "dsti": ("dsti_syn", dict(optimizer="syn_reg_adam")),  # syntx.syn()'s reg_adam; alpha 1.0 from the defaults table
@@ -1164,10 +1165,11 @@ def main():
                          "These supervised arms optimize the same DKT31 labels used for Dice scoring.")
     ap.add_argument("--device", default=None,
                     help="cuda / mps / cpu. Default: auto-detect (cuda, then mps, then cpu), passed identically to both libraries.")
-    ap.add_argument("--inverse-schedule", choices=["per_iteration", "end_of_level"], default=None,
-                    help="When antstorch maintains the half-warp inverses (antstorch arms only). 'end_of_level' inverts once "
-                         "after the last level instead of after every iteration (see syn_registration docstring); "
-                         "validate Dice against a per_iteration run first.")
+    ap.add_argument("--inverse-schedule", choices=["refresh", "per_iteration", "end_of_level"], default=None,
+                    help="When antstorch maintains the half-warp inverses (antstorch arms only). 'refresh' (default) is "
+                         "syntx >= 6.35's Option A (every (1, 2, 4) iterations per level + end-of-level polish); "
+                         "'per_iteration' every iteration; 'end_of_level' inverts once after the last level "
+                         "(see syn_registration docstring).")
     ap.add_argument("--end-of-level-inverse-steps", type=int, default=None,
                     help="Solver steps for the single end-of-level inversion (default 30).")
     ap.add_argument("--syntx-parity", action="store_true",
@@ -1193,7 +1195,7 @@ def main():
     ap.add_argument("--own-defaults", action="store_true",
                     help="Disable the fair mode: antstorch runs with its own defaults (end-of-level inverses, analytical "
                          "gradients, no syntx parity) and fits its own affine, as before 2026-10-14. Default (fair): syntx runs "
-                         "first, antstorch starts from the same affine file and runs syntx's loop (per-iteration inverses with "
+                         "first, antstorch starts from the same affine file and runs syntx's loop (syntx's Option A inverses with "
                          "10 steps, syntx parity, autograd; dsti with syntx.syn()'s reg_adam), and times compared are deformable-only.")
     ap.add_argument("--no-warmup", action="store_true",
                     help="Skip the throwaway first run per library (device/kernel initialisation) that is excluded from the timings.")
@@ -1416,9 +1418,9 @@ def main():
                 label = reg
             table_lines.append(f"| {pair_idx} | {label} | {s_dice} | {a_dice} | {delta} | {s_t} | {a_t} |")
 
-    _eff_schedule = args.inverse_schedule or ("per_iteration" if (FAIR or args.legacy_defaults) else "end_of_level")
+    _eff_schedule = args.inverse_schedule or ("per_iteration" if args.legacy_defaults else "refresh")
     md_lines = ["# Comparaison syntx vs antstorch — Mindboggle-101 (dense SyN)", "",
-                f"Paires : {args.pairs}  ", f"Modèles : {args.models}  ", f"Device : {args.device or 'auto'}  ", f"antstorch inverse_method : {args.inverse_method or 'default (anderson)'}  ", f"Mode : {'JUSTE — affine syntx partagée ; antstorch iso-algorithme (inverses par itération 10 pas, parité syntx, autograd ; dsti = syn_reg_adam) ; temps déformable seul' if FAIR else 'défauts propres de chaque bibliothèque (affines propres)'}  ",
+                f"Paires : {args.pairs}  ", f"Modèles : {args.models}  ", f"Device : {args.device or 'auto'}  ", f"antstorch inverse_method : {args.inverse_method or 'default (anderson)'}  ", f"Mode : {'JUSTE — affine syntx partagée ; antstorch iso-algorithme (inverses Option A de syntx 10 pas, parité syntx, autograd ; dsti = syn_reg_adam) ; temps déformable seul' if FAIR else 'défauts propres de chaque bibliothèque (affines propres)'}  ",
                 f"antstorch defaults : {'legacy' if args.legacy_defaults else 'syntx-aligned'}  ",
 f"antstorch inverse_schedule : {_eff_schedule}"
                 + (f" ({args.end_of_level_inverse_steps or 30} steps)" if _eff_schedule == "end_of_level" else "") + "  ",

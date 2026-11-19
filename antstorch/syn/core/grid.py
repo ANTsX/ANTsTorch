@@ -488,3 +488,32 @@ def _sample_mid_gradients(
     grad_J_mid_sampled = torch.matmul(grad_J_mid_sampled, moving_direction_t.t())
     grad_J_mid_sampled = torch.matmul(grad_J_mid_sampled, M_phys)
     return grad_I_mid_sampled, grad_J_mid_sampled
+
+
+# --- Ported from syntx.spatial / syntx.core.grid (syntx v6.39.0), used by core.digital_diffeomorphism ---------------
+
+def get_physical_to_normalized_affine(shape_t, spacing_t, origin_t, direction_t):
+    """``(M, b)`` such that ``x @ M + b`` maps physical points (tensor order z, y, x) to normalised
+    ``[-1, 1]`` grid coordinates in (x, y, z) order, from reversed metadata tensors.
+
+    ``n = D^-1 (x - origin) * 2 / (spacing * (shape - 1)) - 1`` with the true inverse direction (as ITK;
+    equal to :func:`physical_to_normalized_torch_cached` for an orthonormal direction).
+    """
+    scale_t = 2.0 / (spacing_t * (shape_t - 1.0))
+    M = torch.linalg.inv(direction_t).transpose(-1, -2) * scale_t.unsqueeze(0)
+    b = -(origin_t @ M) - 1.0
+    return torch.flip(M, dims=[-1]), torch.flip(b, dims=[-1])
+
+
+def physical_to_normalized_fast(phys_coords, M, b):
+    """``phys_coords @ M + b`` over the last axis for ``(M, b)`` from :func:`get_physical_to_normalized_affine`."""
+    dim = phys_coords.shape[-1]
+    return (phys_coords.reshape(-1, dim) @ M + b).view(phys_coords.shape)
+
+
+def sample_field_cf(field_cf: torch.Tensor, grid: torch.Tensor, mode: str = 'bilinear',
+                    padding_mode: str = 'border') -> torch.Tensor:
+    """Sample a channels-first field ``(B, C, *spatial)`` at normalised positions ``grid`` and return it
+    channels-last ``(B, *spatial_out, C)`` (``align_corners=True``). syntx routes differentiable GPU calls
+    through its deterministic grid-sample kernel; this port uses the stock kernel."""
+    return torch.movedim(grid_sample(field_cf, grid, mode=mode, padding_mode=padding_mode, align_corners=True), 1, -1)

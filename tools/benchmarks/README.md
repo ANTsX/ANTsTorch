@@ -28,7 +28,7 @@
 Most of ANTsTorch's registration code follows [syntx](https://github.com/stnava/syntx).  ANTsTorch also includes a stationary velocity flow (SVF) framework.
 
 - **The dense SyN formulation:** symmetric, midpoint-based, Eulerian fields, local cross-correlation (`cc2`), 4-2-1 pyramid, and the fluid regularizers (Gaussian, Sobolev, DST-I).
-- **`greedy`:** the one-directional compositive model of `syntx.greedy`, including syntx's millimetre-isotropic deformable pyramid (`antstorch.greedy`, bit-identical to syntx on CPU).
+- **`greedy`:** the one-directional compositive model of `syntx.greedy`, including syntx's millimetre-isotropic deformable pyramid, loss-slope early stop and default-on digital-diffeomorphism finish (`antstorch.greedy`, matched to syntx v6.39 on CPU to 1e-5). Note: before 2026-11-18 the inverse used for Dice moving was solved with the vector components in the wrong order (as in syntx < 6.36), so earlier `greedy` Dice moving values are not comparable.
 - **The benchmark protocol:** the 90 Mindboggle pairs, N4 pre-processing, the DKT31 Dice measures, and the
   model names (`gaussian`, `sobolev`, `dsti`, ...).
 - **The syntx default hyper-parameters** (`syntx_defaults=True`), selected per regularizer and optimizer.
@@ -144,7 +144,7 @@ GPU-accelerated multi-scale diffeomorphic registration that replaces plain gradi
 <details>
 <summary>General options of the benchmark script.</summary>
 
-By default the script runs in the *fair mode*: syntx runs first and produces the affine of each pair, ANTsTorch starts from the same affine file and runs syntx's loop (per-iteration inverses with 10 steps, syntx parity, autograd; `dsti` with `syntx.syn()`'s `reg_adam`), and the times compared are deformable-only.
+By default the script runs in the *fair mode*: syntx runs first and produces the affine of each pair, ANTsTorch starts from the same affine file and runs syntx's loop (syntx's Option A inverses — refreshed every 1/2/4 iterations per level with 10 steps, end-of-level polish, LM polish of the composed inverse — syntx parity, autograd; `dsti` with `syntx.syn()`'s `reg_adam`), and the times compared are deformable-only.
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -160,7 +160,7 @@ By default the script runs in the *fair mode*: syntx runs first and produces the
 | `--legacy-defaults` | off | ANTsTorch only: restore its previous defaults (`lncc`, `grad_step` 0.5, `flow_sigma` 3.0, 100/100/50 iterations, physical sigma, per-iteration inverses) instead of the syntx-aligned ones (`syn_registration(syntx_defaults=False)`). Writes to an `_legacy` output directory. |
 | `--syntx-parity` | off | ANTsTorch only: mimic syntx's loop (CFL step scaled by √(current/original size), early stop on loss slope ≤ 1e-6 over 10 iterations, restore of the best-loss warps). |
 | `--no-analytical-gradients` | off | ANTsTorch only: autograd through the image interpolation, as syntx's benchmark does (`use_analytical_gradients=False`), instead of the analytical image-gradient backward. |
-| `--inverse-schedule {per_iteration,end_of_level}` | ANTsTorch's own | ANTsTorch only: when the half-warp inverses are maintained. `end_of_level` inverts once after the last level; validate the Dice against a `per_iteration` run first. |
+| `--inverse-schedule {refresh,per_iteration,end_of_level}` | `refresh` | ANTsTorch only: when the half-warp inverses are maintained. `refresh` is syntx's Option A (syntx ≥ 6.35); `per_iteration` updates them every iteration; `end_of_level` inverts once after the last level. |
 | `--end-of-level-inverse-steps N` | 30 | Solver steps of the single end-of-level inversion. |
 | `--inverse-method {anderson,fixed_point,hybrid_lm}` | `anderson` | ANTsTorch only: in-loop field-inversion solver. `fixed_point` was about 2.2 times faster than `anderson` on MPS at 6 steps; syntx keeps its own solver, so use this as an ablation, not as the main comparison. |
 

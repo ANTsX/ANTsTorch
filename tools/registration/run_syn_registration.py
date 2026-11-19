@@ -163,7 +163,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--regadam-grad-sigma", type=float, default=1.8, help="reg_adam: gradient smoothing sigma (voxels)")
     parser.add_argument("--regadam-quotient-sigma", type=float, default=0.8, help="reg_adam: Adam-quotient smoothing sigma (voxels)")
     parser.add_argument("--inverse-method", choices=("fixed_point", "anderson", "hybrid_lm"), default="anderson")
-    parser.add_argument("--in-loop-inverse-steps", type=int, default=6)
+    parser.add_argument("--in-loop-inverse-steps", type=int, default=None,
+                        help="In-loop inverse solver steps (default: syntx-aligned 10; 6 with legacy defaults).")
     parser.add_argument(
         "--no-antisymmetric",
         action="store_false",

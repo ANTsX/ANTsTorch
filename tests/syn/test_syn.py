@@ -112,8 +112,21 @@ def test_syn_registration_rejects_degenerate_pyramid_level_for_every_regularizer
         syn_registration(
             fixed, moving, type_of_transform="SyNOnly",
             regularizer=regularizer, optimizer=optimizer,
-            levels=(8, 4, 2, 1), reg_iterations=(2, 2, 1, 1),
+            levels=(8, 4, 2, 1), reg_iterations=(2, 2, 1, 1), pyramid="legacy",
         )
+
+
+def test_deformable_pyramid_floors_every_axis_at_16_voxels():
+    # syntx's 'deformable' pyramid (the syntx-aligned default since 2026-11-18) never shrinks an axis below
+    # min(16, n) voxels, so the shrink-8 level that the legacy pyramid rejects above is (16, 16) here.
+    fixed, moving = _ants_pair_2d(size=(30, 28))
+    prov = syn_registration(
+        fixed, moving, type_of_transform="SyNOnly", syn_metric="mse",
+        levels=(8, 4, 2, 1), reg_iterations=(2, 2, 1, 1),
+    )["provenance"]
+    assert prov["pyramid"] == "deformable"
+    assert prov["level_shapes"][0] == [16, 16]
+    assert sorted(prov["level_shapes"][-1]) == [28, 30]
 
 
 def test_syn_registration_accepts_pyramid_level_once_window_fits():
@@ -488,6 +501,9 @@ def test_syn_registration_legacy_defaults_restore_previous_knob_values():
     assert prov["grad_step"] == 0.5
     assert prov["flow_sigma"] == 3.0
     assert prov["inverse_schedule"] == "per_iteration"
+    assert prov["in_loop_inverse_steps"] == 6
+    assert prov["polish_inv_steps"] == 0
+    assert prov["compose_polish_tol"] == 0.0
     assert prov["syntx_defaults"] is False
 
 
@@ -510,7 +526,13 @@ def test_syn_registration_resolves_syntx_defaults_per_regularizer(
     assert d["flow_sigma"] == pytest.approx(flow_sigma)
     assert d["conservative_smooth"] is conservative
     assert d["sobolev_alpha"] == alpha
-    assert d["inverse_schedule"] == "end_of_level"
+    # syntx >= 6.35 "Option A" (canonical_2026_11_11)
+    assert d["inverse_schedule"] == "refresh"
+    assert d["in_loop_inverse_steps"] == 10
+    assert tuple(d["inv_refresh_every"]) == (1, 2, 4)
+    assert d["polish_inv_steps"] == 30
+    assert d["polish_inv_tol"] == pytest.approx(0.02)
+    assert d["compose_polish_tol"] == pytest.approx(0.30)
 
 
 def test_syn_registration_provenance_shows_resolved_sobolev_defaults_and_explicit_values_win():
@@ -521,7 +543,9 @@ def test_syn_registration_provenance_shows_resolved_sobolev_defaults_and_explici
     assert prov["flow_sigma"] == pytest.approx(2.4 ** 0.5)
     assert prov["sobolev_alpha"] == 2.25
     assert prov["conservative_smooth"] is True
-    assert prov["inverse_schedule"] == "end_of_level"
+    assert prov["inverse_schedule"] == "refresh"
+    assert prov["inv_refresh_every"] == [1, 2, 4]
+    assert prov["compose_polish_tol"] == pytest.approx(0.30)
     prov = syn_registration(fixed, moving, grad_step=0.3, flow_sigma=2.0, sobolev_alpha=1.0,
                             inverse_schedule="per_iteration", **kw)["provenance"]
     assert prov["grad_step"] == 0.3
@@ -983,3 +1007,59 @@ def test_reg_adam_optimizer_works_in_3d():
         regularizer="dsti", optimizer="reg_adam",
     )
     assert torch.isfinite(torch.tensor(result["loss_history"])).all()
+
+
+# --- syntx v6.39 alignment (2026-11-18): stationary boundary, Option A inverses, compose polish ----------
+
+def _warp_arrays(result):
+    fwd = [p for p in result["fwdtransforms"] if p.endswith("1Warp.nii.gz")][0]
+    inv = [p for p in result["invtransforms"] if p.endswith("1InverseWarp.nii.gz")][0]
+    return ants.image_read(fwd).numpy(), ants.image_read(inv).numpy()
+
+
+def test_stationary_boundary_default_keeps_the_warps_at_zero_on_the_rim():
+    fixed, moving = _ants_pair_2d(size=(30, 28))
+    kw = dict(type_of_transform="SyNOnly", syn_metric="mse", levels=(2, 1), reg_iterations=(5, 5))
+    fwd, inv = _warp_arrays(syn_registration(fixed, moving, **kw))
+    rim = np.ones(fwd.shape[:2], bool)
+    rim[1:-1, 1:-1] = False
+    assert np.abs(fwd[rim]).max() == 0.0 and np.abs(inv[rim]).max() == 0.0
+    fwd_off, _ = _warp_arrays(syn_registration(fixed, moving, stationary_boundary=False, **kw))
+    assert np.abs(fwd_off[rim]).max() > 0.0
+
+
+def test_compose_polish_improves_the_inverse_consistency_of_the_written_warps():
+    from antstorch.syn.core.inverse import compute_inverse_identity_error_nd
+
+    fixed, moving = _ants_pair_2d(size=(30, 28))
+    kw = dict(type_of_transform="SyNOnly", syn_metric="mse", levels=(2, 1), reg_iterations=(10, 10),
+              in_loop_inverse_steps=2, polish_inv_steps=0)
+
+    def residual(result):
+        fwd, inv = _warp_arrays(result)
+        to_t = lambda a: torch.from_numpy(np.ascontiguousarray(np.transpose(a, (1, 0, 2))[..., ::-1][None])).double()
+        error = compute_inverse_identity_error_nd(to_t(inv), to_t(fwd), spacing=(1.0, 1.0), origin=(0.0, 0.0),
+                                                  direction=np.eye(2))
+        return float(error.max())
+
+    unpolished = residual(syn_registration(fixed, moving, compose_polish_tol=0.0, **kw))
+    polished = residual(syn_registration(fixed, moving, compose_polish_tol=0.01, **kw))
+    assert polished < unpolished
+    assert polished <= 0.011
+
+
+def test_refresh_schedule_validates_its_cadence():
+    fixed, moving = _ants_pair_2d()
+    with pytest.raises(ValueError, match="inv_refresh_every"):
+        syn_registration(fixed, moving, type_of_transform="SyNOnly", inv_refresh_every=(1, 0))
+    with pytest.raises(ValueError, match="pyramid"):
+        syn_registration(fixed, moving, type_of_transform="SyNOnly", pyramid="nonsense")
+
+
+def test_digital_diffeomorphism_default_and_stats_in_provenance():
+    fixed, moving = _ants_pair_2d(size=(30, 28))
+    kw = dict(type_of_transform="SyNOnly", syn_metric="mse", levels=(2, 1), reg_iterations=(5, 5))
+    prov = syn_registration(fixed, moving, **kw)["provenance"]
+    assert prov["digital_diffeomorphism"] is True
+    assert set(prov["digital_diffeomorphism_stats"]) == {"l2r", "r2l", "composed"}
+    assert syn_registration(fixed, moving, syntx_defaults=False, **kw)["provenance"]["digital_diffeomorphism"] is False

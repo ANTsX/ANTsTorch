@@ -16,6 +16,173 @@ import torch
 import torch.nn.functional as F
 
 
+# --- Separable box means (port of syntx.core.losses.cross_correlation, syntx v6.39.0 / R32) ----------------------
+
+_WINDOW_COUNT_CACHE: dict[
+    tuple,
+    tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]],
+] = {}
+_FUSE_MAX_VOXELS = 16_777_216
+
+
+def _get_window_count_views(
+    spatial_shape: tuple[int, ...],
+    window_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
+    """Return cached ``(inv_counts_1d, counts_1d, pad_ratios_1d)`` broadcast views."""
+    key = (tuple(int(s) for s in spatial_shape), int(window_size), str(device), dtype)
+    cached = _WINDOW_COUNT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    if len(_WINDOW_COUNT_CACHE) >= 64:
+        _WINDOW_COUNT_CACHE.clear()
+
+    dim = len(spatial_shape)
+    pad = window_size // 2
+    k_f = float(window_size)
+    inv_views: list[torch.Tensor] = []
+    cnt_views: list[torch.Tensor] = []
+    ratio_views: list[torch.Tensor] = []
+    for d, n in enumerate(spatial_shape):
+        idx = torch.arange(n, device=device, dtype=dtype)
+        c_1d = torch.clamp(idx + pad, max=n - 1) - torch.clamp(idx - pad, min=0) + 1.0
+        v_shape = [1, 1] + [1] * dim
+        v_shape[d + 2] = n
+        cnt_views.append(c_1d.reshape(v_shape))
+        inv_views.append((1.0 / c_1d).reshape(v_shape))
+        ratio_views.append((k_f / c_1d).reshape(v_shape))
+
+    res = (tuple(inv_views), tuple(cnt_views), tuple(ratio_views))
+    _WINDOW_COUNT_CACHE[key] = res
+    return res
+
+
+def _scale_by_views_inplace(y: torch.Tensor, views: tuple[torch.Tensor, ...]) -> torch.Tensor:
+    for v in views:
+        y.mul_(v)
+    return y
+
+
+def _separable_avg_pool_nd(x: torch.Tensor, window_size: int, count_include_pad: bool) -> torch.Tensor:
+    """Exact separable 1-D ``avg_pool2d`` / ``avg_pool3d`` passes (`3 * k` or `2 * k` taps instead of `k^d`)."""
+    pad = window_size // 2
+    if x.dim() == 4:
+        y = F.avg_pool2d(
+            x, kernel_size=(window_size, 1), stride=1, padding=(pad, 0), count_include_pad=count_include_pad
+        )
+        return F.avg_pool2d(
+            y, kernel_size=(1, window_size), stride=1, padding=(0, pad), count_include_pad=count_include_pad
+        )
+    if x.dim() == 5:
+        y = F.avg_pool3d(
+            x, kernel_size=(window_size, 1, 1), stride=1, padding=(pad, 0, 0), count_include_pad=count_include_pad
+        )
+        y = F.avg_pool3d(
+            y, kernel_size=(1, window_size, 1), stride=1, padding=(0, pad, 0), count_include_pad=count_include_pad
+        )
+        return F.avg_pool3d(
+            y, kernel_size=(1, 1, window_size), stride=1, padding=(0, 0, pad), count_include_pad=count_include_pad
+        )
+    raise ValueError(f"Expected 4D or 5D tensor, got {x.dim()}D.")
+
+
+def _box_pool(x: torch.Tensor, window_size: int, count_include_pad: bool) -> torch.Tensor:
+    """Stride-1 local box mean with zero padding ``window_size // 2`` (exact separable 1-D for odd windows)."""
+    if window_size % 2 == 0:
+        pool_fn = F.avg_pool2d if x.dim() == 4 else F.avg_pool3d
+        return pool_fn(
+            x,
+            kernel_size=window_size,
+            stride=1,
+            padding=window_size // 2,
+            count_include_pad=count_include_pad,
+        )
+    if window_size <= 1:
+        return x.clone()
+    return _separable_avg_pool_nd(x, window_size, count_include_pad=count_include_pad)
+
+
+class _DeterministicBoxMean(torch.autograd.Function):
+    """Exact separable local box mean (stride 1, zero padding, ``count_include_pad=False``)
+    with zero saved tensors and deterministic single-pass backward on CPU, CUDA, and MPS."""
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, window_size: int) -> torch.Tensor:
+        ctx.window_size = window_size
+        return _box_pool(x, window_size, count_include_pad=False)
+
+    @staticmethod
+    def backward(ctx, g: torch.Tensor):
+        k = ctx.window_size
+        if k <= 1:
+            return g.clone(), None
+        _, _, pad_ratios = _get_window_count_views(g.shape[2:], k, g.device, g.dtype)
+        scaled = _scale_by_views_inplace(g.clone(), pad_ratios)
+        return _separable_avg_pool_nd(scaled, k, count_include_pad=True), None
+
+
+# Devices on which box_mean_nd uses the deterministic backward (all devices use separable _DeterministicBoxMean).
+DETERMINISTIC_POOL_DEVICES = ("mps", "cuda", "cpu")
+
+
+def box_mean_nd(x: torch.Tensor, window_size: int) -> torch.Tensor:
+    """Local box mean of ``x`` (B, C, *spatial), 2-D or 3-D: border mean is over in-image voxels only."""
+    if window_size % 2 == 1 and x.requires_grad and torch.is_grad_enabled():
+        return _DeterministicBoxMean.apply(x, window_size)
+    return _box_pool(x, window_size, count_include_pad=False)
+
+
+def _window_counts(x: torch.Tensor, window_size: int) -> torch.Tensor:
+    """Number of in-image voxels of each box window (zero padding excluded), shape ``(B, 1, *spatial)``."""
+    if window_size % 2 == 1:
+        _, cnt_views, _ = _get_window_count_views(x.shape[2:], window_size, x.device, x.dtype)
+        prod = cnt_views[0]
+        for cv in cnt_views[1:]:
+            prod = prod * cv
+        return prod.expand(x.shape[0], 1, *x.shape[2:]).clone()
+    dim = x.dim() - 2
+    pool = F.avg_pool2d if dim == 2 else F.avg_pool3d
+    ones = torch.ones_like(x[:, :1])
+    pad = window_size // 2
+    return pool(ones, kernel_size=window_size, stride=1, padding=pad, count_include_pad=True) * (window_size**dim)
+
+
+def _centered_moments_nd(
+    I_w: torch.Tensor,
+    J_w: torch.Tensor,
+    window_size: int,
+    differentiable: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute ``(F_c, M_c, I_var, J_var, IJ_cov)`` using fused ``[2C]`` + ``[3C]`` separable box means
+    below ``_FUSE_MAX_VOXELS``, falling back to per-channel passes on ultra-large unchunked volumes."""
+    pool = box_mean_nd if differentiable else (lambda t, k: _box_pool(t, k, count_include_pad=False))
+    c = I_w.shape[1]
+    if I_w.numel() <= _FUSE_MAX_VOXELS:
+        ij_mean = pool(torch.cat([I_w, J_w], dim=1), window_size)
+        I_mean = ij_mean[:, :c]
+        J_mean = ij_mean[:, c:]
+        F_c = I_w - I_mean
+        M_c = J_w - J_mean
+        del ij_mean, I_mean, J_mean
+        sec = pool(torch.cat([F_c.square(), M_c.square(), F_c * M_c], dim=1), window_size)
+        I_var = torch.clamp(sec[:, :c], min=0.0)
+        J_var = torch.clamp(sec[:, c : 2 * c], min=0.0)
+        IJ_cov = sec[:, 2 * c :]
+        return F_c, M_c, I_var, J_var, IJ_cov
+
+    I_mean = pool(I_w, window_size)
+    J_mean = pool(J_w, window_size)
+    F_c = I_w - I_mean
+    M_c = J_w - J_mean
+    del I_mean, J_mean
+    I_var = torch.clamp(pool(F_c.square(), window_size), min=0.0)
+    J_var = torch.clamp(pool(M_c.square(), window_size), min=0.0)
+    IJ_cov = pool(F_c * M_c, window_size)
+    return F_c, M_c, I_var, J_var, IJ_cov
+
+
 class AnalyticalLNCC(torch.autograd.Function):
     """Local NCC (correlation coefficient, not its square) with a hand-derived backward pass.
 
@@ -258,24 +425,13 @@ def local_ncc_loss_nd(
     elif use_ants_pseudo_gradient and not squared:
         return AnalyticalLNCC.apply(I, J, mask, window_size)
 
-    pad = window_size // 2
-
-    if dim == 2:
-        pool_fn = F.avg_pool2d
-    elif dim == 3:
-        pool_fn = F.avg_pool3d
-    else:
+    if dim not in (2, 3):
         raise ValueError(f"Only 2-D and 3-D images are supported, got {dim}D.")
 
-    def box_filter(x):
-        return pool_fn(x, kernel_size=window_size, stride=1, padding=pad, count_include_pad=False)
-
-    I_mean = box_filter(I)
-    J_mean = box_filter(J)
-
-    I_var = torch.clamp(box_filter((I - I_mean) ** 2), min=0.0)
-    J_var = torch.clamp(box_filter((J - J_mean) ** 2), min=0.0)
-    IJ_cov = box_filter((I - I_mean) * (J - J_mean))
+    # syntx >= 6.35 (R32): the same centred local moments from exact separable 1-D box means (k taps per axis
+    # instead of k^d), fused [2C] + [3C] passes, deterministic separable backward. Equal to the former
+    # avg_pool2d/avg_pool3d formulation up to floating-point summation order.
+    _, _, I_var, J_var, IJ_cov = _centered_moments_nd(I, J, window_size, differentiable=True)
 
     var_floor = 1e-6
     safe_I_var = torch.clamp(I_var, min=var_floor)
