@@ -1004,13 +1004,27 @@ def update_inverse_field_nd(
             if itk_stopping and converged(max_error_norm, mean_error_norm, "both"):
                 break
 
+            # Memory: this is the same ITK fixed-point step as before, with the same operations in the
+            # same order, but one field-sized buffer (`error`) is reused for the update and the new
+            # iterate, and each temporary is freed as soon as it has been used. The previous
+            # out-of-place form kept about six field-sized tensors alive through each iteration.
+            # Results are unchanged: floating-point + and * are commutative, so
+            # `update.mul_(epsilon).add_(W_inv_disp)` gives exactly `W_inv_disp + update * epsilon`.
             coords_phys = X_phys + W_inv_disp
             coords_norm = physical_to_normalized_torch_cached(coords_phys, shape_t, spacing_t, origin_t, direction_t)
+            del coords_phys
             forward_at_inv = torch.movedim(
                 grid_sample(W_disp_cf, coords_norm, padding_mode='border', align_corners=True), 1, -1
             )
+            del coords_norm
+            # Kept out of place so `error` (and hence the returned field) has the same memory layout
+            # as W_inv_disp, as before; forward_at_inv is a channels-first view.
             error = W_inv_disp + forward_at_inv
-            scaled_norm = torch.sqrt(torch.sum((error / spacing_t) ** 2, dim=-1, keepdim=True))
+            del forward_at_inv
+            scaled_sq = error / spacing_t
+            scaled_sq.pow_(2)
+            scaled_norm = torch.sqrt(torch.sum(scaled_sq, dim=-1, keepdim=True))
+            del scaled_sq
             max_error_norm = float(scaled_norm.max())
             mean_error_norm = float(scaled_norm.mean())
             # Idempotent (syntx >= 6.35.4): test the current iterate before updating it. With
@@ -1019,7 +1033,6 @@ def update_inverse_field_nd(
             if converged(max_error_norm, mean_error_norm, "both") and not itk_stopping:
                 break
 
-            update = -error
             epsilon = 0.75 if iteration == 0 else 0.5
             clip_threshold = epsilon * max_error_norm
             clip_scale = torch.where(
@@ -1027,13 +1040,19 @@ def update_inverse_field_nd(
                 clip_threshold / scaled_norm.clamp(min=1e-10),
                 torch.ones_like(scaled_norm)
             )
-            update = update * clip_scale
-            W_inv_disp = W_inv_disp + update * epsilon
+            del scaled_norm
+            # `error` is a buffer created in this iteration, so updating it in place never touches the
+            # caller's W_inv_disp. Each line below is one line of the previous version:
+            update = error.neg_()                        # update = -error
+            update.mul_(clip_scale)                      # update = update * clip_scale
+            del clip_scale
+            W_inv_disp = update.mul_(epsilon).add_(W_inv_disp)   # W_inv_disp = W_inv_disp + update * epsilon
+            del error, update
 
             if smoothing_sigma > 0.0:
                 W_inv_disp = separable_gaussian_filter(W_inv_disp, smoothing_sigma, spacing=spacing)
 
-            W_inv_disp = W_inv_disp * boundary_mask
+            W_inv_disp.mul_(boundary_mask)               # our own buffer here (from this iteration)
 
         return torch.movedim(W_inv_disp, -1, 1) if channels_first else W_inv_disp
     else:
