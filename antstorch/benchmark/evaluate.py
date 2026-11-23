@@ -89,6 +89,10 @@ _SYN_REGULARIZERS = {
     "sobolev_regadam": "sobolev",
     "dsti_regadam": "dsti",
     "bspline_regadam": "bspline",
+    # syntx 6.44's canonical syntx.syn regularizer (common Navier-Cauchy, s=2.0, nu=0.20), the
+    # syn_registration() default since 2026-11-23; div_curl is the former syntx.greedy (6.43) winner.
+    "navier_syn": "navier",
+    "div_curl_syn": "div_curl",
 }
 # model_lower values in _SYN_REGULARIZERS above that additionally force
 # syn_registration(optimizer=...) rather than leaving it at 'gradient_descent'

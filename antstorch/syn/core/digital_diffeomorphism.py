@@ -2408,19 +2408,8 @@ def enforce_digital_diffeomorphism_nd(
         spacing is not None and origin is not None and direction is not None
     )
     include_4th = bool(use_physical)
-    boundary_mask = get_boundary_mask(spatial, device, dtype)
-    domain_mask = (
-        (boundary_mask[0, ..., 0] > 0.5)
-        if stationary_boundary
-        else torch.ones(spatial, dtype=torch.bool, device=device)
-    )
 
     if use_physical:
-        if X_phys is None:
-            X_phys = get_physical_grid_torch(
-                spatial, spacing, origin, direction, device=device, dtype=dtype
-            )
-        X_base = X_phys
         spacing_rev = [float(s) for s in reversed(tuple(spacing))]
         origin_rev = [float(o) for o in reversed(tuple(origin))]
         dir_arr = np.asarray(
@@ -2431,21 +2420,8 @@ def enforce_digital_diffeomorphism_nd(
             dir_arr = dir_arr.reshape(dim, dim)
         direction_rev = dir_arr[::-1, ::-1].copy()
 
-        spacing_t = torch.tensor(spacing_rev, device=device, dtype=dtype)
-        shape_t = torch.tensor(list(spatial), device=device, dtype=dtype)
-        origin_t = torch.tensor(origin_rev, device=device, dtype=dtype)
-        direction_t = torch.tensor(direction_rev, device=device, dtype=dtype)
-        M_norm, b_norm = get_physical_to_normalized_affine(
-            shape_t, spacing_t, origin_t, direction_t
-        )
         D_inv_np = np.linalg.inv(direction_rev)
         sp_rev_np = np.asarray(spacing_rev, dtype=np.float64)
-        A_to_vox = torch.tensor(D_inv_np.T / sp_rev_np[None, :], device=device, dtype=dtype)
-        b_to_vox = torch.tensor(
-            -np.asarray(origin_rev, dtype=np.float64) @ (D_inv_np.T / sp_rev_np[None, :]),
-            device=device,
-            dtype=dtype,
-        )
         right_mat = torch.tensor(
             np.diag(1.0 / sp_rev_np) @ D_inv_np, device=device, dtype=dtype
         )
@@ -2455,14 +2431,6 @@ def enforce_digital_diffeomorphism_nd(
         mean_sp = float(np.mean(spacing_rev))
         max_step_unit = float(min(spacing_rev)) * 2.0
     else:
-        grids = [torch.linspace(-1.0, 1.0, s, device=device, dtype=dtype) for s in spatial]
-        mesh = torch.meshgrid(*grids, indexing="ij")
-        X_base = torch.stack(list(reversed(mesh)), dim=-1).unsqueeze(0)
-        k_vec = np.asarray([max(s - 1, 1) / 2.0 for s in spatial], dtype=np.float64)
-        p_flip = np.eye(dim, dtype=np.float64)[::-1].copy()
-        A_to_vox = torch.tensor(p_flip @ np.diag(k_vec), device=device, dtype=dtype)
-        b_to_vox = torch.tensor(k_vec.copy(), device=device, dtype=dtype)
-        right_mat = torch.tensor((p_flip @ np.diag(k_vec)).T, device=device, dtype=dtype)
         D_rev_inv = torch.eye(dim, device=device, dtype=dtype)
         err_to_vox_scale = torch.tensor(
             [float(max(s - 1, 1) / 2.0) for s in reversed(spatial)], device=device, dtype=dtype
@@ -2478,6 +2446,57 @@ def enforce_digital_diffeomorphism_nd(
         return _eval_dual_fd_det_min_fast(
             u_t, steps_fd, D_rev_T, s_D, include_4th, use_physical
         )
+
+    if unidirectional:
+        with torch.no_grad():
+            det_f0 = _eval_det_min(W_fwd_in)
+            init_min_det_f = float(det_f0.amin().item())
+            if steps <= 0 or init_min_det_f >= float(jac_floor):
+                if stats is not None:
+                    stats["steps"] = 0
+                    stats["active_voxels"] = 0
+                    stats["initial_min_det_fwd"] = init_min_det_f
+                    stats["final_min_det_fwd"] = init_min_det_f
+                    stats["initial_max_ice_vox"] = 0.0
+                    stats["final_max_ice_vox"] = 0.0
+                return W_fwd
+
+    boundary_mask = get_boundary_mask(spatial, device, dtype)
+    domain_mask = (
+        (boundary_mask[0, ..., 0] > 0.5)
+        if stationary_boundary
+        else torch.ones(spatial, dtype=torch.bool, device=device)
+    )
+
+    if not unidirectional:
+        if use_physical:
+            if X_phys is None:
+                X_phys = get_physical_grid_torch(
+                    spatial, spacing, origin, direction, device=device, dtype=dtype
+                )
+            X_base = X_phys
+            spacing_t = torch.tensor(spacing_rev, device=device, dtype=dtype)
+            shape_t = torch.tensor(list(spatial), device=device, dtype=dtype)
+            origin_t = torch.tensor(origin_rev, device=device, dtype=dtype)
+            direction_t = torch.tensor(direction_rev, device=device, dtype=dtype)
+            M_norm, b_norm = get_physical_to_normalized_affine(
+                shape_t, spacing_t, origin_t, direction_t
+            )
+            A_to_vox = torch.tensor(D_inv_np.T / sp_rev_np[None, :], device=device, dtype=dtype)
+            b_to_vox = torch.tensor(
+                -np.asarray(origin_rev, dtype=np.float64) @ (D_inv_np.T / sp_rev_np[None, :]),
+                device=device,
+                dtype=dtype,
+            )
+        else:
+            grids = [torch.linspace(-1.0, 1.0, s, device=device, dtype=dtype) for s in spatial]
+            mesh = torch.meshgrid(*grids, indexing="ij")
+            X_base = torch.stack(list(reversed(mesh)), dim=-1).unsqueeze(0)
+            k_vec = np.asarray([max(s - 1, 1) / 2.0 for s in spatial], dtype=np.float64)
+            p_flip = np.eye(dim, dtype=np.float64)[::-1].copy()
+            A_to_vox = torch.tensor(p_flip @ np.diag(k_vec), device=device, dtype=dtype)
+            b_to_vox = torch.tensor(k_vec.copy(), device=device, dtype=dtype)
+            right_mat = torch.tensor((p_flip @ np.diag(k_vec)).T, device=device, dtype=dtype)
 
     def _has_nonzero_boundary(w_t: torch.Tensor) -> bool:
         for ax in range(dim):
@@ -2540,21 +2559,12 @@ def enforce_digital_diffeomorphism_nd(
 
     with torch.no_grad():
         dom_b = domain_mask.unsqueeze(0).expand(B, *spatial)
-        det_f0 = _eval_det_min(W_fwd_in)
-        init_min_det_f = float(det_f0.amin().item())
+        if not unidirectional:
+            det_f0 = _eval_det_min(W_fwd_in)
+            init_min_det_f = float(det_f0.amin().item())
         n_full_lut = B * max(int(np.prod(spatial)), 1)
 
         if unidirectional:
-            if steps <= 0 or init_min_det_f >= float(jac_floor):
-                if stats is not None:
-                    stats["steps"] = 0
-                    stats["active_voxels"] = 0
-                    stats["initial_min_det_fwd"] = init_min_det_f
-                    stats["final_min_det_fwd"] = init_min_det_f
-                    stats["initial_max_ice_vox"] = 0.0
-                    stats["final_max_ice_vox"] = 0.0
-                return W_fwd
-
             lut_shared = torch.full((n_full_lut,), -1, dtype=torch.long, device=device)
             u_f, _, final_min_df, steps_taken, ever_f = _unfold_field_adaptive_smooth(
                 W_fwd_in,

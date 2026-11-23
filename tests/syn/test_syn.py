@@ -1063,3 +1063,99 @@ def test_digital_diffeomorphism_default_and_stats_in_provenance():
     assert prov["digital_diffeomorphism"] is True
     assert set(prov["digital_diffeomorphism_stats"]) == {"l2r", "r2l", "composed"}
     assert syn_registration(fixed, moving, syntx_defaults=False, **kw)["provenance"]["digital_diffeomorphism"] is False
+
+
+# --- syntx 6.40-6.44 alignment (2026-11-23) -----------------------------------
+
+
+def test_syn_registration_default_is_canonical_navier():
+    """syntx 6.44 'canonical_2026_11_20': navier (s=2, nu=0.20), sobolev_alpha 1.5, grad_step 0.6, sqrt(2.4)."""
+    fixed, moving = _ants_pair_2d()
+    res = syn_registration(fixed, moving, type_of_transform="SyNOnly", levels=(2, 1), reg_iterations=(3, 2))
+    prov = res["provenance"]
+    assert prov["regularizer"] == "navier"
+    assert prov["optimizer"] == "gradient_descent"
+    assert prov["grad_step"] == pytest.approx(0.6)
+    assert prov["flow_sigma"] == pytest.approx(2.4 ** 0.5)
+    assert prov["sobolev_alpha"] == pytest.approx(1.5)
+    assert np.isfinite(res["warpedmovout"].numpy()).all()
+
+
+def test_syn_registration_legacy_defaults_keep_gaussian():
+    fixed, moving = _ants_pair_2d()
+    res = syn_registration(fixed, moving, type_of_transform="SyNOnly", levels=(2, 1), reg_iterations=(2, 1),
+                           syntx_defaults=False)
+    assert res["provenance"]["regularizer"] == "gaussian"
+
+
+def test_syn_registration_cfl_is_gradient_descent_alias():
+    fixed, moving = _ants_pair_2d()
+    kw = dict(type_of_transform="SyNOnly", levels=(2, 1), reg_iterations=(3, 2))
+    a = syn_registration(fixed, moving, optimizer="cfl", **kw)
+    b = syn_registration(fixed, moving, optimizer="gradient_descent", **kw)
+    assert a["provenance"]["optimizer"] == "gradient_descent"
+    np.testing.assert_array_equal(a["warpedmovout"].numpy(), b["warpedmovout"].numpy())
+
+
+def test_syn_registration_regularizer_kwargs_validation_and_effect():
+    fixed, moving = _ants_pair_2d()
+    kw = dict(type_of_transform="SyNOnly", levels=(2, 1), reg_iterations=(4, 3))
+    with pytest.raises(ValueError, match="unknown key"):
+        syn_registration(fixed, moving, regularizer="navier", regularizer_kwargs={"bogus": 1.0}, **kw)
+    with pytest.raises(ValueError, match="continuum"):
+        syn_registration(fixed, moving, regularizer="sobolev", regularizer_kwargs={"poisson_ratio": 0.3}, **kw)
+    a = syn_registration(fixed, moving, regularizer="navier", **kw)
+    b = syn_registration(fixed, moving, regularizer="navier", regularizer_kwargs={"poisson_ratio": 0.49}, **kw)
+    assert b["provenance"]["regularizer_kwargs"] == {"poisson_ratio": 0.49}
+    assert not np.array_equal(a["warpedmovout"].numpy(), b["warpedmovout"].numpy())
+
+
+def test_syn_reg_adam_accepts_continuum_and_rejects_gaussian():
+    fixed, moving = _ants_pair_2d()
+    kw = dict(type_of_transform="SyNOnly", levels=(2, 1), reg_iterations=(3, 2))
+    res = syn_registration(fixed, moving, regularizer="navier", optimizer="syn_reg_adam", **kw)
+    assert np.isfinite(res["warpedmovout"].numpy()).all()
+    with pytest.raises(ValueError, match="syn_reg_adam"):
+        syn_registration(fixed, moving, regularizer="gaussian", optimizer="syn_reg_adam", **kw)
+
+
+def test_apply_regularizer_navier_matches_registry_with_direction_conjugation():
+    from antstorch.syn.core.regularizers import build_level_regularizer
+    torch.manual_seed(0)
+    field = torch.randn(1, 9, 10, 11, 3)
+    th = 0.3
+    direction = np.array([[np.cos(th), -np.sin(th), 0.0], [np.sin(th), np.cos(th), 0.0], [0.0, 0.0, 1.0]])
+    spacing, origin = (1.0, 1.5, 2.0), (1.0, 2.0, 3.0)
+    out = _apply_regularizer(field, "navier", 1.2, spacing, sobolev_alpha=1.5, origin_itk=origin,
+                             direction_itk=direction, extra_reg_kwargs={"poisson_ratio": 0.3})
+    ref = build_level_regularizer("navier", alpha=1.5, spacing=spacing, origin=origin, direction=direction,
+                                  fluid_sigma=1.2, param_domain="physical_mm",
+                                  extra_reg_kwargs={"poisson_ratio": 0.3})(field)
+    torch.testing.assert_close(out, ref, rtol=0, atol=0)
+    assert _apply_regularizer(field, "navier", 0.0, spacing).data_ptr() == field.data_ptr()
+
+
+def test_sobolev_green_operator_uses_spacing_in_tensor_axis_order():
+    """Fixed 2026-11-23 (syntx >= 5.0): ITK (x, y, z) spacing was applied to tensor axes (z, y, x) unreversed."""
+    from antstorch.syn.core.smoothing import apply_sobolev_green_operator
+    torch.manual_seed(1)
+    field = torch.randn(1, 12, 10, 3)  # tensor (y, x)
+    spacing_xy = (1.0, 3.0)  # x = 1 mm, y = 3 mm
+    out = apply_sobolev_green_operator(field, fluid_sigma=2.0, alpha=1.0, spacing=spacing_xy)
+    ky = torch.fft.fftfreq(12) * 2 * np.pi / spacing_xy[1]
+    kx = torch.fft.rfftfreq(10) * 2 * np.pi / spacing_xy[0]
+    K = 1.0 / (1.0 + 1.0 * (ky[:, None] ** 2 + kx[None, :] ** 2)) ** 2
+    ref = torch.fft.irfftn(torch.fft.rfftn(field.movedim(-1, 1), dim=(2, 3)) * K, s=(12, 10), dim=(2, 3)).movedim(1, -1)
+    torch.testing.assert_close(out, ref, rtol=1e-5, atol=1e-6)
+
+
+def test_dsti_green_operator_spacing():
+    from antstorch.syn.core.smoothing import apply_dsti_green_operator
+    torch.manual_seed(2)
+    field = torch.randn(1, 8, 9, 7, 3)
+    torch.testing.assert_close(apply_dsti_green_operator(field, alpha=1.0),
+                               apply_dsti_green_operator(field, alpha=1.0, spacing=(1.0, 1.0, 1.0)))
+    coarse = apply_dsti_green_operator(field, alpha=1.0, spacing=(2.0, 2.0, 2.0))
+    fine = apply_dsti_green_operator(field, alpha=1.0, spacing=(1.0, 1.0, 1.0))
+    # larger voxels -> smaller Laplacian eigenvalues in mm^-2 -> weaker smoothing
+    assert float(coarse.std()) > float(fine.std())

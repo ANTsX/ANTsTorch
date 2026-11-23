@@ -517,3 +517,33 @@ def sample_field_cf(field_cf: torch.Tensor, grid: torch.Tensor, mode: str = 'bil
     channels-last ``(B, *spatial_out, C)`` (``align_corners=True``). syntx routes differentiable GPU calls
     through its deterministic grid-sample kernel; this port uses the stock kernel."""
     return torch.movedim(grid_sample(field_cf, grid, mode=mode, padding_mode=padding_mode, align_corners=True), 1, -1)
+
+
+# Ported from syntx v6.44 (core/grid.py); used by core.optimizers.FieldStepOptimizer.
+def resize_field(field: torch.Tensor, size, mode: str = None) -> torch.Tensor:
+    """
+    Resize a channels-last field to a new spatial size with ``F.interpolate``
+    (``align_corners=True``).
+
+    Values are not rescaled, so this is correct for normalised or physical-unit fields but
+    not for voxel-unit displacements.
+
+    Parameters
+    ----------
+    field : Tensor (B, *spatial, dim)
+    size : sequence of int
+        Target spatial size, tensor order (z, y, x).
+    mode : str, optional
+        ``F.interpolate`` mode. None: 'trilinear' when the component count is 3, otherwise
+        'bilinear'.
+
+    Returns
+    -------
+    Tensor (B, *size, dim)
+    """
+    dim = field.shape[-1]
+    if mode is None:
+        mode = 'trilinear' if dim == 3 else 'bilinear'
+    field_cf = torch.movedim(field, -1, 1)                                       # (B, dim, *spatial)
+    resized_cf = F.interpolate(field_cf, size=size, mode=mode, align_corners=True)
+    return torch.movedim(resized_cf, 1, -1)                                       # (B, *size, dim)

@@ -55,9 +55,11 @@ from .ants_transform_io import write_affine_transform
 from .syn.core.affine import parse_ants_affine
 from .syn.core.convergence import DEFAULT_SLOPE_THRESHOLD, LossSlopeStop
 from .syn.core.inverse import update_inverse_field_nd_anderson
-from .syn.core.losses import local_ncc_loss_nd
+from .syn.core.losses import _box_pool, box_mean_nd, local_ncc_loss_nd
+from .syn.core.optimizers import FieldStepOptimizer, validate_regularizer_optimizer_pair
+from .syn.core.regularizers import REGULARIZER_EXTRA_KEYS, build_level_regularizer, list_regularizers
 from .syn.core.pipeline import auto_detect_device, cleanup_gpu
-from .syn.core.smoothing import separable_1d_filter
+from .syn.core.smoothing import apply_sobolev_green_operator, separable_1d_filter
 from .syn.core.utils import normalize_image
 from .syn.robust_affine import robust_affine
 
@@ -133,6 +135,10 @@ def _build_loss(similarity_metric: str, window_size: int, squared: bool):
         return local_ncc_loss_nd(moved, fixed, mask=mask, window_size=window_size, squared=cc_squared,
                                  use_ants_pseudo_gradient=False)
 
+    # syntx >= 6.40: for 'cc2' / 'lncc' the fit loop caches the fixed image's local moments once per level
+    # (the same formula as local_ncc_loss_nd, evaluated with the fixed-side terms precomputed).
+    _cc.fast_lncc = metric in ("cc2", "lncc")
+    _cc.squared = cc_squared
     return _cc
 
 
@@ -145,11 +151,12 @@ _PYR_EPS = 1e-6
 
 
 class _Level:
-    """One pyramid level: ``tensor`` (B, C, *shape) and ``shape`` (tensor order z, y, x)."""
-    __slots__ = ("tensor", "shape")
+    """One pyramid level: ``tensor`` (B, C, *shape), ``shape`` (tensor order z, y, x) and the level grid
+    ``spacing`` (ITK x, y, z order; used by the physical-space regularizers, syntx >= 6.42)."""
+    __slots__ = ("tensor", "shape", "spacing")
 
-    def __init__(self, tensor: torch.Tensor, shape: Tuple[int, ...]):
-        self.tensor, self.shape = tensor, shape
+    def __init__(self, tensor: torch.Tensor, shape: Tuple[int, ...], spacing: Optional[Tuple[float, ...]] = None):
+        self.tensor, self.shape, self.spacing = tensor, shape, spacing
 
 
 def _plan_axes_deformable(n_xyz, sp, t, floor_eff):
@@ -228,10 +235,22 @@ def _smooth_replicate_cf(x: torch.Tensor, sig_zyx) -> torch.Tensor:
     ``syntx.core.smoothing.separable_gaussian_filter(..., mode='replicate', kernel_type='bessel')``."""
     if not any(sg > 0 for sg in sig_zyx):
         return x
-    from .syn.core.smoothing import get_cached_gaussian_kernel_1d
+    from .syn.core.smoothing import _shifted_slice_blur_1d_inplace, get_cached_gaussian_kernel_1d
     v = x
     device, dtype = v.device, v.dtype
     dim = v.dim() - 2
+    need_grad = bool(torch.is_grad_enabled() and v.requires_grad)
+    w_dtype = torch.float64 if dtype == torch.float64 else torch.float32
+    # syntx >= 6.40 (separable_gaussian_filter): off MPS, a 3-D input without autograd is blurred by in-place
+    # shifted-slice additions (same weights, no padded copy / conv3d workspace).
+    if dim == 3 and device.type != "mps" and not need_grad:
+        out = v
+        for i, sig in enumerate(sig_zyx):
+            if sig <= 0.0:
+                continue
+            weights = get_cached_gaussian_kernel_1d(sig, "cpu", w_dtype).view(-1).tolist()
+            out = _shifted_slice_blur_1d_inplace(out, i + 2, weights, "replicate")
+        return out if out.is_contiguous() else out.contiguous()
     if dim == 3 and device.type != "mps":
         C = v.shape[1]
         for i, sig in enumerate(sig_zyx):
@@ -256,6 +275,11 @@ def _smooth_replicate_cf(x: torch.Tensor, sig_zyx) -> torch.Tensor:
             continue
         kernel = get_cached_gaussian_kernel_1d(sig, device, dtype)
         pad_size = kernel.shape[-1] // 2
+        if device.type == "mps" and kernel.shape[-1] >= 33 and not need_grad:
+            # syntx >= 6.40: avoid the multi-GB Metal conv1d im2col workspace of large kernels
+            weights = get_cached_gaussian_kernel_1d(sig, "cpu", w_dtype).view(-1).tolist()
+            v = _shifted_slice_blur_1d_inplace(v, i + 2, weights, "replicate")
+            continue
         dims = list(range(v.ndim))
         dims[-1], dims[i + 2] = dims[i + 2], dims[-1]
         vp = v.permute(*dims).contiguous()
@@ -283,8 +307,9 @@ def _build_pyramid_deformable(image: torch.Tensor, spacing_xyz, levels, referenc
                               mask: Optional[torch.Tensor] = None):
     """Pyramid of ``image`` (B, C, *spatial) with ``spacing_xyz`` (x, y, z): a list of ``_Level`` (and of mask levels or None)."""
     plans = _plan_levels_deformable(tuple(image.shape[2:]), spacing_xyz, levels, reference_spacing)
-    lv = [_Level(_apply_level(image, p), p["shape_zyx"]) for p in plans]
-    ml = [_Level(_apply_level(mask.to(image.dtype), p), p["shape_zyx"]) for p in plans] if mask is not None else None
+    lv = [_Level(_apply_level(image, p), p["shape_zyx"], p["spacing_xyz"]) for p in plans]
+    ml = ([_Level(_apply_level(mask.to(image.dtype), p), p["shape_zyx"], p["spacing_xyz"]) for p in plans]
+          if mask is not None else None)
     return lv, ml
 
 
@@ -354,6 +379,21 @@ def _restrict_ants_displacement(disp_img, restrict_transformation):
                            has_components=True)
 
 
+def _normalized_to_physical_disp(disp: torch.Tensor, shape, spacing, direction, dtype=torch.float32) -> torch.Tensor:
+    """Normalised ``(x, y, z)``-component displacement -> tensor-layout physical one (``(z, y, x)`` components, mm)
+    on the input's device: components reversed, scaled by ``(n - 1) / 2 * spacing`` per axis, rotated by the
+    reversed direction matrix (``syntx.spatial.normalized_to_physical_disp``, syntx >= 6.40)."""
+    dim = len(shape)
+    device = disp.device
+    disp_t = torch.flip(disp.to(dtype=dtype), dims=[-1])
+    shape_t = torch.tensor(list(shape), device=device, dtype=dtype)
+    spacing_t = torch.tensor(list(reversed([float(x) for x in spacing])), device=device, dtype=dtype)
+    d = np.asarray(direction, dtype=np.float64).reshape(dim, dim)[::-1, ::-1].copy()
+    direction_t = torch.tensor(d, device=device, dtype=dtype)
+    scaled = disp_t * ((shape_t - 1.0) / 2.0 * spacing_t)
+    return (scaled.reshape(-1, dim) @ direction_t.t()).reshape(disp_t.shape)
+
+
 def _grid_to_ants_displacement(total_target_grid: torch.Tensor, fixed, P_F: np.ndarray, P_M: Optional[np.ndarray] = None,
                                restrict_transformation: Optional[Sequence[float]] = None):
     """Target coordinate grid (normalised) -> ANTs physical displacement image on the fixed grid (``y_phys - x_phys``)."""
@@ -391,6 +431,40 @@ def _grid_to_ants_displacement(total_target_grid: torch.Tensor, fixed, P_F: np.n
 # ----------------------------------------------------------------------------------------
 # The optimisation model
 # ----------------------------------------------------------------------------------------
+class _Conv1x1AffineGrid(torch.autograd.Function):
+    """``clamp(coords, -1, 1) @ M^T + t`` in closed form (syntx >= 6.40 ``greedy._Conv1x1AffineGrid``).
+
+    Replaces the bilinear sampling of a stored ``affine_grid`` (same values: the affine is linear and the
+    stored grid was sampled with border padding, i.e. at clamped coordinates) without keeping that
+    ``(1, dim, *spatial)`` grid alive; 1x1 ``conv1d`` on MPS, ``addmm`` elsewhere. The backward pass
+    zeroes the gradient of clamped (out-of-domain) coordinates, as the border-padded sampler did.
+    """
+
+    @staticmethod
+    def forward(ctx, coords: torch.Tensor, M: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        in_bounds = (coords >= -1.0) & (coords <= 1.0)
+        ctx.save_for_backward(M, in_bounds)
+        dim = M.shape[0]
+        c = coords.clamp(-1.0, 1.0)
+        if coords.device.type == "mps":
+            cf = c.view(1, -1, dim).transpose(1, 2).contiguous()
+            out_cf = F.conv1d(cf, M.view(dim, dim, 1), t.view(dim))
+            return out_cf.transpose(1, 2).contiguous().view_as(coords)
+        return torch.addmm(t.view(1, dim), c.reshape(-1, dim), M.t()).view_as(coords)
+
+    @staticmethod
+    def backward(ctx, go: torch.Tensor):
+        M, in_bounds = ctx.saved_tensors
+        dim = M.shape[0]
+        if go.device.type == "mps":
+            go_cf = go.reshape(1, -1, dim).transpose(1, 2).contiguous()
+            gin_cf = F.conv1d(go_cf, M.t().contiguous().view(dim, dim, 1))
+            gin = gin_cf.transpose(1, 2).contiguous().view_as(go)
+        else:
+            gin = (go.reshape(-1, dim) @ M).view_as(go)
+        return gin * in_bounds.to(gin.dtype), None, None
+
+
 class GreedyRegistrationModel(nn.Module):
     """The tensor-level model behind :func:`greedy_registration` (``syntx.greedy.GreedyRegistrationModel``).
 
@@ -400,15 +474,26 @@ class GreedyRegistrationModel(nn.Module):
     Parameters
     ----------
     dim : {2, 3}
-    learning_rate : float, default 0.45
-        Step size (``greedy_registration`` passes 0.375): the update's largest displacement is
+    learning_rate : float, default 0.5625
+        Step size (``greedy_registration`` passes 1.5): with ``'cfl'`` the update's largest displacement is
+        ``learning_rate`` voxels of the level grid, with ``'adam'`` / ``'reg_adam'``
         ``learning_rate / (grid size - 1)`` of the normalised domain.
     flow_sigma : float, default 1.8
-        Gaussian sigma (voxels) smoothing the similarity gradient.
+        Gaussian sigma (voxels) smoothing the similarity gradient (``'gaussian'``); for the spectral / continuum
+        regularizers, the natural scale when ``sobolev_alpha`` is None.
     total_sigma : float, default 0.28
         Gaussian sigma (voxels) smoothing the whole field after each update (0 = off).
-    optimizer : {'adam', 'regadam' / 'reg_adam'}
-        'regadam' additionally smooths the Adam quotient (``regadam_sigma``, Gaussian voxels).
+    optimizer : {'cfl', 'adam', 'regadam' / 'reg_adam'} or None
+        None: 'cfl' for the spectral / continuum regularizers, 'adam' otherwise (syntx >= 6.43,
+        ``validate_regularizer_optimizer_pair``). 'regadam' additionally smooths the Adam quotient.
+    regularizer : str, default 'gaussian'
+        'gaussian' or any name of :func:`antstorch.syn.core.regularizers.list_regularizers`.
+    sobolev_alpha : float, optional
+        Spectral / continuum operator strength.
+    cfl_momentum : float, default 0.85
+        Velocity momentum of ``optimizer='cfl'``.
+    extra_reg_kwargs : dict, optional
+        Continuum operator parameters (``poisson_ratio``, ``s``, ...).
     regadam_sigma : float, default 0.8
     lncc_radius : int, default 2
         Local-correlation radius (window ``2 * radius + 1``).
@@ -425,8 +510,10 @@ class GreedyRegistrationModel(nn.Module):
     device : torch.device, optional
     """
 
-    def __init__(self, dim: int = 3, learning_rate: float = 0.45, flow_sigma: float = 1.8, total_sigma: float = 0.28,
-                 optimizer: str = "adam", regularizer: str = "gaussian", regadam_sigma: float = 0.8,
+    def __init__(self, dim: int = 3, learning_rate: float = 0.5625, flow_sigma: float = 1.8, total_sigma: float = 0.28,
+                 optimizer: Optional[str] = None, regularizer: str = "gaussian", regadam_sigma: float = 0.8,
+                 sobolev_alpha: Optional[float] = None, cfl_momentum: float = 0.85,
+                 extra_reg_kwargs: Optional[Dict[str, Any]] = None,
                  lncc_radius: int = 2, similarity_metric: str = "cc2", squared: bool = True,
                  anderson: bool = False, anderson_steps: int = 5, anderson_m: int = 5,
                  anderson_freq: str = "per_scale", padding_mode: str = "border",
@@ -450,16 +537,23 @@ class GreedyRegistrationModel(nn.Module):
             self.restrict_transformation = tuple(rt)
         else:
             self.restrict_transformation = None
-        if str(regularizer).lower() not in ("gaussian", "gauss"):
-            raise ValueError(f"antstorch.greedy: only the 'gaussian' regularizer is supported, got {regularizer!r}")
+        reg = str(regularizer).lower()
+        _valid_regs = set(list_regularizers()) | {"gaussian", "gauss", "sobolev"}
+        if reg not in _valid_regs:
+            raise ValueError(f"antstorch.greedy: unknown regularizer {regularizer!r}; expected one of {sorted(_valid_regs)}")
         self.learning_rate = learning_rate
         self.flow_sigma = flow_sigma
         self.total_sigma = total_sigma
-        self.optimizer = optimizer.lower()
-        if self.optimizer not in ("adam", "regadam", "reg_adam"):
-            raise ValueError(f"antstorch.greedy: optimizer must be 'adam' or 'regadam', got {optimizer!r}")
-        self.regularizer = "gaussian"
+        # syntx >= 6.43: None -> 'cfl' for spectral/continuum regularizers, 'adam' otherwise; componentwise
+        # Adam with a coupled continuum operator is refused (it breaks the div/curl coupling).
+        self.optimizer = validate_regularizer_optimizer_pair(reg, optimizer, caller="GreedyRegistrationModel")
+        if self.optimizer not in ("adam", "regadam", "reg_adam", "cfl"):
+            raise ValueError(f"antstorch.greedy: optimizer must be 'adam', 'regadam' or 'cfl', got {optimizer!r}")
+        self.regularizer = reg
         self.regadam_sigma = regadam_sigma
+        self.sobolev_alpha = None if sobolev_alpha is None else float(sobolev_alpha)
+        self.cfl_momentum = float(cfl_momentum)
+        self.extra_reg_kwargs = dict(extra_reg_kwargs or {})
         self.lncc_radius = lncc_radius
         self.window_size = 2 * lncc_radius + 1
         self.similarity_metric = similarity_metric.lower()
@@ -481,15 +575,19 @@ class GreedyRegistrationModel(nn.Module):
     def fit(self, fixed_tensor: torch.Tensor, moving_tensor: torch.Tensor, theta: torch.Tensor,
             scales: List[int], iterations: List[int], fixed_mask_tensor: Optional[torch.Tensor] = None,
             verbose: bool = False, spacing: Optional[Sequence[float]] = None,
-            moving_spacing: Optional[Sequence[float]] = None) -> torch.Tensor:
+            moving_spacing: Optional[Sequence[float]] = None, origin: Optional[Sequence[float]] = None,
+            direction: Optional[Any] = None) -> torch.Tensor:
         """Multi-scale optimisation of the field.
 
         ``fixed_tensor`` / ``moving_tensor``: ``(1, 1, *spatial)``; ``theta``: ``(1, dim, dim + 1)`` affine in
         normalised coordinates (fixed -> moving); ``scales`` / ``iterations``: shrink factor and iterations per
         level. Returns (and stores as ``self.warp``) the field; ``self.loss_history`` keeps the loss.
 
-        ``spacing`` / ``moving_spacing`` (ITK x, y, z order; default unit spacing, and the fixed spacing for the moving image)
+        ``spacing`` / ``origin`` / ``direction`` (ITK x, y, z order) are required (``ValueError`` otherwise, syntx >= 6.42);
+        ``moving_spacing`` defaults to the fixed spacing. The spacings
         feed the 'deformable' pyramid, so a level is isotropic in millimetres and a thick axis is not shrunk with the thin ones.
+        ``origin`` / ``direction`` (ITK order) are only validated and forwarded to the regularizer (the field is
+        regularized in the voxel frame, ``build_level_regularizer(param_domain='normalized_grid')``).
         """
         self.theta = theta
         full_shape = fixed_tensor.shape[2:]
@@ -499,18 +597,30 @@ class GreedyRegistrationModel(nn.Module):
         def smooth_field(f, gaussians):
             return separable_1d_filter(torch.movedim(f, -1, 1), gaussians).movedim(1, -1)
 
-        sp_f = tuple(float(x) for x in spacing) if spacing is not None else (1.0,) * dim
-        sp_m = tuple(float(x) for x in moving_spacing) if moving_spacing is not None else sp_f
+        # syntx >= 6.42: no silent unit-spacing / zero-origin / identity-direction fallback on raw tensors.
+        from .syn.core.regularizers import _require_spacing, resolve_required_image_geometry
+        sp_f, _orig_f, _dir_f = resolve_required_image_geometry(
+            fixed_tensor, spacing, origin, direction, dim, "fixed", "GreedyRegistrationModel.fit",
+            spacing_name="spacing", origin_name="origin", direction_name="direction")
+        sp_m = _require_spacing(moving_spacing, dim, "GreedyRegistrationModel.fit") if moving_spacing is not None else sp_f
         # the pyramid: each image on its own grid, the warp lives on the FIXED level grid
         fixed_lv, mask_lv = _build_pyramid_deformable(fixed_tensor, sp_f, scales, mask=fixed_mask_tensor)
         moving_lv, _ = _build_pyramid_deformable(moving_tensor, sp_m, scales, reference_spacing=sp_f)
 
         init_size = list(fixed_lv[0].shape)
         warp = torch.zeros((1, *init_size, dim), dtype=torch.float32, device=self.device)
-        exp_avg = torch.zeros_like(warp)
-        exp_avg_sq = torch.zeros_like(warp)
+        # syntx >= 6.43: one stateful field-step engine for every optimizer ('cfl': CFL-normalised step with
+        # velocity momentum; 'adam' / 'reg_adam': per-level Adam moments, resized with the field).
+        step_opt = FieldStepOptimizer(mode=self.optimizer, param_domain="normalized_grid", beta1=self.beta1,
+                                      beta2=self.beta2, eps=self.eps, cfl_momentum=self.cfl_momentum,
+                                      sobolev_alpha=self.sobolev_alpha)
+        step_opt.init_state(warp)
         self.loss_history = []
         regadam = self.optimizer in ("regadam", "reg_adam")
+        M_theta = self.theta[0, :, :dim].contiguous()
+        t_theta = self.theta[0, :, dim].contiguous()
+        is_identity_theta = bool(torch.allclose(
+            self.theta[0], torch.eye(dim, dim + 1, device=self.theta.device, dtype=self.theta.dtype), atol=1e-7))
 
         self.stop.records.clear()
         for level_idx, (scale, n_iters) in enumerate(zip(scales, iterations)):
@@ -518,22 +628,18 @@ class GreedyRegistrationModel(nn.Module):
                 continue
             self.stop.start_level(level_idx, n_iters)
             size_down = list(fixed_lv[level_idx].shape)
+            sp_level = fixed_lv[level_idx].spacing
             fi_down = fixed_lv[level_idx].tensor
             mi_down = moving_lv[level_idx].tensor
             mask_down = mask_lv[level_idx].tensor if mask_lv is not None else None
 
-            # Interpolate the warp and the Adam moments to the current scale
+            # Interpolate the warp and the optimizer state to the current scale
             if list(warp.shape[1:-1]) != size_down:
                 warp = _resize_field(warp, size_down, mode=mode)
-                exp_avg = _resize_field(exp_avg, size_down, mode=mode)
-                exp_avg_sq = _resize_field(exp_avg_sq, size_down, mode=mode)
+                step_opt.on_level_change(size_down, interp_mode=mode)
 
             grid_shape = [1, 1, *size_down]
             id_grid = F.affine_grid(torch.eye(dim, dim + 1, device=self.device)[None], grid_shape, align_corners=True)
-            affine_grid = F.affine_grid(self.theta, grid_shape, align_corners=True)
-            affine_grid_cf = torch.movedim(affine_grid, -1, 1)
-            half_resolution = 1.0 / (max(size_down) - 1)
-            step = 0  # Adam warm-up step reset at each scale level
 
             grad_gaussians = ([_gaussian_1d_compact(self.flow_sigma, truncated=2.0, device=self.device)
                                for _ in range(dim)] if self.flow_sigma > 0 else None)
@@ -542,41 +648,88 @@ class GreedyRegistrationModel(nn.Module):
             warp_gaussians = ([_gaussian_1d_compact(self.total_sigma, truncated=2.0, device=self.device)
                                for _ in range(dim)] if self.total_sigma > 0 else None)
 
+            if self.regularizer not in ("gaussian", "gauss", "none", "identity"):
+                _reg_kw = dict(alpha=self.sobolev_alpha, sobolev_alpha=self.sobolev_alpha, spacing=sp_level,
+                               origin=origin, direction=direction, fluid_sigma=self.flow_sigma,
+                               param_domain="normalized_grid", grid_shape=size_down, mask=mask_down,
+                               fixed_mask=mask_down, extra_reg_kwargs=self.extra_reg_kwargs, output_units="voxel")
+                grad_reg_fn = build_level_regularizer(self.regularizer, input_role="gradient", **_reg_kw)
+                post_reg_fn = (build_level_regularizer(self.regularizer, input_role="velocity", **_reg_kw)
+                               if regadam else None)
+            else:
+                grad_reg_fn = post_reg_fn = None
+            grad_smooth_fn = ((lambda f, _g=grad_gaussians: smooth_field(f, _g))
+                              if (self.flow_sigma > 0 and grad_gaussians is not None) else None)
+            reg_smooth_fn = (lambda f, _g=reg_gaussians: smooth_field(f, _g)) if reg_gaussians is not None else None
+
+            def _sobolev_fallback_fn(raw_u, ra_alpha, _sp=sp_level):
+                return apply_sobolev_green_operator(raw_u.squeeze(0), fluid_sigma=ra_alpha, alpha=ra_alpha,
+                                                    spacing=_sp).unsqueeze(0)
+
+            restr_mask = (torch.tensor(self.restrict_transformation, device=self.device, dtype=warp.dtype)
+                          .view(1, *([1] * dim), dim) if self.restrict_transformation is not None else None)
+
+            # Constant fixed-image LNCC local mean / variance, once per level (syntx >= 6.40)
+            use_fast_lncc = bool(getattr(self.loss_fn, "fast_lncc", False))
+            if use_fast_lncc:
+                ws_lvl = min(int(self.window_size), int(min(size_down)))
+                if ws_lvl % 2 == 0:
+                    ws_lvl = max(1, ws_lvl - 1)
+                with torch.no_grad():
+                    _j_mean = _box_pool(fi_down, ws_lvl, count_include_pad=False)
+                    _lncc_M_c = fi_down - _j_mean
+                    del _j_mean
+                    _lncc_J_var = torch.clamp(_box_pool(_lncc_M_c.square(), ws_lvl, count_include_pad=False), min=0.0)
+                    _lncc_safe_J_var = torch.clamp(_lncc_J_var, min=1e-6)
+                    _lncc_j_valid = ((_lncc_J_var > 1e-6) & (mask_down > 0.5)) if mask_down is not None else None
+                    del _lncc_J_var
+            lncc_squared = bool(getattr(self.loss_fn, "squared", True))
+
             for it in range(n_iters):
                 warp_param = warp.detach().requires_grad_(True)
 
-                # A o (Id + u): deform in fixed-space coordinates, then map through the affine.
-                sample_grid = _sample_field_cf(affine_grid_cf, id_grid + warp_param)
+                # A o (Id + u): deform in fixed-space coordinates (clamped to [-1, 1], as the border-padded sampling
+                # of the affine grid did), then map through the affine in closed form.
+                if is_identity_theta:
+                    sample_grid = torch.clamp(id_grid + warp_param, -1.0, 1.0)
+                else:
+                    sample_grid = _Conv1x1AffineGrid.apply(id_grid + warp_param, M_theta, t_theta)
                 moved = grid_sample(mi_down, sample_grid, mode="bilinear", padding_mode="zeros", align_corners=True)
 
-                loss = self.loss_fn(moved, fi_down, mask=mask_down)
+                if use_fast_lncc:
+                    I_mean = box_mean_nd(moved, ws_lvl)
+                    F_c = moved - I_mean
+                    del I_mean
+                    c_ch = moved.shape[1]
+                    sec = box_mean_nd(torch.cat([F_c.square(), F_c * _lncc_M_c], dim=1), ws_lvl)
+                    I_var = torch.clamp(sec[:, :c_ch], min=0.0)
+                    IJ_cov = sec[:, c_ch:]
+                    del sec, F_c
+                    safe_I_var = torch.clamp(I_var, min=1e-6)
+                    if lncc_squared:
+                        cc_metric = torch.clamp((IJ_cov ** 2) / (safe_I_var * _lncc_safe_J_var + 1e-8), min=0.0, max=1.0)
+                    else:
+                        cc_metric = torch.clamp(IJ_cov / (torch.sqrt(safe_I_var * _lncc_safe_J_var) + 1e-6),
+                                                min=-1.0, max=1.0)
+                    if mask_down is not None:
+                        active = ((I_var > 1e-6) & _lncc_j_valid).to(moved.dtype)
+                        loss = -torch.sum(cc_metric * active) / (torch.sum(active) + 1e-8)
+                    else:
+                        loss = -torch.mean(cc_metric)
+                    del I_var, IJ_cov, safe_I_var, cc_metric
+                else:
+                    loss = self.loss_fn(moved, fi_down, mask=mask_down)
                 self.loss_history.append(loss.detach())
                 loss.backward()
 
-                grad = warp_param.grad.data
-                if self.flow_sigma > 0 and grad_gaussians is not None:
-                    grad = smooth_field(grad, grad_gaussians)
-
-                step += 1
-                exp_avg.mul_(self.beta1).add_(grad, alpha=1.0 - self.beta1)
-                exp_avg_sq.mul_(self.beta2).addcmul_(grad, grad, value=1.0 - self.beta2)
-                b1_corr = 1.0 - self.beta1 ** step
-                b2_corr = 1.0 - self.beta2 ** step
-                denom = (exp_avg_sq / b2_corr).sqrt().add_(self.eps)
-                raw_update = (exp_avg / b1_corr) / denom
-
-                if regadam and reg_gaussians is not None:
-                    u_reg = smooth_field(raw_update, reg_gaussians)
-                else:
-                    u_reg = raw_update
-
-                # Bound the maximum step
-                gradmax = self.eps + u_reg.norm(p=2, dim=-1, keepdim=True).flatten(1).max(1).values
-                gradmax = gradmax.reshape(-1, *([1]) * (dim + 1)).clamp(min=1.0)
-                update = -self.learning_rate * half_resolution * (u_reg / gradmax)
-                if self.restrict_transformation is not None:
-                    restr_mask = torch.tensor(self.restrict_transformation, device=self.device,
-                                              dtype=update.dtype).view(1, *([1] * dim), dim)
+                grad = warp_param.grad.detach()
+                with torch.no_grad():
+                    update = step_opt.step(grad, self.learning_rate, grid_shape=size_down, spacing=sp_level,
+                                           reg_fn=grad_reg_fn, post_reg_fn=post_reg_fn,
+                                           grad_smooth_fn=grad_smooth_fn, reg_smooth_fn=reg_smooth_fn,
+                                           sobolev_fallback_fn=_sobolev_fallback_fn)
+                del grad
+                if restr_mask is not None:
                     update = update * restr_mask
 
                 # Eulerian compositive pullback: u_{k+1}(x) = v_k(x) + u_k(x + v_k(x))
@@ -631,10 +784,10 @@ def greedy_registration(
     reg_iterations: Optional[Union[List[int], Tuple[int, ...]]] = None,
     iterations: Optional[Union[List[int], Tuple[int, ...]]] = None,
     scales: Optional[Union[List[int], Tuple[int, ...]]] = None,
-    learning_rate: float = 0.375,
-    flow_sigma: float = 1.8,
-    total_sigma: float = 0.28,
-    optimizer: str = "adam",
+    learning_rate: float = 1.5,
+    flow_sigma: float = 1.62,
+    total_sigma: float = 0.0,
+    optimizer: Optional[str] = "cfl",
     regadam_sigma: float = 0.8,
     similarity_metric: str = "cc2",
     lncc_radius: int = 2,
@@ -652,6 +805,9 @@ def greedy_registration(
     seed: int = 42,
     restrict_transformation: Optional[Union[Sequence[float], Tuple[float, ...]]] = None,
     levels: Optional[Union[List[int], Tuple[int, ...]]] = None,
+    cfl_momentum: float = 0.1875,
+    regularizer: str = "navier",
+    sobolev_alpha: Optional[float] = 2.625,
     **kwargs: Any,
 ) -> Dict[str, Any]:
     """Greedy (one-directional) diffeomorphic registration of ``moving`` to ``fixed`` -- ``antstorch.greedy``.
@@ -672,13 +828,18 @@ def greedy_registration(
         [100, 100, 100, 50] (2-D).
     scales : list of int, default None
         Shrink factor per level. None: [2**(L-1), ..., 1] for L = len(reg_iterations). ``levels`` is an alias.
-    learning_rate : float, default 0.375
-        Step size (``grad_step=`` is an alias).
-    flow_sigma : float, default 1.8
-        Gaussian sigma in voxels smoothing the gradient (not the ITK variance convention of ``syn_registration``).
-    total_sigma : float, default 0.28
+    learning_rate : float, default 1.5
+        Step size (``grad_step=`` is an alias): the largest displacement of an update, in voxels of the level grid
+        (``'cfl'``) or ``learning_rate / (grid size - 1)`` of the normalised domain (``'adam'`` / ``'reg_adam'``).
+    flow_sigma : float, default 1.62
+        Gaussian sigma in voxels smoothing the gradient for ``regularizer='gaussian'`` (not the ITK variance
+        convention of ``syn_registration``); the natural scale (alpha = flow_sigma / 2) of a continuum
+        regularizer when ``sobolev_alpha`` is None.
+    total_sigma : float, default 0.0
         Gaussian sigma in voxels smoothing the whole field after each update.
-    optimizer : {'adam', 'regadam', 'reg_adam'}, default 'adam'
+    optimizer : {'cfl', 'adam', 'regadam', 'reg_adam'} or None, default 'cfl'
+        None: 'cfl' for the spectral / continuum regularizers, 'adam' for 'gaussian'. 'adam' with a coupled
+        continuum regularizer raises ``ValueError`` (componentwise scaling breaks the div / curl coupling).
     regadam_sigma : float, default 0.8
     similarity_metric : str, default 'cc2'
         'cc2' / 'lncc' / 'cc' / 'ncc' (local correlation) or 'mse' / 'l2'.
@@ -701,10 +862,23 @@ def greedy_registration(
     seed : int, default 42
         Accepted for signature parity with ``syntx.greedy`` (the optimisation is deterministic).
     restrict_transformation : sequence of float, optional
+    cfl_momentum : float, default 0.1875
+        Velocity momentum of ``optimizer='cfl'`` (0 disables it).
+    regularizer : str, default 'navier'
+        'gaussian' or any operator of :func:`antstorch.syn.core.regularizers.list_regularizers` ('navier',
+        'div_curl', 'sobolev', ...), applied to the gradient on the level grid in millimetres.
+    sobolev_alpha : float or None, default 2.625
+        Spectral / continuum operator strength (None: each operator's default from ``flow_sigma``).
+
+    The defaults are syntx 6.44's canonical ``syntx.greedy`` setting (``canonical_2026_11_20``: Navier-Cauchy
+    with ``s`` 2.0 and Poisson ratio 0.20, ``optimizer='cfl'``). The previous ones (syntx <= 6.41) were
+    ``learning_rate=0.375, flow_sigma=1.8, total_sigma=0.28, optimizer='adam', regularizer='gaussian'``.
+
     **kwargs
         ``padding_mode`` ('border'), ``squared`` (True), ``interpolator`` ('linear', for the warped output),
-        ``regularizer`` (only 'gaussian'), and the aliases ``grad_step`` / ``optimizer_type`` /
-        ``project_inverse`` / ``anderson_projection``. Any other keyword raises ``TypeError``.
+        the continuum operator parameters (``poisson_ratio``, ``s``, ``beta``, ``gamma``, ...; see
+        ``REGULARIZER_EXTRA_KEYS``; ``alpha`` is an alias of ``sobolev_alpha``), and the aliases ``grad_step`` /
+        ``optimizer_type`` / ``project_inverse`` / ``anderson_projection``. Any other keyword raises ``TypeError``.
 
     Returns
     -------
@@ -792,7 +966,11 @@ def greedy_registration(
     if "optimizer_type" in kwargs:
         optimizer = str(kwargs.pop("optimizer_type"))
     padding_mode = str(kwargs.pop("padding_mode", "border"))
-    reg_mode = str(kwargs.pop("regularizer", "gaussian")).lower()
+    cfl_momentum = float(kwargs.pop("cfl_momentum", cfl_momentum))
+    extra_reg_kwargs = {k: kwargs.pop(k) for k in list(kwargs) if k in REGULARIZER_EXTRA_KEYS}
+    if "alpha" in extra_reg_kwargs:
+        sobolev_alpha = float(extra_reg_kwargs.pop("alpha"))
+    reg_mode = str(kwargs.pop("regularizer", regularizer)).lower()
     squared = bool(kwargs.pop("squared", True))
     interpolator = kwargs.pop("interpolator", "linear")
     # syntx >= 6.16 / 6.36 options (None / 0 disables the early stop; digital_diffeomorphism=False the finish polish)
@@ -806,27 +984,34 @@ def greedy_registration(
     # 6. Optimise
     model = GreedyRegistrationModel(
         dim=dim, learning_rate=learning_rate, flow_sigma=flow_sigma, total_sigma=total_sigma, optimizer=optimizer,
-        regularizer=reg_mode, regadam_sigma=regadam_sigma, lncc_radius=lncc_radius,
+        regularizer=reg_mode, regadam_sigma=regadam_sigma, sobolev_alpha=sobolev_alpha, cfl_momentum=cfl_momentum,
+        extra_reg_kwargs=extra_reg_kwargs, lncc_radius=lncc_radius,
         similarity_metric=similarity_metric, squared=squared, anderson=anderson, anderson_steps=anderson_steps,
         anderson_m=anderson_m, anderson_freq=anderson_freq, padding_mode=padding_mode,
         restrict_transformation=restrict_transformation, device=torch_device, convergence_slope=convergence_slope)
     t0_opt = time.time()
     warp = model.fit(fixed_tensor=fi_t, moving_tensor=mi_t, theta=theta, scales=scales, iterations=reg_iterations,
                      fixed_mask_tensor=mask_t, verbose=verbose,
-                     spacing=tuple(float(x) for x in fixed.spacing), moving_spacing=tuple(float(x) for x in moving.spacing))
+                     spacing=tuple(float(x) for x in fixed.spacing), moving_spacing=tuple(float(x) for x in moving.spacing),
+                     origin=tuple(float(x) for x in fixed.origin), direction=np.asarray(fixed.direction))
     t1_opt = time.time() - t0_opt
 
-    # 7. Export: the non-linear displacement (affine kept separate) and the affine file
-    full_shape = fi_t.shape[2:]
-    full_id_grid = F.affine_grid(torch.eye(dim, dim + 1, device=warp.device)[None], [1, 1, *full_shape],
-                                 align_corners=True)
-    disp_img = _grid_to_ants_displacement(full_id_grid + warp, fixed, P_F, P_F,
-                                          restrict_transformation=restrict_transformation)
+    # 7. Export: the non-linear displacement (affine kept separate) and the affine file. syntx >= 6.40 converts the
+    # normalised field to the physical (tensor-layout, mm) displacement directly on the device, in float32
+    # (``syntx.spatial.normalized_to_physical_disp``) instead of through a float64 CPU meshgrid, and applies
+    # ``restrict_transformation`` to that tensor before the inverse / digital-diffeomorphism finish.
+    full_shape = tuple(fi_t.shape[2:])
+    with torch.no_grad():
+        disp_t = _normalized_to_physical_disp(warp, full_shape, fixed.spacing, fixed.direction, dtype=torch.float32)
+        if restrict_transformation is not None:
+            restr_t_zyx = torch.tensor(list(reversed([0.0 if float(w) == 0.0 else 1.0 for w in restrict_transformation])),
+                                       device=disp_t.device, dtype=disp_t.dtype).view(1, *([1] * dim), dim)
+            disp_t = disp_t * restr_t_zyx
+        else:
+            restr_t_zyx = None
 
-    # 7b. Physical inverse and/or digital-diffeomorphism finish (syntx >= 6.36, default on). Fields go to the
-    # tensor layout (axes AND components reversed, syntx.spatial.disp_itk_to_tensor) before the physical inverse:
-    # before syntx 6.36 (and in this port until 2026-11-18) the inverse was solved on ``numpy().T``, i.e. with the
-    # components left in (x, y, z) order against a (z, y, x) physical grid.
+    # 7b. Physical inverse and/or digital-diffeomorphism finish (syntx >= 6.36, default on), both on the tensor
+    # layout (axes AND components reversed).
     from .syn.bridge import displacement_zyx_to_ants_image
     _dd_on = digital_diffeomorphism and sum(reg_iterations) > 0
     _dd_kw = dict(spacing=fixed.spacing, origin=fixed.origin, direction=fixed.direction,
@@ -834,27 +1019,32 @@ def greedy_registration(
                   stationary_boundary=(padding_mode == "border"))
     inv_disp_img = None
     t1_inv = 0.0
-    if return_inverse or _dd_on:
+    if return_inverse:
         t0_inv = time.time()
-        disp_t = _ants_displacement_to_zyx(disp_img, torch_device)
-        if return_inverse:
-            if verbose:
-                print("[greedy] Computing physical inverse displacement field with Anderson acceleration...")
-            inv_disp_t = update_inverse_field_nd_anderson(
-                W_disp=disp_t, W_inv_disp=None, steps=max(anderson_steps, 15), m=anderson_m,
-                spacing=fixed.spacing, origin=fixed.origin, direction=fixed.direction)
-            if _dd_on:
-                from .syn.core.digital_diffeomorphism import enforce_digital_diffeomorphism_nd
-                disp_t, inv_disp_t = enforce_digital_diffeomorphism_nd(disp_t, inv_disp_t, ice_tol=0.30, **_dd_kw)
-                disp_img = _restrict_ants_displacement(displacement_zyx_to_ants_image(disp_t, fixed), restrict_transformation)
-            inv_disp_img = _restrict_ants_displacement(displacement_zyx_to_ants_image(inv_disp_t, fixed),
-                                                       restrict_transformation if _dd_on else None)
-            t1_inv = time.time() - t0_inv
-        else:
+        if verbose:
+            print("[greedy] Computing physical inverse displacement field with Anderson acceleration...")
+        inv_disp_t = update_inverse_field_nd_anderson(
+            W_disp=disp_t, W_inv_disp=None, steps=max(anderson_steps, 15), m=anderson_m,
+            spacing=fixed.spacing, origin=fixed.origin, direction=fixed.direction)
+        if _dd_on:
+            from .syn.core.digital_diffeomorphism import enforce_digital_diffeomorphism_nd
+            disp_t, inv_disp_t = enforce_digital_diffeomorphism_nd(disp_t, inv_disp_t, ice_tol=0.30, **_dd_kw)
+        if restr_t_zyx is not None:
+            with torch.no_grad():
+                disp_t = disp_t * restr_t_zyx
+                inv_disp_t = inv_disp_t * restr_t_zyx
+        disp_img = displacement_zyx_to_ants_image(disp_t, fixed)
+        inv_disp_img = displacement_zyx_to_ants_image(inv_disp_t, fixed)
+        t1_inv = time.time() - t0_inv
+    else:
+        if _dd_on:
             from .syn.core.digital_diffeomorphism import enforce_digital_diffeomorphism_nd
             disp_t = enforce_digital_diffeomorphism_nd(disp_t, None, **_dd_kw)
             disp_t = disp_t[0] if isinstance(disp_t, tuple) else disp_t
-            disp_img = _restrict_ants_displacement(displacement_zyx_to_ants_image(disp_t, fixed), restrict_transformation)
+            if restr_t_zyx is not None:
+                with torch.no_grad():
+                    disp_t = disp_t * restr_t_zyx
+        disp_img = displacement_zyx_to_ants_image(disp_t, fixed)
 
     affine_file = None
     if aff_tx is not None:
@@ -916,8 +1106,12 @@ def greedy_registration(
     provenance = {
         "algorithm": "antstorch.greedy",
         "formulation": "eulerian_compositive",
-        "optimizer": optimizer,
-        "regadam_sigma": regadam_sigma if optimizer in ("regadam", "reg_adam") else None,
+        "optimizer": model.optimizer,
+        "regularizer": model.regularizer,
+        "sobolev_alpha": model.sobolev_alpha,
+        "cfl_momentum": model.cfl_momentum if model.optimizer == "cfl" else None,
+        "regularizer_kwargs": dict(model.extra_reg_kwargs) or None,
+        "regadam_sigma": regadam_sigma if model.optimizer in ("regadam", "reg_adam") else None,
         "reg_iterations": reg_iterations,
         "scales": scales,
         "learning_rate": learning_rate,

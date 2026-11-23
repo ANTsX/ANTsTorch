@@ -18,7 +18,7 @@ Differences from the SyN script, which follow from the method:
 
 Example
 -------
-Default greedy registration (Adam optimizer) on CPU::
+Default greedy registration (syntx 6.44 canonical: navier regularizer, cfl optimizer) on CPU::
 
     PYTHONPATH=. python tools/registration/run_greedy_registration.py
 
@@ -53,15 +53,19 @@ def parse_args() -> argparse.Namespace:
                         help="Path to the moving image (default: the bundled ANTs 'r27' demo image)")
     parser.add_argument("--device", default=None, help="PyTorch device: cpu, cuda, or mps (default: CUDA, else MPS, else CPU)")
     parser.add_argument("--output-dir", type=Path, default=Path("greedy_registration_output"))
-    parser.add_argument("--optimizer", choices=("adam", "regadam"), default="adam",
-                        help="'adam' (benchmark arm 'greedy') or 'regadam' (arm 'greedy_regadam')")
+    parser.add_argument("--optimizer", choices=("cfl", "adam", "regadam"), default=None,
+                        help="'cfl' (default, syntx 6.44 canonical), 'adam' (the former default) or 'regadam'")
+    parser.add_argument("--regularizer", default=None,
+                        help="'navier' (default), 'gaussian', or any antstorch.syn.core.regularizers name")
+    parser.add_argument("--sobolev-alpha", type=float, default=None, help="Continuum operator strength (default 2.625)")
+    parser.add_argument("--cfl-momentum", type=float, default=None, help="cfl: velocity momentum (default 0.1875)")
     parser.add_argument("--regadam-sigma", type=float, default=None, help="regadam: Adam-quotient smoothing sigma in voxels (default 0.8)")
     parser.add_argument("--levels", type=int, nargs="+", default=None, help="Shrink factors, coarse to fine (default: 2**(L-1), ..., 1)")
     parser.add_argument("--reg-iterations", type=int, nargs="+", default=None,
                         help="Iterations per level (default: 100 100 20 in 3-D, 100 100 100 50 in 2-D)")
-    parser.add_argument("--learning-rate", type=float, default=None, help="Step size (default 0.375)")
-    parser.add_argument("--flow-sigma", type=float, default=None, help="Gaussian sigma (voxels) smoothing the gradient (default 1.8)")
-    parser.add_argument("--total-sigma", type=float, default=None, help="Gaussian sigma (voxels) smoothing the whole field (default 0.28)")
+    parser.add_argument("--learning-rate", type=float, default=None, help="Step size (default 1.5)")
+    parser.add_argument("--flow-sigma", type=float, default=None, help="Gaussian sigma (voxels) smoothing the gradient (default 1.62)")
+    parser.add_argument("--total-sigma", type=float, default=None, help="Gaussian sigma (voxels) smoothing the whole field (default 0.0)")
     parser.add_argument("--similarity", choices=("cc2", "lncc", "cc", "ncc", "mse", "l2"), default=None,
                         help="Similarity metric (default cc2)")
     parser.add_argument("--lncc-radius", type=int, default=None, help="Window radius for the local correlation metrics (default 2)")
@@ -107,6 +111,10 @@ def main() -> None:
         "flow_sigma": args.flow_sigma,
         "total_sigma": args.total_sigma,
         "regadam_sigma": args.regadam_sigma,
+        "optimizer": args.optimizer,
+        "regularizer": args.regularizer,
+        "sobolev_alpha": args.sobolev_alpha,
+        "cfl_momentum": args.cfl_momentum,
         "similarity_metric": args.similarity,
         "lncc_radius": args.lncc_radius,
         "affine_mode": args.affine_mode,
@@ -123,7 +131,6 @@ def main() -> None:
     result = greedy_registration(
         fixed_ants,
         moving_ants,
-        optimizer=args.optimizer,
         anderson=args.anderson,
         return_inverse=args.return_inverse,
         # A trailing "/" writes 1Warp.nii.gz / 0GenericAffine.mat (and 1InverseWarp.nii.gz) into --output-dir,
@@ -139,7 +146,7 @@ def main() -> None:
         ants.image_write(result["warpedfixout"], str(args.output_dir / "warped_fixed.nii.gz"))
 
     print(f"Registration completed in {elapsed:.2f} seconds.")
-    print(f"Optimizer: {args.optimizer}")
+    print(f"Optimizer: {result['provenance']['optimizer']}  Regularizer: {result['provenance']['regularizer']}")
     print(f"Transform files: fwdtransforms={result['fwdtransforms']}, invtransforms={result['invtransforms']}")
     print(f"Outputs written to: {args.output_dir.resolve()}")
 
