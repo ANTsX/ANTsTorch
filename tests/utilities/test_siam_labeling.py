@@ -21,7 +21,9 @@ siam = importlib.import_module("antstorch.utilities.siam_labeling")
     np.array([[0., 0., -1.], [1., 0., 0.], [0., -1., 0.]]),
     np.array([[0.8, -0.6, 0.], [0.6, 0.8, 0.], [0., 0., 1.]]),
 ])
-def test_native_geometry_and_probability_order(monkeypatch, tmp_path, direction):
+@pytest.mark.parametrize("return_probability_images", [True, False])
+def test_native_geometry_and_probability_order(monkeypatch, tmp_path, direction,
+                                               return_probability_images):
     nib = pytest.importorskip("nibabel")
     array = (np.arange(4 * 5 * 6).reshape(4, 5, 6) % 18).astype(np.float32)
     image = ants.from_numpy(array, origin=(10., -20., 30.),
@@ -43,26 +45,29 @@ def test_native_geometry_and_probability_order(monkeypatch, tmp_path, direction)
         def predict_single_npy_array(self, data, properties, **kwargs):
             predict(data, properties, **kwargs)
             seg = data[0].astype(np.uint8)
+            if not kwargs["save_or_return_probabilities"]:
+                return seg
             probabilities = np.stack([seg == label for label in range(18)]).astype(np.float32)
             return seg, probabilities
 
     monkeypatch.setattr(siam, "_load_siam_dependencies", lambda: (nib, Predictor))
     monkeypatch.setattr(siam, "_get_siam_model", lambda verbose: (tmp_path, (0, 1, 2, 3, 4)))
     monkeypatch.setattr(siam, "get_default_device", lambda: torch.device("cpu"))
-    result = siam.siam_labeling(image)
+    result = siam.siam_labeling(image, return_probability_images=return_probability_images)
     assert init.call_args.kwargs["device"] == torch.device("cpu")
     assert init.call_args.kwargs["use_mirroring"] is False
     assert init.call_args.kwargs["use_gaussian"] is True
     assert init.call_args.kwargs["tile_step_size"] == 0.5
     assert init.call_args.kwargs["perform_everything_on_device"] is False
-    assert predict.call_args.kwargs == {"save_or_return_probabilities": True}
+    assert predict.call_args.kwargs == {"save_or_return_probabilities": return_probability_images}
     assert predict.call_args.args[0].dtype == np.float32
     # Verify SimpleITK axis order and spacing on a known orientation.
     if np.array_equal(direction, np.eye(3)):
         np.testing.assert_array_equal(predict.call_args.args[0][0], array[::-1, ::-1, :].transpose(2, 1, 0))
         np.testing.assert_allclose(predict.call_args.args[1]["spacing"], (2.1, 1.3, 0.8))
     np.testing.assert_array_equal(result["segmentation_image"].numpy(), array)
-    for label, probability in enumerate(result["probability_images"]):
+    assert ("probability_images" in result) is return_probability_images
+    for label, probability in enumerate(result.get("probability_images", [])):
         np.testing.assert_array_equal(probability.numpy(), array == label)
         assert ants.image_physical_space_consistency(probability, image)
     assert ants.image_physical_space_consistency(result["segmentation_image"], image)

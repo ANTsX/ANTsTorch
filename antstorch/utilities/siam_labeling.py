@@ -120,7 +120,7 @@ def _load_siam_dependencies():
     return nibabel, nnUNetPredictor
 
 
-def siam_labeling(image, device=None, verbose=False):
+def siam_labeling(image, return_probability_images=False, device=None, verbose=False):
     """Segment a whole-head 3-D image with the original SIAM v0.3 model.
 
     Uses SIAM's pretrained nnU-Net, all published folds, Gaussian sliding
@@ -133,6 +133,11 @@ def siam_labeling(image, device=None, verbose=False):
     image : ANTsImage
         Scalar 3-D head image (e.g., T1, T2, FLAIR or CT). Physical geometry
         must be correct. Canonical RAS orientation is applied internally.
+    return_probability_images : bool
+        Also return the 18 per-class probability maps. This adds a softmax
+        and 18 full-resolution float maps, which costs substantial time and
+        memory; the segmentation alone matches ``siam-pred`` without
+        ``--save_proba``.
     device : str, torch.device or None
         Inference device. None uses the ANTsTorch session default.
     verbose : bool
@@ -141,8 +146,9 @@ def siam_labeling(image, device=None, verbose=False):
     Returns
     -------
     dict
-        ``segmentation_image`` and 18 ``probability_images`` in the input
-        geometry, plus ``labels`` mapping names to label values. Labels:
+        ``segmentation_image`` in the input geometry and ``labels`` mapping
+        names to label values; with ``return_probability_images=True``, also 18
+        ``probability_images`` in the input geometry. Labels:
         0 background, 1 GM, 2 WM, 3 CSF, 4 ventricular CSF, 5 cerebellar GM,
         6 thalamus, 7 pallidum, 8 putamen, 9 caudate, 10 accumbens,
         11 amygdala, 12 hippocampus, 13 dura, 14 vessels, 15 skull,
@@ -154,7 +160,7 @@ def siam_labeling(image, device=None, verbose=False):
     downloaded from Figshare using get_antstorch_data("siamV03"), verified,
     cached and unpacked. Weights are CC BY 4.0. Cite Valabregue et al.,
     https://arxiv.org/abs/2605.02737 and https://zenodo.org/records/17733431.
-    Inference and the returned probability maps require substantial memory.
+    Inference requires substantial memory, and more with probability maps.
 
     Examples
     --------
@@ -188,16 +194,19 @@ def siam_labeling(image, device=None, verbose=False):
         verbose=verbose, verbose_preprocessing=verbose, allow_tqdm=verbose)
     predictor.initialize_from_trained_model_folder(
         str(model_folder), use_folds=folds, checkpoint_name="checkpoint_final.pth")
-    segmentation, probabilities = predictor.predict_single_npy_array(
-        data, properties, save_or_return_probabilities=True)
+    output = predictor.predict_single_npy_array(
+        data, properties, save_or_return_probabilities=return_probability_images)
+    segmentation, probabilities = output if return_probability_images else (output, None)
 
     def to_native(array):
         array = nib.orientations.apply_orientation(array.transpose(2, 1, 0), undo_orientation)
         return ants.from_numpy_like(np.ascontiguousarray(array), image)
 
     labels = predictor.dataset_json["labels"]
-    return {
+    result = {
         "segmentation_image": to_native(segmentation),
-        "probability_images": [to_native(probability) for probability in probabilities],
         "labels": dict(sorted(labels.items(), key=lambda item: item[1])),
     }
+    if return_probability_images:
+        result["probability_images"] = [to_native(probability) for probability in probabilities]
+    return result

@@ -51,14 +51,18 @@ parameters exactly; optimizer states and training logs have been omitted.
 The result contains:
 
 - `segmentation_image`: an ANTsImage with integer-valued labels.
-- `probability_images`: 18 ANTsImages, ordered by label value, including background.
+- `probability_images`: only with `return_probability_images=True`, 18 ANTsImages
+  ordered by label value, including background.
 - `labels`: the names and values from the published `dataset.json`.
 
 The classes are background, GM, WM, CSF, ventricular CSF, cerebellar GM,
 thalamus, pallidum, putamen, caudate, accumbens, amygdala, hippocampus,
 dura, vessels, skull, head, and anomalies (values 0–17). There is no separate
-auxiliary sigmoid output. Returning all probability maps and running the
-original network requires substantial RAM; CPU inference can be slow.
+auxiliary sigmoid output. Running the original network requires substantial
+RAM; CPU inference can be slow. Probability maps are off by default, matching
+`siam-pred` without `--save_proba`: requesting them adds a softmax and 18
+full-resolution float maps (about 1.2 GB per copy for a 256³ image), which
+noticeably increases run time and memory.
 
 ## Validation
 

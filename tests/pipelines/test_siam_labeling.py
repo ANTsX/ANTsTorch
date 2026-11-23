@@ -70,7 +70,11 @@ def test_siam_with_real_nnunet_predictor(tmp_path, monkeypatch):
     array = np.random.default_rng(42).normal(size=(9, 10, 11)).astype(np.float32)
     image = ants.from_numpy(array, spacing=(0.9, 1.1, 1.2), origin=(10, 20, -30),
                            direction=np.diag([-1., -1., 1.]))
-    result = siam.siam_labeling(image, device="cpu")
+    result = siam.siam_labeling(image, return_probability_images=True, device="cpu")
+    segmentation_only = siam.siam_labeling(image, device="cpu")
+    assert "probability_images" not in segmentation_only
+    np.testing.assert_array_equal(segmentation_only["segmentation_image"].numpy(),
+                                  result["segmentation_image"].numpy())
     probabilities = np.stack([p.numpy() for p in result["probability_images"]])
     assert probabilities.shape == (18, *image.shape)
     np.testing.assert_allclose(probabilities.sum(axis=0), 1., atol=1e-6)
