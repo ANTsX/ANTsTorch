@@ -6,6 +6,10 @@ from torch.hub import download_url_to_file
 
 _antstorch_cache_directory = os.path.join(os.path.expanduser('~'), '.antstorch')
 
+_EXPECTED_SHA256 = {
+    "siamV03": "0a8e6964f1dbb9aab85b0041d70b26262bc1e261f9e9cbe1187f3a0b3ced641b",
+}
+
 
 def get_antstorch_cache_directory():
     """Get the cache directory for ANTsTorch data. Data and pre-trained models will be
@@ -51,6 +55,8 @@ def get_antstorch_data(
     file_id : str
         One of the permitted file ids or pass "show" to list all valid possibilities.
         Note that most require internet access to download.
+        "siamV03" returns the SIAM v0.3 inference archive (.tar.gz), without
+        extracting it; siam_labeling handles model installation.
     target_file_name : str, optional
         Optional target filename. If omitted, a sensible default is inferred from `file_id`.
     show_progress : bool, optional
@@ -130,6 +136,7 @@ def get_antstorch_data(
         "CIT168_T1w_700um_pad_adni": "https://ndownloader.figshare.com/files/64536261",
         "CIT168_basal_forebrain_adni": "https://ndownloader.figshare.com/files/64536324",
         "det_atlas_25_pad_LR_adni": "https://ndownloader.figshare.com/files/64536333",
+        "siamV03": "https://ndownloader.figshare.com/files/71795392",
     }
 
     valid_list = tuple(sorted(list(_switcher.keys()) + ["show"]))
@@ -148,10 +155,12 @@ def get_antstorch_data(
 
     url = _switcher[file_id]
 
-    # Choose a default extension: .mat for the affine, .nii.gz otherwise.
+    # Choose the extension matching the data format.
     if target_file_name is None:
         if file_id == "magetCerebellumxTemplate0GenericAffine":
             target_file_name = f"{file_id}.mat"
+        elif file_id == "siamV03":
+            target_file_name = f"{file_id}.tar.gz"
         else:
             target_file_name = f"{file_id}.nii.gz"
 
@@ -160,6 +169,7 @@ def get_antstorch_data(
 
     # Download only if needed
     if not os.path.exists(target_file_name_path):
-        download_url_to_file(url, target_file_name_path, hash_prefix=None, progress=show_progress)
+        download_url_to_file(url, target_file_name_path,
+                             hash_prefix=_EXPECTED_SHA256.get(file_id), progress=show_progress)
 
     return target_file_name_path

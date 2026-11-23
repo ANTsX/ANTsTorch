@@ -14,6 +14,7 @@ complement the [ANTsX tutorial](https://gist.github.com/ntustison/12a656a5fc2f6f
 installation
 examples/index
 api
+siam_labeling
 antsx_tutorial_syn
 label_image_registration
 antsx_tutorial_bspline_flows
