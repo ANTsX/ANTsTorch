@@ -37,6 +37,9 @@ dependencies = [
 [tool.setuptools.packages.find]
 include = ["antstorch*"]
 
+[project.optional-dependencies]
+siam = ["nnunetv2>=2.8.1,<3", "nibabel>=5", "filelock>=3"]
+
 [tool.setuptools.package-data]
 # Bundles the 90-pair Mindboggle-101 definition antstorch.benchmark ships
 # with, so it is present in installed (not just editable/checkout) installs.

@@ -10,6 +10,7 @@ from .cortical_thickness import longitudinal_cortical_thickness
 from .n4_bias_field_correction import n4_bias_field_correction
 from .deep_flash import deep_flash
 from .harvard_oxford_atlas_labeling import harvard_oxford_atlas_labeling
+from .siam_labeling import siam_labeling
 from .desikan_killiany_tourville_labeling import desikan_killiany_tourville_labeling
 from .cerebellum_morphology import cerebellum_morphology
 from .nbm_labeling import nbm_labeling

@@ -122,12 +122,13 @@ Registration and brain extraction examples default to CPU and accept `--device` 
 
 ## Pretrained applications
 
-The application layer provides ports using ANTsPyNet pretrained weights. Available workflows include:
+The application layer provides ANTsPyNet model ports and integrations with published PyTorch models. Available workflows include:
 
 | Domain | Applications |
 | --- | --- |
 | **Brain extraction** | T1, T2, T2*, FA, FLAIR, PET, MRA; T1 three-tissue, hemisphere, and lobe variants |
 | **Brain anatomy** | Deep Atropos tissue segmentation, Desikan–Killiany–Tourville and Harvard–Oxford labeling, Deep FLASH, cerebellar morphology, cortical thickness |
+| **Whole-head segmentation** | Original SIAM v0.3 via nnU-Net, with the optional `siam` extra; [usage and model downloads](docs/siam_labeling.md) |
 | **Small structures** | HippMapp3r and two-stage hippocampus segmentation, hypothalamus and subunits, claustrum |
 | **White matter lesions** | SYSU-Media, HyperMapp3r, ANTsXNet WMH, and SHIVA PVS/WMH ensembles |
 | **Lung imaging** | Extraction in proton MRI, CT, ventilation MRI, and X-ray; lobe, airway, vessel, and pulmonary artery segmentation |

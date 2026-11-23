@@ -9,6 +9,7 @@ Registration-specific APIs can also be imported from their subpackages.
 | `antstorch.create_unet_model_3d` | Channel count, output count, architecture options | A PyTorch module; inputs use NCDHW order |
 | `antstorch.brain_extraction` | ANTsImage and modality | Probability image for `t1`; other modalities can return different structures |
 | `antstorch.deep_atropos` | T1 image and preprocessing options | Dictionary containing segmentation and probability images |
+| `antstorch.siam_labeling` | Scalar 3-D head image and optional device | Original SIAM v0.3 segmentation, 18 probability images, and label mapping; requires the `siam` extra |
 | `antstorch.syn.syn_registration` | Fixed and moving ANTsImages | Warped images and file-based transform lists |
 | `antstorch.bspline_flows.n4_bias_field_correction_tensor` | Image tensor, domain, optional mask | Corrected image tensor or bias field |
 | `antstorch.bspline_flows.bspline_svf_registration` | Image tensors and physical domains | Warped image, displacement fields and optimization history |
