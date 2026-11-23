@@ -48,6 +48,19 @@ Existing installations of the original Zenodo checkpoints remain usable
 without another download. The Figshare package preserves their network
 parameters exactly; optimizer states and training logs have been omitted.
 
+Two options trade parity with SIAM's default inference for speed:
+
+- `voxel_size=0.75` tells nnU-Net the image already has 0.75 mm spacing,
+  without resampling it, like `siam-pred -voxelsize 0.75`. Both
+  interpolations are skipped, which can help small structures, and fewer
+  sliding windows are usually needed. For example, a 1 mm
+  `189 × 233 × 197` image needs 2 windows instead of 4. The SIAM authors
+  suggest this for near-isotropic inputs of 0.6–1 mm. Other values act as a
+  zoom, e.g. for neonatal heads. Results are returned in the input geometry.
+- `number_of_folds=n` ensembles only the first `n` published folds. Run
+  time scales roughly linearly with `n`; accuracy should be checked for
+  your data.
+
 The result contains:
 
 - `segmentation_image`: an ANTsImage with integer-valued labels.

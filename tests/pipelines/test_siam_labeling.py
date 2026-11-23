@@ -94,3 +94,10 @@ def test_siam_with_real_nnunet_predictor(tmp_path, monkeypatch):
         data, properties, save_or_return_probabilities=True)
     np.testing.assert_array_equal(result["segmentation_image"].numpy(), seg.transpose(2, 1, 0))
     np.testing.assert_allclose(probabilities, proba.transpose(0, 3, 2, 1), atol=1e-6)
+
+    # Header-only voxel size, as siam-pred -voxelsize: no resampling at all.
+    zoomed = siam.siam_labeling(image, voxel_size=1., device="cpu")
+    properties = dict(properties, spacing=(1., 1., 1.))
+    seg = reference.predict_single_npy_array(data, properties)
+    np.testing.assert_array_equal(zoomed["segmentation_image"].numpy(), seg.transpose(2, 1, 0))
+    assert ants.image_physical_space_consistency(zoomed["segmentation_image"], image)

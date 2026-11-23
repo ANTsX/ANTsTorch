@@ -168,3 +168,68 @@ def test_incomplete_cache_is_not_accepted(tmp_path):
     (tmp_path / "antstorch_model.json").write_text(json.dumps(
         {"archive_md5": siam._MODEL_MD5, "folds": [0]}))
     assert siam._model_folds(tmp_path) is None
+
+
+def mock_predictor(monkeypatch, tmp_path, folds=(0, 1, 2, 3, 4)):
+    nib = pytest.importorskip("nibabel")
+    calls = {}
+
+    class Predictor:
+        dataset_json = {"labels": {"background": 0, "Anomalies": 17}}
+
+        def __init__(self, **kwargs):
+            pass
+
+        def initialize_from_trained_model_folder(self, folder, use_folds, checkpoint_name):
+            calls["use_folds"] = use_folds
+
+        def predict_single_npy_array(self, data, properties, **kwargs):
+            calls["spacing"] = properties["spacing"]
+            return data[0].astype(np.uint8)
+
+    monkeypatch.setattr(siam, "_load_siam_dependencies", lambda: (nib, Predictor))
+    monkeypatch.setattr(siam, "_get_siam_model", lambda verbose: (tmp_path, folds))
+    monkeypatch.setattr(siam, "get_default_device", lambda: torch.device("cpu"))
+    return calls
+
+
+@pytest.mark.parametrize("voxel_size, expected", [(None, (2.1, 1.3, 0.8)), (0.75, (0.75,) * 3)])
+def test_voxel_size_changes_only_model_spacing(monkeypatch, tmp_path, voxel_size, expected):
+    calls = mock_predictor(monkeypatch, tmp_path)
+    array = (np.arange(4 * 5 * 6).reshape(4, 5, 6) % 18).astype(np.float32)
+    direction = np.array([[0., 0., -1.], [1., 0., 0.], [0., -1., 0.]])
+    image = ants.from_numpy(array, origin=(10., -20., 30.), spacing=(0.8, 1.3, 2.1),
+                           direction=direction)
+    result = siam.siam_labeling(image, voxel_size=voxel_size)
+    np.testing.assert_allclose(sorted(calls["spacing"]), sorted(expected))
+    if voxel_size is not None:
+        assert calls["spacing"] == expected
+    np.testing.assert_array_equal(result["segmentation_image"].numpy(), array)
+    assert ants.image_physical_space_consistency(result["segmentation_image"], image)
+
+
+@pytest.mark.parametrize("number_of_folds, expected", [(None, (0, 1, 2, 3, 4)), (1, (0,)), (3, (0, 1, 2))])
+def test_number_of_folds_selects_first_folds(monkeypatch, tmp_path, number_of_folds, expected):
+    calls = mock_predictor(monkeypatch, tmp_path)
+    image = ants.from_numpy((np.arange(64).reshape(4, 4, 4) % 18).astype(np.float32))
+    siam.siam_labeling(image, number_of_folds=number_of_folds)
+    assert tuple(calls["use_folds"]) == expected
+
+
+def test_too_many_folds(monkeypatch, tmp_path):
+    mock_predictor(monkeypatch, tmp_path, folds=(0, 1))
+    image = ants.from_numpy((np.arange(64).reshape(4, 4, 4) % 18).astype(np.float32))
+    with pytest.raises(ValueError, match="at most 2"):
+        siam.siam_labeling(image, number_of_folds=3)
+
+
+@pytest.mark.parametrize("kwargs", [{"voxel_size": 0}, {"voxel_size": -0.75},
+                                    {"voxel_size": float("nan")}, {"number_of_folds": 0},
+                                    {"number_of_folds": 1.5}, {"number_of_folds": True}])
+def test_reject_invalid_options_before_loading_dependencies(monkeypatch, kwargs):
+    load = Mock(side_effect=AssertionError("No dependencies or downloads expected"))
+    monkeypatch.setattr(siam, "_load_siam_dependencies", load)
+    image = ants.from_numpy((np.arange(64).reshape(4, 4, 4) % 18).astype(np.float32))
+    with pytest.raises(ValueError):
+        siam.siam_labeling(image, **kwargs)
+    load.assert_not_called()

@@ -120,11 +120,12 @@ def _load_siam_dependencies():
     return nibabel, nnUNetPredictor
 
 
-def siam_labeling(image, return_probability_images=False, device=None, verbose=False):
+def siam_labeling(image, return_probability_images=False, voxel_size=None,
+                  number_of_folds=None, device=None, verbose=False):
     """Segment a whole-head 3-D image with the original SIAM v0.3 model.
 
-    Uses SIAM's pretrained nnU-Net, all published folds, Gaussian sliding
-    windows with a 0.5 step, and no test-time mirroring. The nnU-Net plans
+    By default, uses SIAM's pretrained nnU-Net, all published folds, Gaussian
+    sliding windows with a 0.5 step, and no test-time mirroring. The nnU-Net plans
     perform intensity normalization and resampling to 0.75 mm. No brain
     extraction, N4 correction, or template registration is performed.
 
@@ -138,6 +139,18 @@ def siam_labeling(image, return_probability_images=False, device=None, verbose=F
         and 18 full-resolution float maps, which costs substantial time and
         memory; the segmentation alone matches ``siam-pred`` without
         ``--save_proba``.
+    voxel_size : float or None
+        If given, the model is told the image has this isotropic spacing (mm)
+        without resampling it, as ``siam-pred -voxelsize``. With 0.75 the
+        image is used at its native grid, which avoids both interpolations
+        and usually reduces the number of sliding windows; the SIAM authors
+        suggest it for near-isotropic inputs of 0.6-1 mm. Other values act as
+        a zoom (e.g., about 1.4 times the true spacing for neonates). Outputs
+        are always returned in the input geometry. None uses the true spacing.
+    number_of_folds : int or None
+        Ensemble only the first ``number_of_folds`` published folds. Run time
+        scales roughly linearly with this number; fewer folds depart from
+        SIAM's default inference. None uses all folds.
     device : str, torch.device or None
         Inference device. None uses the ANTsTorch session default.
     verbose : bool
@@ -171,9 +184,21 @@ def siam_labeling(image, return_probability_images=False, device=None, verbose=F
     array = image.numpy().astype(np.float32)
     if not np.isfinite(array).all() or np.ptp(array) == 0:
         raise ValueError("SIAM requires finite, non-constant image intensities.")
+    if voxel_size is not None:
+        voxel_size = float(voxel_size)
+        if not np.isfinite(voxel_size) or voxel_size <= 0:
+            raise ValueError("voxel_size must be a positive number of millimetres.")
+    if number_of_folds is not None and (
+            isinstance(number_of_folds, bool) or not isinstance(number_of_folds, (int, np.integer))
+            or number_of_folds < 1):
+        raise ValueError("number_of_folds must be a positive integer.")
     nib, predictor_class = _load_siam_dependencies()
     device = get_default_device() if device is None else torch.device(device)
     model_folder, folds = _get_siam_model(verbose)
+    if number_of_folds is not None:
+        if number_of_folds > len(folds):
+            raise ValueError(f"number_of_folds must be at most {len(folds)}.")
+        folds = tuple(folds[:number_of_folds])
 
     # Match TorchIO ToCanonical, then SimpleITKIO's (C,Z,Y,X) convention.
     lps_to_ras = np.diag([-1., -1., 1., 1.])
@@ -186,7 +211,12 @@ def siam_labeling(image, return_probability_images=False, device=None, verbose=F
         nib.orientations.io_orientation(canonical.affine),
         nib.orientations.io_orientation(native.affine))
     data = np.ascontiguousarray(np.asarray(canonical.dataobj).transpose(2, 1, 0)[None])
-    properties = {"spacing": tuple(nib.affines.voxel_sizes(canonical.affine)[::-1])}
+    spacing = nib.affines.voxel_sizes(canonical.affine)[::-1]
+    if voxel_size is not None:
+        # Header-only spacing change, as siam-pred -voxelsize; the predicted
+        # grid is unchanged, so restoring the input geometry is exact.
+        spacing = (voxel_size,) * 3
+    properties = {"spacing": tuple(float(value) for value in spacing)}
 
     predictor = predictor_class(
         tile_step_size=0.5, use_gaussian=True, use_mirroring=False,
