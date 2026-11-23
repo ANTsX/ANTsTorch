@@ -3591,6 +3591,14 @@ class GlowToolBase(ABC):
                 "rest of the latent)."
             ),
         )
+        ap.add_argument(
+            "--save-latents", type=str, default=None,
+            help=(
+                "Optional .npz path: also save every subject's per-level latents, flattened "
+                "(z_0, z_1, ...: arrays of shape (N, d_l)), with the input paths (paths_json)."
+            ),
+        )
+        ap.add_argument("--save-latents-dtype", choices=["float16", "float32"], default="float32")
         ap.add_argument("--ema",         action=argparse.BooleanOptionalAction, default=True)
         self._add_size_arg(ap, required=True)
         args = ap.parse_args(argv)
@@ -3686,6 +3694,22 @@ class GlowToolBase(ABC):
             gc.collect()
 
         L = len(z_stacks[0])
+
+        if args.save_latents:
+            # Per-level latents of every subject, flattened to (N, d_l), with the input paths, so that
+            # cohort statistics (concentration, permutation tests, other metrics) need no re-encoding.
+            lat_path = Path(args.save_latents)
+            lat_path.parent.mkdir(parents=True, exist_ok=True)
+            dtype = np.float16 if args.save_latents_dtype == "float16" else np.float32
+            arrays = {
+                f"z_{l}": torch.stack([z_stacks[i][l].flatten() for i in range(len(z_stacks))])
+                .numpy().astype(dtype)
+                for l in range(L)
+            }
+            arrays["shapes_json"] = np.array(json.dumps([list(z_stacks[0][l].shape[1:]) for l in range(L)]))
+            arrays["paths_json"] = np.array(json.dumps([str(p) for p in per_view_paths[vi]]))
+            np.savez(str(lat_path), **arrays)
+            print(f"[recon-cohort-template] latents of {len(z_stacks)} subject(s) → {lat_path}")
 
         z_mean_list = []
         for l in range(L):
