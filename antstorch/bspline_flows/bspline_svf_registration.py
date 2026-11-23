@@ -12,6 +12,7 @@ from .bspline_synthesis import refine_bspline_coefficients
 from .deterministic_registration import DeterministicBSplineRegistration
 from .physical_gradient_descent import PhysicalGradientDescent
 from antstorch.syn.core.pipeline import relocate_tensors_avoiding_mps_grid_sample_3d
+from antstorch.syn.core.smoothing import gaussian_blur_replicate
 from .similarity import SIMILARITY_METRICS
 from .spatial_transform import affine_displacement_field
 
@@ -119,27 +120,24 @@ def _pyramid_configuration(shrink_factors, smoothing_sigmas, iterations, learnin
     return factors, sigmas, level_iterations, level_rates
 
 
-def _smooth_image(image: Tensor, domain: ImageDomain, sigma: float) -> Tensor:
-    """Gaussian smoothing with ``sigma`` in physical domain units."""
+def _smooth_image(image: Tensor, domain: ImageDomain, sigma: float, units: str = "mm") -> Tensor:
+    """Separable Gaussian smoothing of ``image``.
+
+    ``sigma`` is in physical domain units (``units='mm'``, the default) or in
+    voxels of ``image`` (``units='vox'``, as ANTs' ``2x1x0vox``; the same
+    voxel sigma on every axis whatever the spacing). Separable, via
+    :func:`antstorch.syn.core.smoothing.gaussian_blur_replicate` (the dense
+    N-D Gaussian up to floating-point rounding).
+    """
+    if units not in ("mm", "vox"):
+        raise ValueError(f"smoothing sigma units must be 'mm' or 'vox', got {units!r}")
     if sigma == 0:
         return image
-    sigma_torch = tuple(reversed(tuple(sigma / spacing for spacing in domain.spacing)))
-    axes = []
-    radii = []
-    for axis_sigma in sigma_torch:
-        radius = max(1, int(3.0 * axis_sigma + 0.5))
-        radii.append(radius)
-        coordinate = torch.arange(-radius, radius + 1, dtype=image.dtype, device=image.device)
-        axis_kernel = torch.exp(-0.5 * (coordinate / axis_sigma).square())
-        axes.append(axis_kernel / axis_kernel.sum())
-    kernel = axes[0]
-    for axis_kernel in axes[1:]:
-        kernel = kernel.unsqueeze(-1) * axis_kernel.reshape((1,) * kernel.ndim + (-1,))
-    kernel = kernel.reshape((1, 1) + kernel.shape).expand((image.shape[1], 1) + kernel.shape)
-    padding = tuple(value for radius in reversed(radii) for value in (radius, radius))
-    padded = F.pad(image, padding, mode="replicate")
-    convolution = F.conv2d if domain.dimension == 2 else F.conv3d
-    return convolution(padded, kernel, groups=image.shape[1])
+    if units == "vox":
+        sigma_torch = (float(sigma),) * domain.dimension
+    else:
+        sigma_torch = tuple(reversed(tuple(sigma / spacing for spacing in domain.spacing)))
+    return gaussian_blur_replicate(image, sigma_torch)
 
 
 def _validate_initial_affine(initial_affine, fixed: Tensor, dimension: int) -> Optional[Tuple[Tensor, Tensor]]:

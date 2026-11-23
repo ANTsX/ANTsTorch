@@ -31,7 +31,7 @@ dependencies = [
     "optax",
     "jaxopt",
     "tqdm",
-    "antsnormflows @ git+https://github.com/ANTsx/ANTsNormalizingFlows.git@main"
+    "antsnormflows>=1.0.0",
     ]
 
 [tool.setuptools.packages.find]

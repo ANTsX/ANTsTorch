@@ -11,8 +11,7 @@ python -m pip install -e .
 python -c "import antstorch; import torch; print(torch.__version__)"
 ```
 
-On Windows, activate with `.venv\Scripts\activate` instead. Git is required
-because `antsnormflows` is installed from its Git repository. Installation
+On Windows, activate with `.venv\Scripts\activate` instead. Installation
 includes ANTsPy, PyTorch, JAX and other scientific packages; it needs network
 access and substantially more space than a documentation-only installation.
 

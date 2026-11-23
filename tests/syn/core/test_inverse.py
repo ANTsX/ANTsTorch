@@ -1,3 +1,4 @@
+import pytest
 import numpy as np
 import torch
 
@@ -192,3 +193,43 @@ def test_fixed_point_stopping_option_preserves_physical_default():
     either = update_inverse_field_nd(field, initial, convergence_criterion='either', **options)
     torch.testing.assert_close(default, both, atol=0, rtol=0)
     assert not torch.allclose(default, either)
+
+
+# --- syntx v6.35.4 / R32 behaviour (ported 2026-11-18) -----------------------------------------------
+
+def _smooth_field_3d(shape=(12, 14, 10), amplitude=0.8, seed=0):
+    g = torch.Generator().manual_seed(seed)
+    coarse = torch.randn((1, 3, 3, 3, 3), generator=g, dtype=torch.float64)
+    field = torch.nn.functional.interpolate(coarse, size=shape, mode="trilinear", align_corners=True)
+    field = amplitude * field.movedim(1, -1)
+    from antstorch.syn.core.smoothing import get_boundary_mask
+    return field * get_boundary_mask(shape, field.device, field.dtype)
+
+
+@pytest.mark.parametrize("method", ["anderson", "fixed_point"])
+def test_inverse_solvers_are_idempotent_on_a_converged_guess(method):
+    from antstorch.syn.core.inverse import update_inverse_field_nd
+    W = _smooth_field_3d()
+    sp, org, dr = (1.0, 1.0, 1.0), (0.0, 0.0, 0.0), np.eye(3).flatten()
+    inv = update_inverse_field_nd(W, None, steps=200, method=method, spacing=sp, origin=org, direction=dr,
+                                  max_error_threshold=1e-3, mean_error_threshold=1e-5)
+    again = update_inverse_field_nd(W, inv.clone(), steps=10, method=method, spacing=sp, origin=org, direction=dr,
+                                    max_error_threshold=1e-3, mean_error_threshold=1e-5)
+    assert torch.equal(again, inv)
+
+
+def test_hybrid_lm_polish_reduces_inverse_error_and_never_increases_it_per_voxel():
+    from antstorch.syn.core.inverse import (
+        compute_inverse_identity_error_nd, update_inverse_field_nd, update_inverse_field_nd_hybrid_lm,
+    )
+    W = _smooth_field_3d(amplitude=1.5, seed=3)
+    sp, org, dr = (1.0, 1.2, 0.9), (0.0, 0.0, 0.0), np.eye(3)
+    rough = update_inverse_field_nd(W, None, steps=3, method="anderson", spacing=sp, origin=org, direction=dr)
+    polished = update_inverse_field_nd_hybrid_lm(W, rough, steps=30, max_error_threshold=0.01,
+                                                 mean_error_threshold=0.001, spacing=sp, origin=org, direction=dr)
+    # The LM minimises the residual v(x) + u(x + v(x)) voxel by voxel, accepting strictly improving steps only.
+    e0 = compute_inverse_identity_error_nd(rough, W, spacing=sp, origin=org, direction=dr)
+    e1 = compute_inverse_identity_error_nd(polished, W, spacing=sp, origin=org, direction=dr)
+    assert float(e1.max()) < float(e0.max())
+    assert float(e1.mean()) < float(e0.mean())
+    assert bool((e1 <= e0 + 1e-9).all())

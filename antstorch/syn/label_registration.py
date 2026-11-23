@@ -13,7 +13,8 @@ from ..ants_transform_io import read_affine_transform
 def _metric_name(name):
     name = name.lower()
     name = {"msq": "mse", "meansquares": "mse", "mutualinformation": "mi"}.get(name, name)
-    if name not in ("mse", "cc", "lncc", "cc2", "lncc2", "mattes", "mi", "dice"):
+    name = {"labelmsq": "label_msq", "label_meansquares": "label_msq"}.get(name, name)
+    if name not in ("mse", "cc", "lncc", "cc2", "lncc2", "mattes", "mi", "dice", "label_msq"):
         raise ValueError(f"Unsupported multivariate metric: {name}")
     return name
 
@@ -38,9 +39,37 @@ def _images(value, name, optional=False):
     return values
 
 
-def _centroid(image, label):
-    index = np.argwhere(image.numpy() == label).mean(axis=0)
-    return np.asarray(image.origin) + np.asarray(image.direction) @ (index * np.asarray(image.spacing))
+def _label_index_statistics(array):
+    """Voxel counts and index sums of every label of an integer-valued array, in one pass.
+
+    Returns ``(counts, sums)`` with ``counts[k]`` the number of voxels of label
+    ``k`` and ``sums[k, d]`` the sum of their indices along axis ``d``. The
+    array is visited one slice (along axis 0) at a time, so the only extra
+    memory is slice-sized. Index sums are integers accumulated in float64
+    (exact below 2**53), so ``sums / counts`` equals
+    ``np.argwhere(array == k).mean(axis=0)`` exactly.
+    """
+    labels = array.astype(np.int64, copy=False)
+    size = int(labels.max()) + 1 if labels.size else 1
+    counts = np.zeros(size, dtype=np.int64)
+    sums = np.zeros((size, array.ndim), dtype=np.float64)
+    slice_index = np.indices(array.shape[1:], dtype=np.float64).reshape(array.ndim - 1, -1)
+    for i in range(array.shape[0]):
+        flat = labels[i].ravel()
+        slice_counts = np.bincount(flat, minlength=size)
+        counts += slice_counts
+        sums[:, 0] += float(i) * slice_counts
+        for axis in range(1, array.ndim):
+            sums[:, axis] += np.bincount(flat, weights=slice_index[axis - 1], minlength=size)
+    return counts, sums
+
+
+def _label_centroids(image, statistics, ids):
+    """Physical centroids of labels ``ids`` from :func:`_label_index_statistics` output."""
+    counts, sums = statistics
+    index = sums[ids] / counts[ids][:, None]
+    origin, direction, spacing = (np.asarray(value) for value in (image.origin, image.direction, image.spacing))
+    return [origin + direction @ (row * spacing) for row in index]
 
 
 def _landmark_affine(fixed, moving, transform):
@@ -103,7 +132,10 @@ def label_image_registration(
     execute the deformable optimization; centroid fitting and image/transform
     I/O run on CPU. Masks restrict the deformable metrics. Binary masks are
     interpolated linearly during optimization, not by nearest neighbor.
-    Memory use grows with the number of labels and their image sizes.
+    Each label image is stored once per side; the per-label binary masks are
+    built on the fly at full resolution and cached only at coarser pyramid
+    levels, and each label term is backpropagated separately, so memory
+    grows with the number of labels only through those coarse-level caches.
 
     Returns the usual ANTsTorch SyN result, including ANTs-compatible
     fwdtransforms/invtransforms, loss histories, and common_label_ids.
@@ -140,16 +172,22 @@ def label_image_registration(
     common = []
     fixed_centers, moving_centers, metrics = [], [], []
     for a, b, weight in zip(fixed, moving, weights):
-        ids = np.intersect1d(np.unique(a.numpy()), np.unique(b.numpy()))
+        # One pass per image gives every label's count and centroid; the
+        # binary masks are never materialized here (syn_registration's
+        # 'label_msq' metric builds them from the label maps on the fly).
+        array_a = a.numpy()
+        stats_a, stats_b = _label_index_statistics(array_a), _label_index_statistics(b.numpy())
+        present_a = np.flatnonzero(stats_a[0])
+        present_b = np.flatnonzero(stats_b[0])
+        ids = np.intersect1d(present_a, present_b)
         ids = ids[ids != 0]
         if not len(ids):
             raise ValueError("No common nonzero labels for an image pair")
-        common.append(ids.tolist())
-        for label in ids:
-            fixed_centers.append(_centroid(a, label))
-            moving_centers.append(_centroid(b, label))
-            if weight:
-                metrics.append(("MSQ", a == label, b == label, float(weight), 0))
+        common.append(ids.astype(array_a.dtype).tolist())
+        fixed_centers.extend(_label_centroids(a, stats_a, ids))
+        moving_centers.extend(_label_centroids(b, stats_b, ids))
+        if weight:
+            metrics.extend(("label_msq", a, b, float(weight), int(label)) for label in ids)
     matrix, translation = np.eye(d), np.zeros(d)
     if isinstance(initial_transforms, str) and initial_transforms in ("rigid", "similarity", "affine"):
         matrix, translation = _landmark_affine(np.asarray(fixed_centers), np.asarray(moving_centers), initial_transforms)

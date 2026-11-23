@@ -46,7 +46,7 @@ regularization are relied on for stability instead.
 
 import math
 import warnings
-from typing import Dict, Optional, Sequence, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import ants
 import numpy as np
@@ -73,18 +73,20 @@ from .core.grid import (
     physical_to_normalized_torch_cached,
     prepare_mid_images_and_gradients_torch,
 )
-from .core.inverse import update_inverse_field_nd
+from .core.inverse import update_inverse_field_nd, update_inverse_field_nd_hybrid_lm
 from .core.jacobian import compute_jacobian_determinant_nd
-from .core.losses import local_ncc_loss_nd, mattes_mi_loss_nd, box_cc2_loss_nd, soft_dice_loss_nd
+from .core.losses import local_ncc_loss_chunked, local_ncc_loss_nd, mattes_mi_loss_nd, box_cc2_loss_nd, soft_dice_loss_nd
 from .core.pipeline import auto_detect_device, mps_grid_sample_3d_available, mps_grid_sample_3d_forward_available
 from .core.smoothing import (
     apply_dsti_green_operator,
     apply_sobolev_green_operator,
     get_boundary_mask,
+    gaussian_blur_replicate,
     separable_gaussian_filter,
 )
 
 _LINEAR_TRANSFORM_TYPES = ("Translation", "Rigid", "Similarity", "Affine")
+_CC_METRICS = ("cc", "lncc", "cc2", "lncc2")
 _SYN_TRANSFORM_TYPES = ("SyN", "SyNOnly")
 _SIMILARITY_METRICS = ("mse", "lncc", "cc", "lncc2", "cc2", "mattes", "mi", "box_cc2", "dice")
 _REGULARIZERS = ("gaussian", "sobolev", "dsti", "bspline")
@@ -114,23 +116,10 @@ def _level_values(value, levels: int, name: str) -> tuple:
 
 
 def _gaussian_blur_image(image: Tensor, sigma: float) -> Tensor:
-    """Isotropic separable Gaussian blur, ``sigma`` in voxel units."""
+    """Isotropic separable Gaussian blur, ``sigma`` in voxel units (replicate padding)."""
     if sigma <= 0:
         return image
-    dim = image.ndim - 2
-    device, dtype = image.device, image.dtype
-    radius = max(1, int(3.0 * sigma + 0.5))
-    coordinate = torch.arange(-radius, radius + 1, dtype=dtype, device=device)
-    kernel_1d = torch.exp(-0.5 * (coordinate / sigma).square())
-    kernel_1d = kernel_1d / kernel_1d.sum()
-    kernel = kernel_1d
-    for _ in range(dim - 1):
-        kernel = kernel.unsqueeze(-1) * kernel_1d.reshape((1,) * kernel.ndim + (-1,))
-    kernel = kernel.reshape((1, 1) + kernel.shape).expand((image.shape[1], 1) + kernel.shape)
-    padding = tuple(value for _ in range(dim) for value in (radius, radius))
-    padded = F.pad(image, padding, mode="replicate")
-    convolution = F.conv2d if dim == 2 else F.conv3d
-    return convolution(padded, kernel, groups=image.shape[1])
+    return gaussian_blur_replicate(image, (sigma,) * (image.ndim - 2))
 
 
 def _shrunk_torch_shape(torch_shape: Tuple[int, ...], factor: int, syntx_parity: bool = False) -> Tuple[int, ...]:
@@ -154,6 +143,7 @@ def _validate_pyramid_levels(
     levels: Sequence[int],
     window_size: int,
     syntx_parity: bool = False,
+    level_shapes: Optional[Sequence[Tuple[int, ...]]] = None,
 ) -> None:
     """Reject a SyN resolution pyramid whose coarsest level(s) are too small
     to support the local similarity window, for ANY ``regularizer``/
@@ -189,7 +179,8 @@ def _validate_pyramid_levels(
     """
     offending = []
     for level_index, factor in enumerate(levels):
-        shrunk = _shrunk_torch_shape(tuple(torch_shape), int(factor), syntx_parity)
+        shrunk = (tuple(level_shapes[level_index]) if level_shapes is not None
+                  else _shrunk_torch_shape(tuple(torch_shape), int(factor), syntx_parity))
         if min(shrunk) < window_size:
             offending.append((level_index, int(factor), shrunk))
     if offending:
@@ -223,8 +214,47 @@ def _downsample_metadata(meta: Dict[str, tuple], factor: int, syntx_parity: bool
     return new_meta
 
 
-def _downsample_image(image: Tensor, meta: Dict[str, tuple], factor: int, syntx_parity: bool = False, smoothing_sigma=None) -> Tuple[Tensor, Dict[str, tuple]]:
-    """Gaussian-presmooth (``sigma = log2(factor)`` voxels) then resample, preserving physical extent."""
+_PYRAMIDS = ("deformable", "legacy")
+
+
+def _deformable_plan(meta: Dict[str, tuple], factor, reference_spacing=None, smoothing_sigma=None) -> dict:
+    """One level of syntx's central 'deformable' pyramid plan (``syntx.pyramid``, syntx >= 6.2 / commit afcdf87, used by
+    ``syntx.syn`` and ported for :mod:`antstorch.greedy`): millimetre-isotropic target ``factor x min(reference spacing)``,
+    corner-aligned grid ``m = round((n - 1) s / t) + 1`` per axis with a 16-voxel floor, native grid at level 1, and an
+    anti-aliasing Gaussian of ``0.5 x`` the axis coarsening factor (native voxels; ``smoothing_sigma`` replaces it) on the
+    coarsened axes only."""
+    from ..greedy import _plan_levels_deformable
+    return _plan_levels_deformable(meta["torch_shape"], meta["spacing"], [factor], reference_spacing, sigma=smoothing_sigma)[0]
+
+
+def _level_torch_shape(meta: Dict[str, tuple], factor: int, syntx_parity: bool = False, pyramid: str = "legacy",
+                       reference_spacing=None) -> Tuple[int, ...]:
+    """Spatial (torch-order) shape of a pyramid level, from metadata alone."""
+    if pyramid == "deformable":
+        return tuple(_deformable_plan(meta, factor, reference_spacing)["shape_zyx"])
+    return _shrunk_torch_shape(meta["torch_shape"], factor, syntx_parity)
+
+
+def _downsample_image(image: Tensor, meta: Dict[str, tuple], factor: int, syntx_parity: bool = False, smoothing_sigma=None,
+                      pyramid: str = "legacy", reference_spacing=None) -> Tuple[Tensor, Dict[str, tuple]]:
+    """One pyramid level of ``image`` and its metadata.
+
+    ``pyramid='deformable'``: syntx's central planner (see :func:`_deformable_plan`); the moving image is planned on its
+    own grid with the fixed image's spacing as ``reference_spacing``. ``pyramid='legacy'``: Gaussian presmoothing
+    (``sigma = log2(factor)`` voxels, or ``smoothing_sigma``) then trilinear resampling to ``(n - 1) // factor + 1``
+    voxels (``floor(n / factor)`` with ``syntx_parity``) -- syntx's pyramid before 2026-10-10.
+    Both preserve the physical extent (corner-aligned grids)."""
+    if pyramid == "deformable":
+        from ..greedy import _apply_level
+        plan = _deformable_plan(meta, factor, reference_spacing, smoothing_sigma)
+        out = _apply_level(image, plan)
+        if plan["is_identity"] and tuple(plan["shape_zyx"]) == tuple(meta["torch_shape"]):
+            return out, meta
+        new_meta = dict(meta)
+        new_meta["torch_shape"] = tuple(int(v) for v in plan["shape_zyx"])
+        new_meta["shape"] = tuple(reversed(new_meta["torch_shape"]))
+        new_meta["spacing"] = tuple(float(v) for v in plan["spacing_xyz"])
+        return out, new_meta
     if factor == 1 and (smoothing_sigma is None or smoothing_sigma == 0):
         return image, meta
     sigma = math.log2(factor) if smoothing_sigma is None else smoothing_sigma
@@ -408,10 +438,7 @@ def _fit_syn_level(
     J_curr: Tensor,
     fixed_meta: Dict[str, tuple],
     moving_meta: Dict[str, tuple],
-    warp_l2r: Tensor,
-    warp_r2l: Tensor,
-    warp_l2r_inv: Tensor,
-    warp_r2l_inv: Tensor,
+    warps: List[Optional[Tensor]],
     M_phys: Tensor,
     t_phys: Tensor,
     *,
@@ -442,22 +469,38 @@ def _fit_syn_level(
     regadam_quotient_sigma: float = 0.8,
     inverse_schedule: str = "per_iteration",
     end_of_level_inverse_steps: int = 30,
+    inv_refresh_every: int = 1,
+    inv_tolerance: float = 0.1,
+    polish_inv_steps: int = 0,
+    polish_inv_tol: float = 0.02,
     syntx_parity: bool = False,
+    cfl_shrink_ratio: Optional[float] = None,
     use_analytical_gradients: bool = True,
     sobolev_alpha: Optional[float] = None,
     optimizer_lr: float = 1.0,
     metric_terms=None,
     metric_masks=None,
+    metric_chunks: int = 1,
+    stationary_boundary: bool = False,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor, list]:
+    # ``warps`` is the caller's [l2r, r2l, l2r_inv, r2l_inv] list, consumed
+    # here: emptying it drops the caller's references, so each level-start
+    # field is freed as soon as this function rebinds its own name (instead
+    # of staying alive for the whole level). The inverses may be None when
+    # inverse_schedule='end_of_level' (nothing reads them before the end).
+    warp_l2r, warp_r2l, warp_l2r_inv, warp_r2l_inv = warps
+    warps.clear()
     device, dtype = I_curr.device, I_curr.dtype
     fixed_meta_t = metadata_tensors_from_dict(fixed_meta, device, dtype)
     moving_meta_t = metadata_tensors_from_dict(moving_meta, device, dtype)
     X_phys = _physical_grid(fixed_meta, device, dtype)
     boundary_mask = get_boundary_mask(fixed_meta["torch_shape"], device, dtype)
     if syntx_parity:
-        # syntx scales the CFL step by sqrt(curr_size/original_size) <= 1
-        # (coarse levels take SMALLER steps); the default here is the inverse.
-        level_cfl_voxels = grad_step * math.sqrt(1.0 / float(shrink_factor))
+        # syntx scales the CFL step by sqrt(shrink ratio) <= 1 (coarse levels take SMALLER steps); the default here
+        # is the inverse. syntx >= 6.2 (deformable pyramid): the ratio is min over axes of finest / level spacing
+        # (syntx.pyramid.cfl_shrink_ratio); before, curr_size / original_size of the z axis, ~ 1 / shrink_factor.
+        ratio = float(cfl_shrink_ratio) if cfl_shrink_ratio is not None else 1.0 / float(shrink_factor)
+        level_cfl_voxels = grad_step * math.sqrt(ratio)
     else:
         level_cfl_voxels = grad_step * math.sqrt(float(shrink_factor))
     best_loss = float("inf")
@@ -500,7 +543,29 @@ def _fit_syn_level(
         if _mesh_size_active(total_field_mesh_size_at_base_level):
             total_mesh_size_level = _scale_mesh_size(total_field_mesh_size_at_base_level, level_scale)
 
-    def objective(left, right, left_inv, right_inv):
+    def _chunked_cc_term(left, right, a, b, valid, name, window, weight):
+        # Slab-wise CC (core.losses.local_ncc_loss_chunked): backpropagates
+        # weight * loss into a/b (and through them to the half-warps) slab by
+        # slab, and returns the detached weighted loss -- plus a zero term
+        # tied to the half-warps when they are given, so the caller's
+        # loss.backward() still works and adds nothing.
+        value, grad_a, grad_b = local_ncc_loss_chunked(
+            a, b, valid, window_size=window, squared=name in ("cc2", "lncc2"), chunks=metric_chunks,
+        )
+        torch.autograd.backward((a, b), (grad_a * weight, grad_b * weight))
+        value = weight * value
+        if left is not None:
+            return left.sum() * 0 + right.sum() * 0 + value
+        return value
+
+    def objective(left, right, left_inv, right_inv, backward=False):
+        # With metric_terms and backward=True, each term is backpropagated as
+        # soon as it is evaluated (into detached copies of the two sampling
+        # grids), so only one term's graph -- and, for 'label_msq', one
+        # label's on-the-fly masks -- is alive at a time; the accumulated grid
+        # gradients are then pushed back to the half-warps. The returned loss
+        # has the same value, but its graph only carries a zero term (its
+        # backward() adds nothing). Ignored for the single-metric path.
         if metric_terms is None:
             a, b, _, _, valid = prepare_mid_images_and_gradients_torch(
                 left, right, left_inv, right_inv, I_curr, J_curr, X_phys,
@@ -508,7 +573,10 @@ def _fit_syn_level(
                 moving_meta_t["shape_t"], moving_meta_t["spacing_t"], moving_meta_t["origin_t"], moving_meta_t["direction_t"],
                 fixed_meta["spacing"], moving_meta["spacing"], M_phys, t_phys, None,
                 use_analytical_gradients=use_analytical_gradients,
+                compute_gradients=False,
             )
+            if metric_chunks > 1 and similarity in _CC_METRICS and backward and torch.is_grad_enabled():
+                return _chunked_cc_term(left, right, a, b, valid, similarity, window_size, 1.0)
             return _similarity_loss(similarity, a, b, valid, window_size, num_bins)
         fixed_grid = physical_to_normalized_torch_cached(
             X_phys + left, fixed_meta_t["shape_t"], fixed_meta_t["spacing_t"],
@@ -526,13 +594,33 @@ def _fit_syn_level(
                 if mask is not None:
                     sampled = grid_sample(mask, grid.detach(), mode="nearest", padding_mode="zeros", align_corners=True)
                     valid = valid * (sampled > 0).to(dtype)
+        per_term = backward and torch.is_grad_enabled()
+        if per_term:
+            sample_fixed = fixed_grid.detach().requires_grad_(True)
+            sample_moving = moving_grid.detach().requires_grad_(True)
+        else:
+            sample_fixed, sample_moving = fixed_grid, moving_grid
         loss = left.sum() * 0 + right.sum() * 0
         for name, a, b, weight, parameter in metric_terms:
-            a_mid = grid_sample_nd(a, fixed_grid, use_analytical_gradients=use_analytical_gradients)
-            b_mid = grid_sample_nd(b, moving_grid, use_analytical_gradients=use_analytical_gradients)
+            if name == "label_msq":
+                a, b, name = (a == parameter).to(dtype), (b == parameter).to(dtype), "mse"
+            a_mid = grid_sample_nd(a, sample_fixed, use_analytical_gradients=use_analytical_gradients)
+            b_mid = grid_sample_nd(b, sample_moving, use_analytical_gradients=use_analytical_gradients)
+            a = b = None
             radius = int(parameter) if name in ("cc", "lncc", "cc2", "lncc2", "box_cc2") else 0
             bins = int(parameter) if name in ("mi", "mattes") else num_bins
-            loss = loss + weight * _similarity_loss(name, a_mid, b_mid, valid, 2 * radius + 1, bins)
+            if per_term and metric_chunks > 1 and name in _CC_METRICS:
+                term = _chunked_cc_term(None, None, a_mid, b_mid, valid, name, 2 * radius + 1, weight)
+            else:
+                term = weight * _similarity_loss(name, a_mid, b_mid, valid, 2 * radius + 1, bins)
+            a_mid = b_mid = None
+            if per_term and term.requires_grad:
+                term.backward()
+                term = term.detach()
+            loss = loss + term
+            term = None
+        if per_term:
+            torch.autograd.backward((fixed_grid, moving_grid), (sample_fixed.grad, sample_moving.grad))
         return loss
 
     history = []
@@ -540,17 +628,22 @@ def _fit_syn_level(
         warp_l2r_leaf = warp_l2r.detach().requires_grad_(True)
         warp_r2l_leaf = warp_r2l.detach().requires_grad_(True)
 
-        loss = objective(warp_l2r_leaf, warp_r2l_leaf, warp_l2r_inv, warp_r2l_inv)
+        loss = objective(warp_l2r_leaf, warp_r2l_leaf, warp_l2r_inv, warp_r2l_inv, backward=True)
         if not torch.isfinite(loss):
             raise FloatingPointError(f"non-finite SyN loss at resolution level {level_index + 1}")
         if syntx_parity and float(loss.detach().item()) < best_loss:
             # syntx keeps the (pre-update) warps of the best loss seen.
             best_loss = float(loss.detach().item())
-            best_state = (warp_l2r.detach().clone(), warp_r2l.detach().clone(),
-                          warp_l2r_inv.detach().clone(), warp_r2l_inv.detach().clone())
+            best_state = tuple(None if field is None else field.detach().clone()
+                               for field in (warp_l2r, warp_r2l, warp_l2r_inv, warp_r2l_inv))
         loss.backward()
-        grad_l = warp_l2r_leaf.grad
-        grad_r = warp_r2l_leaf.grad
+        current = float(loss.detach().item())
+        # Drop the loss (and with it the autograd graph, whose AccumulateGrad
+        # nodes would otherwise keep this iteration's leaves alive into the
+        # next one) and detach the gradients from their leaves.
+        del loss
+        grad_l, warp_l2r_leaf.grad = warp_l2r_leaf.grad, None
+        grad_r, warp_r2l_leaf.grad = warp_r2l_leaf.grad, None
         if grad_l is None or grad_r is None or not torch.isfinite(grad_l).all() or not torch.isfinite(grad_r).all():
             raise FloatingPointError(f"non-finite SyN half-warp gradient at resolution level {level_index + 1}")
 
@@ -666,6 +759,11 @@ def _fit_syn_level(
 
         warp_l2r = _eulerian_update(warp_l2r_leaf.detach(), delta_l, X_phys, fixed_meta_t)
         warp_r2l = _eulerian_update(warp_r2l_leaf.detach(), delta_r, X_phys, fixed_meta_t)
+        # Release this iteration's leaves, gradients and steps now rather than
+        # when the next iteration rebinds them (they would otherwise sit on
+        # top of the next forward pass's peak).
+        warp_l2r_leaf = warp_r2l_leaf = grad_l = grad_r = delta_l = delta_r = None
+        common_mode = u_raw_l = u_raw_r = u_reg_l = u_reg_r = None
 
         if regularizer == "bspline":
             if _mesh_size_active(total_mesh_size_level):
@@ -680,6 +778,13 @@ def _fit_syn_level(
         elif total_sigma > 0:
             warp_l2r = separable_gaussian_filter(warp_l2r, total_sigma, spacing=fixed_meta["spacing"], sigma_mode="physical")
             warp_r2l = separable_gaussian_filter(warp_r2l, total_sigma, spacing=fixed_meta["spacing"], sigma_mode="physical")
+
+        if stationary_boundary:
+            # syntx (SyNTo stationary_boundary=True, ITK EnforceStationaryBoundary): zero displacement on every face
+            # of both half-warps after each update and total-field smoothing, before the inverse refresh (the
+            # inverse solvers keep their own result at zero there).
+            warp_l2r = warp_l2r * boundary_mask
+            warp_r2l = warp_r2l * boundary_mask
 
         # Nothing inside this loop reads warp_*_inv (prepare_mid_images_and_
         # gradients_torch accepts them but never uses them); they only feed the
@@ -697,8 +802,21 @@ def _fit_syn_level(
                 warp_r2l, warp_r2l_inv, steps=in_loop_inverse_steps, method=inverse_method,
                 spacing=fixed_meta["spacing"], origin=fixed_meta["origin"], direction=fixed_meta["direction"], X_phys=X_phys,
             )
+        elif inverse_schedule == "refresh" and ((iteration + 1) % inv_refresh_every == 0 or iteration == iterations - 1):
+            # syntx >= 6.35 ("Option A"): the warm-started in-loop inverses are refreshed every
+            # inv_refresh_every iterations of this level (and at its last scheduled iteration),
+            # with syntx's tolerance (max inv_tolerance, mean inv_tolerance / 100, in voxels).
+            warp_l2r_inv = update_inverse_field_nd(
+                warp_l2r, warp_l2r_inv, steps=in_loop_inverse_steps, method=inverse_method,
+                max_error_threshold=inv_tolerance, mean_error_threshold=inv_tolerance * 0.01,
+                spacing=fixed_meta["spacing"], origin=fixed_meta["origin"], direction=fixed_meta["direction"], X_phys=X_phys,
+            )
+            warp_r2l_inv = update_inverse_field_nd(
+                warp_r2l, warp_r2l_inv, steps=in_loop_inverse_steps, method=inverse_method,
+                max_error_threshold=inv_tolerance, mean_error_threshold=inv_tolerance * 0.01,
+                spacing=fixed_meta["spacing"], origin=fixed_meta["origin"], direction=fixed_meta["direction"], X_phys=X_phys,
+            )
 
-        current = float(loss.detach().item())
         history.append(current)
         if verbose:
             print(
@@ -719,6 +837,24 @@ def _fit_syn_level(
         if final_loss >= best_loss:
             warp_l2r, warp_r2l, warp_l2r_inv, warp_r2l_inv = best_state
 
+    if (inverse_schedule in ("per_iteration", "refresh") and iterations > 0
+            and (polish_inv_steps > 0 or (inverse_schedule == "refresh" and inv_refresh_every > 1))):
+        # syntx >= 6.35: polish both warm-started half-warp inverses at the end of every level
+        # (polish_inv_steps solver steps, max error polish_inv_tol voxels, mean polish_inv_tol / 100),
+        # after the best-state restore. With polish_inv_steps=0 and a refresh cadence > 1, syntx
+        # still polishes, with max(in_loop_inverse_steps, 10) steps.
+        polish_steps = polish_inv_steps if polish_inv_steps > 0 else max(int(in_loop_inverse_steps), 10)
+        warp_l2r_inv = update_inverse_field_nd(
+            warp_l2r, warp_l2r_inv, steps=polish_steps, method=inverse_method,
+            max_error_threshold=polish_inv_tol, mean_error_threshold=polish_inv_tol * 0.01,
+            spacing=fixed_meta["spacing"], origin=fixed_meta["origin"], direction=fixed_meta["direction"], X_phys=X_phys,
+        )
+        warp_r2l_inv = update_inverse_field_nd(
+            warp_r2l, warp_r2l_inv, steps=polish_steps, method=inverse_method,
+            max_error_threshold=polish_inv_tol, mean_error_threshold=polish_inv_tol * 0.01,
+            spacing=fixed_meta["spacing"], origin=fixed_meta["origin"], direction=fixed_meta["direction"], X_phys=X_phys,
+        )
+
     if inverse_schedule == "end_of_level" and level_index == num_levels - 1:
         # Only the final level's inverse is consumed (by the final composition
         # in syn_registration()); coarser levels' inverses would be discarded
@@ -733,7 +869,8 @@ def _fit_syn_level(
             spacing=fixed_meta["spacing"], origin=fixed_meta["origin"], direction=fixed_meta["direction"], X_phys=X_phys,
         )
 
-    return warp_l2r.detach(), warp_r2l.detach(), warp_l2r_inv.detach(), warp_r2l_inv.detach(), history
+    return tuple(None if field is None else field.detach()
+                 for field in (warp_l2r, warp_r2l, warp_l2r_inv, warp_r2l_inv)) + (history,)
 
 
 def _fit_affine_from_ants(
@@ -753,6 +890,7 @@ def _fit_affine_from_ants(
     multi_start: bool,
     center_of_mass_init: bool,
     verbose: bool,
+    smoothing_sigmas_units: str = "mm",
 ):
     """Fit the affine initialization with :func:`antstorch.bspline_flows.affine_registration.affine_registration`."""
     # Imported lazily (not at module scope): antstorch.bspline_flows itself
@@ -781,6 +919,7 @@ def _fit_affine_from_ants(
         num_bins=num_bins,
         shrink_factors=shrink_factors,
         smoothing_sigmas=smoothing_sigmas,
+        smoothing_sigmas_units=smoothing_sigmas_units,
         iterations=iterations,
         learning_rate=learning_rate,
         multi_start=multi_start,
@@ -809,8 +948,15 @@ def _fit_affine_from_ants(
 # Anything the table does not state keeps antstorch's previous default
 # (grad_step 0.5 for dsti and reg_adam, flow_sigma 3.0 where syntx has no
 # equivalent). ``syntx_defaults=False`` restores the previous defaults wholesale.
+# Inverse handling follows syntx's 'canonical_2026_11_11' defaults ("Option A", syntx >= 6.35.0):
+# warm-started in-loop inverses (10 solver steps, as syntx.syn()) refreshed every (1, 2, 4)
+# iterations from the coarsest to the finest level, a 30-step end-of-level polish (0.02 voxel),
+# and a safeguarded Levenberg-Marquardt polish of the composed inverse (0.30 voxel).
 _COMMON_SYNTX_DEFAULTS = dict(
-    syn_metric="cc2", levels=(4, 2, 1), gaussian_sigma_mode="voxel", inverse_schedule="end_of_level",
+    syn_metric="cc2", levels=(4, 2, 1), gaussian_sigma_mode="voxel", inverse_schedule="refresh",
+    in_loop_inverse_steps=10, inv_refresh_every=(1, 2, 4), polish_inv_steps=30, polish_inv_tol=0.02,
+    compose_polish_tol=0.30, pyramid="deformable", stationary_boundary=True,
+    digital_diffeomorphism=True,
 )
 _SYNTX_DEFAULTS = {
     ("gaussian", "gradient_descent"): dict(
@@ -849,7 +995,9 @@ _SYNTX_DEFAULTS = {
 _LEGACY_DEFAULTS = dict(
     syn_metric="lncc", levels=(4, 2, 1), reg_iterations=(100, 100, 50), grad_step=0.5, flow_sigma=3.0,
     gaussian_sigma_mode="physical", conservative_smooth=False, sobolev_alpha=None,
-    inverse_schedule="per_iteration",
+    inverse_schedule="per_iteration", in_loop_inverse_steps=6, inv_refresh_every=1, polish_inv_steps=0,
+    polish_inv_tol=0.02, compose_polish_tol=0.0, pyramid="legacy", stationary_boundary=False,
+    digital_diffeomorphism=False,
 )
 
 
@@ -865,6 +1013,7 @@ def syn_registration(
     affine_num_bins: int = 32,
     affine_shrink_factors: Sequence[int] = (4, 2, 1),
     affine_smoothing_sigmas: Optional[Union[float, Sequence[float]]] = (2.0, 1.0, 0.0),
+    affine_smoothing_sigmas_units: str = "vox",
     affine_iterations: Union[int, Sequence[int]] = (100, 100, 50),
     affine_learning_rate: Union[float, Sequence[float]] = (0.05, 0.03, 0.02),
     affine_multi_start: bool = True,
@@ -889,14 +1038,26 @@ def syn_registration(
     total_field_spline_distance: Optional[Union[float, Sequence[float]]] = None,
     bspline_enforce_stationary_boundary: bool = True,
     inverse_method: str = "anderson",
-    in_loop_inverse_steps: int = 6,
+    in_loop_inverse_steps: Optional[int] = None,
     inverse_schedule: Optional[str] = None,
     end_of_level_inverse_steps: int = 30,
+    inv_refresh_every: Optional[Union[int, Sequence[int]]] = None,
+    polish_inv_steps: Optional[int] = None,
+    polish_inv_tol: Optional[float] = None,
+    compose_polish_tol: Optional[float] = None,
+    compose_polish_steps: int = 30,
+    inv_tolerance: Optional[float] = None,
+    pyramid: Optional[str] = None,
+    stationary_boundary: Optional[bool] = None,
+    digital_diffeomorphism: Optional[bool] = None,
+    digital_diffeomorphism_floor: float = 0.05,
+    digital_diffeomorphism_steps: int = 50,
     syntx_defaults: bool = True,
     syntx_parity: bool = False,
     use_analytical_gradients: bool = True,
     sobolev_alpha: Optional[float] = None,
     optimizer_lr: float = 1.0,
+    metric_chunks: int = 1,
     antisymmetric: bool = True,
     gaussian_sigma_mode: Optional[str] = None,
     conservative_smooth: Optional[bool] = None,
@@ -934,10 +1095,29 @@ def syn_registration(
     parameter) terms to the same SyN objective. Images must share their
     respective primary domains. MSQ/MeanSquares aliases retain raw image
     amplitudes; other metrics use the standard intensity normalization.
+    ``label_msq`` (alias ``LabelMSQ``) takes label maps and a label value as
+    ``parameter``: it is MeanSquares between the binary masks
+    ``fixed_image == parameter`` and ``moving_image == parameter``, built on
+    the fly from the shared label maps instead of being stored per label.
+    With multivariate terms, each term is backpropagated separately, so only
+    one term's autograd graph is alive at a time.
     ``primary_metric_weight=0`` disables the primary metric. ``mask`` and
     ``moving_mask`` restrict midpoint sampling to their nonzero regions.
     ``smoothing_sigmas`` optionally sets the pyramid image smoothing in
     voxel units, one value per level. These options affect SyN only.
+
+    ``metric_chunks`` (default 1) evaluates CC-family metrics (``cc``,
+    ``lncc``, ``cc2``, ``lncc2``; primary and multivariate) in that many
+    slabs along the longest axis, each with a ``2 * radius`` halo and
+    backpropagated on its own, so the CC autograd graph is never held for
+    the whole image (the per-voxel values, and hence the loss, are those of
+    the unchunked metric). Lower peak memory for more kernel launches.
+
+    ``affine_smoothing_sigmas`` are in full-resolution voxels by default
+    (``affine_smoothing_sigmas_units='vox'``, as ANTs' ``2x1x0vox``), so the
+    default (2, 1, 0) means the same amount of smoothing whatever the image
+    spacing; ``'mm'`` gives physical units (the behaviour before this
+    option existed, identical for 1 mm isotropic images).
 
     **Defaults.** ``syn_metric``, ``levels``, ``reg_iterations``, ``grad_step``,
     ``flow_sigma``, ``gaussian_sigma_mode``, ``conservative_smooth``,
@@ -946,7 +1126,8 @@ def syn_registration(
     ``_SYNTX_DEFAULTS`` (e.g. ``'gaussian'``: cc2, ``grad_step`` 0.25,
     ``levels`` (4, 2, 1), ``reg_iterations`` (100, 100, 20), ``flow_sigma``
     sqrt(3) -- syntx's ``flow_sigma`` is an ITK variance, this function's is a
-    sigma -- voxel-unit sigma, ``inverse_schedule='end_of_level'``; ``'sobolev'``:
+    sigma -- voxel-unit sigma, syntx's "Option A" inverse handling (see
+    ``inverse_schedule`` below); ``'sobolev'``:
     ``grad_step`` 0.4, ``flow_sigma`` sqrt(2.4), ``sobolev_alpha`` 2.25,
     conservative post-filter; ``'dsti'``: ``reg_iterations`` (100, 50, 10),
     ``flow_sigma`` sqrt(3), conservative post-filter). Any value passed
@@ -1113,9 +1294,21 @@ def syn_registration(
     ``fwdtransforms``/``invtransforms`` are built from algebraically (a
     half-warp-inverse swap), not from any generic post-hoc field inversion.
 
-    ``inverse_schedule`` chooses *when* those inverses are maintained. The
-    historical behavior described above is ``'per_iteration'`` (now used only with ``syntx_defaults=False``;
-    the syntx-aligned default is ``'end_of_level'``).
+    ``inverse_schedule`` chooses *when* those inverses are maintained.
+    ``'refresh'`` (the syntx-aligned default, syntx >= 6.35.0 "Option A",
+    ``canonical_2026_11_11``) updates them, warm-started, with
+    ``in_loop_inverse_steps`` (default 10) solver steps every
+    ``inv_refresh_every`` iterations (default ``(1, 2, 4)``, one value per
+    level from coarse to fine, the last value reused) and at each level's last
+    scheduled iteration, with syntx's tolerance (max ``inv_tolerance``, default
+    ``0.1 * min(spacing)``, mean 1 % of it); every level then ends with a
+    ``polish_inv_steps`` (default 30) polish to ``polish_inv_tol`` (default
+    0.02 voxel). After the final half-warp swap, the composed inverse is
+    refined against the composed forward field by a safeguarded per-voxel
+    Levenberg-Marquardt solver (``compose_polish_tol``, default 0.30 voxel,
+    ``compose_polish_steps`` 30; 0 disables it). The historical behavior
+    described above is ``'per_iteration'`` (every iteration, used with
+    ``syntx_defaults=False``, where polishes are off).
     Nothing inside the SyN loop reads the inverses -- they only feed the final
     composition -- so ``'end_of_level'`` skips the per-iteration updates and
     inverts the final level's half-warps once, from the first-order guess
@@ -1124,6 +1317,23 @@ def syn_registration(
     of the loop time on MPS); the final inverse accuracy depends on
     ``end_of_level_inverse_steps`` rather than on the warm-started chain, so
     check Dice / identity error on your data before relying on it.
+
+    ``pyramid`` selects how each level is built. ``'deformable'`` (the
+    syntx-aligned default; syntx's central planner since its 2026-10-10
+    refactor, commit afcdf87): millimetre-isotropic target spacing
+    ``factor x min(fixed spacing)``, corner-aligned grid of
+    ``round((n - 1) s / t) + 1`` samples per axis with a 16-voxel floor, the
+    native grid at level 1, an anti-aliasing Gaussian of ``0.5 x`` the axis
+    coarsening factor (or ``smoothing_sigmas``) on the coarsened axes only, the
+    moving image on its own grid; with ``syntx_parity`` the CFL step uses
+    syntx's ``min(finest / level spacing)`` ratio. ``'legacy'`` (with
+    ``syntx_defaults=False``): ``log2(factor)``-voxel blur and
+    ``(n - 1) // factor + 1`` samples (``floor(n / factor)`` with
+    ``syntx_parity``), syntx's pyramid before that refactor.
+    ``stationary_boundary`` (syntx-aligned default ``True``, as syntx's
+    ``SyNTo``; ``False`` with ``syntx_defaults=False``) zeroes both half-warps
+    on every face of the domain after each update, so the written warps are
+    zero on the outermost voxel layer.
 
     ``levels``/``reg_iterations`` define the multi-resolution pyramid
     (coarse to fine, e.g. ``levels=(4, 2, 1)``); unlike
@@ -1171,6 +1381,22 @@ def syn_registration(
         flow_sigma = _defaults["flow_sigma"]
     if inverse_schedule is None:
         inverse_schedule = _defaults["inverse_schedule"]
+    if in_loop_inverse_steps is None:
+        in_loop_inverse_steps = _defaults["in_loop_inverse_steps"]
+    if inv_refresh_every is None:
+        inv_refresh_every = _defaults["inv_refresh_every"]
+    if polish_inv_steps is None:
+        polish_inv_steps = _defaults["polish_inv_steps"]
+    if polish_inv_tol is None:
+        polish_inv_tol = _defaults["polish_inv_tol"]
+    if compose_polish_tol is None:
+        compose_polish_tol = _defaults["compose_polish_tol"]
+    if pyramid is None:
+        pyramid = _defaults["pyramid"]
+    if stationary_boundary is None:
+        stationary_boundary = _defaults["stationary_boundary"]
+    if digital_diffeomorphism is None:
+        digital_diffeomorphism = _defaults["digital_diffeomorphism"]
     if gaussian_sigma_mode is None:
         gaussian_sigma_mode = _defaults["gaussian_sigma_mode"]
     if conservative_smooth is None:
@@ -1198,8 +1424,26 @@ def syn_registration(
             "optimizer='syn_reg_adam' reproduces syntx.syn()'s reg_adam for the spectral regularizers only "
             "('sobolev', 'dsti'); syntx smooths the Adam quotient differently for 'gaussian'/'bspline'"
         )
-    if inverse_schedule not in ("per_iteration", "end_of_level"):
-        raise ValueError("inverse_schedule must be 'per_iteration' or 'end_of_level'")
+    if isinstance(metric_chunks, bool) or not isinstance(metric_chunks, int) or metric_chunks < 1:
+        raise ValueError("metric_chunks must be a positive integer")
+    if (metric_chunks > 1 and multivariate_extras is None and syn_metric not in _CC_METRICS
+            and type_of_transform in _SYN_TRANSFORM_TYPES):
+        raise ValueError("metric_chunks > 1 requires a CC-family syn_metric (cc, lncc, cc2, lncc2)")
+    if affine_smoothing_sigmas_units not in ("mm", "vox"):
+        raise ValueError("affine_smoothing_sigmas_units must be 'mm' or 'vox'")
+    if pyramid not in _PYRAMIDS:
+        raise ValueError(f"pyramid must be one of {_PYRAMIDS}")
+    if inverse_schedule not in ("per_iteration", "refresh", "end_of_level"):
+        raise ValueError("inverse_schedule must be 'per_iteration', 'refresh' or 'end_of_level'")
+    _refresh = tuple(inv_refresh_every) if isinstance(inv_refresh_every, (list, tuple)) else (inv_refresh_every,)
+    if len(_refresh) == 0 or any(isinstance(v, bool) or int(v) != v or int(v) < 1 for v in _refresh):
+        raise ValueError("inv_refresh_every must be a positive integer or a sequence of positive integers")
+    if int(in_loop_inverse_steps) < 0 or int(polish_inv_steps) < 0 or int(compose_polish_steps) < 0:
+        raise ValueError("in_loop_inverse_steps, polish_inv_steps and compose_polish_steps must be >= 0")
+    if float(polish_inv_tol) <= 0:
+        raise ValueError("polish_inv_tol must be > 0")
+    if compose_polish_tol is not None and float(compose_polish_tol) < 0:
+        raise ValueError("compose_polish_tol must be >= 0 (0 disables the post-composition polish)")
     if end_of_level_inverse_steps < 1:
         raise ValueError("end_of_level_inverse_steps must be >= 1")
     if update_field_mesh_size_at_base_level is not None and update_field_mesh_size_at_base_level < 0:
@@ -1352,6 +1596,7 @@ def syn_registration(
             num_bins=affine_num_bins,
             shrink_factors=affine_shrink_factors,
             smoothing_sigmas=affine_smoothing_sigmas,
+            smoothing_sigmas_units=affine_smoothing_sigmas_units,
             iterations=affine_iterations,
             learning_rate=affine_learning_rate,
             multi_start=affine_multi_start,
@@ -1409,6 +1654,7 @@ def syn_registration(
             "provenance": {
                 "type_of_transform": type_of_transform,
                 "affine_transform_type": type_of_transform,
+                "affine_smoothing_sigmas_units": affine_smoothing_sigmas_units,
                 "device": str(resolved_device),
                 "outprefix": resolved_outprefix,
             },
@@ -1438,20 +1684,32 @@ def syn_registration(
         if primary_metric_weight:
             metric_terms_full.append((syn_metric, I_full, J_full, primary_metric_weight,
                                       neighborhood_radius if syn_metric not in ("mi", "mattes") else num_bins))
+        # Each distinct metric image is validated and converted once, so the
+        # 'label_msq' terms of one label map share a single tensor per side.
+        converted = {}
+
+        def metric_tensor(image, reference, role, normalize):
+            key = (id(image), normalize)
+            if key not in converted:
+                _validate_image_domain(image, reference, role)
+                converted[key] = (image, ants_image_to_tensor(image, resolved_device, dtype, normalize=normalize))
+            return converted[key][1]
+
         for name, a, b, weight, parameter in (multivariate_extras or []):
             name = _metric_name(name)
-            _validate_image_domain(a, fixed, "fixed metric image")
-            _validate_image_domain(b, moving, "moving metric image")
             if not math.isfinite(weight) or weight < 0 or not math.isfinite(parameter) or parameter < 0:
                 raise ValueError("metric weights and parameters must be finite and nonnegative")
-            if name in ("cc", "lncc", "cc2", "lncc2", "mi", "mattes") and parameter != int(parameter):
-                raise ValueError("Metric radius/bin count must be an integer")
+            if name in ("cc", "lncc", "cc2", "lncc2", "mi", "mattes", "label_msq") and parameter != int(parameter):
+                raise ValueError("Metric radius/bin count/label value must be an integer")
+            if name == "label_msq" and parameter > 2**24:
+                raise ValueError("label_msq label values must be representable exactly in float32 (<= 2^24)")
             if name in ("mi", "mattes") and parameter < 2:
                 raise ValueError("MI metrics require at least two histogram bins")
+            normalize = name not in ("mse", "label_msq")
+            tensor_a = metric_tensor(a, fixed, "fixed metric image", normalize)
+            tensor_b = metric_tensor(b, moving, "moving metric image", normalize)
             if weight:
-                metric_terms_full.append((name,
-                    ants_image_to_tensor(a, resolved_device, dtype, normalize=name != "mse"),
-                    ants_image_to_tensor(b, resolved_device, dtype, normalize=name != "mse"), weight, parameter))
+                metric_terms_full.append((name, tensor_a, tensor_b, weight, parameter))
         if not metric_terms_full:
             raise ValueError("At least one metric must have a positive weight")
         masks = []
@@ -1517,25 +1775,46 @@ def syn_registration(
     if metric_terms_full is not None:
         window_size = max([1] + [2 * int(term[4]) + 1 for term in metric_terms_full
                                   if term[0] in ("cc", "lncc", "cc2", "lncc2", "box_cc2")])
-    _validate_pyramid_levels(fixed_meta_full["torch_shape"], levels, window_size, syntx_parity)
+    _fixed_level_metas = [
+        _downsample_metadata(fixed_meta_full, int(f), syntx_parity) if pyramid == "legacy" else
+        dict(fixed_meta_full, torch_shape=tuple(_deformable_plan(fixed_meta_full, f)["shape_zyx"]),
+             spacing=tuple(_deformable_plan(fixed_meta_full, f)["spacing_xyz"]))
+        for f in levels
+    ]
+    _validate_pyramid_levels(fixed_meta_full["torch_shape"], levels, window_size, syntx_parity,
+                             level_shapes=[m["torch_shape"] for m in _fixed_level_metas])
+    # syntx.pyramid.cfl_shrink_ratio: min over axes of (finest level spacing / level spacing).
+    _finest_spacing = _fixed_level_metas[-1]["spacing"]
+    _cfl_ratios = [min(float(fs) / float(cs) for fs, cs in zip(_finest_spacing, m["spacing"])) for m in _fixed_level_metas]
+    # syntx: inv_tolerance defaults to 0.1 * min(full-resolution spacing); used as the in-loop
+    # max-error threshold (voxels) of the 'refresh' schedule, the mean threshold being 1 % of it.
+    resolved_inv_tolerance = (0.1 * float(min(fixed_meta_full["spacing"])) if inv_tolerance is None
+                              else float(inv_tolerance))
 
     warp_l2r = warp_r2l = warp_l2r_inv = warp_r2l_inv = None
     level_loss_history = []
     for level_index, (factor, iteration_count) in enumerate(zip(levels, reg_iterations)):
         sigma = None if smoothing_sigmas is None else smoothing_sigmas[level_index]
-        I_level, fixed_meta_level = _downsample_image(I_full, fixed_meta_full, factor, syntx_parity, sigma)
-        J_level, moving_meta_level = _downsample_image(J_full, moving_meta_full, factor, syntx_parity, sigma)
+        I_level, fixed_meta_level = _downsample_image(I_full, fixed_meta_full, factor, syntx_parity, sigma, pyramid=pyramid)
+        J_level, moving_meta_level = _downsample_image(J_full, moving_meta_full, factor, syntx_parity, sigma, pyramid=pyramid,
+                                                       reference_spacing=fixed_meta_full["spacing"])
         if warp_l2r is None:
             zeros = torch.zeros(
                 (1,) + fixed_meta_level["torch_shape"] + (dimension,), device=resolved_device, dtype=dtype
             )
             warp_l2r, warp_r2l = zeros.clone(), zeros.clone()
-            warp_l2r_inv, warp_r2l_inv = zeros.clone(), zeros.clone()
+            if inverse_schedule in ("per_iteration", "refresh"):
+                warp_l2r_inv, warp_r2l_inv = zeros.clone(), zeros.clone()
+            del zeros
         else:
             warp_l2r = _upsample_field(warp_l2r, fixed_meta_level["torch_shape"])
             warp_r2l = _upsample_field(warp_r2l, fixed_meta_level["torch_shape"])
-            warp_l2r_inv = _upsample_field(warp_l2r_inv, fixed_meta_level["torch_shape"])
-            warp_r2l_inv = _upsample_field(warp_r2l_inv, fixed_meta_level["torch_shape"])
+            # 'end_of_level' never reads the inverses before the last level,
+            # which restarts from -W: they are None until then, and are not
+            # carried (or upsampled) across levels.
+            if inverse_schedule in ("per_iteration", "refresh"):
+                warp_l2r_inv = _upsample_field(warp_l2r_inv, fixed_meta_level["torch_shape"])
+                warp_r2l_inv = _upsample_field(warp_r2l_inv, fixed_meta_level["torch_shape"])
 
         if verbose:
             message = (
@@ -1569,20 +1848,39 @@ def syn_registration(
         metric_terms_level = None
         metric_masks_level = None
         if metric_terms_full is not None:
-            metric_terms_level = [(name,
-                _downsample_image(a, fixed_meta_full, factor, syntx_parity, sigma)[0],
-                _downsample_image(b, moving_meta_full, factor, syntx_parity, sigma)[0], weight, parameter)
-                for name, a, b, weight, parameter in metric_terms_full]
+            metric_terms_level = []
+            full_resolution = factor == 1 and (sigma is None or sigma == 0)
+            for name, a, b, weight, parameter in metric_terms_full:
+                if name == "label_msq":
+                    if full_resolution:
+                        # Masks are rebuilt from the label maps on the fly.
+                        metric_terms_level.append((name, a, b, weight, parameter))
+                        continue
+                    # Coarser levels cache each label's downsampled mask (the
+                    # full-resolution mask exists only while it is reduced).
+                    a = (a == parameter).to(dtype)
+                    b = (b == parameter).to(dtype)
+                    name = "mse"
+                metric_terms_level.append((name,
+                    _downsample_image(a, fixed_meta_full, factor, syntx_parity, sigma, pyramid=pyramid)[0],
+                    _downsample_image(b, moving_meta_full, factor, syntx_parity, sigma, pyramid=pyramid,
+                                      reference_spacing=fixed_meta_full["spacing"])[0], weight, parameter))
+                a = b = None
             metric_masks_level = [None if value is None else F.interpolate(
                 value, size=meta["torch_shape"], mode="nearest")
                 for value, meta in zip(metric_masks_full, (fixed_meta_level, moving_meta_level))]
 
+        # Hand the level-start fields over in a list that _fit_syn_level()
+        # empties, so this frame keeps no reference to them during the level.
+        level_warps = [warp_l2r, warp_r2l, warp_l2r_inv, warp_r2l_inv]
+        warp_l2r = warp_r2l = warp_l2r_inv = warp_r2l_inv = None
         warp_l2r, warp_r2l, warp_l2r_inv, warp_r2l_inv, history = _fit_syn_level(
             I_level, J_level, fixed_meta_level, moving_meta_level,
-            warp_l2r, warp_r2l, warp_l2r_inv, warp_r2l_inv, M_phys, t_phys,
+            level_warps, M_phys, t_phys,
             iterations=iteration_count,
             metric_terms=metric_terms_level,
             metric_masks=metric_masks_level,
+            metric_chunks=metric_chunks,
             similarity=syn_metric,
             window_size=window_size,
             num_bins=num_bins,
@@ -1599,7 +1897,13 @@ def syn_registration(
             in_loop_inverse_steps=in_loop_inverse_steps,
             inverse_schedule=inverse_schedule,
             end_of_level_inverse_steps=end_of_level_inverse_steps,
+            inv_refresh_every=int(_refresh[min(level_index, len(_refresh) - 1)]),
+            inv_tolerance=resolved_inv_tolerance,
+            polish_inv_steps=int(polish_inv_steps),
+            polish_inv_tol=float(polish_inv_tol),
             syntx_parity=syntx_parity,
+            cfl_shrink_ratio=_cfl_ratios[level_index],
+            stationary_boundary=bool(stationary_boundary),
             use_analytical_gradients=use_analytical_gradients,
             sobolev_alpha=sobolev_alpha,
             verbose=verbose,
@@ -1623,8 +1927,53 @@ def syn_registration(
     moving_meta_t_full = metadata_tensors_from_dict(moving_meta_full, resolved_device, dtype)
     X_phys_full = _physical_grid(fixed_meta_full, resolved_device, dtype)
 
+    _run_finish = sum(reg_iterations) > 0
+    _dd_stats = {}
+    if digital_diffeomorphism and _run_finish:
+        # syntx >= 6.36 (default-on digital diffeomorphism finish, syntx.syn's ``_dd_on`` path) and 6.37.2
+        # (midpoint closure): each half-warp pair is made a digital diffeomorphism BEFORE the composition
+        # (central-difference det(I + D_2h u) >= digital_diffeomorphism_floor and chord ICE <= ice_tol on the
+        # sparse defect neighbourhood; bitwise untouched when nothing violates), the composed pair is LM
+        # polished and then enforced again. syntx also pulls the final correction back onto its midpoint
+        # half-fields (pullback_digital_diffeomorphism_to_halves); antstorch exports no midpoint field, so the
+        # written transforms are the same without it.
+        from .core.digital_diffeomorphism import enforce_digital_diffeomorphism_nd
+        _dd_ice_tol = float(compose_polish_tol) if compose_polish_tol and float(compose_polish_tol) > 0 else 0.30
+        _dd_kw = dict(spacing=fixed_meta_full["spacing"], origin=fixed_meta_full["origin"],
+                      direction=fixed_meta_full["direction"], X_phys=X_phys_full, ice_tol=_dd_ice_tol,
+                      jac_floor=float(digital_diffeomorphism_floor), steps=int(digital_diffeomorphism_steps),
+                      stationary_boundary=bool(stationary_boundary))
+        if stationary_boundary:
+            _rim = get_boundary_mask(fixed_meta_full["torch_shape"], resolved_device, dtype)
+            warp_l2r, warp_r2l = warp_l2r * _rim, warp_r2l * _rim
+            warp_l2r_inv, warp_r2l_inv = warp_l2r_inv * _rim, warp_r2l_inv * _rim
+        for _name, (_f, _i) in (("l2r", (warp_l2r, warp_l2r_inv)), ("r2l", (warp_r2l, warp_r2l_inv))):
+            _st = {}
+            _f, _i = enforce_digital_diffeomorphism_nd(_f, _i, stats=_st, **_dd_kw)
+            _dd_stats[_name] = _st
+            if _name == "l2r":
+                warp_l2r, warp_l2r_inv = _f, _i
+            else:
+                warp_r2l, warp_r2l_inv = _f, _i
     syn_forward = _compose_fixed_grid(warp_l2r_inv, warp_r2l, X_phys_full, fixed_meta_t_full)
     syn_inverse = _compose_fixed_grid(warp_r2l_inv, warp_l2r, X_phys_full, fixed_meta_t_full)
+    if digital_diffeomorphism and _run_finish and stationary_boundary:
+        syn_forward, syn_inverse = syn_forward * _rim, syn_inverse * _rim
+    if compose_polish_tol and float(compose_polish_tol) > 0 and compose_polish_steps > 0 and sum(reg_iterations) > 0:
+        # syntx >= 6.35: safeguarded per-voxel Levenberg-Marquardt polish of the algebraic
+        # (half-warp swap) inverse against the composed forward field, max error
+        # compose_polish_tol voxels, mean min(compose_polish_tol / 2, 0.02).
+        _cp_tol = float(compose_polish_tol)
+        syn_inverse = update_inverse_field_nd_hybrid_lm(
+            syn_forward, syn_inverse, steps=int(compose_polish_steps),
+            max_error_threshold=_cp_tol, mean_error_threshold=min(_cp_tol * 0.5, 0.02),
+            spacing=fixed_meta_full["spacing"], origin=fixed_meta_full["origin"],
+            direction=fixed_meta_full["direction"], X_phys=X_phys_full, stationary_boundary=True,
+        )
+    if digital_diffeomorphism and _run_finish:
+        _st = {}
+        syn_forward, syn_inverse = enforce_digital_diffeomorphism_nd(syn_forward, syn_inverse, stats=_st, **_dd_kw)
+        _dd_stats["composed"] = _st
 
     # Total forward: apply the pure-SyN deformation, then the (fixed)
     # affine, matching prepare_mid_images_and_gradients_torch's own
@@ -1725,14 +2074,34 @@ def syn_registration(
             "bspline_enforce_stationary_boundary": bspline_enforce_stationary_boundary,
             "antisymmetric": antisymmetric,
             "inverse_method": inverse_method,
+            "metric_chunks": metric_chunks,
             "inverse_schedule": inverse_schedule,
+            "pyramid": pyramid,
+            "stationary_boundary": bool(stationary_boundary),
+            "digital_diffeomorphism": bool(digital_diffeomorphism),
+            "digital_diffeomorphism_floor": float(digital_diffeomorphism_floor),
+            "digital_diffeomorphism_steps": int(digital_diffeomorphism_steps),
+            "digital_diffeomorphism_stats": {
+                k: {kk: (float(vv) if isinstance(vv, (int, float)) else vv) for kk, vv in st.items()
+                    if isinstance(vv, (int, float, bool))}
+                for k, st in _dd_stats.items()
+            },
+            "level_shapes": [list(m["torch_shape"]) for m in _fixed_level_metas],
             "end_of_level_inverse_steps": end_of_level_inverse_steps,
+            "in_loop_inverse_steps": int(in_loop_inverse_steps),
+            "inv_refresh_every": list(_refresh),
+            "inv_tolerance": float(resolved_inv_tolerance),
+            "polish_inv_steps": int(polish_inv_steps),
+            "polish_inv_tol": float(polish_inv_tol),
+            "compose_polish_tol": float(compose_polish_tol or 0.0),
+            "compose_polish_steps": int(compose_polish_steps),
             "syntx_parity": syntx_parity,
             "sobolev_alpha": sobolev_alpha,
             "syntx_defaults": syntx_defaults,
             "optimizer_lr": optimizer_lr,
             "use_analytical_gradients": use_analytical_gradients,
             "affine_fit": affine_result is not None,
+            "affine_smoothing_sigmas_units": affine_smoothing_sigmas_units,
             "device": str(resolved_device),
             "outprefix": resolved_outprefix,
         },

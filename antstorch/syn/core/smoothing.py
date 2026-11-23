@@ -431,6 +431,38 @@ def separable_1d_filter(x: torch.Tensor, kernels) -> torch.Tensor:
     return x
 
 
+def gaussian_blur_replicate(image: torch.Tensor, sigmas) -> torch.Tensor:
+    """Separable Gaussian blur of a channels-first image with replicate padding.
+
+    ``image`` is ``(B, C, *spatial)``; ``sigmas`` gives one voxel-unit sigma
+    per spatial axis, in the same (PyTorch) axis order. Each 1-D kernel has
+    radius ``max(1, int(3 * sigma + 0.5))`` and unit sum. The image is
+    replicate-padded once on every axis, then filtered along each axis in
+    turn as a weighted sum of shifted slices: this equals the dense N-D
+    Gaussian on the same padded image (a separable kernel) up to
+    floating-point rounding, at O(radius) instead of O(radius^dim) cost per
+    voxel, and uses no convolution backend (conv2d/conv3d with 1-D kernels
+    gave wrong results on macOS CPU).
+    """
+    sigmas = tuple(float(sigma) for sigma in sigmas)
+    if len(sigmas) != image.ndim - 2:
+        raise ValueError("gaussian_blur_replicate needs one sigma per spatial axis")
+    radii = [max(1, int(3.0 * sigma + 0.5)) for sigma in sigmas]
+    padding = tuple(value for radius in reversed(radii) for value in (radius, radius))
+    blurred = F.pad(image, padding, mode="replicate")
+    for axis, (sigma, radius) in enumerate(zip(sigmas, radii)):
+        coordinate = torch.arange(-radius, radius + 1, dtype=image.dtype, device=image.device)
+        kernel = torch.exp(-0.5 * (coordinate / sigma).square())
+        kernel = kernel / kernel.sum()
+        spatial_axis = 2 + axis
+        length = blurred.shape[spatial_axis] - 2 * radius
+        filtered = blurred.narrow(spatial_axis, 0, length) * kernel[0]
+        for offset in range(1, 2 * radius + 1):
+            filtered = filtered + blurred.narrow(spatial_axis, offset, length) * kernel[offset]
+        blurred = filtered
+    return blurred
+
+
 def get_boundary_mask(spatial, device, dtype, rim_size=1):
     """Build a mask that is zero on the domain boundary and one in the interior.
 

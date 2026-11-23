@@ -38,6 +38,7 @@ lives on the fixed level grid. Earlier syntx versions (< 6.2) shrank every axis 
 Intensity normalisation follows ``syntx.greedy``: ``normalize_image(method='auto')`` on both images.
 """
 
+import math
 import os
 import tempfile
 import time
@@ -52,6 +53,7 @@ import torch.nn.functional as F
 from ._torch_compat import grid_sample
 from .ants_transform_io import write_affine_transform
 from .syn.core.affine import parse_ants_affine
+from .syn.core.convergence import DEFAULT_SLOPE_THRESHOLD, LossSlopeStop
 from .syn.core.inverse import update_inverse_field_nd_anderson
 from .syn.core.losses import local_ncc_loss_nd
 from .syn.core.pipeline import auto_detect_device, cleanup_gpu
@@ -172,24 +174,38 @@ def _plan_axes_deformable(n_xyz, sp, t, floor_eff):
     return out
 
 
-def _plan_levels_deformable(shape_zyx, spacing_xyz, levels, reference_spacing_xyz=None):
+def _plan_levels_deformable(shape_zyx, spacing_xyz, levels, reference_spacing_xyz=None, sigma=None):
     """Plan every level of the 'deformable' pyramid (``syntx.pyramid.plan_levels(..., 'deformable')``): level L has the working
     spacing L x (finest spacing of the reference or of the image), isotropic in millimetres; default smoothing
-    sigma = 0.5 x the axis's coarsening factor (native voxels) on every coarsened axis. Returns a list of dicts."""
+    sigma = 0.5 x the axis's coarsening factor (native voxels) on every coarsened axis. ``sigma`` (a float or one value per
+    level, native voxels, syntx ``sigma_mode='voxel'``) replaces that rule; an axis that is not coarsened is never smoothed.
+    Returns a list of dicts (``spacing_xyz``: the level grid spacing, ``f * s`` per axis)."""
     n_zyx = tuple(int(x) for x in shape_zyx)
     sp = tuple(float(x) for x in spacing_xyz)
     ref = tuple(float(x) for x in reference_spacing_xyz) if reference_spacing_xyz is not None else sp
     n_xyz = n_zyx[::-1]
+    levels = [float(x) for x in levels]
+    if sigma is not None and not isinstance(sigma, (int, float)):
+        sigma = [float(x) for x in sigma]
+        if len(sigma) != len(levels):
+            raise ValueError(f"sigma has {len(sigma)} entries for {len(levels)} levels")
     plans = []
-    for L in [float(x) for x in levels]:
+    for li, L in enumerate(levels):
         t = max(L * min(ref), min(sp))
         axes = _plan_axes_deformable(n_xyz, sp, t, _MIN_VOXELS_PER_AXIS)
         m_xyz = tuple(a[0] for a in axes)
         f_xyz = tuple(a[1] for a in axes)
         modes = tuple(a[2] for a in axes)
-        sig_xyz = [0.5 * f if (md == "linear" and f > 1.0 + _PYR_EPS) else 0.0 for f, md in zip(f_xyz, modes)]
+        if sigma is None:
+            sig_xyz = [0.5 * f if (md == "linear" and f > 1.0 + _PYR_EPS) else 0.0 for f, md in zip(f_xyz, modes)]
+        else:
+            sv = float(sigma if isinstance(sigma, (int, float)) else sigma[li])
+            if sv < 0 or not math.isfinite(sv):
+                raise ValueError(f"sigma must be finite and >= 0, got {sv}")
+            sig_xyz = [sv] * len(f_xyz)
         sig_zyx = tuple(sg if (f > 1.0 + _PYR_EPS and sg > 0) else 0.0 for sg, f in zip(sig_xyz, f_xyz))[::-1]
         plans.append(dict(shape_zyx=tuple(m_xyz[::-1]), f_xyz=f_xyz, modes_xyz=modes, sigma_zyx=sig_zyx,
+                          spacing_xyz=tuple(f * s for f, s in zip(f_xyz, sp)),
                           native_shape_zyx=n_zyx, is_identity=all(md == "identity" for md in modes)))
     return plans
 
@@ -317,6 +333,27 @@ def _apply_homogeneous(P: np.ndarray, points: np.ndarray) -> np.ndarray:
         return (P @ homogeneous.T).T
 
 
+def _ants_displacement_to_zyx(disp_img, device) -> torch.Tensor:
+    """ANTs displacement image -> ``(1, *spatial, dim)`` tensor in tensor layout: spatial axes AND vector components
+    reversed to (z, y, x) (``syntx.spatial.disp_itk_to_tensor``); the inverse of ``displacement_zyx_to_ants_image``."""
+    arr = disp_img.numpy()
+    dim = arr.shape[-1]
+    arr = np.transpose(arr, (1, 0, 2)) if dim == 2 else np.transpose(arr, (2, 1, 0, 3))
+    return torch.from_numpy(np.ascontiguousarray(arr[..., ::-1])).float().unsqueeze(0).to(device)
+
+
+def _restrict_ants_displacement(disp_img, restrict_transformation):
+    """Zero the displacement components (ITK x, y, z order) whose ``restrict_transformation`` weight is 0."""
+    if restrict_transformation is None:
+        return disp_img
+    arr = disp_img.numpy()
+    for i, w in enumerate(restrict_transformation):
+        if w == 0.0:
+            arr[..., i] = 0.0
+    return ants.from_numpy(arr, origin=disp_img.origin, spacing=disp_img.spacing, direction=disp_img.direction,
+                           has_components=True)
+
+
 def _grid_to_ants_displacement(total_target_grid: torch.Tensor, fixed, P_F: np.ndarray, P_M: Optional[np.ndarray] = None,
                                restrict_transformation: Optional[Sequence[float]] = None):
     """Target coordinate grid (normalised) -> ANTs physical displacement image on the fixed grid (``y_phys - x_phys``)."""
@@ -395,8 +432,13 @@ class GreedyRegistrationModel(nn.Module):
                  anderson_freq: str = "per_scale", padding_mode: str = "border",
                  beta1: float = 0.9, beta2: float = 0.99, eps: float = 1e-8,
                  restrict_transformation: Optional[Sequence[float]] = None,
-                 device: Optional[torch.device] = None):
+                 device: Optional[torch.device] = None,
+                 convergence_slope: Optional[float] = DEFAULT_SLOPE_THRESHOLD):
         super().__init__()
+        # syntx >= 6.16: the shared deformable stopping rule (core.convergence.LossSlopeStop): the loss is read every
+        # 5 iterations and a level ends once its least-squares slope over 10 samples is within +-convergence_slope.
+        self.stop = LossSlopeStop(slope_threshold=convergence_slope)
+        self.convergence: List[dict] = []
         self.dim = dim
         if restrict_transformation is not None:
             rt = [float(w) for w in restrict_transformation]
@@ -470,9 +512,11 @@ class GreedyRegistrationModel(nn.Module):
         self.loss_history = []
         regadam = self.optimizer in ("regadam", "reg_adam")
 
+        self.stop.records.clear()
         for level_idx, (scale, n_iters) in enumerate(zip(scales, iterations)):
             if n_iters <= 0:
                 continue
+            self.stop.start_level(level_idx, n_iters)
             size_down = list(fixed_lv[level_idx].shape)
             fi_down = fixed_lv[level_idx].tensor
             mi_down = moving_lv[level_idx].tensor
@@ -547,6 +591,11 @@ class GreedyRegistrationModel(nn.Module):
                 if verbose and (it % 25 == 0 or it == n_iters - 1):
                     print(f"  [greedy] Level {level_idx} (scale {scale}) Iter {it + 1}/{n_iters} | Loss: {loss.item():.4f}")
 
+                # the loss is read back every 5 iterations (one device sync); the level ends when it stopped decreasing
+                if (it + 1) % 5 == 0 and self.stop.update(it, float(loss.detach())):
+                    break
+            self.stop.end_level(it + 1)
+
             if self.anderson and self.anderson_freq == "per_scale":
                 if verbose:
                     print(f"  [greedy] Applying Anderson projection at scale {scale} ({self.anderson_steps} steps)...")
@@ -568,6 +617,7 @@ class GreedyRegistrationModel(nn.Module):
             warp = warp * restr_mask
 
         self.loss_history = [float(l.item()) if hasattr(l, "item") else float(l) for l in self.loss_history]
+        self.convergence = list(self.stop.records)
         self.warp = warp
         return warp
 
@@ -745,6 +795,11 @@ def greedy_registration(
     reg_mode = str(kwargs.pop("regularizer", "gaussian")).lower()
     squared = bool(kwargs.pop("squared", True))
     interpolator = kwargs.pop("interpolator", "linear")
+    # syntx >= 6.16 / 6.36 options (None / 0 disables the early stop; digital_diffeomorphism=False the finish polish)
+    convergence_slope = kwargs.pop("convergence_slope", DEFAULT_SLOPE_THRESHOLD)
+    digital_diffeomorphism = bool(kwargs.pop("digital_diffeomorphism", True))
+    digital_diffeomorphism_floor = float(kwargs.pop("digital_diffeomorphism_floor", 0.05))
+    digital_diffeomorphism_steps = int(kwargs.pop("digital_diffeomorphism_steps", 25))
     if kwargs:
         raise TypeError(f"antstorch.greedy() got unexpected keyword(s) {sorted(kwargs)}")
 
@@ -754,7 +809,7 @@ def greedy_registration(
         regularizer=reg_mode, regadam_sigma=regadam_sigma, lncc_radius=lncc_radius,
         similarity_metric=similarity_metric, squared=squared, anderson=anderson, anderson_steps=anderson_steps,
         anderson_m=anderson_m, anderson_freq=anderson_freq, padding_mode=padding_mode,
-        restrict_transformation=restrict_transformation, device=torch_device)
+        restrict_transformation=restrict_transformation, device=torch_device, convergence_slope=convergence_slope)
     t0_opt = time.time()
     warp = model.fit(fixed_tensor=fi_t, moving_tensor=mi_t, theta=theta, scales=scales, iterations=reg_iterations,
                      fixed_mask_tensor=mask_t, verbose=verbose,
@@ -767,6 +822,39 @@ def greedy_registration(
                                  align_corners=True)
     disp_img = _grid_to_ants_displacement(full_id_grid + warp, fixed, P_F, P_F,
                                           restrict_transformation=restrict_transformation)
+
+    # 7b. Physical inverse and/or digital-diffeomorphism finish (syntx >= 6.36, default on). Fields go to the
+    # tensor layout (axes AND components reversed, syntx.spatial.disp_itk_to_tensor) before the physical inverse:
+    # before syntx 6.36 (and in this port until 2026-11-18) the inverse was solved on ``numpy().T``, i.e. with the
+    # components left in (x, y, z) order against a (z, y, x) physical grid.
+    from .syn.bridge import displacement_zyx_to_ants_image
+    _dd_on = digital_diffeomorphism and sum(reg_iterations) > 0
+    _dd_kw = dict(spacing=fixed.spacing, origin=fixed.origin, direction=fixed.direction,
+                  jac_floor=digital_diffeomorphism_floor, steps=digital_diffeomorphism_steps,
+                  stationary_boundary=(padding_mode == "border"))
+    inv_disp_img = None
+    t1_inv = 0.0
+    if return_inverse or _dd_on:
+        t0_inv = time.time()
+        disp_t = _ants_displacement_to_zyx(disp_img, torch_device)
+        if return_inverse:
+            if verbose:
+                print("[greedy] Computing physical inverse displacement field with Anderson acceleration...")
+            inv_disp_t = update_inverse_field_nd_anderson(
+                W_disp=disp_t, W_inv_disp=None, steps=max(anderson_steps, 15), m=anderson_m,
+                spacing=fixed.spacing, origin=fixed.origin, direction=fixed.direction)
+            if _dd_on:
+                from .syn.core.digital_diffeomorphism import enforce_digital_diffeomorphism_nd
+                disp_t, inv_disp_t = enforce_digital_diffeomorphism_nd(disp_t, inv_disp_t, ice_tol=0.30, **_dd_kw)
+                disp_img = _restrict_ants_displacement(displacement_zyx_to_ants_image(disp_t, fixed), restrict_transformation)
+            inv_disp_img = _restrict_ants_displacement(displacement_zyx_to_ants_image(inv_disp_t, fixed),
+                                                       restrict_transformation if _dd_on else None)
+            t1_inv = time.time() - t0_inv
+        else:
+            from .syn.core.digital_diffeomorphism import enforce_digital_diffeomorphism_nd
+            disp_t = enforce_digital_diffeomorphism_nd(disp_t, None, **_dd_kw)
+            disp_t = disp_t[0] if isinstance(disp_t, tuple) else disp_t
+            disp_img = _restrict_ants_displacement(displacement_zyx_to_ants_image(disp_t, fixed), restrict_transformation)
 
     affine_file = None
     if aff_tx is not None:
@@ -803,18 +891,8 @@ def greedy_registration(
     inv_transforms: List[str] = []
     whichtoinvert_inv: List[bool] = []
     warpedfixout = None
-    t1_inv = 0.0
-    if return_inverse:
+    if return_inverse and inv_disp_img is not None:
         t0_inv = time.time()
-        if verbose:
-            print("[greedy] Computing physical inverse displacement field with Anderson acceleration...")
-        disp_t = torch.from_numpy(disp_img.numpy().T.copy()).float().unsqueeze(0).to(torch_device)
-        inv_disp_t = update_inverse_field_nd_anderson(
-            W_disp=disp_t, W_inv_disp=None, steps=max(anderson_steps, 15), m=anderson_m,
-            spacing=fixed.spacing, origin=fixed.origin, direction=fixed.direction)
-        inv_np = inv_disp_t.squeeze(0).cpu().numpy().T
-        inv_disp_img = ants.from_numpy(inv_np.astype(np.float32), origin=fixed.origin, spacing=fixed.spacing,
-                                       direction=fixed.direction, has_components=True)
         if outprefix is not None:
             inv_file = f"{outprefix}1InverseWarp.nii.gz"
         else:
@@ -832,7 +910,7 @@ def greedy_registration(
             whichtoinvert_inv = [False]
         warpedfixout = ants.apply_transforms(fixed=moving, moving=fixed, transformlist=inv_transforms,
                                              whichtoinvert=whichtoinvert_inv, interpolator=interpolator)
-        t1_inv = time.time() - t0_inv
+        t1_inv += time.time() - t0_inv
 
     total_runtime = time.time() - t0_total
     provenance = {
@@ -851,6 +929,8 @@ def greedy_registration(
         "anderson_steps": anderson_steps if (anderson or return_inverse) else 0,
         "anderson_freq": anderson_freq if anderson else "none",
         "return_inverse": return_inverse,
+        "digital_diffeomorphism": digital_diffeomorphism,
+        "convergence": model.stop.summary(),
         "runtime_total_sec": round(total_runtime, 2),
         "runtime_affine_sec": round(t1_aff, 2),
         "runtime_deformable_sec": round(t1_opt, 2),

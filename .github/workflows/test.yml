@@ -133,6 +133,7 @@ jobs:
       - name: Install ANTsTorch and dependencies
         run: |
           pip install -e .
+          pip install --no-deps --force-reinstall git+https://github.com/ANTsX/ANTsNormalizingFlows.git@main
 
       - name: Run tests (individually via pytest)
         run: |
