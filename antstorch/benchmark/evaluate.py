@@ -109,10 +109,12 @@ _SYN_OPTIMIZER_OVERRIDE = {
 }
 _BSPLINE_SVF_MODELS = ("bspline_svf", "svf")
 _GAUSSIAN_SVF_MODELS = ("gaussian_svf",)
-_LABEL_MODELS = ("label_syn", "label_intensity_syn", "label_navier_syn", "label_intensity_navier_syn")
+_LABEL_MODELS = ("label_syn", "label_intensity_syn", "label_navier_syn", "label_intensity_navier_syn",
+                 "label_sobolev_syn", "label_intensity_sobolev_syn")
 # Deformable regularizer of each supervised arm (label_image_registration defaults to ANTs' Gaussian SyN).
 _LABEL_MODEL_REGULARIZER = {"label_syn": "gaussian", "label_intensity_syn": "gaussian",
-                            "label_navier_syn": "navier", "label_intensity_navier_syn": "navier"}
+                            "label_navier_syn": "navier", "label_intensity_navier_syn": "navier",
+                            "label_sobolev_syn": "sobolev", "label_intensity_sobolev_syn": "sobolev"}
 
 # Traditional (non-ANTsTorch) ANTs baselines, run via a direct
 # ants.registration(type_of_transform=...) call (see _run_ants_traditional()
@@ -639,8 +641,10 @@ def evaluate_mindboggle_pair(
     model : str
         ``label_syn`` and ``label_intensity_syn`` use the evaluation labels
         to guide Gaussian SyN (without/with T1 intensities);
-        ``label_navier_syn`` / ``label_intensity_navier_syn`` are the same
-        arms with the Navier-Cauchy regularizer (syntx 6.44's canonical one). These supervised arms
+        ``label_navier_syn`` / ``label_intensity_navier_syn`` and
+        ``label_sobolev_syn`` / ``label_intensity_sobolev_syn`` are the same
+        arms with the Navier-Cauchy (syntx 6.44's canonical) or Sobolev
+        regularizer. These supervised arms
         start from the canonical affine and default to levels (4,2,1),
         iterations (100,100,20), label weight 1, and CC radius 2 for T1.
         Their Dice is an in-objective fit measure, not held-out accuracy.

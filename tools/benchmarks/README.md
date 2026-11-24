@@ -58,12 +58,15 @@ Four optional supervised arms call `antstorch.label_image_registration`:
 | `label_intensity_syn` | The same label terms plus T1 local CC (radius 2, weight 1) | Gaussian (ANTs SyN) | Same shared canonical affine |
 | `label_navier_syn` | As `label_syn` | Navier-Cauchy (s = 2, ν = 0.20, `sobolev_alpha` 1.5, `flow_sigma` √2.4) | Same shared canonical affine |
 | `label_intensity_navier_syn` | As `label_intensity_syn` | Navier-Cauchy, as above | Same shared canonical affine |
+| `label_sobolev_syn` | As `label_syn` | Sobolev Green operator (`sobolev_alpha` 2.25, `flow_sigma` √2.4, conservative post-filter) | Same shared canonical affine |
+| `label_intensity_sobolev_syn` | As `label_intensity_syn` | Sobolev, as above | Same shared canonical affine |
 
 All use a 4–2–1 pyramid and 100/100/20 iterations by default, the
 `antsRegistrationSyN[so]` step (0.2), with per-label MSQ weight 1
 (`--label-weight` to change it). `label_image_registration` keeps ANTs'
 Gaussian SyN by default even though `syn_registration()` now defaults to
-`navier`; the two `*_navier_*` arms change only the regularizer.
+`navier`; the `*_navier_*` and `*_sobolev_*` arms change only the regularizer
+(and take its `flow_sigma` / `sobolev_alpha` presets).
 They have no syntx counterpart and run after the paired comparison arms.
 They keep ANTsTorch's native optimizer/inverse settings and analytical
 sampling gradients, including in fair mode; the syntx-specific fair-mode

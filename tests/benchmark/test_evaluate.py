@@ -668,7 +668,8 @@ def test_affine_time_is_cached_and_reported_separately(mock_mindboggle_dataset, 
         assert rec["runtime_seconds"] == pytest.approx(rec["affine_seconds"] + rec["deformable_seconds"])
 
 
-@pytest.mark.parametrize('model', ['label_syn', 'label_intensity_syn', 'label_navier_syn', 'label_intensity_navier_syn'])
+@pytest.mark.parametrize('model', ['label_syn', 'label_intensity_syn', 'label_navier_syn', 'label_intensity_navier_syn',
+                                   'label_sobolev_syn', 'label_intensity_sobolev_syn'])
 def test_label_guided_benchmark_uses_shared_affine_and_marks_supervision(
         mock_mindboggle_dataset, tmp_path, model):
     import torch
@@ -691,7 +692,7 @@ def test_label_guided_benchmark_uses_shared_affine_and_marks_supervision(
     assert rec['labels_used_for_optimization'] is True
     assert rec['intensity_images_used_for_deformation'] == model.startswith('label_intensity')
     provenance = rec['registration_provenance']
-    assert provenance['regularizer'] == ('navier' if 'navier' in model else 'gaussian')
+    assert provenance['regularizer'] == ('navier' if 'navier' in model else 'sobolev' if 'sobolev' in model else 'gaussian')
     assert provenance['affine_fit'] is False
     assert provenance['reg_iterations'] == (1, 1)
     assert provenance['intensity_image_pairs'] == (1 if model.startswith('label_intensity') else 0)

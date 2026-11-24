@@ -95,7 +95,8 @@ warnings.filterwarnings("ignore", message=r"flow_sigma=.*has no effect", categor
 PAIR_INDICES_DEFAULT = [0, 24, 88]
 _BASE_MODELS = ["gaussian", "sobolev", "dsti", "bspline", "navier", "div_curl"]
 SVF_MODELS = ["bspline_svf", "gaussian_svf"]  # ANTsTorch stationary velocity fields: no syntx counterpart, antstorch-only arms
-LABEL_MODELS = ["label_syn", "label_intensity_syn", "label_navier_syn", "label_intensity_navier_syn"]
+LABEL_MODELS = ["label_syn", "label_intensity_syn", "label_navier_syn", "label_intensity_navier_syn",
+                "label_sobolev_syn", "label_intensity_sobolev_syn"]
 ANTSTORCH_ONLY_MODELS = SVF_MODELS + LABEL_MODELS
 # syntx.greedy vs antstorch.greedy (see _run_greedy): "greedy" = both libraries' own defaults (syntx 6.44 canonical:
 # navier + cfl), "greedy_regadam" = the same with optimizer='regadam', "greedy_gaussian" = the former default
@@ -1184,7 +1185,8 @@ def main():
                          "bspline_svf / gaussian_svf are ANTsTorch stationary-velocity-field models with no syntx counterpart: "
                          "antstorch only, from the shared affine, scored with the same Dice / time / Jacobian measures. "
                          "label_syn / label_intensity_syn are supervised label-only / label+T1 Gaussian SyN arms, "
-                         "label_navier_syn / label_intensity_navier_syn the same with the navier regularizer, all antstorch only. "
+                         "label_navier_syn / label_intensity_navier_syn and label_sobolev_syn / label_intensity_sobolev_syn "
+                         "the same with the navier / sobolev regularizer, all antstorch only. "
                          "navier / div_curl: syntx 6.44's continuum regularizers (navier = both libraries' canonical default). "
                          "greedy = navier + cfl (6.44 defaults), greedy_gaussian = the former gaussian + adam greedy.")
     ap.add_argument("--label-weight", type=float, default=1.0,
@@ -1459,7 +1461,8 @@ f"antstorch inverse_schedule : {_eff_schedule}"
     if any(model in LABEL_MODELS for model in args.models):
         md_lines.extend([
             "", "**Supervised label-guided arms:** `label_syn` (labels only) and `label_intensity_syn` (labels + T1), "
-            "Gaussian SyN; `label_navier_syn` / `label_intensity_navier_syn`, the same with the navier regularizer; "
+            "Gaussian SyN; `label_navier_syn` / `label_intensity_navier_syn` and `label_sobolev_syn` / "
+            "`label_intensity_sobolev_syn`, the same with the navier / sobolev regularizer; "
             "optimize the same DKT31 labels used for Dice scoring. Their Dice measures fit to supplied anatomy, "
             "not held-out accuracy, and is not a like-for-like comparison with intensity-only arms. "
             f"Per-label MSQ weight: {LABEL_WEIGHT}. Both start from the cached canonical affine "
