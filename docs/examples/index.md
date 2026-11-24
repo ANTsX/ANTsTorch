@@ -1,20 +1,27 @@
-# Runnable examples
+# Example notebooks
 
-Install ANTsTorch first, then run these commands from the repository root.
-The scripts complement the [ANTsX tutorial](https://gist.github.com/ntustison/12a656a5fc2f6f9c4494c88dc09c5621);
-they use ANTsTorch rather than assuming ANTsPyNet APIs are interchangeable.
+The [notebook collection](https://github.com/ANTsX/ANTsTorch/blob/main/examples/README.md) provides executable tutorials
+adapted to ANTsTorch. Install with `python -m pip install -e '.[notebooks]'`,
+register the environment with `python -m ipykernel install --user --name python3`,
+and open the notebooks in Jupyter or VS Code using that kernel.
 
-| Example | Command | Data and outputs |
-| --- | --- | --- |
-| U-Net forward pass | `python examples/unet_2d.py` | Offline; prints `(1, 3, 64, 64)` probabilities from random weights |
-| N4 correction | `python examples/n4_synthetic.py` | Offline; prints corrected tensor shape; short synthetic demonstration |
-| SyN registration | `python examples/syn_registration.py` | Downloads r16/r64; writes warped image, Jacobian and transforms to `example_outputs/syn/` |
-| Brain extraction | `python examples/brain_extraction.py /path/to/t1.nii.gz` | Downloads pretrained assets; writes probability, thresholded mask and brain image to `example_outputs/brain/` |
+| Notebook | Data and outputs |
+| --- | --- |
+| {download}`Getting started <../../examples/getting_started.ipynb>` | Offline; image geometry and tensor conversion |
+| {download}`2-D U-Net <../../examples/unet_2d.ipynb>` | Offline; probability maps from random weights |
+| {download}`N4 correction <../../examples/n4_bias_correction.ipynb>` | Offline; synthetic bias correction and nonuniformity measurement |
+| {download}`SyN registration <../../examples/syn_registration.ipynb>` | Downloads r16/r64; warped image, Jacobian and transforms |
+| {download}`Brain extraction <../../examples/brain_extraction.ipynb>` | Downloads T1 and pretrained assets; probability, mask and brain image |
+| {download}`Deep Atropos <../../examples/deep_atropos.ipynb>` | Downloads T1 and pretrained assets; segmentation and tissue probabilities |
+| {download}`Cortical thickness <../../examples/cortical_thickness.ipynb>` | Downloads T1 and pretrained assets; tissue maps and DiReCT thickness |
 
-The last two scripts accept `--device` and `--output-dir`; `--help` lists their
-options. Existing files with the same output names are overwritten. Brain
-extraction uses a 0.5 probability threshold; inspect the mask on your input image.
-Scripts do not open plot windows and are not executed during documentation builds.
+All notebooks default to CPU. Pretrained applications can take several minutes
+or longer and substantial memory. Set `t1_path` to an absolute path to use a
+local scalar 3-D T1 image. Application outputs go to `example_outputs/` relative
+to the kernel working directory and matching filenames are overwritten.
+
+Notebooks are not executed during documentation builds. Pytest validates their
+format and supports opt-in execution; see [testing instructions](https://github.com/ANTsX/ANTsTorch/blob/main/tests/README.md).
 
 ```{toctree}
 :maxdepth: 1

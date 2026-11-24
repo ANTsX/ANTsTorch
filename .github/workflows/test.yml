@@ -132,7 +132,7 @@ jobs:
 
       - name: Install ANTsTorch and dependencies
         run: |
-          pip install -e .
+          pip install -e ".[notebooks]"
           pip install --no-deps --force-reinstall git+https://github.com/ANTsX/ANTsNormalizingFlows.git@main
 
       - name: Run tests (individually via pytest)
@@ -147,3 +147,8 @@ jobs:
             pytest -v -s --forked --strict-markers --test-device=cpu "$f" || exit 1
             python -c "import psutil; print('Memory after :', psutil.virtual_memory().used // (1024*1024), 'MB')"
           done < <(find tests -type f -name 'test_*.py' -print0 | sort -z)
+
+      - name: Execute offline example notebooks
+        run: |
+          python -m pytest tests/examples --run-notebooks --test-device=cpu --strict-markers \
+            -m "not requires_data and not slow and not cuda and not mps"

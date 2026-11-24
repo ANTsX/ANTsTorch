@@ -30,9 +30,9 @@ It complements [ANTsPyNet](https://github.com/ANTsX/ANTsPyNet/) and [ANTsRNet](h
 
 | Area | Capabilities | Start here |
 | --- | --- | --- |
-| **Deep learning** | 2-D and 3-D U-Nets, ResNets, dense networks, deep back-projection networks, and task-specific architectures | [U-Net example](examples/unet_2d.py) |
+| **Deep learning** | 2-D and 3-D U-Nets, ResNets, dense networks, deep back-projection networks, and task-specific architectures | [U-Net example](examples/unet_2d.ipynb) |
 | **Pretrained applications** | Brain extraction, tissue segmentation, anatomical labeling, lung imaging, super-resolution, and more | [Application catalog](#pretrained-applications) |
-| **Image processing** | Preprocessing, augmentation, and tensor-native N4 bias field correction | [N4 example](examples/n4_synthetic.py) |
+| **Image processing** | Preprocessing, augmentation, and tensor-native N4 bias field correction | [N4 example](examples/n4_bias_correction.ipynb) |
 | **Registration** | SyN, affine, and B-spline stationary velocity field registration | [SyN tutorial](docs/antsx_tutorial_syn.md) · [B-spline tutorial](docs/antsx_tutorial_bspline_flows.md) |
 | **Cortical thickness** | Segmentation-driven workflows and a tensor implementation of DiReCT | [Implementation guide](antstorch/direct/README.md) |
 | **Normalizing flows** | Flow architectures and LAMNR hybrid training workflows | [Training guide](docs/lamnr_hybrid_trainer.md) |
@@ -104,21 +104,19 @@ Weights and templates download on first use and are cached under `~/.antstorch`.
 
 ### Run the examples
 
-From the repository root after installation:
+Explore the [Jupyter notebook collection](examples/README.md), starting with
+[Getting started](examples/getting_started.ipynb). It includes U-Net, N4, SyN,
+brain extraction, Deep Atropos and cortical thickness workflows.
 
 ```bash
-# Synthetic examples: no data or pretrained-weight downloads
-python examples/unet_2d.py
-python examples/n4_synthetic.py
-
-# Registration: downloads ANTsPy sample images
-python examples/syn_registration.py --output-dir example_outputs/syn
-
-# Brain extraction: provide your own T1 MRI
-python examples/brain_extraction.py /path/to/t1.nii.gz --output-dir example_outputs/brain
+python -m pip install -e '.[notebooks]'
+python -m ipykernel install --user --name python3 --display-name "Python 3 (ANTsTorch)"
 ```
 
-Registration and brain extraction examples default to CPU and accept `--device` and `--output-dir`. Matching output files are overwritten. See the [example guide](docs/examples/index.md) for outputs and limitations, and the [installation guide](docs/installation.md#devices-and-data) for device constraints.
+Open a notebook in Jupyter or VS Code and select this kernel. The first three
+notebooks use synthetic data; registration and pretrained applications download
+sample images or model assets. See the [example guide](docs/examples/index.md)
+for resources and outputs.
 
 ## Pretrained applications
 

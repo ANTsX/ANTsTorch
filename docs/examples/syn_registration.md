@@ -1,8 +1,7 @@
 # SyN registration
 
-{download}`Download the script <../../examples/syn_registration.py>`
+{download}`Download the notebook <../../examples/syn_registration.ipynb>`
 
-```{literalinclude} ../../examples/syn_registration.py
-:language: python
-:linenos:
-```
+Download the r16/r64 samples, run registration and inspect the warped image and Jacobian.
+
+See the [notebook guide](https://github.com/ANTsX/ANTsTorch/blob/main/examples/README.md) for installation and execution.

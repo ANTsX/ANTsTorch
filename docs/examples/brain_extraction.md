@@ -1,11 +1,10 @@
-# T1 brain extraction
+# Brain extraction
 
-{download}`Download the script <../../examples/brain_extraction.py>`
+{download}`Download the notebook <../../examples/brain_extraction.ipynb>`
 
-```{literalinclude} ../../examples/brain_extraction.py
-:language: python
-:linenos:
-```
+Run pretrained T1 extraction on a downloadable sample or a local image, inspect probabilities and save a thresholded mask.
+
+See the [notebook guide](https://github.com/ANTsX/ANTsTorch/blob/main/examples/README.md) for installation and execution.
 
 ## PET brain extraction
 

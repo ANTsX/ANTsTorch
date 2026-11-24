@@ -14,6 +14,14 @@ import pytest
 
 def pytest_addoption(parser):
     parser.addoption(
+        "--run-notebooks", action="store_true", default=False,
+        help="Execute example notebooks in isolated Jupyter kernels (requires notebook dependencies).",
+    )
+    parser.addoption(
+        "--notebook-timeout", type=int, default=300,
+        help="Maximum execution time in seconds per notebook cell (default: 300).",
+    )
+    parser.addoption(
         "--test-device", choices=("auto", "cpu", "cuda", "mps"), default="auto",
         help="ANTsTorch default device during tests; explicitly requested devices are unchanged.",
     )
