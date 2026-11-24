@@ -88,7 +88,7 @@ data explicitly rather than relying on the repository working directory. Outputs
 are not saved back to source notebooks. The selected test device sets ANTsTorch's
 default in the kernel; explicit device arguments in cells still take precedence.
 Downloads may still populate the usual library caches. The collection includes
-five offline notebooks and seven notebooks marked `requires_data` and `slow`.
+seven offline notebooks and eleven notebooks marked `requires_data` and `slow`.
 
 ## Markers and fixtures
 
@@ -122,7 +122,11 @@ per-file and per-test process isolation while covering the nested components.
 The data preparation/cache job supplies external templates and models.
 GPU tests skip when their required hardware is unavailable.
 
-A separate ordinary pytest invocation executes the five offline example
+The WMH notebook additionally requires a real paired T1/FLAIR input. To execute
+it, set `ANTSTORCH_EXAMPLE_T1` and `ANTSTORCH_EXAMPLE_FLAIR` to existing absolute
+paths. Its `requires_data` marker excludes it from offline CI execution.
+
+A separate ordinary pytest invocation executes the seven offline example
 notebooks in their own Jupyter kernels. Data-dependent notebook execution remains
 opt-in; their notebook schemas are validated in the per-file test pass.
 
