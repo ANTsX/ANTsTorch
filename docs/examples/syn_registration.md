@@ -4,4 +4,4 @@
 
 Download the r16/r64 samples, run registration and inspect the warped image and Jacobian.
 
-See the [notebook guide](../../examples/README.md) for installation and execution.
+See the [notebook guide](https://github.com/ANTsX/ANTsTorch/blob/main/examples/README.md) for installation and execution.

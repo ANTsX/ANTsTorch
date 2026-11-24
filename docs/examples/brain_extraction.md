@@ -4,7 +4,7 @@
 
 Run pretrained T1 extraction on a downloadable sample or a local image, inspect probabilities and save a thresholded mask.
 
-See the [notebook guide](../../examples/README.md) for installation and execution.
+See the [notebook guide](https://github.com/ANTsX/ANTsTorch/blob/main/examples/README.md) for installation and execution.
 
 ## PET brain extraction
 
