@@ -107,7 +107,8 @@ Weights and templates download on first use and are cached under `~/.antstorch`.
 Explore the [Jupyter notebook collection](examples/README.md), starting with
 [Getting started](examples/getting_started.ipynb). It includes U-Net, N4, SyN,
 brain extraction, Deep Atropos, cortical thickness, Harvard–Oxford, DKT, SIAM,
-B-spline fitting and denoising workflows.
+B-spline fitting and registration, data augmentation, denoising, Deep FLASH,
+white matter hyperintensities, mouse brain analysis and MRI super-resolution workflows.
 
 ```bash
 python -m pip install -e '.[notebooks]'
