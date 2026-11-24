@@ -40,7 +40,8 @@ ORDER = ["navier", "navier_regadam", "div_curl", "div_curl_regadam",
          "gaussian", "gaussian_regadam", "sobolev", "sobolev_regadam", "dsti", "dsti_regadam", "bspline", "bspline_regadam",
          "greedy", "greedy_regadam", "greedy_gaussian", "bspline_svf", "gaussian_svf",
          "label_syn (supervised)", "label_intensity_syn (supervised)",
-         "label_navier_syn (supervised)", "label_intensity_navier_syn (supervised)"]
+         "label_navier_syn (supervised)", "label_intensity_navier_syn (supervised)",
+         "label_sobolev_syn (supervised)", "label_intensity_sobolev_syn (supervised)"]
 
 
 def _load(path):

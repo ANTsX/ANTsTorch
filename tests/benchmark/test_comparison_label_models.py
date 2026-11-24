@@ -16,7 +16,8 @@ def load_script(name):
     return module
 
 
-@pytest.mark.parametrize('model', ['label_syn', 'label_intensity_syn', 'label_navier_syn', 'label_intensity_navier_syn'])
+@pytest.mark.parametrize('model', ['label_syn', 'label_intensity_syn', 'label_navier_syn', 'label_intensity_navier_syn',
+                                   'label_sobolev_syn', 'label_intensity_sobolev_syn'])
 def test_label_models_route_only_to_antstorch_and_appear_in_summary(tmp_path, monkeypatch, model):
     comparison = load_script('compare_syntx_antstorch_mindboggle')
     monkeypatch.setattr(comparison, '_add_jacobian', lambda rec, pair: rec)
