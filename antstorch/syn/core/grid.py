@@ -229,7 +229,11 @@ def grid_sample_nd(input, grid, mode='bilinear', padding_mode='border', align_co
     use_analytical_gradients : bool
         If ``True`` and ``grid.requires_grad`` while ``input`` does not,
         route through :class:`AnalyticalGridSample` for a cheaper backward
-        pass. Ignored for the B-spline/nearest backends.
+        pass (the sampled image gradient, not the exact derivative of the
+        bilinear interpolation; only the forward ``grid_sample`` kernel is
+        used, which matters on MPS). Ignored for the B-spline/nearest
+        backends. Unlike syntx's ``use_analytical_gradients``, this never
+        changes the similarity metric's own gradient.
 
     Returns
     -------

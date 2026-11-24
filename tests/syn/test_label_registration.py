@@ -130,7 +130,7 @@ def test_metric_weighting_and_mask_exclusion(tmp_path):
     assert masked['loss_history'] == [0.0]
 
 
-@pytest.mark.parametrize('regularizer', ['gaussian', 'sobolev', 'dsti', 'bspline'])
+@pytest.mark.parametrize('regularizer', ['gaussian', 'sobolev', 'dsti', 'bspline', 'navier', 'div_curl'])
 def test_regularizers_and_best_state_use_multivariate_objective(tmp_path, regularizer):
     fixed, moving = labels(), labels(shift=1)
     result = label_image_registration(fixed, moving, initial_transforms='identity',
@@ -148,3 +148,13 @@ def test_identity_on_different_domains(tmp_path, d):
     result = label_image_registration(fixed, moving, initial_transforms='identity',
         levels=(1,), reg_iterations=(1,), device='cpu', output_prefix=str(tmp_path / 'reg'))
     assert np.isfinite(result['loss_history']).all()
+
+
+def test_default_regularizer_is_ants_gaussian_syn(tmp_path):
+    """syn_registration()'s default became 'navier' (syntx 6.44, #103); the ANTs [so] presets stay Gaussian SyN."""
+    fixed, moving = labels(), labels(shift=1)
+    kw = dict(initial_transforms='identity', levels=(2, 1), reg_iterations=(2, 2), device='cpu')
+    default = label_image_registration(fixed, moving, output_prefix=str(tmp_path / 'a'), **kw)
+    assert default['provenance']['regularizer'] == 'gaussian'
+    navier = label_image_registration(fixed, moving, regularizer='navier', output_prefix=str(tmp_path / 'b'), **kw)
+    assert navier['provenance']['regularizer'] == 'navier'

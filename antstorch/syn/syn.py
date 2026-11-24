@@ -56,6 +56,7 @@ from torch import Tensor
 
 from ..ants_transform_io import build_transform_lists, default_outprefix, write_affine_transform
 from ..registration import reg_adam_direction
+from .robust_affine import _mps_grid_sample_backward_available
 from .core.regularizers import (
     COUPLED_CONTINUUM_REGULARIZERS,
     REGULARIZER_EXTRA_KEYS,
@@ -1260,6 +1261,19 @@ def syn_registration(
     ``optimizer_lr`` (default 1.0, syntx's), sets the step. For the spectral (``'sobolev'``/``'dsti'``)
     and continuum regularizers. ``optimizer='cfl'`` is an alias of ``'gradient_descent'`` (syntx's name).
 
+    ``use_analytical_gradients`` (default ``True``) only selects how the dense-SyN image sampling
+    is differentiated with respect to the half-warps: ``True`` uses ``AnalyticalGridSample`` (the
+    image's own central-difference gradient, resampled at the warped point -- needs only the
+    ``grid_sample`` *forward* kernel, so 3-D SyN runs on MPS); ``False`` differentiates the
+    bilinear interpolation itself through autograd (needs ``grid_sampler_*d_backward``; on an MPS
+    build without it the call falls back to CPU with a ``RuntimeWarning``). The similarity metric
+    is always differentiated by autograd. **This is not syntx's option of the same name**: in
+    ``syntx.syn`` (default ``False``) ``True`` additionally replaces the LNCC gradient with the
+    ITK/ANTs pseudo-gradient (``ANTsPseudoLNCC``), which this function never does -- so
+    ``False`` here does not reproduce syntx's default any more than ``True`` does (both differ
+    from it in the sampler derivative only; measured 2026-11-23 on a synthetic 3-D pair, neither
+    setting is closer to ``syntx.syn``'s field).
+
     ``gaussian_sigma_mode`` and ``conservative_smooth`` tune two
     ``'gaussian'``/``'sobolev'``/``'dsti'`` regularizer-formula details that
     this port intentionally resolves differently from ``syntx.syn``'s own
@@ -1594,6 +1608,25 @@ def syn_registration(
     needs_internal_affine_fit = initial_affine is None and (
         type_of_transform in _LINEAR_TRANSFORM_TYPES or type_of_transform == "SyN"
     )
+    # use_analytical_gradients=False differentiates the dense-SyN image sampling through the native
+    # grid_sample backward (aten::grid_sampler_{2,3}d_backward), which MPS lacks on the PyTorch
+    # builds tested (and, for 2-D, on some builds). The forward-only probes below assume the
+    # AnalyticalGridSample path, so this case is checked first, for 2-D and 3-D alike.
+    needs_sampler_backward = (
+        not use_analytical_gradients and type_of_transform in _SYN_TRANSFORM_TYPES and sum(reg_iterations) > 0
+    )
+    if (resolved_device.type == "mps" and needs_sampler_backward
+            and not _mps_grid_sample_backward_available(dimension)):
+        warnings.warn(
+            f"syn_registration: use_analytical_gradients=False needs the {dimension}-D "
+            f"torch.nn.functional.grid_sample backward MPS kernel "
+            f"(aten::grid_sampler_{dimension}d_backward), which this PyTorch build lacks, so "
+            "falling back to CPU for this call. Keep use_analytical_gradients=True (the default: "
+            "its hand-written backward only needs the forward kernel) to stay on MPS, or set "
+            "PYTORCH_ENABLE_MPS_FALLBACK=1 to let PyTorch fall back op by op.",
+            RuntimeWarning,
+        )
+        resolved_device = torch.device("cpu")
     if resolved_device.type == "mps" and dimension == 3:
         if needs_internal_affine_fit and not mps_grid_sample_3d_available():
             # mps_grid_sample_3d_available() probes forward AND backward: PyTorch

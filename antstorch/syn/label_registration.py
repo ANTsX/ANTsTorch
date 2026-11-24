@@ -128,7 +128,12 @@ def label_image_registration(
     a deterministic full-sampling objective, not ANTs C++ numerical parity.
 
     Extra keyword arguments configure :func:`syn_registration` (e.g.
-    levels, reg_iterations, regularizer, optimizer, flow_sigma). CUDA/MPS
+    levels, reg_iterations, regularizer, optimizer, flow_sigma). The
+    regularizer defaults to ``'gaussian'`` (ANTs' SyN), not to
+    :func:`syn_registration`'s ``'navier'``; ``regularizer='navier'`` (or
+    another continuum operator) also takes that operator's
+    ``flow_sigma`` / ``sobolev_alpha`` presets, while the step size and
+    schedule still come from the ANTs preset. CUDA/MPS
     execute the deformable optimization; centroid fitting and image/transform
     I/O run on CPU. Masks restrict the deformable metrics. Binary masks are
     interpolated linearly during optimization, not by nearest neighbor.
@@ -199,8 +204,10 @@ def label_image_registration(
             m, t = read_affine_transform(str(path), d)
             matrix, translation = m @ matrix, m @ translation + t
 
+    # regularizer="gaussian": the antsRegistrationSyN[so] presets are ANTs' Gaussian SyN. syn_registration()'s
+    # own default became 'navier' with syntx 6.44 (#103); pass regularizer= to choose another one.
     options = dict(levels=(8, 4, 2, 1), reg_iterations=(100, 70, 50, 20),
-                   grad_step=0.2, syn_metric="mse", neighborhood_radius=0)
+                   grad_step=0.2, syn_metric="mse", neighborhood_radius=0, regularizer="gaussian")
     deformable = type_of_deformable_transform is not None and type_of_deformable_transform != ""
     intensity_metric, parameter = "CC", 2
     if deformable:

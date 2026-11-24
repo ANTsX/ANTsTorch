@@ -28,7 +28,7 @@
 Most of ANTsTorch's registration code follows [syntx](https://github.com/stnava/syntx).  ANTsTorch also includes a stationary velocity flow (SVF) framework.
 
 - **The dense SyN formulation:** symmetric, midpoint-based, Eulerian fields, local cross-correlation (`cc2`), 4-2-1 pyramid, and the fluid regularizers (Gaussian, Sobolev, DST-I).
-- **`greedy`:** the one-directional compositive model of `syntx.greedy`, including syntx's millimetre-isotropic deformable pyramid, loss-slope early stop and default-on digital-diffeomorphism finish (`antstorch.greedy`, matched to syntx v6.39 on CPU to 1e-5). Note: before 2026-11-18 the inverse used for Dice moving was solved with the vector components in the wrong order (as in syntx < 6.36), so earlier `greedy` Dice moving values are not comparable.
+- **`greedy`:** the one-directional compositive model of `syntx.greedy`, including syntx's millimetre-isotropic deformable pyramid, loss-slope early stop and default-on digital-diffeomorphism finish (`antstorch.greedy`, bit-identical to syntx v6.44 on CPU; default navier + cfl since 2026-11-23). Note: before 2026-11-18 the inverse used for Dice moving was solved with the vector components in the wrong order (as in syntx < 6.36), so earlier `greedy` Dice moving values are not comparable.
 - **The benchmark protocol:** the 90 Mindboggle pairs, N4 pre-processing, the DKT31 Dice measures, and the
   model names (`gaussian`, `sobolev`, `dsti`, ...).
 - **The syntx default hyper-parameters** (`syntx_defaults=True`), selected per regularizer and optimizer.
@@ -39,8 +39,8 @@ Most of ANTsTorch's registration code follows [syntx](https://github.com/stnava/
 
 | Family | ANTsTorch entry point | Model names | Inverse |
 |---|---|---|---|
-| Dense SyN | `antstorch.syn.syn_registration` | `gaussian_syn`, `sobolev_syn`, `dsti_syn`, `bspline_syn` | yes (symmetric) |
-| Greedy (compositive) | `antstorch.greedy.greedy_registration` (alias `greedy`) | `greedy`, `greedy_regadam` | no (optional Anderson inverse with `return_inverse=True`) |
+| Dense SyN | `antstorch.syn.syn_registration` | `navier_syn` (default regularizer since syntx 6.44), `div_curl_syn`, `gaussian_syn`, `sobolev_syn`, `dsti_syn`, `bspline_syn` | yes (symmetric) |
+| Greedy (compositive) | `antstorch.greedy.greedy_registration` (alias `greedy`) | `greedy` (navier + cfl), `greedy_regadam`, `greedy_gaussian` (former gaussian + adam default) | no (optional Anderson inverse with `return_inverse=True`) |
 | Stationary velocity field (SVF) | `antstorch.bspline_flows.bspline_svf_registration`, `gaussian_svf_registration` | `bspline_svf` (alias `svf`), `gaussian_svf` | yes (by integration) |
 | ANTs baselines | `ants.registration` | `ants_syn_quick`, any deformable-only `type_of_transform` | — |
 
@@ -50,15 +50,20 @@ Most of ANTsTorch's registration code follows [syntx](https://github.com/stnava/
 
 ### Label-guided ANTsTorch arms
 
-Two optional supervised arms call `antstorch.label_image_registration`:
+Four optional supervised arms call `antstorch.label_image_registration`:
 
-| Model | Deformable objective | Initialization |
-|---|---|---|
-| `label_syn` | One binary MeanSquares term per common nonzero DKT31 label | Shared canonical affine |
-| `label_intensity_syn` | The same label terms plus T1 local CC (radius 2, weight 1) | Same shared canonical affine |
+| Model | Deformable objective | Regularizer | Initialization |
+|---|---|---|---|
+| `label_syn` | One binary MeanSquares term per common nonzero DKT31 label | Gaussian (ANTs SyN) | Shared canonical affine |
+| `label_intensity_syn` | The same label terms plus T1 local CC (radius 2, weight 1) | Gaussian (ANTs SyN) | Same shared canonical affine |
+| `label_navier_syn` | As `label_syn` | Navier-Cauchy (s = 2, ν = 0.20, `sobolev_alpha` 1.5, `flow_sigma` √2.4) | Same shared canonical affine |
+| `label_intensity_navier_syn` | As `label_intensity_syn` | Navier-Cauchy, as above | Same shared canonical affine |
 
-Both use Gaussian SyN, a 4–2–1 pyramid and 100/100/20 iterations by
-default, with per-label MSQ weight 1 (`--label-weight` to change it).
+All use a 4–2–1 pyramid and 100/100/20 iterations by default, the
+`antsRegistrationSyN[so]` step (0.2), with per-label MSQ weight 1
+(`--label-weight` to change it). `label_image_registration` keeps ANTs'
+Gaussian SyN by default even though `syn_registration()` now defaults to
+`navier`; the two `*_navier_*` arms change only the regularizer.
 They have no syntx counterpart and run after the paired comparison arms.
 They keep ANTsTorch's native optimizer/inverse settings and analytical
 sampling gradients, including in fair mode; the syntx-specific fair-mode
@@ -75,7 +80,7 @@ improvement over the intensity-only arms. JSON records identify this with
 the supervised arms. The existing results table below predates these arms;
 no label-guided results are reported there yet.
 
-For example, run the usual comparison and the two new arms together:
+For example, run the usual comparison and two supervised arms together:
 
 ```bash
 python tools/benchmarks/compare_syntx_antstorch_mindboggle.py \
@@ -105,6 +110,18 @@ the canonical affine and evaluation, while including the registration call
 and its transform export. Label-mask construction is part of that call.
 Memory use grows with the number of labels; full 3-D volumes can require
 substantial accelerator memory.
+
+### syntx 6.44 arms (2026-11-23)
+
+| `--models` | ANTsTorch | syntx | Notes |
+|---|---|---|---|
+| `navier` | `navier_syn` (canonical preset) | model `syn` = `syntx.syn()` defaults (`canonical_2026_11_20`) | the default of both libraries |
+| `div_curl` | `div_curl_syn` (same preset) | model `syn` with `regularizer='div_curl'` | |
+| `navier_regadam`, `div_curl_regadam` | greedy-style `reg_adam` + the regularizer | same syntx arm as the base model | ANTsTorch only, like the other `*_regadam` |
+| `sobolev` | `sobolev_syn` (v6.39 canonical: `grad_step` 0.4, `sobolev_alpha` 2.25) | model `sobolev` with `regularizer='sobolev'`, `grad_step=0.4`, `sobolev_alpha=2.25` | **since syntx 6.44 its `sobolev` model runs navier**: pinned here so the row still compares Sobolev with Sobolev |
+| `greedy` | `antstorch.greedy` defaults (navier + cfl) | `syntx.greedy` defaults | the former `optimizer='adam'` is refused with navier |
+| `greedy_regadam` | navier + `optimizer='regadam'` | same | |
+| `greedy_gaussian` | gaussian + adam, `learning_rate` 0.375, `flow_sigma` 1.8, `total_sigma` 0.28 | same | the former `greedy` arm, for comparison with earlier runs |
 
 ### Optimizers
 
@@ -299,7 +316,8 @@ The Dice plot shows Dice fixed, the one measure available for every arm. The Jac
 export PYTHONPATH=$HOME/Pkg/syntx/src:$HOME/Pkg/ANTsTorch
 python tools/benchmarks/compare_syntx_antstorch_mindboggle.py --pairs 0 1 2 --out-dir <dir>          # validation
 python tools/benchmarks/compare_syntx_antstorch_mindboggle.py --out-dir <dir>                        # 90 pairs, fair mode
-python tools/benchmarks/compare_syntx_antstorch_mindboggle.py --models greedy greedy_regadam --out-dir <dir>
+python tools/benchmarks/compare_syntx_antstorch_mindboggle.py --models greedy greedy_regadam greedy_gaussian --out-dir <dir>
+python tools/benchmarks/compare_syntx_antstorch_mindboggle.py --models navier div_curl sobolev label_intensity_syn label_intensity_navier_syn --device cuda --out-dir <dir>   # syntx 6.44 arms + supervised label+T1
 python tools/benchmarks/compare_syntx_antstorch_mindboggle.py --models gaussian sobolev dsti bspline_svf gaussian_svf --out-dir <dir>   # SVF: ANTsTorch only
 python tools/benchmarks/compare_syntx_antstorch_mindboggle.py --fireants --device cuda:0 --out-dir <dir>
 python tools/benchmarks/compare_syntx_antstorch_mindboggle.py --fireants-only --fireants-preset fine-tuned-syntx --pairs $(seq 0 3 89) --device cuda:0 --out-dir <dir of an earlier run>   # FireANTs alone, from that run's syntx affines

@@ -16,7 +16,7 @@ def load_script(name):
     return module
 
 
-@pytest.mark.parametrize('model', ['label_syn', 'label_intensity_syn'])
+@pytest.mark.parametrize('model', ['label_syn', 'label_intensity_syn', 'label_navier_syn', 'label_intensity_navier_syn'])
 def test_label_models_route_only_to_antstorch_and_appear_in_summary(tmp_path, monkeypatch, model):
     comparison = load_script('compare_syntx_antstorch_mindboggle')
     monkeypatch.setattr(comparison, '_add_jacobian', lambda rec, pair: rec)
@@ -121,3 +121,28 @@ def test_script_selects_checkout_before_dependency_can_import_installed_package(
     result = subprocess.run([sys.executable, '-c', code], cwd=tmp_path,
                             env=environment, capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_syntx_arm_mapping_for_v644_models():
+    """syntx >= 6.44 runs canonical navier for its 'sobolev'/'syn' model: navier / div_curl go through 'syn',
+    and the sobolev arm pins its regularizer and the former canonical values."""
+    comparison = load_script('compare_syntx_antstorch_mindboggle')
+    assert comparison._SYNTX_MODEL_NAME['navier'] == comparison._SYNTX_MODEL_NAME['div_curl'] == 'syn'
+    assert comparison.SYNTX_KWARGS['sobolev']['regularizer'] == 'sobolev'
+    assert comparison.SYNTX_KWARGS['sobolev']['sobolev_alpha'] == 2.25
+    assert comparison.SYNTX_KWARGS['div_curl']['regularizer'] == 'div_curl'
+    assert 'regularizer' not in comparison.SYNTX_KWARGS['navier']
+    assert comparison._ANTSTORCH_MODEL_NAME['navier'] == 'navier_syn'
+    assert comparison._ANTSTORCH_MODEL_NAME['div_curl_regadam'] == 'div_curl_regadam'
+
+
+def test_greedy_arms_do_not_force_adam_on_navier(tmp_path, monkeypatch):
+    """optimizer='adam' with the navier default raises (componentwise Adam): 'greedy' passes no optimizer."""
+    comparison = load_script('compare_syntx_antstorch_mindboggle')
+    assert comparison.GREEDY_ARM_KWARGS['greedy'] == {}
+    assert comparison.GREEDY_ARM_KWARGS['greedy_regadam'] == {'optimizer': 'regadam'}
+    gauss = comparison.GREEDY_ARM_KWARGS['greedy_gaussian']
+    assert gauss['regularizer'] == 'gaussian' and gauss['optimizer'] == 'adam'
+    from antstorch.syn.core.optimizers import validate_regularizer_optimizer_pair
+    for kw in comparison.GREEDY_ARM_KWARGS.values():
+        validate_regularizer_optimizer_pair(kw.get('regularizer', 'navier'), kw.get('optimizer'))

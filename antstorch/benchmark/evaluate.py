@@ -93,6 +93,8 @@ _SYN_REGULARIZERS = {
     # syn_registration() default since 2026-11-23; div_curl is the former syntx.greedy (6.43) winner.
     "navier_syn": "navier",
     "div_curl_syn": "div_curl",
+    "navier_regadam": "navier",
+    "div_curl_regadam": "div_curl",
 }
 # model_lower values in _SYN_REGULARIZERS above that additionally force
 # syn_registration(optimizer=...) rather than leaving it at 'gradient_descent'
@@ -102,10 +104,15 @@ _SYN_OPTIMIZER_OVERRIDE = {
     "sobolev_regadam": "reg_adam",
     "dsti_regadam": "reg_adam",
     "bspline_regadam": "reg_adam",
+    "navier_regadam": "reg_adam",
+    "div_curl_regadam": "reg_adam",
 }
 _BSPLINE_SVF_MODELS = ("bspline_svf", "svf")
 _GAUSSIAN_SVF_MODELS = ("gaussian_svf",)
-_LABEL_MODELS = ("label_syn", "label_intensity_syn")
+_LABEL_MODELS = ("label_syn", "label_intensity_syn", "label_navier_syn", "label_intensity_navier_syn")
+# Deformable regularizer of each supervised arm (label_image_registration defaults to ANTs' Gaussian SyN).
+_LABEL_MODEL_REGULARIZER = {"label_syn": "gaussian", "label_intensity_syn": "gaussian",
+                            "label_navier_syn": "navier", "label_intensity_navier_syn": "navier"}
 
 # Traditional (non-ANTsTorch) ANTs baselines, run via a direct
 # ants.registration(type_of_transform=...) call (see _run_ants_traditional()
@@ -631,7 +638,9 @@ def evaluate_mindboggle_pair(
         Index of the pair (0 to 89 for the bundled default pairs.csv).
     model : str
         ``label_syn`` and ``label_intensity_syn`` use the evaluation labels
-        to guide SyN (without/with T1 intensities). These supervised arms
+        to guide Gaussian SyN (without/with T1 intensities);
+        ``label_navier_syn`` / ``label_intensity_navier_syn`` are the same
+        arms with the Navier-Cauchy regularizer (syntx 6.44's canonical one). These supervised arms
         start from the canonical affine and default to levels (4,2,1),
         iterations (100,100,20), label weight 1, and CC radius 2 for T1.
         Their Dice is an in-objective fit measure, not held-out accuracy.
@@ -823,7 +832,8 @@ def evaluate_mindboggle_pair(
         label_kwargs = {key: kwargs[key] for key in _SYN_FORWARDED_KWARGS + ("reg_iterations", "regularizer") if key in kwargs}
         label_kwargs.setdefault("levels", (4, 2, 1))
         label_kwargs.setdefault("reg_iterations", (100, 100, 20))
-        with_intensity = model_lower == "label_intensity_syn"
+        label_kwargs.setdefault("regularizer", _LABEL_MODEL_REGULARIZER[model_lower])
+        with_intensity = model_lower.startswith("label_intensity")
         res_reg = label_image_registration(
             fixed_label_images=fl, moving_label_images=ml,
             fixed_intensity_images=fi if with_intensity else None,
@@ -977,7 +987,7 @@ def evaluate_mindboggle_pair(
         record.update(
             supervision="evaluation_labels",
             labels_used_for_optimization=True,
-            intensity_images_used_for_deformation=model_lower == "label_intensity_syn",
+            intensity_images_used_for_deformation=model_lower.startswith("label_intensity"),
             label_image_weighting=kwargs.get("label_image_weighting", 1.0),
             registration_provenance=res_reg.get("provenance", {}),
         )

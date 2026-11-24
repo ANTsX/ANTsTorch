@@ -93,11 +93,15 @@ sys.path.insert(0, ANTSTORCH_ROOT)
 warnings.filterwarnings("ignore", message=r"flow_sigma=.*has no effect", category=UserWarning)
 
 PAIR_INDICES_DEFAULT = [0, 24, 88]
-_BASE_MODELS = ["gaussian", "sobolev", "dsti", "bspline"]
+_BASE_MODELS = ["gaussian", "sobolev", "dsti", "bspline", "navier", "div_curl"]
 SVF_MODELS = ["bspline_svf", "gaussian_svf"]  # ANTsTorch stationary velocity fields: no syntx counterpart, antstorch-only arms
-LABEL_MODELS = ["label_syn", "label_intensity_syn"]
+LABEL_MODELS = ["label_syn", "label_intensity_syn", "label_navier_syn", "label_intensity_navier_syn"]
 ANTSTORCH_ONLY_MODELS = SVF_MODELS + LABEL_MODELS
-MODELS = _BASE_MODELS + [f"{m}_regadam" for m in _BASE_MODELS] + ["greedy", "greedy_regadam"] + ANTSTORCH_ONLY_MODELS  # syntx.greedy vs antstorch.greedy, optimizer adam / regadam (see _run_greedy)
+# syntx.greedy vs antstorch.greedy (see _run_greedy): "greedy" = both libraries' own defaults (syntx 6.44 canonical:
+# navier + cfl), "greedy_regadam" = the same with optimizer='regadam', "greedy_gaussian" = the former default
+# (gaussian + adam, learning_rate 0.375, flow_sigma 1.8, total_sigma 0.28), kept to compare with earlier runs.
+GREEDY_MODELS = ["greedy", "greedy_regadam", "greedy_gaussian"]
+MODELS = _BASE_MODELS + [f"{m}_regadam" for m in _BASE_MODELS] + GREEDY_MODELS + ANTSTORCH_ONLY_MODELS
 
 SYNTX_ROOT = os.path.expanduser("~/Pkg/syntx")
 DATA_DIR = os.path.expanduser("~/Data/Public/Mindboggle/Volumes")
@@ -120,6 +124,11 @@ _SYNTX_MODEL_NAME = {
     "gaussian": "gaussian",
     "sobolev": "sobolev",
     "dsti": "syn_dsti1",
+    # syntx >= 6.44: its "syn"/"sobolev" model runs syntx.syn()'s own defaults, the canonical Navier-Cauchy
+    # setting (syn_config, canonical_2026_11_20). navier / div_curl therefore go through "syn" (div_curl with an
+    # explicit regularizer, SYNTX_KWARGS), and "sobolev" pins the Sobolev regularizer and its former canonical values.
+    "navier": "syn",
+    "div_curl": "syn",
 }
 # antstorch.benchmark.evaluate_mindboggle_pair(model=...) name for each
 # --models entry: the four base regularizers use the "_syn" suffix; the
@@ -138,7 +147,12 @@ _ANTSTORCH_MODEL_NAME.update({m: m for m in ANTSTORCH_ONLY_MODELS})
 # (100,100,20) so both sides always run the same schedule.
 SYNTX_KWARGS = {
     "gaussian": dict(similarity_metric="cc2", reg_iterations=[100, 100, 20]),
-    "sobolev": dict(similarity_metric="cc2", reg_iterations=[100, 100, 20]),
+    # Since syntx 6.44 its "sobolev" model is the canonical navier run; pin the Sobolev regularizer and the
+    # v6.39 canonical values (grad_step 0.4, sobolev_alpha 2.25), which antstorch's sobolev_syn preset keeps.
+    "sobolev": dict(similarity_metric="cc2", reg_iterations=[100, 100, 20], regularizer="sobolev",
+                    grad_step=0.4, sobolev_alpha=2.25),
+    "navier": dict(similarity_metric="cc2", reg_iterations=[100, 100, 20]),
+    "div_curl": dict(similarity_metric="cc2", reg_iterations=[100, 100, 20], regularizer="div_curl"),
 }
 
 
@@ -167,7 +181,7 @@ _SHARED_AFFINE_DONE = set()
 
 
 def _run_antstorch(reg, pair_idx, device, out_dir, matched=True):  # `matched` kept for old callers; ignored
-    if reg in ("greedy", "greedy_regadam"):
+    if reg in GREEDY_MODELS:
         return _run_greedy("antstorch", pair_idx, device, out_dir, reg=reg)
     sys.path.insert(0, ANTSTORCH_ROOT)
     from antstorch.benchmark.evaluate import evaluate_mindboggle_pair as antstorch_eval
@@ -210,7 +224,7 @@ def _run_antstorch(reg, pair_idx, device, out_dir, matched=True):  # `matched` k
 
 
 def _run_syntx(reg, pair_idx, device, out_dir, matched=True):  # `matched` kept for old callers; ignored
-    if reg in ("greedy", "greedy_regadam"):
+    if reg in GREEDY_MODELS:
         return _run_greedy("syntx", pair_idx, device, out_dir, reg=reg)
     sys.path.insert(0, os.path.join(SYNTX_ROOT, "src"))
     os.chdir(SYNTX_ROOT)  # syntx.benchmark.evaluate caches to "results/..." relative to cwd
@@ -551,6 +565,14 @@ def _aggregate(results, models, skip_syntx):
 # Greedy arms (model "greedy" of --models): syntx.greedy vs antstorch.greedy (one-directional greedy compositive registration).
 # ======================================================================================================================
 GREEDY_KWARGS = dict(reg_iterations=[100, 100, 20])  # both libraries otherwise run their (identical) defaults
+# Per-arm overrides, passed identically to syntx.greedy and antstorch.greedy. The previous fixed optimizer='adam'
+# is refused with the navier default (componentwise Adam breaks the continuum coupling), so "greedy" now passes none.
+GREEDY_ARM_KWARGS = {
+    "greedy": {},
+    "greedy_regadam": dict(optimizer="regadam"),
+    "greedy_gaussian": dict(regularizer="gaussian", optimizer="adam", learning_rate=0.375, flow_sigma=1.8,
+                            total_sigma=0.28),
+}
 GREEDY_LABEL = "greedy"
 
 
@@ -590,9 +612,10 @@ def _run_greedy(lib, pair_idx, device, out_dir, data_dir=DATA_DIR, reg="greedy")
         pair_out = os.path.join(out_dir, f"{lib}_{reg}", f"pair_{pair_idx:03d}")
         os.makedirs(pair_out, exist_ok=True)
         _sync(device)
-        optimizer = "regadam" if reg == "greedy_regadam" else "adam"
+        arm_kwargs = dict(GREEDY_ARM_KWARGS[reg])
+        optimizer = arm_kwargs.get("optimizer", "default")
         res = greedy_fn(fi, mi, initial_transform=affine_path, return_inverse=True, device=device, verbose=False,
-                        outprefix=os.path.join(pair_out, f"{reg}_"), optimizer=optimizer, **GREEDY_KWARGS)
+                        outprefix=os.path.join(pair_out, f"{reg}_"), **GREEDY_KWARGS, **arm_kwargs)
         _sync(device)
         prov = res["provenance"]
         deformable = float(prov.get("runtime_deformable_sec", time.time() - t0))
@@ -608,7 +631,8 @@ def _run_greedy(lib, pair_idx, device, out_dir, data_dir=DATA_DIR, reg="greedy")
             "folding_pct": float(jac.get("folding_pct", float("nan"))),
             "min_jacobian": float(jac.get("min", float("nan"))),
             "runtime_seconds": deformable, "_deformable_seconds": deformable, "_wall_seconds": time.time() - t0,
-            "_affine_source": affine_source, "_greedy_kwargs": dict(GREEDY_KWARGS), "_device": str(prov.get("device", device)),
+            "_affine_source": affine_source, "_greedy_kwargs": dict(GREEDY_KWARGS, **arm_kwargs),
+            "_greedy_regularizer": prov.get("regularizer"), "_device": str(prov.get("device", device)),
             "_library": lib, "_regularizer": reg, "_greedy_optimizer": optimizer, "_status": "SUCCESS",
             "syntx_affine_time": float(prov.get("runtime_affine_sec", 0.0)),
             "transforms": {"fwdtransforms": [str(t) for t in res["fwdtransforms"]]},
@@ -1159,9 +1183,12 @@ def main():
                     help="Default: gaussian sobolev dsti (the arms with a syntx counterpart of the same algorithm). "
                          "bspline_svf / gaussian_svf are ANTsTorch stationary-velocity-field models with no syntx counterpart: "
                          "antstorch only, from the shared affine, scored with the same Dice / time / Jacobian measures. "
-                         "label_syn / label_intensity_syn are supervised label-only / label+T1 SyN arms, also antstorch only.")
+                         "label_syn / label_intensity_syn are supervised label-only / label+T1 Gaussian SyN arms, "
+                         "label_navier_syn / label_intensity_navier_syn the same with the navier regularizer, all antstorch only. "
+                         "navier / div_curl: syntx 6.44's continuum regularizers (navier = both libraries' canonical default). "
+                         "greedy = navier + cfl (6.44 defaults), greedy_gaussian = the former gaussian + adam greedy.")
     ap.add_argument("--label-weight", type=float, default=1.0,
-                    help="Per-label MSQ weight for label_syn / label_intensity_syn (default 1). "
+                    help="Per-label MSQ weight for the label_* arms (default 1). "
                          "These supervised arms optimize the same DKT31 labels used for Dice scoring.")
     ap.add_argument("--device", default=None,
                     help="cuda / mps / cpu. Default: auto-detect (cuda, then mps, then cpu), passed identically to both libraries.")
@@ -1412,6 +1439,8 @@ def main():
                 label = reg + " (non-officiel, vs syntx bspline)"
             elif reg == "greedy_regadam":
                 label = reg + " (les deux bibliothèques en regadam)"
+            elif reg == "greedy_gaussian":
+                label = reg + " (ancien défaut : gaussian + adam)"
             elif reg.endswith("_regadam"):
                 label = reg + f" (vs syntx {base})"
             else:
@@ -1429,7 +1458,8 @@ f"antstorch inverse_schedule : {_eff_schedule}"
     md_lines.append("")
     if any(model in LABEL_MODELS for model in args.models):
         md_lines.extend([
-            "", "**Supervised label-guided arms:** `label_syn` (labels only) and `label_intensity_syn` (labels + T1) "
+            "", "**Supervised label-guided arms:** `label_syn` (labels only) and `label_intensity_syn` (labels + T1), "
+            "Gaussian SyN; `label_navier_syn` / `label_intensity_navier_syn`, the same with the navier regularizer; "
             "optimize the same DKT31 labels used for Dice scoring. Their Dice measures fit to supplied anatomy, "
             "not held-out accuracy, and is not a like-for-like comparison with intensity-only arms. "
             f"Per-label MSQ weight: {LABEL_WEIGHT}. Both start from the cached canonical affine "

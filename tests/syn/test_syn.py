@@ -1159,3 +1159,37 @@ def test_dsti_green_operator_spacing():
     fine = apply_dsti_green_operator(field, alpha=1.0, spacing=(1.0, 1.0, 1.0))
     # larger voxels -> smaller Laplacian eigenvalues in mm^-2 -> weaker smoothing
     assert float(coarse.std()) > float(fine.std())
+
+
+# --- use_analytical_gradients=False on MPS (2026-11-23) -------------------------
+
+
+@pytest.mark.parametrize("dim", [2, 3])
+def test_syn_registration_autograd_sampler_on_mps_without_backward_falls_back_to_cpu(monkeypatch, recwarn, dim):
+    """use_analytical_gradients=False needs grid_sampler_*d_backward; the forward-only MPS probes assumed the
+    AnalyticalGridSample path and let such a call crash on MPS (as syntx does, project doc §35)."""
+    probed = []
+    monkeypatch.setattr("antstorch.syn.syn._mps_grid_sample_backward_available",
+                        lambda d: probed.append(d) or False)
+    monkeypatch.setattr("antstorch.syn.syn.mps_grid_sample_3d_forward_available", lambda: True)
+    fixed, moving = _ants_pair_2d() if dim == 2 else _ants_pair_3d()
+    res = syn_registration(fixed, moving, type_of_transform="SyNOnly", levels=(1,), reg_iterations=(1,),
+                           device="mps", use_analytical_gradients=False)
+    assert probed == [dim]
+    assert res["provenance"]["device"] == "cpu"
+    assert any("use_analytical_gradients=False" in str(w.message) for w in recwarn.list)
+
+
+def test_syn_registration_analytical_sampler_does_not_probe_backward(monkeypatch):
+    def _fail(d):
+        raise AssertionError("the backward probe must not be consulted with use_analytical_gradients=True")
+    monkeypatch.setattr("antstorch.syn.syn._mps_grid_sample_backward_available", _fail)
+    fixed, moving = _ants_pair_2d()
+    syn_registration(fixed, moving, type_of_transform="SyNOnly", levels=(1,), reg_iterations=(1,), device="cpu",
+                     use_analytical_gradients=False)
+    try:  # MPS is not available here: only the probe dispatch is under test
+        syn_registration(fixed, moving, type_of_transform="SyNOnly", levels=(1,), reg_iterations=(1,), device="mps")
+    except AssertionError:
+        raise
+    except Exception:
+        pass
