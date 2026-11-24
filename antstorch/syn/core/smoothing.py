@@ -19,6 +19,8 @@ All fields use the channel-last convention ``(B, *spatial, dim)``.
 
 import math
 import warnings
+from typing import Literal, Optional, Sequence, Union
+
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -183,10 +185,14 @@ def _get_sobolev_filter_cached(spatial_shape, alpha_val, s, spacing, device, dty
         return _SOBOLEV_FILTER_CACHE[cache_key]
 
     dim = len(spatial_shape)
+    # ``spacing`` is in ANTs/ITK (x, y, z) order while the spatial axes are in tensor (z, y, x)
+    # order: reverse it (syntx >= 5.0). Before this fix the per-axis spacing was applied to the
+    # wrong axis for anisotropic images.
+    spacing_zyx = tuple(reversed(spacing)) if spacing is not None else None
     k_axes = []
     for d in range(dim):
         n_d = spatial_shape[d]
-        sp_d = float(spacing[d]) if (spacing is not None and d < len(spacing)) else 1.0
+        sp_d = float(spacing_zyx[d]) if (spacing_zyx is not None and d < len(spacing_zyx)) else 1.0
         if d == dim - 1:
             k_d = (torch.fft.rfftfreq(n_d, device=device) * (2.0 * math.pi)) / max(sp_d, 1e-4)
         else:
@@ -242,7 +248,9 @@ def apply_sobolev_green_operator(m, fluid_sigma=3.0, alpha=None, border_width=0,
 
     spatial_shape = m.shape[1:-1]
     spatial_dims = tuple(range(2, 2 + dim))
-    m_cf = m.permute(0, 3, 1, 2) if dim == 2 else m.permute(0, 4, 1, 2, 3)
+    # syntx >= 6.40: contiguous float32 channel-first copy, in-place spectral product (same values; the FFT
+    # of a contiguous buffer is also what makes the result bit-identical to syntx's).
+    m_cf = torch.movedim(m, -1, 1).to(torch.float32).contiguous()
 
     K_bc = _get_sobolev_filter_cached(spatial_shape, alpha_val, s, spacing, device, dtype)
 
@@ -259,17 +267,16 @@ def apply_sobolev_green_operator(m, fluid_sigma=3.0, alpha=None, border_width=0,
             message=r".*was resized since it had shape.*",
             category=UserWarning,
         )
-        m_fft = torch.fft.rfftn(m_cf.to(torch.float32), dim=spatial_dims)
-        v_fft = m_fft * K_bc
-        v_cf = torch.fft.irfftn(v_fft, s=spatial_shape, dim=spatial_dims).to(dtype=dtype)
+        m_fft = torch.fft.rfftn(m_cf, dim=spatial_dims)
+        del m_cf
+        m_fft.mul_(K_bc)
+        v_cf = torch.fft.irfftn(m_fft, s=spatial_shape, dim=spatial_dims).to(dtype=dtype)
+        del m_fft
 
-    if dim == 2:
-        return v_cf.permute(0, 2, 3, 1)
-    else:
-        return v_cf.permute(0, 2, 3, 4, 1)
+    return torch.movedim(v_cf, 1, -1)
 
 
-def apply_dsti_green_operator(m, fluid_sigma=3.0, alpha=None):
+def apply_dsti_green_operator(m, fluid_sigma=3.0, alpha=None, spacing=None, s=2.0):
     """Fluid-regularize a field with the DST-I "Dirichlet-Shield" Green's operator.
 
     Applies the same Sobolev smoothing kernel as
@@ -289,6 +296,12 @@ def apply_dsti_green_operator(m, fluid_sigma=3.0, alpha=None):
     alpha : float, optional
         Sobolev kernel parameter, overriding the ``fluid_sigma``-derived
         default (``alpha = fluid_sigma / 2``).
+    spacing : sequence of float, optional
+        Voxel spacing in ANTs/ITK ``(x, y, z)`` order (reversed internally).
+        The Laplacian eigenvalues are divided by ``h_d ** 2``, as in syntx
+        (>= 6.40). ``None`` keeps unit spacing (the previous behaviour).
+    s : float, default 2.0
+        Operator power.
 
     Returns
     -------
@@ -305,18 +318,21 @@ def apply_dsti_green_operator(m, fluid_sigma=3.0, alpha=None):
     dim = len(spatial_shape)
 
     alpha_val = float(alpha) if alpha is not None else float(fluid_sigma) / 2.0
-    s = 2.0
+    s_val = float(s)
 
+    spacing_zyx = tuple(reversed(tuple(spacing))) if spacing is not None else None
     k_axes = []
     for d in range(dim):
         n_d = spatial_shape[d]
         k_vec = torch.arange(1, n_d + 1, device=device, dtype=torch.float32)
-        lambda_d = 4.0 * (torch.sin(math.pi * k_vec / (2.0 * (n_d + 1))) ** 2)
+        sp_d = float(spacing_zyx[d]) if (spacing_zyx is not None and d < len(spacing_zyx)) else 1.0
+        scale = (sp_d ** 2) if spacing is not None else 1.0
+        lambda_d = 4.0 * (torch.sin(math.pi * k_vec / (2.0 * (n_d + 1))) ** 2) / scale
         k_axes.append(lambda_d)
 
     k_mesh = torch.meshgrid(*k_axes, indexing='ij')
     lambda_sq = sum(k_j for k_j in k_mesh)
-    K_dst = 1.0 / ((1.0 + alpha_val * lambda_sq) ** s)
+    K_dst = 1.0 / ((1.0 + alpha_val * lambda_sq) ** s_val)
 
     # Channel-first representation: (B, C, *spatial).
     curr = m.movedim(-1, 1).to(torch.float32)
@@ -365,9 +381,9 @@ def apply_dsti_green_operator(m, fluid_sigma=3.0, alpha=None):
     return curr.to(dtype=dtype).movedim(1, -1)
 
 
-def apply_dsti1_green_operator(m, fluid_sigma=3.0, alpha=None):
+def apply_dsti1_green_operator(m, fluid_sigma=3.0, alpha=None, spacing=None, s=2.0):
     """Alias for :func:`apply_dsti_green_operator`."""
-    return apply_dsti_green_operator(m, fluid_sigma=fluid_sigma, alpha=alpha)
+    return apply_dsti_green_operator(m, fluid_sigma=fluid_sigma, alpha=alpha, spacing=spacing, s=s)
 
 
 def separable_1d_filter(x: torch.Tensor, kernels) -> torch.Tensor:
@@ -488,3 +504,270 @@ def get_boundary_mask(spatial, device, dtype, rim_size=1):
         slices[i + 1] = slice(-rim_size, None)
         boundary_mask[tuple(slices)] = 0
     return boundary_mask
+
+
+# ---------------------------------------------------------------------------
+# Ported from syntx v6.44 (core/smoothing.py): compact erf Gaussian and the
+# B-spline field smoother used by the regularizer registry (core/regularizers.py).
+# ---------------------------------------------------------------------------
+
+def gaussian_1d_compact(
+    sigma: float,
+    truncated: float = 2.0,
+    device: Union[str, torch.device] = 'cpu',
+    dtype: torch.dtype = torch.float32,
+) -> Optional[torch.Tensor]:
+    """1-D Gaussian kernel integrated over unit bins (erf differences), normalised to sum 1.
+
+    Radius = round(max(sigma * truncated, 0.5)) (at least 1 tap each side), so the kernel has
+    2 * radius + 1 taps. ``sigma`` in voxels. Returns a 1-D tensor, or None if sigma <= 0.
+    """
+    if sigma <= 0.0:
+        return None
+    tail = int(max(float(sigma) * truncated, 0.5) + 0.5)
+    x = torch.arange(-tail, tail + 1, dtype=dtype, device=device)
+    t = 0.70710678 / float(sigma)
+    out = 0.5 * ((t * (x + 0.5)).erf() - (t * (x - 0.5)).erf()).clamp(min=0)
+    return out / out.sum()
+
+
+def _resolve_sigmas(sigma, spacing, sigma_mode, num_spatial):
+    """Per-axis sigmas (voxels, tensor order) for the Gaussian filters; ValueError for an
+    unknown ``sigma_mode``, a wrong-length sigma sequence, a sequence with
+    ``sigma_mode='physical'``, a non-positive spacing, or a ``spacing`` that would be
+    ignored (voxel mode)."""
+    if sigma_mode not in ('voxel', 'physical'):
+        raise ValueError(f"sigma_mode must be 'voxel' or 'physical', got {sigma_mode!r}")
+    if isinstance(sigma, (tuple, list)):
+        if sigma_mode == 'physical':
+            raise ValueError("a per-axis sigma sequence is in voxels: use sigma_mode='voxel'")
+        if len(sigma) != num_spatial:
+            raise ValueError(f"need one sigma per spatial axis ({num_spatial}), got {len(sigma)}")
+        return [float(x) for x in sigma]
+    if sigma_mode == 'physical':
+        if spacing is None:
+            raise ValueError("sigma_mode='physical' needs spacing")
+        if any(not float(sp) > 0 for sp in spacing):
+            raise ValueError(f"spacing must be positive, got {list(spacing)}")
+        return [float(np.clip(float(sigma) / sp, 0.5, 10.0)) for sp in tuple(reversed(spacing))]
+    if spacing is not None:
+        raise ValueError("spacing is only used with sigma_mode='physical' (sigma in mm); in voxel "
+                         "mode it would be ignored -- drop it or pass sigma_mode='physical'")
+    return [float(sigma)] * num_spatial
+
+
+def fast_separable_gaussian_filter(
+    grid: torch.Tensor,
+    sigma: Union[float, Sequence[float]],
+    spacing: Optional[Sequence[float]] = None,
+    sigma_mode: str = 'voxel',
+    truncated: float = 2.0,
+) -> torch.Tensor:
+    """
+    Separable Gaussian smoothing of a channel-last field with compact erf kernels
+    (``gaussian_1d_compact``) and ZERO padding, so values are pulled toward 0 near the border.
+
+    Parameters
+    ----------
+    grid : Tensor (B, *spatial, C), 2-D or 3-D spatial, any C.
+    sigma : float or sequence
+        Voxels. A sequence gives one sigma per spatial axis in tensor order (z, y, x) and is
+        always taken in voxels.
+    spacing : sequence, optional
+        ANTs (x, y, z) order, required by and only allowed with ``sigma_mode='physical'`` and a
+        scalar sigma: per-axis sigma = sigma / spacing, clipped to [0.5, 10] voxels. (Invalid
+        combinations raise ValueError.)
+    sigma_mode : {'voxel', 'physical'}, default 'voxel'
+    truncated : float, default 2.0
+        Kernel radius in sigmas.
+
+    Returns
+    -------
+    Tensor of the input shape (contiguous); ``grid`` itself if every sigma <= 0. Axes with
+    sigma <= 0 are not filtered.
+    """
+    device = grid.device
+    dtype = grid.dtype
+    shape = grid.shape
+    spatial_shape = shape[1:-1]
+    num_spatial = len(spatial_shape)
+
+    sigma_list = _resolve_sigmas(sigma, spacing, sigma_mode, num_spatial)
+
+    if all(s <= 0.0 for s in sigma_list):
+        return grid
+
+    v = torch.movedim(grid, -1, 1)
+    kernels = [gaussian_1d_compact(s, truncated=truncated, device=device, dtype=dtype) for s in sigma_list]
+    v_filtered = separable_1d_filter(v, kernels)
+    return torch.movedim(v_filtered, 1, -1).contiguous()
+
+
+def smooth_displacement_field_bspline(
+    field: torch.Tensor,
+    spacing: Optional[Sequence[float]] = None,
+    origin: Optional[Sequence[float]] = None,
+    mesh_size: Optional[Union[int, Sequence[int]]] = None,
+    spline_distance: Optional[Union[float, Sequence[float]]] = None,
+    fluid_sigma: Optional[float] = None,
+    enforce_stationary_boundary: bool = False,
+    order: int = 3,
+    coord_convention: Literal['xyz', 'zyx'] = 'xyz',
+) -> torch.Tensor:
+    """Smooth a displacement / velocity field by a B-spline least-squares fit (``antstorch.bspline_flows``).
+
+    Fits a B-spline control lattice to the dense field
+    (``antstorch.bspline_flows.fit_bspline_displacement_field``, one fitting level) and
+    evaluates it back on the grid -- the BSplineSyN-style regulariser. Each batch item is fitted
+    separately.
+
+    Parameters
+    ----------
+    field : torch.Tensor
+        (B, *spatial, dim) or (*spatial, dim); spatial axes always in tensor order (z, y, x).
+    spacing, origin : sequence of float, optional
+        Grid geometry, in the order given by ``coord_convention``. Default 1 and 0 per axis.
+    mesh_size : int or sequence of int, optional
+        B-spline spans per axis (``coord_convention`` order); an int applies to all axes.
+    spline_distance : float or sequence of float, optional
+        Knot spacing in spacing units; mesh = ceil(physical extent / distance) per axis
+        (``mesh_size_for_spline_distance``). A sequence follows ``coord_convention`` like
+        ``spacing`` / ``mesh_size`` (reversed internally for 'zyx').
+    fluid_sigma : float, optional
+        Used only if neither of the above is given and > 0: spline distance =
+        max(4 * fluid_sigma, 12).
+    enforce_stationary_boundary : bool, default False
+        Passed to the fit: pin the field to zero at the domain boundary.
+    order : int, default 3
+        Spline order.
+    coord_convention : {'xyz', 'zyx'}, default 'xyz'
+        Order of the vector components and of ``spacing`` / ``origin`` / sequence
+        ``mesh_size``: 'xyz' = ANTs (x, y, z), 'zyx' = tensor order (reversed internally).
+
+    Priority: ``spline_distance``, then ``mesh_size``, then ``fluid_sigma``, else 6 spans per
+    axis; every axis gets at least 2 spans.
+
+    Returns
+    -------
+    torch.Tensor
+        Smoothed field of the input shape (dtype / device as returned by antstorch).
+    """
+    from ...bspline_flows import (
+        fit_bspline_displacement_field,
+        ImageDomain,
+        mesh_size_for_spline_distance,
+    )
+
+    d = field.shape[-1]
+    if field.dim() == d + 1:
+        unbatched = True
+        v = field.unsqueeze(0)
+    elif field.dim() == d + 2:
+        unbatched = False
+        v = field
+    else:
+        raise ValueError(
+            f"Expected field of dimension {d + 1} (*spatial, {d}) or "
+            f"{d + 2} (B, *spatial, {d}), got {field.dim()}"
+        )
+
+    B = v.shape[0]
+    spatial_shape = v.shape[1:-1]
+    size_itk = tuple(reversed(spatial_shape))
+
+    if spacing is not None:
+        if coord_convention == 'zyx':
+            spacing_itk = tuple(reversed(spacing))
+        else:
+            spacing_itk = tuple(float(s) for s in spacing)
+    else:
+        spacing_itk = (1.0,) * d
+
+    if origin is not None:
+        if coord_convention == 'zyx':
+            origin_itk = tuple(reversed(origin))
+        else:
+            origin_itk = tuple(float(o) for o in origin)
+    else:
+        origin_itk = (0.0,) * d
+
+    domain = ImageDomain(size=size_itk, spacing=spacing_itk, origin=origin_itk)
+
+    if spline_distance is not None:
+        if coord_convention == 'zyx' and not isinstance(spline_distance, (int, float)):
+            spline_distance = tuple(reversed(tuple(spline_distance)))
+        mesh_size_itk = mesh_size_for_spline_distance(domain, spline_distance)
+    elif mesh_size is not None:
+        if isinstance(mesh_size, int):
+            mesh_size_itk = (int(mesh_size),) * d
+        else:
+            mesh_size_itk = tuple(reversed(mesh_size)) if coord_convention == 'zyx' else tuple(mesh_size)
+    elif fluid_sigma is not None and float(fluid_sigma) > 0:
+        eff_dist = max(4.0 * float(fluid_sigma), 12.0)
+        mesh_size_itk = mesh_size_for_spline_distance(domain, eff_dist)
+    else:
+        mesh_size_itk = (6,) * d
+
+    # Ensure at least 2 intervals per axis for cubic splines
+    mesh_size_itk = tuple(max(2, int(m)) for m in mesh_size_itk)
+
+    outs = []
+    for b in range(B):
+        vb = v[b : b + 1]  # (1, *spatial, d)
+        # Convert to channel-first (1, d, *spatial)
+        if coord_convention == 'zyx':
+            vb_itk = vb.movedim(-1, 1).flip(1)
+        else:
+            vb_itk = vb.movedim(-1, 1)
+
+        sm = fit_bspline_displacement_field(
+            displacement_field=vb_itk,
+            domain=domain,
+            number_of_fitting_levels=1,
+            mesh_size=mesh_size_itk,
+            spline_order=order,
+            enforce_stationary_boundary=enforce_stationary_boundary,
+        )
+
+        if coord_convention == 'zyx':
+            sm_syntx = sm.flip(1).movedim(1, -1)
+        else:
+            sm_syntx = sm.movedim(1, -1)
+
+        outs.append(sm_syntx)
+
+    res = torch.cat(outs, dim=0) if B > 1 else outs[0]
+    return res.squeeze(0) if unbatched else res
+
+
+# Ported from syntx v6.44: in-place shifted-slice 1-D blur (its CPU 3-D / MPS large-kernel smoothing path).
+def _shifted_slice_blur_1d_inplace(
+    x: torch.Tensor,
+    sa: int,
+    weights: Sequence[float],
+    eff_mode: str,
+) -> torch.Tensor:
+    """1-D symmetric shifted-slice Gaussian filter along axis ``sa`` using in-place ``.add_``.
+
+    Callers must ensure ``not (torch.is_grad_enabled() and x.requires_grad)`` and
+    ``eff_mode in ('replicate', 'constant')``. Allocates zero padded buffers and avoids 5-D
+    ``F.pad`` and ``im2col`` workspaces.
+    """
+    pad = len(weights) // 2
+    length = x.shape[sa]
+    replicate = (eff_mode == 'replicate')
+    acc = x * float(weights[pad])
+    first = x.narrow(sa, 0, 1) if replicate else None
+    last = x.narrow(sa, length - 1, 1) if replicate else None
+    for d in range(1, pad + 1):
+        w = float(weights[pad + d])
+        if d < length:
+            acc.narrow(sa, d, length - d).add_(x.narrow(sa, 0, length - d), alpha=w)
+            acc.narrow(sa, 0, length - d).add_(x.narrow(sa, d, length - d), alpha=w)
+            if replicate:
+                acc.narrow(sa, 0, d).add_(first, alpha=w)
+                acc.narrow(sa, length - d, d).add_(last, alpha=w)
+        elif replicate:
+            acc.add_(first, alpha=w)
+            acc.add_(last, alpha=w)
+    return acc

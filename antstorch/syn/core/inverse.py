@@ -23,6 +23,21 @@ from .grid import (
 )
 
 
+def _scaled_sq_sum(error: torch.Tensor, scale: torch.Tensor, divide: bool) -> torch.Tensor:
+    """Compute ``sum_c ((error[..., c] / scale[c]) ** 2)`` (or ``* scale[c]``) as ``(B, *spatial, 1)``
+    without allocating a full multi-channel ``(B, *spatial, dim)`` squared tensor."""
+    dim = error.shape[-1]
+    if divide:
+        sq = (error[..., 0:1] / scale[0]).square_()
+        for c in range(1, dim):
+            sq.add_((error[..., c:c + 1] / scale[c]).square_())
+    else:
+        sq = (error[..., 0:1] * scale[0]).square_()
+        for c in range(1, dim):
+            sq.add_((error[..., c:c + 1] * scale[c]).square_())
+    return sq
+
+
 def _multilinear_val_and_jac_torch(
     u_grid: torch.Tensor,
     vox_coords: torch.Tensor,

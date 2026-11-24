@@ -53,7 +53,9 @@ def test_bad_keyword_and_regularizer():
     with pytest.raises(TypeError):
         greedy_registration(fx, fx, bogus=1, initial_transform=False, device="cpu")
     with pytest.raises(ValueError):
-        GreedyRegistrationModel(regularizer="sobolev")
+        GreedyRegistrationModel(regularizer="nope")
+    with pytest.raises(ValueError):  # componentwise Adam breaks the div/curl coupling (syntx >= 6.43)
+        GreedyRegistrationModel(regularizer="navier", optimizer="adam")
     with pytest.raises(ValueError):
         GreedyRegistrationModel(similarity_metric="nope")
 
@@ -114,3 +116,51 @@ def test_convergence_record_and_options():
                               convergence_slope=None, digital_diffeomorphism=False)
     assert off["provenance"]["convergence"]["slope_threshold"] is None
     assert all(r["iterations"] == r["cap"] for r in off["provenance"]["convergence"]["levels"])
+
+
+# --- syntx 6.40-6.44 alignment (2026-11-23) -----------------------------------
+
+
+def test_defaults_are_canonical_navier_cfl():
+    fx, mv = _blob((0, 0)), _blob((3, -2))
+    reg = greedy_registration(fx, mv, reg_iterations=[6, 4], initial_transform=False, device="cpu")
+    prov = reg["provenance"]
+    assert prov["regularizer"] == "navier" and prov["optimizer"] == "cfl"
+    assert prov["learning_rate"] == 1.5 and prov["flow_sigma"] == 1.62 and prov["total_sigma"] == 0.0
+    assert prov["sobolev_alpha"] == 2.625 and prov["cfl_momentum"] == 0.1875
+    assert _corr(reg["warpedmovout"], fx) > _corr(mv, fx)
+
+
+def test_continuum_kwargs_are_forwarded():
+    fx, mv = _blob((0, 0)), _blob((3, -2))
+    kw = dict(reg_iterations=[6, 4], initial_transform=False, device="cpu", digital_diffeomorphism=False)
+    a = greedy_registration(fx, mv, **kw)["model"].warp
+    b = greedy_registration(fx, mv, poisson_ratio=0.45, **kw)
+    assert b["provenance"]["regularizer_kwargs"] == {"poisson_ratio": 0.45}
+    assert not np.array_equal(a.numpy(), b["model"].warp.numpy())
+
+
+def test_fit_requires_physical_geometry():
+    import torch
+    model = GreedyRegistrationModel(dim=3)
+    x = torch.rand(1, 1, 16, 16, 16)
+    theta = torch.eye(3, 4)[None]
+    with pytest.raises(ValueError, match="required"):
+        model.fit(x, x, theta, scales=[1], iterations=[1])
+
+
+def test_conv1x1_affine_grid_matches_border_sampled_affine_grid():
+    import torch
+    import torch.nn.functional as F
+    from antstorch.greedy import _Conv1x1AffineGrid, _sample_field_cf
+    torch.manual_seed(0)
+    theta = torch.eye(3, 4)[None] + 0.05 * torch.randn(1, 3, 4)
+    shape = [1, 1, 9, 10, 11]
+    id_grid = F.affine_grid(torch.eye(3, 4)[None], shape, align_corners=True)
+    coords = (id_grid + 0.3 * torch.randn_like(id_grid)).requires_grad_(True)
+    a = _Conv1x1AffineGrid.apply(coords, theta[0, :, :3].contiguous(), theta[0, :, 3].contiguous())
+    ref = _sample_field_cf(torch.movedim(F.affine_grid(theta, shape, align_corners=True), -1, 1), coords)
+    torch.testing.assert_close(a, ref, rtol=1e-5, atol=1e-5)
+    a.sum().backward()
+    outside = (coords.detach().abs() > 1.0)
+    assert float(coords.grad[outside].abs().max()) == 0.0

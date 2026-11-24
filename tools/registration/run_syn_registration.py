@@ -89,6 +89,7 @@ import torch  # noqa: F401  (keep BEFORE `import ants`: OpenMP runtime load orde
 import ants
 import torch
 
+from antstorch.syn.syn import _CONTINUUM_REGULARIZERS
 from antstorch.syn import syn_registration
 
 
@@ -117,12 +118,22 @@ def parse_args() -> argparse.Namespace:
         help="Transform model: a linear type fits only that transform; 'SyN' (default) fits an "
         "affine initialization then the dense stage; 'SyNOnly' skips the affine fit entirely",
     )
-    parser.add_argument("--levels", type=int, nargs="+", default=(4, 2, 1), help="Dense-SyN pyramid shrink factors, coarse to fine")
-    parser.add_argument("--reg-iterations", type=int, nargs="+", default=(100, 100, 50))
-    parser.add_argument("--grad-step", type=float, default=0.5, help="CFL-bounded per-voxel step, in voxel units")
-    parser.add_argument("--flow-sigma", type=float, default=3.0, help="Fluid regularization sigma applied to each raw update")
+    # None = syn_registration()'s own (syntx-aligned) default for the chosen regularizer/optimizer.
+    parser.add_argument("--levels", type=int, nargs="+", default=None,
+                        help="Dense-SyN pyramid shrink factors, coarse to fine (default 4 2 1)")
+    parser.add_argument("--reg-iterations", type=int, nargs="+", default=None,
+                        help="Iterations per level (default: the syntx-aligned preset, 100 100 20 for navier)")
+    parser.add_argument("--grad-step", type=float, default=None,
+                        help="CFL-bounded per-voxel step, in voxel units (default: preset, 0.6 for navier)")
+    parser.add_argument("--flow-sigma", type=float, default=None,
+                        help="Fluid regularization sigma applied to each raw update (default: preset, sqrt(2.4) for navier)")
+    parser.add_argument("--sobolev-alpha", type=float, default=None,
+                        help="Spectral / continuum operator strength (default: preset, 1.5 for navier)")
     parser.add_argument("--total-sigma", type=float, default=0.0, help="Optional elastic (Gaussian) regularization of the composed field")
-    parser.add_argument("--regularizer", choices=("gaussian", "sobolev", "dsti", "bspline"), default="gaussian")
+    parser.add_argument("--regularizer", default=None,
+                        choices=("gaussian", "sobolev", "dsti", "bspline") + _CONTINUUM_REGULARIZERS,
+                        help="Default: navier (syntx 6.44 canonical, Navier-Cauchy s=2, Poisson ratio 0.20)")
+    parser.add_argument("--poisson-ratio", type=float, default=None, help="navier: Poisson ratio (default 0.20)")
     parser.add_argument(
         "--update-field-mesh-size-at-base-level",
         type=int,
@@ -151,7 +162,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--optimizer",
-        choices=("gradient_descent", "reg_adam", "syn_reg_adam"),
+        choices=("gradient_descent", "cfl", "reg_adam", "syn_reg_adam"),
         default="gradient_descent",
         help="Update rule for the dense stage: 'gradient_descent' (default), 'reg_adam' (the benchmark's "
         "'*_regadam' arms: per-voxel Adam moments, reset at each level, with smoothed gradient/quotient) or "
@@ -174,9 +185,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--similarity",
         choices=("mse", "lncc", "cc", "lncc2", "cc2", "mattes", "mi", "box_cc2", "dice"),
-        default="lncc",
+        default=None,
         help="Similarity metric for the dense SyN stage -- identical vocabulary/implementation "
-        "as run_svf_registration.py's --similarity (default: lncc)",
+        "as run_svf_registration.py's --similarity (default: the preset's, cc2)",
     )
     parser.add_argument("--neighborhood-radius", type=int, default=2, help="Window radius for lncc/cc, or the SyN-stage local metric")
     parser.add_argument("--num-bins", type=int, default=32, help="Histogram bins for mattes/mi")
@@ -226,7 +237,7 @@ def main() -> None:
         raise RuntimeError("CUDA was requested but is not available")
     if device.type == "mps" and not torch.backends.mps.is_available():
         raise RuntimeError("MPS was requested but is not available")
-    if len(args.levels) != len(args.reg_iterations):
+    if args.levels and args.reg_iterations and len(args.levels) != len(args.reg_iterations):
         raise ValueError("--levels and --reg-iterations must have the same number of values")
     affine_level_count = len(args.affine_shrink_factors)
     for name, values in (
@@ -272,12 +283,14 @@ def main() -> None:
         syn_metric=args.similarity,
         neighborhood_radius=args.neighborhood_radius,
         num_bins=args.num_bins,
-        levels=tuple(args.levels),
-        reg_iterations=tuple(args.reg_iterations),
+        levels=tuple(args.levels) if args.levels else None,
+        reg_iterations=tuple(args.reg_iterations) if args.reg_iterations else None,
         grad_step=args.grad_step,
         flow_sigma=args.flow_sigma,
+        sobolev_alpha=args.sobolev_alpha,
         total_sigma=args.total_sigma,
         regularizer=args.regularizer,
+        regularizer_kwargs=({"poisson_ratio": args.poisson_ratio} if args.poisson_ratio is not None else None),
         optimizer=args.optimizer,
         optimizer_lr=args.optimizer_lr,
         adam_betas=tuple(args.adam_betas),
@@ -327,8 +340,8 @@ def main() -> None:
 
     print(f"Registration completed in {elapsed:.2f} seconds on {result['provenance']['device']}.")
     print(f"Type of transform: {args.type_of_transform}")
-    print(f"Regularizer: {args.regularizer}")
-    print(f"Optimizer: {args.optimizer}")
+    print(f"Regularizer: {result['provenance']['regularizer']}")
+    print(f"Optimizer: {result['provenance']['optimizer']}")
     if result["loss_history"]:
         print(f"Final SyN loss: {result['loss_history'][-1]:.6g}")
     if result["affine_loss_history"] is not None:

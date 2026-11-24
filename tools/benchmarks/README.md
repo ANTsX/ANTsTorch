@@ -110,7 +110,7 @@ substantial accelerator memory.
 
 | Optimizer | Where | What it does | Benchmark arms (ANTsTorch) | Benchmark arms (syntx) |
 |---|---|---|---|---|
-| `gradient_descent` | `syn_registration` default | CFL-scaled step along the regularized gradient | `gaussian`, `sobolev`, `dsti`, `bspline` | none |
+| `gradient_descent` (alias `cfl`) | `syn_registration` default | CFL-scaled step along the regularized gradient | `gaussian`, `sobolev`, `dsti`, `bspline`, the continuum regularizers (`navier`, `div_curl`, ...) | none |
 | `reg_adam` | `syn_registration`, `greedy` (name `regadam`) | `greedy.py` Adam: bias-corrected moments, the Adam quotient is smoothed (`regadam_sigma` 0.8); moments reset at each level | `gaussian_regadam`, `sobolev_regadam`, `dsti_regadam`, `bspline_regadam`, `greedy_regadam` | `greedy_regadam` (`optimizer='regadam'`); no `*_regadam` SyN arm |
 | `adam` | `greedy` only (default) | Adam without the quotient smoothing | `greedy` | `greedy` |
 | `syn_reg_adam` | `syn_registration` (sobolev, dsti only) | `syntx.syn()` variant: gradient regularized, Adam quotient, Green operator applied again, CFL step shared by both half-warps; used by the `dsti` fair-mode arm | `dsti` in fair mode (the default run) | `dsti` (`syn_dsti1`: `reg_adam` + `dsti1`) |
@@ -474,6 +474,8 @@ the same per-pair canonical affine (fairness invariant, project §17/§18).
 
 | Model name | Regularizer | Optimizer | Note |
 |---|---|---|---|
+| `navier_syn` | `navier` (Navier-Cauchy Green operator, s = 2, Poisson ratio 0.20) | `gradient_descent` (`cfl`) | `syn_registration()` default since 2026-11-23 (syntx 6.44 canonical `canonical_2026_11_20`: `sobolev_alpha` 1.5, `grad_step` 0.6, `flow_sigma` √2.4) |
+| `div_curl_syn` | `div_curl` (decoupled divergence / curl Green operator) | `gradient_descent` (`cfl`) | Continuum operator, same presets as `navier_syn` |
 | `gaussian_syn` | `gaussian` (separable Gaussian smoothing) | `gradient_descent` (default) | — |
 | `sobolev_syn` | `sobolev` (spectral Green operator) | `gradient_descent` (default) | — |
 | `dsti_syn` | `dsti` (DST-I Green operator, homogeneous Dirichlet) | `gradient_descent` (default) | Persistent gap vs syntx's `dsti` arm, documented in project §34/§36; in the fair mode it runs with `syn_reg_adam` |
