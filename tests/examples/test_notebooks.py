@@ -1,0 +1,70 @@
+"""Validate examples and optionally execute them without modifying tracked files."""
+from pathlib import Path
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[2]
+NOTEBOOKS = sorted((ROOT / "examples").rglob("*.ipynb"))
+NOTEBOOKS = [p for p in NOTEBOOKS if ".ipynb_checkpoints" not in p.parts]
+REQUIREMENT_MARKERS = {"requires_data", "slow", "cuda", "mps"}
+
+
+def _read_notebook(path):
+    # Missing tooling must fail when notebooks exist, rather than silently
+    # claiming their validation passed.
+    import nbformat
+
+    notebook = nbformat.read(path, as_version=4)
+    nbformat.validate(notebook)
+    return notebook
+
+
+def _execution_cases():
+    import json
+
+    for path in NOTEBOOKS:
+        # Read only metadata here; schema errors belong to the validation test.
+        metadata = json.loads(path.read_text(encoding="utf-8")).get("metadata", {})
+        tags = metadata.get("tags", [])
+        marks = [getattr(pytest.mark, tag) for tag in REQUIREMENT_MARKERS if tag in tags]
+        yield pytest.param(path, id=path.relative_to(ROOT).as_posix(), marks=marks)
+
+
+@pytest.mark.parametrize("path", NOTEBOOKS, ids=lambda p: p.relative_to(ROOT).as_posix())
+def test_notebook_format(path):
+    notebook = _read_notebook(path)
+    assert any(cell.cell_type == "code" and cell.source.strip() for cell in notebook.cells), (
+        f"{path.name} contains no executable example"
+    )
+    assert notebook.metadata.get("kernelspec", {}).get("language") == "python"
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("path", list(_execution_cases()))
+def test_notebook_execution(path, request, tmp_path, monkeypatch):
+    if not request.config.getoption("--run-notebooks"):
+        pytest.skip("Use --run-notebooks to execute example notebooks")
+
+    from nbclient import NotebookClient
+
+    timeout = request.config.getoption("--notebook-timeout")
+    if timeout <= 0:
+        pytest.fail("--notebook-timeout must be positive")
+    # The pytest device fixture lives in the parent process. Propagate its
+    # choice explicitly to the notebook's separate Python interpreter.
+    device = request.config.getoption("--test-device")
+    notebook = _read_notebook(path)
+    import nbformat
+
+    bootstrap = "import torch\n"
+    if device != "auto":
+        bootstrap += f"import antstorch\nantstorch.set_default_device({device!r})\n"
+    notebook.cells.insert(0, nbformat.v4.new_code_cell(bootstrap))
+    monkeypatch.setenv("MPLBACKEND", "Agg")
+    client = NotebookClient(
+        notebook, timeout=timeout, kernel_name="python3", allow_errors=False,
+        force_raise_errors=True,
+        resources={"metadata": {"path": str(tmp_path)}},
+    )
+    client.execute()

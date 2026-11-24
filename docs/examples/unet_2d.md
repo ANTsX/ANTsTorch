@@ -1,8 +1,7 @@
 # 2-D U-Net
 
-{download}`Download the script <../../examples/unet_2d.py>`
+{download}`Download the notebook <../../examples/unet_2d.ipynb>`
 
-```{literalinclude} ../../examples/unet_2d.py
-:language: python
-:linenos:
-```
+Build a small U-Net and inspect class probabilities. Random weights illustrate the output contract, not trained segmentation.
+
+See the [notebook guide](../../examples/README.md) for installation and execution.

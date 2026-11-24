@@ -60,6 +60,36 @@ are unchanged; `--test-device=cpu` does not disable the GPU or suppress GPU-only
 tests. Use marker selection to exclude those tests. An unavailable explicitly
 selected accelerator produces a usage error.
 
+## Example notebooks
+
+`tests/examples/test_notebooks.py` discovers `.ipynb` files recursively under
+`examples/`, excluding Jupyter checkpoints. Install the optional tooling with
+`python -m pip install -e '.[notebooks]'` and install this environment's kernel
+with `python -m ipykernel install --user --name python3`.
+
+```bash
+# Validate notebook schemas and Python kernel metadata without execution.
+python -m pytest tests/examples --test-device=cpu
+
+# Execute examples, excluding downloads, long computations and GPU requirements.
+python -m pytest tests/examples --run-notebooks --test-device=cpu \
+    -m "not requires_data and not slow and not cuda and not mps"
+```
+
+Notebook-level `metadata.tags` can contain `requires_data`, `slow`, `cuda`, and
+`mps`; these become pytest markers on execution cases. Mark accelerator examples
+and select them only on suitable hardware. Execution is opt-in and fails on cell
+errors, even for cells tagged `raises-exception`. The default timeout is 300
+seconds per cell; override it with `--notebook-timeout`.
+
+Each notebook runs in a fresh `python3` kernel with a temporary working directory
+and a noninteractive plotting backend. Use installed package imports and obtain
+data explicitly rather than relying on the repository working directory. Outputs
+are not saved back to source notebooks. The selected test device sets ANTsTorch's
+default in the kernel; explicit device arguments in cells still take precedence.
+Downloads may still populate the usual library caches. The collection includes
+three offline notebooks and four notebooks marked `requires_data` and `slow`.
+
 ## Markers and fixtures
 
 | Marker | Meaning |
@@ -91,6 +121,10 @@ pytest process with `--forked --test-device=cpu --strict-markers`. This keeps
 per-file and per-test process isolation while covering the nested components.
 The data preparation/cache job supplies external templates and models.
 GPU tests skip when their required hardware is unavailable.
+
+A separate ordinary pytest invocation executes the three offline example
+notebooks in their own Jupyter kernels. Data-dependent notebook execution remains
+opt-in; their notebook schemas are validated in the per-file test pass.
 
 On this macOS environment, some native 3-D operations abort in forked children
 while passing without `--forked`. For local checks, run component files in
