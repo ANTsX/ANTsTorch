@@ -200,6 +200,7 @@ For the methods behind ANTsX and the notebooks above, start with these reference
 | ANTsX ecosystem and deep learning | [Tustison et al., 2021](https://doi.org/10.1038/s41598-021-87564-6) | [Brain extraction modalities](examples/brain_extraction_modalities.ipynb) · [Deep Atropos](examples/deep_atropos.ipynb) |
 | N4 bias correction | [Tustison et al., 2010](https://doi.org/10.1109/TMI.2010.2046908) | [N4 correction](examples/n4_bias_correction.ipynb) |
 | DiReCT cortical thickness | [Das et al., 2009](https://doi.org/10.1016/j.neuroimage.2008.12.016) | [Cortical thickness](examples/cortical_thickness.ipynb) |
+| ANTs and FreeSurfer cortical thickness evaluation | [Tustison et al., 2014](https://pubmed.ncbi.nlm.nih.gov/24879923/) | [Cortical thickness](examples/cortical_thickness.ipynb) |
 | ANTsX structural phenotyping | [Tustison et al., 2024](https://doi.org/10.1038/s41598-024-59440-6) | [Deep FLASH](examples/deep_flash.ipynb) · [DKT](examples/desikan_killiany_tourville.ipynb) |
 | Mouse brain mapping | [Tustison et al., 2025](https://doi.org/10.1038/s41467-025-66741-5) | [Mouse brain analysis](examples/mouse_brain_analysis.ipynb) |
 
