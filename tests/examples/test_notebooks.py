@@ -43,6 +43,38 @@ def test_notebook_format(path):
 @pytest.mark.integration
 @pytest.mark.parametrize("path", list(_execution_cases()))
 def test_notebook_execution(path, request, tmp_path, monkeypatch):
+    notebook = _read_notebook(path)
+    _execute_notebook(notebook, request, tmp_path, monkeypatch)
+    _assert_inline_figures(notebook)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("path", NOTEBOOKS, ids=lambda p: p.relative_to(ROOT).as_posix())
+def test_notebook_plotting(path, request, tmp_path, monkeypatch):
+    """Check every setup cell, including data-dependent notebooks, without data."""
+    import nbformat
+
+    source = _read_notebook(path)
+    cells = [cell for cell in source.cells if cell.cell_type == "code"
+             and "import matplotlib.pyplot as plt" in cell.source]
+    assert cells, f"{path.name} has no plotting setup cell"
+    notebook = nbformat.v4.new_notebook(cells=cells + [nbformat.v4.new_code_cell(
+        "plt.figure(); plt.plot([0, 1], [0, 1]); plt.show()"
+    )])
+    _execute_notebook(notebook, request, tmp_path, monkeypatch)
+    _assert_inline_figures(notebook)
+
+
+def _assert_inline_figures(notebook):
+    outputs = [output for cell in notebook.cells if cell.cell_type == "code"
+               for output in cell.get("outputs", [])]
+    assert not any("FigureCanvasAgg is non-interactive" in output.get("text", "")
+                   for output in outputs), "Notebook uses a noninteractive Agg canvas"
+    assert any({"image/png", "image/svg+xml"}.intersection(output.get("data", {}))
+               for output in outputs), "Notebook produced no inline figures"
+
+
+def _execute_notebook(notebook, request, tmp_path, monkeypatch):
     if not request.config.getoption("--run-notebooks"):
         pytest.skip("Use --run-notebooks to execute example notebooks")
 
@@ -54,7 +86,6 @@ def test_notebook_execution(path, request, tmp_path, monkeypatch):
     # The pytest device fixture lives in the parent process. Propagate its
     # choice explicitly to the notebook's separate Python interpreter.
     device = request.config.getoption("--test-device")
-    notebook = _read_notebook(path)
     import nbformat
 
     bootstrap = "import torch\n"

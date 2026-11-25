@@ -82,8 +82,13 @@ and select them only on suitable hardware. Execution is opt-in and fails on cell
 errors, even for cells tagged `raises-exception`. The default timeout is 300
 seconds per cell; override it with `--notebook-timeout`.
 
-Each notebook runs in a fresh `python3` kernel with a temporary working directory
-and a noninteractive plotting backend. Use installed package imports and obtain
+Each notebook runs in a fresh `python3` kernel with a temporary working directory.
+Tests start with `MPLBACKEND=Agg`; notebook setup must activate inline plotting.
+Full execution must produce inline image outputs without the noninteractive
+`FigureCanvasAgg` warning. Separate plotting tests run only the setup cells and
+a small plot for all 18 notebooks, including data-dependent applications; these
+checks do not download data or run pretrained inference.
+Use installed package imports and obtain
 data explicitly rather than relying on the repository working directory. Outputs
 are not saved back to source notebooks. The selected test device sets ANTsTorch's
 default in the kernel; explicit device arguments in cells still take precedence.

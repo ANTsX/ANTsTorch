@@ -15,6 +15,10 @@ Open a notebook in Jupyter or VS Code, select this kernel and run cells from top
 to bottom. For JupyterLab, install it separately with `python -m pip install jupyterlab`
 and launch `python -m jupyterlab examples`.
 
+The setup cells explicitly enable inline Matplotlib figures in Jupyter/VS Code,
+even if the environment initially selects `Agg`. If using an older notebook in
+an existing kernel, run `%matplotlib inline` and rerun the plotting cells.
+
 | Notebook | Workflow | Resources |
 | --- | --- | --- |
 | [Getting started](getting_started.ipynb) | ANTs images, physical geometry, NumPy and tensor axes | Synthetic; no downloads |
@@ -80,4 +84,6 @@ python -m pytest tests/examples --run-notebooks --test-device=cpu \
 ```
 
 The execution tests use temporary working directories and never save outputs
-back into the source notebooks. See [testing details](../tests/README.md#example-notebooks).
+back into the source notebooks. They also verify inline plotting for every
+notebook using its setup cells and a small plot, without downloading data or
+running pretrained models. See [testing details](../tests/README.md#example-notebooks).
