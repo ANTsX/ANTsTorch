@@ -86,14 +86,14 @@ Each notebook runs in a fresh `python3` kernel with a temporary working director
 Tests start with `MPLBACKEND=Agg`; notebook setup must activate inline plotting.
 Full execution must produce inline image outputs without the noninteractive
 `FigureCanvasAgg` warning. Separate plotting tests run only the setup cells and
-a small plot for all 18 notebooks, including data-dependent applications; these
+a small plot for all notebooks, including data-dependent applications; these
 checks do not download data or run pretrained inference.
 Use installed package imports and obtain
 data explicitly rather than relying on the repository working directory. Outputs
 are not saved back to source notebooks. The selected test device sets ANTsTorch's
 default in the kernel; explicit device arguments in cells still take precedence.
 Downloads may still populate the usual library caches. The collection includes
-seven offline notebooks and eleven notebooks marked `requires_data` and `slow`.
+seven offline notebooks and sixteen notebooks marked `requires_data` and `slow`.
 
 ## Markers and fixtures
 
@@ -127,9 +127,22 @@ per-file and per-test process isolation while covering the nested components.
 The data preparation/cache job supplies external templates and models.
 GPU tests skip when their required hardware is unavailable.
 
+The brain-extraction modality notebook accepts `ANTSTORCH_EXAMPLE_BRAIN_MODALITY`
+and `ANTSTORCH_EXAMPLE_BRAIN_IMAGE`. Its default is `t1threetissue` with a sample
+T1; non-T1 contrasts require a matching local scalar 3-D image. Its execution is
+marked `requires_data` and `slow`.
+
 The WMH notebook additionally requires a real paired T1/FLAIR input. To execute
 it, set `ANTSTORCH_EXAMPLE_T1` and `ANTSTORCH_EXAMPLE_FLAIR` to existing absolute
 paths. Its `requires_data` marker excludes it from offline CI execution.
+
+Pulmonary artery/airway execution needs `ANTSTORCH_EXAMPLE_CHEST_CT` (a local
+CT in HU, at least 160 voxels per axis); `ANTSTORCH_EXAMPLE_LUNG_MASK` is optional.
+Functional lung execution needs `ANTSTORCH_EXAMPLE_VENTILATION` and
+`ANTSTORCH_EXAMPLE_VENTILATION_MASK`. The extraction notebook optionally accepts
+`ANTSTORCH_EXAMPLE_LUNG_IMAGE`, otherwise it downloads an example template.
+All four lung notebooks are marked `requires_data` and `slow`; their format and
+plotting setup checks do not require these inputs or run model inference.
 
 A separate ordinary pytest invocation executes the seven offline example
 notebooks in their own Jupyter kernels. Data-dependent notebook execution remains
