@@ -189,9 +189,28 @@ Registration comparisons use a shared affine initialization in the default fair 
 - **[Documentation publishing](docs/publishing.md)** — build the documentation and publish on Read the Docs.
 - **[ANTsX tutorial examples](https://gist.github.com/ntustison/12a656a5fc2f6f9c4494c88dc09c5621#antsxnet)** — additional self-contained workflows.
 
-## Research, community & license
+## Publications & citations
 
-For background and applications, see the [ANTsX ecosystem publication](https://pubmed.ncbi.nlm.nih.gov/33907199/).
+For the methods behind ANTsX and the notebooks above, start with these references:
+
+| Method / topic | Article | Related notebook |
+| --- | --- | --- |
+| ANTsX ecosystem and deep learning | [Tustison et al., 2021](https://doi.org/10.1038/s41598-021-87564-6) | [Brain extraction modalities](examples/brain_extraction_modalities.ipynb) · [Deep Atropos](examples/deep_atropos.ipynb) |
+| SyN registration | [Avants et al., 2008](https://doi.org/10.1016/j.media.2007.06.004) | [SyN registration](examples/syn_registration.ipynb) |
+| N4 bias correction | [Tustison et al., 2010](https://doi.org/10.1109/TMI.2010.2046908) | [N4 correction](examples/n4_bias_correction.ipynb) |
+| DiReCT cortical thickness | [Das et al., 2009](https://doi.org/10.1016/j.neuroimage.2008.12.016) | [Cortical thickness](examples/cortical_thickness.ipynb) |
+| ANTsX structural phenotyping | [Tustison et al., 2024](https://doi.org/10.1038/s41598-024-59440-6) | [Deep FLASH](examples/deep_flash.ipynb) · [DKT](examples/desikan_killiany_tourville.ipynb) |
+| Mouse brain mapping | [Tustison et al., 2025](https://doi.org/10.1038/s41467-025-66741-5) | [Mouse brain analysis](examples/mouse_brain_analysis.ipynb) |
+
+The [publications guide](docs/publications.md) groups additional method, model
+and dataset references by topic and provides a [BibTeX download](docs/references.bib).
+For a broader view, see the [ANTs curated references](https://github.com/ANTsX/ANTs#references)
+and [historical bibliography](https://github.com/ANTsX/ANTs/blob/main/forhtml/ants.bib).
+These are selected resources, not an exhaustive list of every paper using ANTsX.
+Cite the ecosystem article together with the methods, models and data actually
+used, and report the ANTsTorch version or commit.
+
+## Research, community & license
 
 Questions, bug reports, and contributions are welcome through [GitHub Issues](https://github.com/ANTsX/ANTsTorch/issues) and pull requests. Please include a minimal example and relevant package versions when reporting a problem.
 

@@ -20,6 +20,7 @@ label_image_registration
 antsx_tutorial_bspline_flows
 lamnr_hybrid_trainer
 model_validation
+publications
 ```
 
 ```{toctree}
