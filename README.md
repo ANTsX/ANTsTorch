@@ -102,23 +102,52 @@ ants.image_write(image * mask, "t1_brain.nii.gz")
 
 Weights and templates download on first use and are cached under `~/.antstorch`. This example thresholds the probability map at 0.5; inspect the result for your data. Other extraction modalities may return different output structures.
 
-### Run the examples
+## Python notebooks
 
-Explore the [Jupyter notebook collection](examples/README.md), starting with
-[Getting started](examples/getting_started.ipynb). It includes U-Net, N4, SyN,
-brain extraction, Deep Atropos, cortical thickness, Harvard–Oxford, DKT, SIAM,
-B-spline fitting and registration, data augmentation, denoising, Deep FLASH,
-white matter hyperintensities, mouse brain analysis, MRI super-resolution and pulmonary imaging workflows.
+Explore **23 executable Jupyter notebooks** with explanations, output checks and
+inline figures. Start with [Getting started](examples/getting_started.ipynb),
+then choose a workflow below. The [complete notebook guide](examples/README.md)
+lists data requirements, outputs and execution options for every example.
+
+| Topic | Notebooks |
+| --- | --- |
+| **Getting started and learning** | [Image geometry and tensors](examples/getting_started.ipynb) · [2-D U-Net](examples/unet_2d.ipynb) · [Data augmentation](examples/data_augmentation.ipynb) |
+| **Image processing** | [N4 bias correction](examples/n4_bias_correction.ipynb) · [Denoising](examples/denoising.ipynb) |
+| **Registration and B-splines** | [SyN registration](examples/syn_registration.ipynb) · [Affine + B-spline SVF registration](examples/bspline_registration.ipynb) · [Scattered data fitting](examples/bspline_scattered_data_fitting.ipynb) |
+| **Brain extraction** | [T1 extraction](examples/brain_extraction.ipynb) · [All 11 modality options](examples/brain_extraction_modalities.ipynb): T1, T2, T2*, FLAIR, BOLD, FA, PET, MRA and T1 three-tissue, hemisphere and lobe variants |
+| **Brain anatomy** | [Deep Atropos](examples/deep_atropos.ipynb) · [Harvard–Oxford](examples/harvard_oxford_atlas_labeling.ipynb) · [Desikan–Killiany–Tourville](examples/desikan_killiany_tourville.ipynb) · [Deep FLASH](examples/deep_flash.ipynb) |
+| **Thickness and whole-head labels** | [Cortical thickness](examples/cortical_thickness.ipynb) · [SIAM whole-head segmentation](examples/siam_labeling.ipynb) |
+| **Additional imaging workflows** | [White matter hyperintensities](examples/white_matter_hyperintensities.ipynb) · [Mouse brain analysis](examples/mouse_brain_analysis.ipynb) · [MRI super-resolution](examples/mri_super_resolution.ipynb) |
+| **Pulmonary imaging** | [Lung extraction: CT or proton MRI](examples/lung_extraction.ipynb) · [Functional ventilation segmentation](examples/lung_functional_segmentation.ipynb) · [Pulmonary arteries](examples/lung_pulmonary_artery_segmentation.ipynb) · [Airways](examples/lung_airway_segmentation.ipynb) |
+
+From the repository root, install the notebook tools and launch JupyterLab:
 
 ```bash
-python -m pip install -e '.[notebooks]'
+python -m pip install -e '.[notebooks]' jupyterlab
 python -m ipykernel install --user --name python3 --display-name "Python 3 (ANTsTorch)"
+python -m jupyterlab examples
 ```
 
-Open a notebook in Jupyter or VS Code and select this kernel. The first three
-notebooks use synthetic data; registration and pretrained applications download
-sample images or model assets. See the [example guide](docs/examples/index.md)
-for resources and outputs.
+Alternatively, open the `.ipynb` files in VS Code. Select **Python 3 (ANTsTorch)**
+and run cells from top to bottom. All notebooks default to CPU and explicitly
+enable inline Matplotlib figures. Extraction and binary segmentation overlays
+use masks; anatomical parcellations display discrete labels.
+
+Seven notebooks use synthetic data without downloads: getting started, U-Net,
+N4, denoising, augmentation, B-spline registration and the default scattered-data
+fitting example. Pretrained workflows download weights/templates as needed and
+may require substantial memory and run time. Some use downloadable example
+images; WMH, functional lung, pulmonary artery and airway examples require local
+images of the specified acquisition type. Non-T1 brain-extraction modalities
+also require matching local 3-D inputs. SIAM additionally needs the `siam` extra:
+`python -m pip install -e '.[notebooks,siam]'`.
+
+The [notebook guide](examples/README.md) explains input paths and environment
+variables, cached downloads, output locations and model-specific limitations.
+The [published example guide](docs/examples/index.md) includes notebook downloads;
+notebooks are not executed during documentation builds. See the
+[testing instructions](tests/README.md#example-notebooks) to validate notebooks
+or run the offline examples with pytest.
 
 ## Pretrained applications
 
@@ -126,7 +155,7 @@ The application layer provides ANTsPyNet model ports and integrations with publi
 
 | Domain | Applications |
 | --- | --- |
-| **Brain extraction** | T1, T2, T2*, FA, FLAIR, PET, MRA; T1 three-tissue, hemisphere, and lobe variants |
+| **Brain extraction** | T1, T2, T2*, FA, FLAIR, BOLD, PET, MRA; T1 three-tissue, hemisphere, and lobe variants |
 | **Brain anatomy** | Deep Atropos tissue segmentation, Desikan–Killiany–Tourville and Harvard–Oxford labeling, Deep FLASH, cerebellar morphology, cortical thickness |
 | **Whole-head segmentation** | Original SIAM v0.3 via nnU-Net, with the optional `siam` extra; [usage and model downloads](docs/siam_labeling.md) |
 | **Small structures** | HippMapp3r and two-stage hippocampus segmentation, hypothalamus and subunits, claustrum |

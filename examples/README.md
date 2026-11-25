@@ -40,7 +40,6 @@ an existing kernel, run `%matplotlib inline` and rerun the plotting cells.
 | [White matter hyperintensities](white_matter_hyperintensities.ipynb) | T1-to-FLAIR alignment and SYSU-Media segmentation | Requires local T1/FLAIR pair; downloads model weights |
 | [Mouse brain analysis](mouse_brain_analysis.ipynb) | T2 extraction, Nick parcellation and cortical thickness | Downloads example mouse template, atlas data and weights |
 | [MRI super-resolution](mri_super_resolution.ipynb) | Compare interpolation and pretrained SIQ on a reduced-resolution T1 crop | Downloads sample T1 and converted model weights |
-
 | [Lung extraction](lung_extraction.ipynb) | CT or proton MRI extraction with binary mask display | Downloads an example template, priors and weights; local image optional |
 | [Functional lung segmentation](lung_functional_segmentation.ipynb) | El Bicho ventilation class labels | Requires local ventilation MRI and aligned binary lung mask; downloads weights |
 | [Pulmonary artery segmentation](lung_pulmonary_artery_segmentation.ipynb) | Overlapping-patch CT prediction and binary artery mask | Requires local chest CT in HU, at least 160 voxels per axis; downloads weights |

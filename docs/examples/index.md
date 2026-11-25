@@ -26,7 +26,6 @@ and open the notebooks in Jupyter or VS Code using that kernel.
 | {download}`White matter hyperintensities <../../examples/white_matter_hyperintensities.ipynb>` | Requires local T1/FLAIR pair; downloads model weights; t1-to-flair alignment and sysu-media segmentation |
 | {download}`Mouse brain analysis <../../examples/mouse_brain_analysis.ipynb>` | Downloads example mouse template, atlas data and weights; t2 extraction, nick parcellation and cortical thickness |
 | {download}`MRI super-resolution <../../examples/mri_super_resolution.ipynb>` | Downloads sample T1 and converted model weights; compare interpolation and pretrained siq on a reduced-resolution t1 crop |
-
 | {download}`Lung extraction <../../examples/lung_extraction.ipynb>` | Downloads an example template, priors and weights; local image optional; CT or proton MRI extraction with binary mask display |
 | {download}`Functional lung segmentation <../../examples/lung_functional_segmentation.ipynb>` | Requires local ventilation MRI and aligned binary lung mask; downloads weights; El Bicho ventilation class labels |
 | {download}`Pulmonary artery segmentation <../../examples/lung_pulmonary_artery_segmentation.ipynb>` | Requires local chest CT in HU, at least 160 voxels per axis; downloads weights; Overlapping-patch CT prediction and binary artery mask |
