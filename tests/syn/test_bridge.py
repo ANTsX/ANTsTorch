@@ -200,3 +200,47 @@ def test_apply_bspline_smoothing_operator_is_invariant_to_chunk_size():
     for chunk_size in (17, 97, 4096):
         smoothed = apply_bspline_smoothing_operator(field, domain, mesh_size=3, chunk_size=chunk_size)
         torch.testing.assert_close(smoothed, reference, rtol=1e-10, atol=1e-10)
+
+
+def _skewed_image_3d(seed=0):
+    rng = np.random.default_rng(seed)
+    array = rng.gamma(3.0, 50.0, size=(14, 12, 10)).astype(np.float32)
+    array[:2] = 0.0
+    return ants.from_numpy(array)
+
+
+def test_ants_image_to_tensor_default_is_auto_normalization():
+    from antstorch.syn.core.utils import normalize_image
+
+    image = _skewed_image_3d()
+    expected = normalize_image(image, method="auto").numpy()
+    for normalize in (True, "auto", "AUTO", "entropy"):
+        tensor = ants_image_to_tensor(image, normalize=normalize)
+        recovered = tensor_to_ants_image(tensor, image).numpy()
+        np.testing.assert_array_equal(recovered, expected)
+
+
+def test_ants_image_to_tensor_percentile_matches_fixed_2_98_clip():
+    image = _skewed_image_3d(1)
+    array = image.numpy()
+    positive = array[array > 0]
+    low, high = np.percentile(positive, 2.0), np.percentile(positive, 98.0)
+    expected = np.clip((array - low) / (high - low + 1e-6), 0.0, 1.0)
+    for normalize in ("percentile", "robust"):
+        recovered = tensor_to_ants_image(ants_image_to_tensor(image, normalize=normalize), image).numpy()
+        np.testing.assert_allclose(recovered, expected, atol=1e-6)
+
+
+def test_ants_image_to_tensor_normalization_is_idempotent():
+    image = _skewed_image_3d(2)
+    for normalize in ("auto", "percentile"):
+        once = tensor_to_ants_image(ants_image_to_tensor(image, normalize=normalize), image)
+        twice = tensor_to_ants_image(ants_image_to_tensor(once, normalize=normalize), image)
+        np.testing.assert_array_equal(twice.numpy(), once.numpy())
+
+
+def test_ants_image_to_tensor_rejects_unknown_normalization():
+    import pytest
+
+    with pytest.raises(ValueError, match="intensity normalization"):
+        ants_image_to_tensor(_skewed_image_3d(), normalize="zscore")

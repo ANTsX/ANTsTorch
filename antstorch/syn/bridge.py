@@ -29,24 +29,62 @@ import torch
 from torch import Tensor
 
 
-def _percentile_clip_normalize(array: np.ndarray) -> np.ndarray:
-    """Foreground (``> 0``) 2nd-98th percentile clip to ``[0, 1]``.
+_INTENSITY_NORMALIZATIONS = ("auto", "percentile")
 
-    Matches :func:`antstorch.syn.core.pipeline.normalize_and_tensorize`'s
-    actual normalization exactly, factored out so it can be applied to a
-    single image (not just a fixed/moving pair).
+
+def _resolve_intensity_normalization(normalize) -> Optional[str]:
+    """Map ``ants_image_to_tensor``'s ``normalize`` argument to a method name (or ``None``).
+
+    ``True`` -> ``'auto'`` (the default since 2026-11-25, as in syntx); ``False`` / ``None`` -> no
+    normalization; otherwise one of :data:`_INTENSITY_NORMALIZATIONS` (case-insensitive).
     """
-    positive = array[array > 0]
-    if positive.size > 0:
-        low = float(np.percentile(positive, 2.0))
-        high = float(np.percentile(positive, 98.0))
-        if high <= low + 1e-4:
-            low = 0.0
-            high = float(positive.max())
-    else:
-        low = float(array.min())
-        high = float(array.max())
-    return np.clip((array - low) / (high - low + 1e-6), 0.0, 1.0).astype(np.float32)
+    if normalize is True:
+        return "auto"
+    if normalize is False or normalize is None:
+        return None
+    if isinstance(normalize, str):
+        method = normalize.lower().strip()
+        if method in ("robust",):
+            method = "percentile"
+        if method in ("entropy",):
+            method = "auto"
+        if method in _INTENSITY_NORMALIZATIONS:
+            return method
+        if method in ("none", "off"):
+            return None
+    raise ValueError(
+        f"intensity normalization must be True, False, None, 'auto' or 'percentile', got {normalize!r}"
+    )
+
+
+def _percentile_clip_normalize(array: np.ndarray) -> np.ndarray:
+    """Foreground (``> 0``) 2nd-98th percentile clip to ``[0, 1]`` (the pre-2026-11-25 default).
+
+    Idempotent: an array already in ``[0, 1]`` (with max >= 0.5) is only clipped, like
+    :func:`antstorch.syn.core.utils.normalize_image`.
+    """
+    from antstorch.syn.core.utils import normalize_image
+
+    return normalize_image(array, method="percentile", p_min=2.0, p_max=98.0).astype(np.float32, copy=False)
+
+
+def _auto_normalize(array: np.ndarray) -> np.ndarray:
+    """``normalize_image(method='auto')``: entropy-selected foreground percentiles, clip to ``[0, 1]``.
+
+    Numerically identical to syntx's benchmark ``normalize_intensity`` / ``syntx.core.utils.normalize_image``.
+    Idempotent on an input already in ``[0, 1]``.
+    """
+    from antstorch.syn.core.utils import normalize_image
+
+    return normalize_image(array, method="auto").astype(np.float32, copy=False)
+
+
+def normalize_intensity_array(array: np.ndarray, normalize=True) -> np.ndarray:
+    """Apply the intensity normalization selected by ``normalize`` (see :func:`ants_image_to_tensor`)."""
+    method = _resolve_intensity_normalization(normalize)
+    if method is None:
+        return array
+    return _auto_normalize(array) if method == "auto" else _percentile_clip_normalize(array)
 
 
 def ants_image_metadata(image) -> Dict[str, tuple]:
@@ -77,7 +115,7 @@ def ants_image_to_tensor(
     device: Optional[torch.device] = None,
     dtype: torch.dtype = torch.float32,
     *,
-    normalize: bool = True,
+    normalize: Union[bool, str] = True,
 ) -> Tensor:
     """Convert a scalar ``ants.ANTsImage`` to a singleton ``(1, 1, *torch_shape)`` tensor.
 
@@ -87,9 +125,14 @@ def ants_image_to_tensor(
         Scalar 2-D or 3-D image.
     device, dtype : torch.device, torch.dtype
         Target tensor device/dtype.
-    normalize : bool
-        If ``True`` (default), apply the same foreground percentile-clip
-        normalization as :func:`antstorch.syn.core.pipeline.normalize_and_tensorize`.
+    normalize : bool or str
+        Intensity normalization to ``[0, 1]``, the same as
+        :func:`antstorch.syn.core.pipeline.normalize_and_tensorize`:
+        ``True`` / ``'auto'`` (default) -- ``normalize_image(method='auto')``,
+        foreground percentiles chosen by entropy, as in syntx;
+        ``'percentile'`` -- fixed foreground 2nd-98th percentiles (the default
+        before 2026-11-25); ``False`` -- none. Both methods leave an input
+        already in ``[0, 1]`` unchanged (clipped only).
 
     Returns
     -------
@@ -100,8 +143,7 @@ def ants_image_to_tensor(
     if image.dimension not in (2, 3) or image.components != 1:
         raise ValueError("ants_image_to_tensor expects a scalar 2-D or 3-D ANTsImage")
     array = image.numpy().astype(np.float32, copy=False)
-    if normalize:
-        array = _percentile_clip_normalize(array)
+    array = normalize_intensity_array(array, normalize)
     dimension = image.dimension
     reversed_axes = tuple(range(dimension - 1, -1, -1))
     array = np.ascontiguousarray(np.transpose(array, reversed_axes))

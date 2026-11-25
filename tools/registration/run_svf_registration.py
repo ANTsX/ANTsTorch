@@ -79,7 +79,7 @@ def ants_to_torch(image: ants.ANTsImage, device: torch.device) -> torch.Tensor:
     tensor, raw (unnormalized) intensities -- a thin wrapper over
     :func:`antstorch.syn.bridge.ants_image_to_tensor` (``normalize=False``,
     matching this script's own historical behavior; that function defaults
-    to ``normalize=True``, a percentile-clip normalization this script has
+    to ``normalize=True``, an intensity normalization to [0, 1] this script has
     never applied)."""
     if image.components != 1:
         raise ValueError("This example expects a scalar ANTs image")

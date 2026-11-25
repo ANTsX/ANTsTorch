@@ -361,9 +361,9 @@ def _run_bspline_svf(fi, mi, matrix, translation, *, device, reg_iterations=None
     # pre-normalized fi/mi before this point, and bspline_svf_registration()
     # itself does no normalization internally (its documented tensor-native
     # scope leaves that to the caller) -- so this adapter must do it,
-    # matching the percentile-clip normalization every other path in this
-    # module gets for free from syn_registration()'s own internal
-    # ants_image_to_tensor() calls.
+    # matching the normalization (normalize_image(method='auto') since
+    # 2026-11-25, as syntx) every other path in this module gets for free
+    # from syn_registration()'s own internal ants_image_to_tensor() calls.
     fixed_tensor = ants_image_to_tensor(fi, resolved_device, dtype, normalize=True)
     moving_tensor = ants_image_to_tensor(mi, resolved_device, dtype, normalize=True)
 
