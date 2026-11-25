@@ -63,6 +63,7 @@ from .core.regularizers import (
     build_level_regularizer,
 )
 from .bridge import (
+    _resolve_intensity_normalization,
     ants_image_metadata,
     ants_image_to_tensor,
     apply_bspline_smoothing_operator,
@@ -923,6 +924,7 @@ def _fit_affine_from_ants(
     center_of_mass_init: bool,
     verbose: bool,
     smoothing_sigmas_units: str = "mm",
+    intensity_normalization: Union[bool, str] = "auto",
 ):
     """Fit the affine initialization with :func:`antstorch.bspline_flows.affine_registration.affine_registration`."""
     # Imported lazily (not at module scope): antstorch.bspline_flows itself
@@ -938,8 +940,8 @@ def _fit_affine_from_ants(
     moving_meta = ants_image_metadata(moving)
     fixed_domain = ImageDomain(fixed_meta["shape"], fixed_meta["spacing"], fixed_meta["origin"], fixed_meta["direction"])
     moving_domain = ImageDomain(moving_meta["shape"], moving_meta["spacing"], moving_meta["origin"], moving_meta["direction"])
-    fixed_tensor = ants_image_to_tensor(fixed, device, dtype)
-    moving_tensor = ants_image_to_tensor(moving, device, dtype)
+    fixed_tensor = ants_image_to_tensor(fixed, device, dtype, normalize=intensity_normalization)
+    moving_tensor = ants_image_to_tensor(moving, device, dtype, normalize=intensity_normalization)
     result = _bspline_affine_registration(
         fixed_tensor,
         moving_tensor,
@@ -1108,6 +1110,7 @@ def syn_registration(
     gaussian_sigma_mode: Optional[str] = None,
     conservative_smooth: Optional[bool] = None,
     padding_mode: str = "zeros",
+    intensity_normalization: Union[bool, str] = "auto",
     outprefix: str = "",
     device: Optional[Union[str, torch.device]] = None,
     dtype: torch.dtype = torch.float32,
@@ -1273,6 +1276,17 @@ def syn_registration(
     ``False`` here does not reproduce syntx's default any more than ``True`` does (both differ
     from it in the sampler derivative only; measured 2026-11-23 on a synthetic 3-D pair, neither
     setting is closer to ``syntx.syn``'s field).
+
+    ``intensity_normalization`` (default ``'auto'``, as in syntx since its benchmark and
+    ``syntx.syn`` both see ``normalize_image(method='auto')`` images) sets how ``fixed`` / ``moving``
+    (and the intensity images of ``multivariate_extras``) are rescaled to ``[0, 1]`` before the
+    affine fit and the SyN stage: ``'auto'`` clips each image to foreground percentiles chosen by
+    entropy (:func:`antstorch.syn.core.utils.auto_select_intensity_percentiles`); ``'percentile'``
+    to the fixed 2nd-98th foreground percentiles (the default before 2026-11-25); ``False``
+    disables it. An image already in ``[0, 1]`` is left unchanged by either method. On
+    Mindboggle-101 the fixed 2-98 clip cost up to 0.05 Dice against syntx on pairs where the
+    entropy choice differs (e.g. (5, 99)), with a systematic change of mean Jacobian; with
+    ``'auto'`` the two libraries agree (project doc ``claude/syntx-normalization-parity.md``).
 
     ``gaussian_sigma_mode`` and ``conservative_smooth`` tune two
     ``'gaussian'``/``'sobolev'``/``'dsti'`` regularizer-formula details that
@@ -1566,6 +1580,7 @@ def syn_registration(
         )
     if padding_mode not in ("zeros", "border", "reflection"):
         raise ValueError("padding_mode must be 'zeros', 'border', or 'reflection'")
+    intensity_normalization = _resolve_intensity_normalization(intensity_normalization) or False
     if len(levels) != len(reg_iterations):
         raise ValueError("levels and reg_iterations must have the same length")
 
@@ -1709,6 +1724,7 @@ def syn_registration(
             multi_start=affine_multi_start,
             center_of_mass_init=affine_center_of_mass_init,
             verbose=verbose,
+            intensity_normalization=intensity_normalization,
         )
     else:  # SyNOnly, no initial_affine supplied: identity.
         matrix_xyz = torch.eye(dimension, device=resolved_device, dtype=dtype)
@@ -1774,8 +1790,8 @@ def syn_registration(
 
     fixed_meta_full = ants_image_metadata(fixed)
     moving_meta_full = ants_image_metadata(moving)
-    I_full = ants_image_to_tensor(fixed, resolved_device, dtype)
-    J_full = ants_image_to_tensor(moving, resolved_device, dtype)
+    I_full = ants_image_to_tensor(fixed, resolved_device, dtype, normalize=intensity_normalization)
+    J_full = ants_image_to_tensor(moving, resolved_device, dtype, normalize=intensity_normalization)
 
     # Extra images share the respective primary image domains. MSE masks
     # retain their binary amplitudes; intensity metrics use the usual normalization.
@@ -1812,7 +1828,7 @@ def syn_registration(
                 raise ValueError("label_msq label values must be representable exactly in float32 (<= 2^24)")
             if name in ("mi", "mattes") and parameter < 2:
                 raise ValueError("MI metrics require at least two histogram bins")
-            normalize = name not in ("mse", "label_msq")
+            normalize = intensity_normalization if name not in ("mse", "label_msq") else False
             tensor_a = metric_tensor(a, fixed, "fixed metric image", normalize)
             tensor_b = metric_tensor(b, moving, "moving metric image", normalize)
             if weight:

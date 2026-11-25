@@ -231,11 +231,14 @@ def auto_detect_device(backend='pytorch', requested_device=None):
     return 'cpu'
 
 
-def normalize_and_tensorize(fixed, moving, winsorize_quantiles=None, backend='pytorch', device='cpu'):
+def normalize_and_tensorize(fixed, moving, winsorize_quantiles=None, backend='pytorch', device='cpu',
+                            intensity_normalization='auto'):
     """Winsorize, foreground-normalize, and tensorize a pair of ANTs images.
 
     Each image is rescaled to ``[0, 1]`` using its own foreground (voxels
-    ``> 0``) 2nd-98th percentile range, then converted to a tensor and
+    ``> 0``) percentile range -- chosen by entropy (``intensity_normalization=
+    'auto'``, the default, as in syntx) or fixed at the 2nd-98th percentiles
+    (``'percentile'``) -- then converted to a tensor and
     permuted from ITK physical axis order ``(x, y[, z])`` to the
     ``(B, C, z, y, x)`` (or ``(B, C, y, x)`` in 2D) layout used throughout
     ``antstorch.syn.core``.
@@ -246,13 +249,18 @@ def normalize_and_tensorize(fixed, moving, winsorize_quantiles=None, backend='py
         Fixed and moving images.
     winsorize_quantiles : tuple of float, optional
         Unused placeholder retained for interface parity with
-        ``syntx``; the foreground percentiles are currently fixed at
-        (2, 98).
+        ``syntx``; not used (the percentiles come from
+        ``intensity_normalization``).
     backend : {'pytorch', 'jax'}
         Tensor backend to construct.
     device : str
         Target device for the returned tensors (``backend='pytorch'``
         only).
+    intensity_normalization : {'auto', 'percentile'} or bool
+        ``'auto'`` / ``True`` (default): ``normalize_image(method='auto')``;
+        ``'percentile'``: fixed 2nd-98th percentiles (default before
+        2026-11-25); ``False``: no normalization. An image already in
+        ``[0, 1]`` is left unchanged (clipped only).
 
     Returns
     -------
@@ -269,26 +277,10 @@ def normalize_and_tensorize(fixed, moving, winsorize_quantiles=None, backend='py
     fi_np = fixed.numpy()
     mi_np = moving.numpy()
 
-    def _norm_fg(arr):
-        arr_min = float(arr.min())
-        arr_max = float(arr.max())
-        # Idempotency check: if already normalized to [0, 1] with an active
-        # range, avoid re-deriving percentile statistics from a collapsed
-        # foreground/background structure.
-        if arr_min >= -1e-4 and arr_max <= 1.0 + 1e-4 and arr_max >= 0.5:
-            return np.clip(arr, 0.0, 1.0).astype(np.float32)
+    from antstorch.syn.bridge import normalize_intensity_array
 
-        pos = arr[arr > 0]
-        if len(pos) > 0:
-            p02 = float(np.percentile(pos, 2.0))
-            p98 = float(np.percentile(pos, 98.0))
-            if p98 <= p02 + 1e-4:
-                p02 = 0.0
-                p98 = float(pos.max())
-        else:
-            p02 = float(arr.min())
-            p98 = float(arr.max())
-        return np.clip((arr - p02) / (p98 - p02 + 1e-6), 0.0, 1.0).astype(np.float32)
+    def _norm_fg(arr):
+        return normalize_intensity_array(np.asarray(arr, dtype=np.float32), intensity_normalization)
 
     fi_norm = _norm_fg(fi_np)
     mi_norm = _norm_fg(mi_np)

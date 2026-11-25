@@ -67,6 +67,26 @@ def test_syn_registration_rejects_unknown_padding_mode():
         syn_registration(fixed, moving, type_of_transform="SyNOnly", padding_mode="wrap")
 
 
+def test_syn_registration_rejects_unknown_intensity_normalization():
+    fixed, moving = _ants_pair_2d()
+    with pytest.raises(ValueError, match="intensity normalization"):
+        syn_registration(fixed, moving, type_of_transform="SyNOnly", intensity_normalization="zscore")
+
+
+def test_syn_registration_intensity_normalization_options_run():
+    # 'auto' (default), 'percentile' (pre-2026-11-25 default) and False all run; scaled copies of the same
+    # pair give the same field with either normalization (both are scale-invariant percentile clips). The blobs
+    # are in [0, 1], which both methods leave unchanged (idempotency), so scale them out of that range first.
+    fixed, moving = _ants_pair_2d(ramp=0.3)
+    fixed, moving = fixed * 3.0, moving * 3.0
+    kwargs = dict(type_of_transform="SyNOnly", reg_iterations=(3, 2), levels=(2, 1), device="cpu")
+    for option in ("auto", "percentile"):
+        a = syn_registration(fixed, moving, intensity_normalization=option, **kwargs)
+        b = syn_registration(fixed * 7.0, moving * 7.0, intensity_normalization=option, **kwargs)
+        np.testing.assert_allclose(a["warpedmovout"].numpy() * 7.0, b["warpedmovout"].numpy(), rtol=1e-2, atol=5e-2)
+    syn_registration(fixed, moving, intensity_normalization=False, **kwargs)
+
+
 def test_syn_registration_rejects_mismatched_pyramid_lengths():
     fixed, moving = _ants_pair_2d()
     with pytest.raises(ValueError, match="levels and reg_iterations"):
