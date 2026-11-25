@@ -12,6 +12,7 @@ and open the notebooks in Jupyter or VS Code using that kernel.
 | {download}`N4 correction <../../examples/n4_bias_correction.ipynb>` | Offline; synthetic bias correction and nonuniformity measurement |
 | {download}`SyN registration <../../examples/syn_registration.ipynb>` | Downloads r16/r64; warped image, Jacobian and transforms |
 | {download}`Brain extraction <../../examples/brain_extraction.ipynb>` | Downloads T1 and pretrained assets; probability, mask and brain image |
+| {download}`Brain extraction modalities <../../examples/brain_extraction_modalities.ipynb>` | All 11 modality strings, contrast-specific inputs and binary versus multiclass output handling |
 | {download}`Deep Atropos <../../examples/deep_atropos.ipynb>` | Downloads T1 and pretrained assets; segmentation and tissue probabilities |
 | {download}`Cortical thickness <../../examples/cortical_thickness.ipynb>` | Downloads T1 and pretrained assets; tissue maps and DiReCT thickness |
 | {download}`Harvard–Oxford atlas <../../examples/harvard_oxford_atlas_labeling.ipynb>` | Downloads T1 and pretrained assets; subcortical and cerebellar labels |
@@ -25,6 +26,11 @@ and open the notebooks in Jupyter or VS Code using that kernel.
 | {download}`White matter hyperintensities <../../examples/white_matter_hyperintensities.ipynb>` | Requires local T1/FLAIR pair; downloads model weights; t1-to-flair alignment and sysu-media segmentation |
 | {download}`Mouse brain analysis <../../examples/mouse_brain_analysis.ipynb>` | Downloads example mouse template, atlas data and weights; t2 extraction, nick parcellation and cortical thickness |
 | {download}`MRI super-resolution <../../examples/mri_super_resolution.ipynb>` | Downloads sample T1 and converted model weights; compare interpolation and pretrained siq on a reduced-resolution t1 crop |
+
+| {download}`Lung extraction <../../examples/lung_extraction.ipynb>` | Downloads an example template, priors and weights; local image optional; CT or proton MRI extraction with binary mask display |
+| {download}`Functional lung segmentation <../../examples/lung_functional_segmentation.ipynb>` | Requires local ventilation MRI and aligned binary lung mask; downloads weights; El Bicho ventilation class labels |
+| {download}`Pulmonary artery segmentation <../../examples/lung_pulmonary_artery_segmentation.ipynb>` | Requires local chest CT in HU, at least 160 voxels per axis; downloads weights; Overlapping-patch CT prediction and binary artery mask |
+| {download}`Airway segmentation <../../examples/lung_airway_segmentation.ipynb>` | Requires local chest CT in HU, at least 160 voxels per axis; downloads weights; Overlapping-patch CT prediction and binary airway mask |
 
 All notebooks default to CPU. Pretrained applications can take several minutes
 or longer and substantial memory. Set `t1_path` to an absolute path to use a
@@ -41,6 +47,14 @@ requires local paths or `ANTSTORCH_EXAMPLE_T1` and `ANTSTORCH_EXAMPLE_FLAIR`;
 no paired FLAIR example is bundled. The mouse notebook uses a downloadable T2
 template for demonstration. Super-resolution uses a small T1 crop and compares
 against interpolation without assuming that the pretrained model is more accurate.
+
+The pulmonary notebooks display binary masks or class labels. Extraction supports
+CT and proton MRI and defaults to a downloadable template. Artery and airway
+segmentation require a local chest CT in HU (`ANTSTORCH_EXAMPLE_CHEST_CT`), with
+at least 160 voxels per axis. Functional segmentation requires local ventilation
+MRI and an aligned binary lung mask (`ANTSTORCH_EXAMPLE_VENTILATION` and
+`ANTSTORCH_EXAMPLE_VENTILATION_MASK`). All four download pretrained assets and
+can require substantial time or memory.
 
 Notebooks are not executed during documentation builds. Pytest validates their
 format and supports opt-in execution; see [testing instructions](https://github.com/ANTsX/ANTsTorch/blob/main/tests/README.md).

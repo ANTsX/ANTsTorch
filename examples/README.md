@@ -26,6 +26,7 @@ an existing kernel, run `%matplotlib inline` and rerun the plotting cells.
 | [N4 bias correction](n4_bias_correction.ipynb) | Correct a known bias field and measure nonuniformity | Synthetic; no downloads |
 | [SyN registration](syn_registration.ipynb) | Align r64 to r16 and inspect the Jacobian | Downloads ANTsPy sample images |
 | [Brain extraction](brain_extraction.ipynb) | Pretrained T1 extraction and mask inspection | Downloads sample T1, templates and weights |
+| [Brain extraction modalities](brain_extraction_modalities.ipynb) | Select T1/T2/T2*/FLAIR/BOLD/FA/PET/MRA or T1 three-tissue/hemisphere/lobe variants | Default uses sample T1; other contrasts require local 3-D images; downloads weights/templates |
 | [Deep Atropos](deep_atropos.ipynb) | Six-tissue segmentation and tissue volumes | Downloads sample T1, templates and weights |
 | [Cortical thickness](cortical_thickness.ipynb) | Deep Atropos followed by DiReCT | Downloads sample T1, templates and weights |
 | [Harvard–Oxford atlas](harvard_oxford_atlas_labeling.ipynb) | Subcortical and cerebellar labeling | Downloads sample T1, templates and weights |
@@ -40,6 +41,11 @@ an existing kernel, run `%matplotlib inline` and rerun the plotting cells.
 | [Mouse brain analysis](mouse_brain_analysis.ipynb) | T2 extraction, Nick parcellation and cortical thickness | Downloads example mouse template, atlas data and weights |
 | [MRI super-resolution](mri_super_resolution.ipynb) | Compare interpolation and pretrained SIQ on a reduced-resolution T1 crop | Downloads sample T1 and converted model weights |
 
+| [Lung extraction](lung_extraction.ipynb) | CT or proton MRI extraction with binary mask display | Downloads an example template, priors and weights; local image optional |
+| [Functional lung segmentation](lung_functional_segmentation.ipynb) | El Bicho ventilation class labels | Requires local ventilation MRI and aligned binary lung mask; downloads weights |
+| [Pulmonary artery segmentation](lung_pulmonary_artery_segmentation.ipynb) | Overlapping-patch CT prediction and binary artery mask | Requires local chest CT in HU, at least 160 voxels per axis; downloads weights |
+| [Airway segmentation](lung_airway_segmentation.ipynb) | Overlapping-patch CT prediction and binary airway mask | Requires local chest CT in HU, at least 160 voxels per axis; downloads weights |
+
 All notebooks default to CPU. Change `device` in the setup cell to use a supported
 accelerator. The pretrained 3-D applications can require substantial memory and
 several minutes or longer on CPU. Most human brain applications default to a downloadable T1; set `t1_path`
@@ -48,6 +54,13 @@ mouse T2 template by default. The WMH notebook requires your own T1/FLAIR pair
 through its path parameters or `ANTSTORCH_EXAMPLE_T1` and
 `ANTSTORCH_EXAMPLE_FLAIR` environment variables. Downloaded ANTsTorch assets are
 cached under `~/.antstorch`.
+
+The modality notebook covers the 11 currently supported `brain_extraction`
+modality strings. Set `ANTSTORCH_EXAMPLE_BRAIN_MODALITY` and optionally
+`ANTSTORCH_EXAMPLE_BRAIN_IMAGE`, or edit the variables in the notebook. Only T1
+variants default to the sample T1. For BOLD, provide a scalar 3-D reference or
+mean image, not a 4-D time series. The three-tissue model's brain mask uses label
+1; hemisphere/lobe variants display their discrete labels and region masks.
 
 SIAM requires the additional installation `python -m pip install -e '.[notebooks,siam]'`
 and uses the whole-head input without skull stripping or N4 correction. See its
@@ -62,6 +75,16 @@ only. MRI super-resolution compares a small deliberately degraded crop with
 interpolation; this experiment does not establish whole-volume SIQ parity or
 anatomical accuracy. Mouse parcellation/thickness outputs are explicitly saved
 on the isotropic computation grid, separately from native-space extraction.
+
+The lung notebooks distinguish CT (in Hounsfield units), proton MRI and
+hyperpolarized-gas ventilation MRI. Extraction defaults to a downloadable template
+for API demonstration; the arterial and airway examples require a local CT via
+`ANTSTORCH_EXAMPLE_CHEST_CT`, with an optional binary patch-selection mask via
+`ANTSTORCH_EXAMPLE_LUNG_MASK`. Ventilation segmentation needs both
+`ANTSTORCH_EXAMPLE_VENTILATION` and `ANTSTORCH_EXAMPLE_VENTILATION_MASK`.
+You can instead set paths directly in the notebooks. All displays use masks or
+class labels rather than probability overlays. The 160³ CT patch models can
+require substantial RAM even with prediction batch size 1.
 
 Application outputs are written under `example_outputs/` relative to the kernel
 working directory; rerunning overwrites matching filenames. Inspect plots and
