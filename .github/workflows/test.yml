@@ -148,7 +148,12 @@ jobs:
             python -c "import psutil; print('Memory after :', psutil.virtual_memory().used // (1024*1024), 'MB')"
           done < <(find tests -type f -name 'test_*.py' -print0 | sort -z)
 
-      - name: Execute offline example notebooks
+      - name: Check notebook formats and plotting without downloads
         run: |
           python -m pytest tests/examples --run-notebooks --test-device=cpu --strict-markers \
             -m "not requires_data and not slow and not cuda and not mps"
+
+      - name: Execute notebooks with tutorial image downloads
+        run: |
+          python -m pytest tests/examples --run-notebooks --test-device=cpu --strict-markers \
+            --notebook-timeout=600 -m tutorial_data

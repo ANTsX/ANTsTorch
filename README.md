@@ -64,10 +64,12 @@ Installation includes ANTsPy, PyTorch, JAX, and other scientific dependencies. G
 
 ### Build a 2-D U-Net
 
-Run a forward pass with synthetic input; no image or model downloads are needed.
+Run a forward pass on the real `r16` image used by the ANTsX tutorial.
+ANTsPy downloads it on first use; no pretrained weights are needed.
 
 ```python
 import torch
+import ants
 import antstorch
 
 model = antstorch.create_unet_model_2d(
@@ -77,7 +79,9 @@ model = antstorch.create_unet_model_2d(
     mode="classification",
 ).eval()
 
-image = torch.rand(1, 1, 64, 64)  # batch, channels, height, width
+sample = ants.image_read(ants.get_ants_data("r16")).clone("float")
+sample = ants.iMath(ants.resample_image(sample, (64, 64), use_voxels=True), "Normalize")
+image = torch.from_numpy(sample.numpy().T.copy())[None, None]  # batch, channels, height, width
 with torch.inference_mode():
     probabilities = model(image)
 
@@ -133,13 +137,18 @@ and run cells from top to bottom. All notebooks default to CPU and explicitly
 enable inline Matplotlib figures. Extraction and binary segmentation overlays
 use masks; anatomical parcellations display discrete labels.
 
-Seven notebooks use synthetic data without downloads: getting started, U-Net,
-N4, denoising, augmentation, B-spline registration and the default scattered-data
-fitting example. Pretrained workflows download weights/templates as needed and
-may require substantial memory and run time. Some use downloadable example
-images; WMH, functional lung, pulmonary artery and airway examples require local
-images of the specified acquisition type. Non-T1 brain-extraction modalities
-also require matching local 3-D inputs. SIAM additionally needs the `siam` extra:
+Image inputs come from the [ANTsX tutorial](https://gist.github.com/ntustison/12a656a5fc2f6f9c4494c88dc09c5621):
+`r16`/`r64`, the `mprage_hippmapp3r` and `adni` T1 examples, and its acquired
+T1/FLAIR, lung and mouse datasets. Samples download on first use and are cached;
+no anatomical phantom or random-noise image is used as a substitute. Some
+notebooks resize images or apply the augmentation/resolution changes being taught.
+The B-spline curve and surface examples retain the tutorial's mathematical data.
+
+Seven image-processing/architecture notebooks require tutorial images but no
+pretrained weights. Other workflows download model assets and may require
+substantial memory and run time. Local inputs can override the provided examples;
+brain-extraction contrasts without a matching tutorial acquisition still require
+a suitable local image. SIAM additionally needs the `siam` extra:
 `python -m pip install -e '.[notebooks,siam]'`.
 
 The [notebook guide](examples/README.md) explains input paths and environment
@@ -147,7 +156,7 @@ variables, cached downloads, output locations and model-specific limitations.
 The [published example guide](docs/examples/index.md) includes notebook downloads;
 notebooks are not executed during documentation builds. See the
 [testing instructions](tests/README.md#example-notebooks) to validate notebooks
-or run the offline examples with pytest.
+or run the image-only examples with pytest (`-m tutorial_data`).
 
 ## Pretrained applications
 

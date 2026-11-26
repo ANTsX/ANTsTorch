@@ -7,7 +7,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 NOTEBOOKS = sorted((ROOT / "examples").rglob("*.ipynb"))
 NOTEBOOKS = [p for p in NOTEBOOKS if ".ipynb_checkpoints" not in p.parts]
-REQUIREMENT_MARKERS = {"requires_data", "slow", "cuda", "mps"}
+REQUIREMENT_MARKERS = {"requires_data", "tutorial_data", "slow", "cuda", "mps"}
 
 
 def _read_notebook(path):

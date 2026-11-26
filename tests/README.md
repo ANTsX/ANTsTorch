@@ -76,8 +76,8 @@ python -m pytest tests/examples --run-notebooks --test-device=cpu \
     -m "not requires_data and not slow and not cuda and not mps"
 ```
 
-Notebook-level `metadata.tags` can contain `requires_data`, `slow`, `cuda`, and
-`mps`; these become pytest markers on execution cases. Mark accelerator examples
+Notebook-level `metadata.tags` can contain `requires_data`, `tutorial_data`,
+`slow`, `cuda`, and `mps`; these become pytest markers on execution cases. Mark accelerator examples
 and select them only on suitable hardware. Execution is opt-in and fails on cell
 errors, even for cells tagged `raises-exception`. The default timeout is 300
 seconds per cell; override it with `--notebook-timeout`.
@@ -93,7 +93,11 @@ data explicitly rather than relying on the repository working directory. Outputs
 are not saved back to source notebooks. The selected test device sets ANTsTorch's
 default in the kernel; explicit device arguments in cells still take precedence.
 Downloads may still populate the usual library caches. The collection includes
-seven offline notebooks and sixteen notebooks marked `requires_data` and `slow`.
+23 data-dependent notebooks: seven marked `tutorial_data` (acquired images,
+no pretrained weights), and sixteen marked `slow` (pretrained workflows).
+All execution cases carry `requires_data`. The `tutorial_data` cases can be run
+with `--run-notebooks -m tutorial_data --notebook-timeout=600`; image downloads
+are expected on first use. Format and plotting-setup tests remain download-free.
 
 ## Markers and fixtures
 
@@ -101,7 +105,8 @@ seven offline notebooks and sixteen notebooks marked `requires_data` and `slow`.
 |---|---|
 | `slow` | Known long-running case |
 | `integration` | A complete pipeline or a contract across multiple components |
-| `requires_data` | Requires external templates or pretrained weights; cached files may suffice |
+| `requires_data` | Requires external images, templates or pretrained weights; cached files may suffice |
+| `tutorial_data` | Example uses acquired tutorial images without pretrained weights |
 | `cuda` | Requires CUDA hardware |
 | `mps` | Requires Apple Metal hardware |
 
@@ -128,25 +133,17 @@ The data preparation/cache job supplies external templates and models.
 GPU tests skip when their required hardware is unavailable.
 
 The brain-extraction modality notebook accepts `ANTSTORCH_EXAMPLE_BRAIN_MODALITY`
-and `ANTSTORCH_EXAMPLE_BRAIN_IMAGE`. Its default is `t1threetissue` with a sample
-T1; non-T1 contrasts require a matching local scalar 3-D image. Its execution is
-marked `requires_data` and `slow`.
+and `ANTSTORCH_EXAMPLE_BRAIN_IMAGE`. Its default uses the sample T1; FLAIR and
+MRA can also download matching tutorial acquisitions. Other contrasts require
+local inputs. WMH, mouse and pulmonary notebooks now default to their original
+tutorial acquisitions. Local path overrides remain available; paired overrides
+must supply the same subject's matching images/masks.
 
-The WMH notebook additionally requires a real paired T1/FLAIR input. To execute
-it, set `ANTSTORCH_EXAMPLE_T1` and `ANTSTORCH_EXAMPLE_FLAIR` to existing absolute
-paths. Its `requires_data` marker excludes it from offline CI execution.
-
-Pulmonary artery/airway execution needs `ANTSTORCH_EXAMPLE_CHEST_CT` (a local
-CT in HU, at least 160 voxels per axis); `ANTSTORCH_EXAMPLE_LUNG_MASK` is optional.
-Functional lung execution needs `ANTSTORCH_EXAMPLE_VENTILATION` and
-`ANTSTORCH_EXAMPLE_VENTILATION_MASK`. The extraction notebook optionally accepts
-`ANTSTORCH_EXAMPLE_LUNG_IMAGE`, otherwise it downloads an example template.
-All four lung notebooks are marked `requires_data` and `slow`; their format and
-plotting setup checks do not require these inputs or run model inference.
-
-A separate ordinary pytest invocation executes the seven offline example
-notebooks in their own Jupyter kernels. Data-dependent notebook execution remains
-opt-in; their notebook schemas are validated in the per-file test pass.
+CI first validates formats and plotting setup without downloads. A separate
+pytest invocation executes the seven `tutorial_data` notebooks using real images.
+The data preparation/cache job supplies ANTsTorch assets; ANTsPy sample images
+are obtained through `ants.get_ants_data`. Pretrained notebook inference remains
+opt-in and is not part of that lightweight execution step.
 
 On this macOS environment, some native 3-D operations abort in forked children
 while passing without `--forked`. For local checks, run component files in
