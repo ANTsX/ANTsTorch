@@ -93,8 +93,11 @@ a small plot for all notebooks, including data-dependent applications; these
 checks do not download data or run pretrained inference.
 Use installed package imports and obtain
 data explicitly rather than relying on the repository working directory. Outputs
-are not saved back to source notebooks. The selected test device sets ANTsTorch's
-default in the kernel; explicit device arguments in cells still take precedence.
+are not saved back to source notebooks. An explicit `--test-device` sets `ANTSTORCH_EXAMPLE_DEVICE` and ANTsTorch's
+default in the kernel. Notebook setup cells read that variable, so a local MPS
+preference cannot override `--test-device=cpu` in Linux CI. `auto` leaves the
+environment setting unchanged; independently hardcoded device arguments still
+take precedence inside individual calls.
 Downloads may still populate the usual library caches. The collection includes
 29 data-dependent notebooks: thirteen marked `tutorial_data` (acquired images,
 no pretrained weights), and sixteen marked `slow` (pretrained workflows).

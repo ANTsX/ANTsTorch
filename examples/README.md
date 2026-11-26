@@ -73,8 +73,9 @@ The original N4 and denoising notebooks remain available as introductory example
 SyN and B-spline SVF registration have their own notebooks and are distinct
 methods, rather than image/tensor versions of one function.
 
-All notebooks default to CPU. Change `device` in the setup cell to use a supported
-accelerator. Inputs are the real acquisitions used in the ANTsX tutorial, with
+All notebooks default to CPU. Set `ANTSTORCH_EXAMPLE_DEVICE` to `cuda` or `mps`
+when the corresponding accelerator is available. The setup cell reads this
+shared setting; pytest's explicit `--test-device` overrides it during tests. Inputs are the real acquisitions used in the ANTsX tutorial, with
 downloads cached on first use. `r16` and `r64` use ANTsPy's data retrieval;
 other examples use the ANTsTorch cache, normally `~/.antstorch`. Pretrained 3-D
 applications may require substantial memory and several minutes or longer.
