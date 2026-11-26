@@ -48,7 +48,7 @@ def get_antstorch_data(
     show_progress: bool = True
 ) -> str:
     """
-    Download ANTsTorch data (templates, priors, etc.) from the Figshare repo, or from the local cache.
+    Download ANTsTorch data (tutorial images, templates, priors, etc.) from Figshare, or use the local cache.
 
     Parameters
     ----------
@@ -137,6 +137,14 @@ def get_antstorch_data(
         "CIT168_basal_forebrain_adni": "https://ndownloader.figshare.com/files/64536324",
         "det_atlas_25_pad_LR_adni": "https://ndownloader.figshare.com/files/64536333",
         "siamV03": "https://ndownloader.figshare.com/files/71795392",
+        # Acquisitions used by https://tinyurl.com/antsxtutorial (not templates).
+        "tutorialLungCT": "https://ndownloader.figshare.com/files/42934234",
+        "tutorialLungProton": "https://ndownloader.figshare.com/files/42934228",
+        "tutorialLungVentilation": "https://ndownloader.figshare.com/files/42934231",
+        "tutorialWmhT1": "https://ndownloader.figshare.com/files/40251796",
+        "tutorialWmhFlair": "https://ndownloader.figshare.com/files/40251793",
+        "tutorialMouseT2": "https://ndownloader.figshare.com/files/45289309",
+        "tutorialMra": "https://ndownloader.figshare.com/files/46406755",
     }
 
     valid_list = tuple(sorted(list(_switcher.keys()) + ["show"]))

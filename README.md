@@ -64,10 +64,12 @@ Installation includes ANTsPy, PyTorch, JAX, and other scientific dependencies. G
 
 ### Build a 2-D U-Net
 
-Run a forward pass with synthetic input; no image or model downloads are needed.
+Run a forward pass on the real `r16` image used by the ANTsX tutorial.
+ANTsPy downloads it on first use; no pretrained weights are needed.
 
 ```python
 import torch
+import ants
 import antstorch
 
 model = antstorch.create_unet_model_2d(
@@ -77,7 +79,9 @@ model = antstorch.create_unet_model_2d(
     mode="classification",
 ).eval()
 
-image = torch.rand(1, 1, 64, 64)  # batch, channels, height, width
+sample = ants.image_read(ants.get_ants_data("r16")).clone("float")
+sample = ants.iMath(ants.resample_image(sample, (64, 64), use_voxels=True), "Normalize")
+image = torch.from_numpy(sample.numpy().T.copy())[None, None]  # batch, channels, height, width
 with torch.inference_mode():
     probabilities = model(image)
 
@@ -104,7 +108,7 @@ Weights and templates download on first use and are cached under `~/.antstorch`.
 
 ## Python notebooks
 
-Explore **23 executable Jupyter notebooks** with explanations, output checks and
+Explore **29 executable Jupyter notebooks** with explanations, output checks and
 inline figures. Start with [Getting started](examples/getting_started.ipynb),
 then choose a workflow below. The [complete notebook guide](examples/README.md)
 lists data requirements, outputs and execution options for every example.
@@ -120,6 +124,20 @@ lists data requirements, outputs and execution options for every example.
 | **Additional imaging workflows** | [White matter hyperintensities](examples/white_matter_hyperintensities.ipynb) · [Mouse brain analysis](examples/mouse_brain_analysis.ipynb) · [MRI super-resolution](examples/mri_super_resolution.ipynb) |
 | **Pulmonary imaging** | [Lung extraction: CT or proton MRI](examples/lung_extraction.ipynb) · [Functional ventilation segmentation](examples/lung_functional_segmentation.ipynb) · [Pulmonary arteries](examples/lung_pulmonary_artery_segmentation.ipynb) · [Airways](examples/lung_airway_segmentation.ipynb) |
 
+For methods with both input interfaces, choose the corresponding example:
+
+| Method | ANTsImage | Tensor |
+| --- | --- | --- |
+| N4 bias correction | [Image example](examples/n4_bias_correction_antsimage.ipynb) | [Tensor example](examples/n4_bias_correction_tensor.ipynb) |
+| Denoising | [Image example](examples/denoising_antsimage.ipynb) | [Tensor example](examples/denoising_tensor.ipynb) |
+| DiReCT thickness engine | [Image example](examples/direct_cortical_thickness_antsimage.ipynb) | [Tensor example](examples/direct_cortical_thickness_tensor.ipynb) |
+
+These pairs use the same real tutorial image and settings. The DiReCT pair
+illustrates the engine on a 2-D slice; the full 3-D workflow remains in
+[cortical_thickness.ipynb](examples/cortical_thickness.ipynb). See the
+[interface guide](examples/README.md#antsimage-and-tensor-interfaces) for layouts,
+spacing and return types.
+
 From the repository root, install the notebook tools and launch JupyterLab:
 
 ```bash
@@ -131,15 +149,23 @@ python -m jupyterlab examples
 Alternatively, open the `.ipynb` files in VS Code. Select **Python 3 (ANTsTorch)**
 and run cells from top to bottom. All notebooks default to CPU and explicitly
 enable inline Matplotlib figures. Extraction and binary segmentation overlays
-use masks; anatomical parcellations display discrete labels.
+use masks; anatomical parcellations display discrete labels. Each notebook reports
+the elapsed time of its main operations and a final total duration. Run all cells
+in order for a comparable measurement; downloads and manual pauses count toward
+the total.
 
-Seven notebooks use synthetic data without downloads: getting started, U-Net,
-N4, denoising, augmentation, B-spline registration and the default scattered-data
-fitting example. Pretrained workflows download weights/templates as needed and
-may require substantial memory and run time. Some use downloadable example
-images; WMH, functional lung, pulmonary artery and airway examples require local
-images of the specified acquisition type. Non-T1 brain-extraction modalities
-also require matching local 3-D inputs. SIAM additionally needs the `siam` extra:
+Image inputs come from the [ANTsX tutorial](https://gist.github.com/ntustison/12a656a5fc2f6f9c4494c88dc09c5621):
+`r16`/`r64`, the `mprage_hippmapp3r` and `adni` T1 examples, and its acquired
+T1/FLAIR, lung and mouse datasets. Samples download on first use and are cached;
+no anatomical phantom or random-noise image is used as a substitute. Some
+notebooks resize images or apply the augmentation/resolution changes being taught.
+The B-spline curve and surface examples retain the tutorial's mathematical data.
+
+Thirteen image-processing/architecture notebooks require tutorial images but no
+pretrained weights. Other workflows download model assets and may require
+substantial memory and run time. Local inputs can override the provided examples;
+brain-extraction contrasts without a matching tutorial acquisition still require
+a suitable local image. SIAM additionally needs the `siam` extra:
 `python -m pip install -e '.[notebooks,siam]'`.
 
 The [notebook guide](examples/README.md) explains input paths and environment
@@ -147,7 +173,7 @@ variables, cached downloads, output locations and model-specific limitations.
 The [published example guide](docs/examples/index.md) includes notebook downloads;
 notebooks are not executed during documentation builds. See the
 [testing instructions](tests/README.md#example-notebooks) to validate notebooks
-or run the offline examples with pytest.
+or run the image-only examples with pytest (`-m tutorial_data`).
 
 ## Pretrained applications
 

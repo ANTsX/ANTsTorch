@@ -7,7 +7,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 NOTEBOOKS = sorted((ROOT / "examples").rglob("*.ipynb"))
 NOTEBOOKS = [p for p in NOTEBOOKS if ".ipynb_checkpoints" not in p.parts]
-REQUIREMENT_MARKERS = {"requires_data", "slow", "cuda", "mps"}
+REQUIREMENT_MARKERS = {"requires_data", "tutorial_data", "slow", "cuda", "mps"}
 
 
 def _read_notebook(path):
@@ -46,6 +46,7 @@ def test_notebook_execution(path, request, tmp_path, monkeypatch):
     notebook = _read_notebook(path)
     _execute_notebook(notebook, request, tmp_path, monkeypatch)
     _assert_inline_figures(notebook)
+    _assert_runtime_summary(notebook)
 
 
 @pytest.mark.integration
@@ -74,6 +75,37 @@ def _assert_inline_figures(notebook):
                for output in outputs), "Notebook produced no inline figures"
 
 
+def _assert_runtime_summary(notebook):
+    import re
+
+    text = "".join(output.get("text", "")
+                   for cell in notebook.cells if cell.cell_type == "code"
+                   for output in cell.get("outputs", []))
+    for label in ("Total elapsed time", "Timed operations"):
+        match = re.search(rf"{label}: ([0-9]+\.[0-9]+) s", text)
+        assert match is not None, f"Notebook did not report {label.lower()}"
+        assert float(match.group(1)) >= 0
+
+
+@pytest.mark.integration
+def test_notebook_explicit_device_overrides_environment(request, tmp_path, monkeypatch):
+    """A notebook must not restore MPS after the runner explicitly selected CPU."""
+    import nbformat
+
+    requested = request.config.getoption("--test-device")
+    if requested == "auto":
+        pytest.skip("This check needs an explicit --test-device")
+    monkeypatch.setenv("ANTSTORCH_EXAMPLE_DEVICE", "mps")
+    notebook = nbformat.v4.new_notebook(cells=[nbformat.v4.new_code_cell(
+        "import os\nimport torch\n"
+        "device = os.environ.get('ANTSTORCH_EXAMPLE_DEVICE', 'mps')\n"
+        f"assert device == {requested!r}, device\n"
+        "value = torch.ones(1).to(device)\n"
+        "assert value.device.type == torch.device(device).type\n"
+    )])
+    _execute_notebook(notebook, request, tmp_path, monkeypatch)
+
+
 def _execute_notebook(notebook, request, tmp_path, monkeypatch):
     if not request.config.getoption("--run-notebooks"):
         pytest.skip("Use --run-notebooks to execute example notebooks")
@@ -90,6 +122,7 @@ def _execute_notebook(notebook, request, tmp_path, monkeypatch):
 
     bootstrap = "import torch\n"
     if device != "auto":
+        monkeypatch.setenv("ANTSTORCH_EXAMPLE_DEVICE", device)
         bootstrap += f"import antstorch\nantstorch.set_default_device({device!r})\n"
     notebook.cells.insert(0, nbformat.v4.new_code_cell(bootstrap))
     monkeypatch.setenv("MPLBACKEND", "Agg")

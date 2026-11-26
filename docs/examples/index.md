@@ -7,29 +7,47 @@ and open the notebooks in Jupyter or VS Code using that kernel.
 
 | Notebook | Data and outputs |
 | --- | --- |
-| {download}`Getting started <../../examples/getting_started.ipynb>` | Offline; image geometry and tensor conversion |
-| {download}`2-D U-Net <../../examples/unet_2d.ipynb>` | Offline; probability maps from random weights |
-| {download}`N4 correction <../../examples/n4_bias_correction.ipynb>` | Offline; synthetic bias correction and nonuniformity measurement |
+| {download}`Getting started <../../examples/getting_started.ipynb>` | Downloads tutorial r16; no pretrained weights |
+| {download}`2-D U-Net <../../examples/unet_2d.ipynb>` | Downloads tutorial r16; random network weights, not trained segmentation |
+| {download}`N4 correction <../../examples/n4_bias_correction.ipynb>` | Downloads tutorial r16; no pretrained weights |
 | {download}`SyN registration <../../examples/syn_registration.ipynb>` | Downloads r16/r64; warped image, Jacobian and transforms |
 | {download}`Brain extraction <../../examples/brain_extraction.ipynb>` | Downloads T1 and pretrained assets; probability, mask and brain image |
-| {download}`Brain extraction modalities <../../examples/brain_extraction_modalities.ipynb>` | All 11 modality strings, contrast-specific inputs and binary versus multiclass output handling |
+| {download}`Brain extraction modalities <../../examples/brain_extraction_modalities.ipynb>` | Downloads tutorial T1, FLAIR or MRA and model assets; other contrasts need local input |
 | {download}`Deep Atropos <../../examples/deep_atropos.ipynb>` | Downloads T1 and pretrained assets; segmentation and tissue probabilities |
 | {download}`Cortical thickness <../../examples/cortical_thickness.ipynb>` | Downloads T1 and pretrained assets; tissue maps and DiReCT thickness |
 | {download}`Harvard–Oxford atlas <../../examples/harvard_oxford_atlas_labeling.ipynb>` | Downloads T1 and pretrained assets; subcortical and cerebellar labels |
 | {download}`Desikan–Killiany–Tourville <../../examples/desikan_killiany_tourville.ipynb>` | Downloads T1 and pretrained assets; DKT and lobar labels |
 | {download}`SIAM labeling <../../examples/siam_labeling.ipynb>` | Requires the SIAM extra; downloads 2.68 GB model archive; whole-head labels |
-| {download}`B-spline scattered data fitting <../../examples/bspline_scattered_data_fitting.ipynb>` | Offline by default; ANTsPy reference curves and ANTsTorch surface/image fitting |
-| {download}`Denoising <../../examples/denoising.ipynb>` | Offline; non-local means filtering and error against a clean phantom |
-| {download}`Data augmentation <../../examples/data_augmentation.ipynb>` | Synthetic; no downloads; ANTsPy augmentation on CPU; shared spatial transforms, label interpolation and intensity perturbations |
-| {download}`B-spline registration <../../examples/bspline_registration.ipynb>` | Synthetic; no downloads; affine initialization, b-spline svf and jacobian inspection |
+| {download}`B-spline scattered data fitting <../../examples/bspline_scattered_data_fitting.ipynb>` | Downloads tutorial r16; curve/surface coordinates follow the tutorial; no pretrained weights |
+| {download}`Denoising <../../examples/denoising.ipynb>` | Downloads tutorial r16; no artificial noise added |
+| {download}`Data augmentation <../../examples/data_augmentation.ipynb>` | Downloads tutorial mprage_hippmapp3r; uses a real axial slice; no pretrained weights |
+| {download}`B-spline registration <../../examples/bspline_registration.ipynb>` | Downloads tutorial r16/r64; no pretrained weights |
 | {download}`Deep FLASH <../../examples/deep_flash.ipynb>` | Downloads sample T1, templates, priors and weights; medial temporal lobe parcellation; optional aligned t2 |
-| {download}`White matter hyperintensities <../../examples/white_matter_hyperintensities.ipynb>` | Requires local T1/FLAIR pair; downloads model weights; t1-to-flair alignment and sysu-media segmentation |
-| {download}`Mouse brain analysis <../../examples/mouse_brain_analysis.ipynb>` | Downloads example mouse template, atlas data and weights; t2 extraction, nick parcellation and cortical thickness |
+| {download}`White matter hyperintensities <../../examples/white_matter_hyperintensities.ipynb>` | Downloads tutorial T1/FLAIR pair and model weights; local pair optional |
+| {download}`Mouse brain analysis <../../examples/mouse_brain_analysis.ipynb>` | Downloads tutorial mouse T2 acquisition, atlas data and weights |
 | {download}`MRI super-resolution <../../examples/mri_super_resolution.ipynb>` | Downloads sample T1 and converted model weights; compare interpolation and pretrained siq on a reduced-resolution t1 crop |
-| {download}`Lung extraction <../../examples/lung_extraction.ipynb>` | Downloads an example template, priors and weights; local image optional; CT or proton MRI extraction with binary mask display |
-| {download}`Functional lung segmentation <../../examples/lung_functional_segmentation.ipynb>` | Requires local ventilation MRI and aligned binary lung mask; downloads weights; El Bicho ventilation class labels |
-| {download}`Pulmonary artery segmentation <../../examples/lung_pulmonary_artery_segmentation.ipynb>` | Requires local chest CT in HU, at least 160 voxels per axis; downloads weights; Overlapping-patch CT prediction and binary artery mask |
-| {download}`Airway segmentation <../../examples/lung_airway_segmentation.ipynb>` | Requires local chest CT in HU, at least 160 voxels per axis; downloads weights; Overlapping-patch CT prediction and binary airway mask |
+| {download}`Lung extraction <../../examples/lung_extraction.ipynb>` | Downloads tutorial CT or proton MRI, priors and weights; local image optional |
+| {download}`Functional lung segmentation <../../examples/lung_functional_segmentation.ipynb>` | Downloads tutorial proton/ventilation MRI pair and weights; local image/mask pair optional |
+| {download}`Pulmonary artery segmentation <../../examples/lung_pulmonary_artery_segmentation.ipynb>` | Downloads tutorial CT and weights; local CT in HU optional; at least 160 voxels per axis |
+| {download}`Airway segmentation <../../examples/lung_airway_segmentation.ipynb>` | Downloads tutorial CT and weights; local CT in HU optional; at least 160 voxels per axis |
+
+## ANTsImage and tensor input variants
+
+Each pair has independent executable notebooks using the same r16 acquisition,
+algorithm parameters and timing conventions.
+
+| Method | ANTsImage | Tensor |
+| --- | --- | --- |
+| N4 bias correction | {download}`Image example <../../examples/n4_bias_correction_antsimage.ipynb>` | {download}`Tensor example <../../examples/n4_bias_correction_tensor.ipynb>` |
+| Denoising | {download}`Image example <../../examples/denoising_antsimage.ipynb>` | {download}`Tensor example <../../examples/denoising_tensor.ipynb>` |
+| DiReCT thickness engine | {download}`Image example <../../examples/direct_cortical_thickness_antsimage.ipynb>` | {download}`Tensor example <../../examples/direct_cortical_thickness_tensor.ipynb>` |
+
+The denoising tensor example reverses voxel spacing when reversing spatial
+array axes. N4 uses an explicit physical-domain object. DiReCT uses estimated
+tissues from the real r16 slice for a quick 2-D interface demonstration; it is
+not a replacement for the {download}`full 3-D cortical thickness workflow <../../examples/cortical_thickness.ipynb>`.
+The image interfaces above are part of ANTsTorch and do not switch to ANTsPy's
+numerical implementations.
 
 All notebooks default to CPU. Pretrained applications can take several minutes
 or longer and substantial memory. Set `t1_path` to an absolute path to use a
@@ -41,19 +59,14 @@ and runtime; use a whole-head input without prior brain extraction or N4 correct
 The B-spline notebook identifies the ANTsPy curve examples explicitly: ANTsTorch
 supports 2-D/3-D parametric domains, not 1-D curves.
 
-Deep FLASH can use T1 alone or an already aligned T1/T2 pair. The WMH notebook
-requires local paths or `ANTSTORCH_EXAMPLE_T1` and `ANTSTORCH_EXAMPLE_FLAIR`;
-no paired FLAIR example is bundled. The mouse notebook uses a downloadable T2
-template for demonstration. Super-resolution uses a small T1 crop and compares
-against interpolation without assuming that the pretrained model is more accurate.
-
-The pulmonary notebooks display binary masks or class labels. Extraction supports
-CT and proton MRI and defaults to a downloadable template. Artery and airway
-segmentation require a local chest CT in HU (`ANTSTORCH_EXAMPLE_CHEST_CT`), with
-at least 160 voxels per axis. Functional segmentation requires local ventilation
-MRI and an aligned binary lung mask (`ANTSTORCH_EXAMPLE_VENTILATION` and
-`ANTSTORCH_EXAMPLE_VENTILATION_MASK`). All four download pretrained assets and
-can require substantial time or memory.
+Deep FLASH can use T1 alone or an already aligned T1/T2 pair. WMH defaults to
+the acquired T1/FLAIR pair from the tutorial; the lung notebooks default to its
+CT and paired proton/ventilation acquisitions. The mouse workflow uses its mouse
+T2 acquisition. Paths and environment variables can override these inputs.
+The [notebook guide](https://github.com/ANTsX/ANTsTorch/blob/main/examples/README.md#tutorial-data-sources)
+lists original data URLs and cache identifiers. No anatomical phantom is used
+as an image substitute; augmentation and resolution changes act on acquired data.
+Pulmonary CT models need at least 160 voxels per axis and substantial memory.
 
 Notebooks are not executed during documentation builds. Pytest validates their
 format and supports opt-in execution; see [testing instructions](https://github.com/ANTsX/ANTsTorch/blob/main/tests/README.md).
