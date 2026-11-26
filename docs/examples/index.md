@@ -31,6 +31,24 @@ and open the notebooks in Jupyter or VS Code using that kernel.
 | {download}`Pulmonary artery segmentation <../../examples/lung_pulmonary_artery_segmentation.ipynb>` | Downloads tutorial CT and weights; local CT in HU optional; at least 160 voxels per axis |
 | {download}`Airway segmentation <../../examples/lung_airway_segmentation.ipynb>` | Downloads tutorial CT and weights; local CT in HU optional; at least 160 voxels per axis |
 
+## ANTsImage and tensor input variants
+
+Each pair has independent executable notebooks using the same r16 acquisition,
+algorithm parameters and timing conventions.
+
+| Method | ANTsImage | Tensor |
+| --- | --- | --- |
+| N4 bias correction | {download}`Image example <../../examples/n4_bias_correction_antsimage.ipynb>` | {download}`Tensor example <../../examples/n4_bias_correction_tensor.ipynb>` |
+| Denoising | {download}`Image example <../../examples/denoising_antsimage.ipynb>` | {download}`Tensor example <../../examples/denoising_tensor.ipynb>` |
+| DiReCT thickness engine | {download}`Image example <../../examples/direct_cortical_thickness_antsimage.ipynb>` | {download}`Tensor example <../../examples/direct_cortical_thickness_tensor.ipynb>` |
+
+The denoising tensor example reverses voxel spacing when reversing spatial
+array axes. N4 uses an explicit physical-domain object. DiReCT uses estimated
+tissues from the real r16 slice for a quick 2-D interface demonstration; it is
+not a replacement for the {download}`full 3-D cortical thickness workflow <../../examples/cortical_thickness.ipynb>`.
+The image interfaces above are part of ANTsTorch and do not switch to ANTsPy's
+numerical implementations.
+
 All notebooks default to CPU. Pretrained applications can take several minutes
 or longer and substantial memory. Set `t1_path` to an absolute path to use a
 local scalar 3-D T1 image. Application outputs go to `example_outputs/` relative

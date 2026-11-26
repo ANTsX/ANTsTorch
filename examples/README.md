@@ -45,6 +45,34 @@ an existing kernel, run `%matplotlib inline` and rerun the plotting cells.
 | [Pulmonary artery segmentation](lung_pulmonary_artery_segmentation.ipynb) | Overlapping-patch CT prediction and binary artery mask | Downloads tutorial CT and weights; local CT in HU optional; at least 160 voxels per axis |
 | [Airway segmentation](lung_airway_segmentation.ipynb) | Overlapping-patch CT prediction and binary airway mask | Downloads tutorial CT and weights; local CT in HU optional; at least 160 voxels per axis |
 
+## ANTsImage and tensor interfaces
+
+Choose a standalone notebook for the input type you use. Each pair runs the same
+acquired r16 image and algorithm settings, with inline figures and measured
+operation/total durations. The tensor examples expose array layout, device and
+physical-metadata handling; the image examples use ANTsTorch's image interface.
+An ANTsImage interface here still uses ANTsTorch's engine, rather than calling
+the corresponding ANTsPy/ITK implementation.
+
+| Method | ANTsImage input | Tensor input |
+| --- | --- | --- |
+| N4 bias correction | [n4_bias_correction_antsimage.ipynb](n4_bias_correction_antsimage.ipynb) | [n4_bias_correction_tensor.ipynb](n4_bias_correction_tensor.ipynb) |
+| Denoising | [denoising_antsimage.ipynb](denoising_antsimage.ipynb) | [denoising_tensor.ipynb](denoising_tensor.ipynb) |
+| DiReCT thickness engine | [direct_cortical_thickness_antsimage.ipynb](direct_cortical_thickness_antsimage.ipynb) | [direct_cortical_thickness_tensor.ipynb](direct_cortical_thickness_tensor.ipynb) |
+
+For N4, these are separate public functions. Denoising dispatches the same
+function on the input type: its spacing tuple follows the provided tensor's
+spatial axes, whereas N4's `ImageDomain` uses physical x-y-z order. DiReCT's
+image entry returns an ANTsImage and its tensor entry returns a `DiReCTResult`.
+The DiReCT pair is a 2-D API demonstration using estimated tissues from the real
+r16 slice; use the existing [3-D cortical thickness workflow](cortical_thickness.ipynb)
+for the segmentation-to-thickness application. Tensor input alone does not imply
+autograd support: the DiReCT tensor engine runs without gradient recording.
+
+The original N4 and denoising notebooks remain available as introductory examples.
+SyN and B-spline SVF registration have their own notebooks and are distinct
+methods, rather than image/tensor versions of one function.
+
 All notebooks default to CPU. Change `device` in the setup cell to use a supported
 accelerator. Inputs are the real acquisitions used in the ANTsX tutorial, with
 downloads cached on first use. `r16` and `r64` use ANTsPy's data retrieval;
@@ -111,13 +139,27 @@ results before using them downstream. Short demonstration schedules and structur
 clinical or anatomical accuracy. Acquired images do not provide noise-free or
 bias-free ground truth, so those notebooks avoid synthetic ground-truth assertions.
 
+## Execution times
+
+Each notebook prints timings for its main operations and a final **total elapsed
+time**, in seconds and minutes, on the selected device. CUDA and MPS work is
+synchronized before stopping an operation timer. Operation timings include any
+preprocessing or model/template downloads performed inside that call.
+
+Use **Restart Kernel and Run All Cells** for a comparable end-to-end measurement.
+The total starts at the first setup cell and includes imports, downloads, image
+preparation, computation, figures and file writes, but not Jupyter kernel startup.
+Manual pauses between cells are included. First runs can take longer because
+images and weights must be downloaded; later runs benefit from caches. These
+are measurements of the current run, not hardware-independent estimates.
+
 ## Validate and execute
 
 ```bash
 # Validate all notebook schemas without running cells.
 python -m pytest tests/examples --test-device=cpu
 
-# Execute seven notebooks on tutorial images (downloads allowed, no model weights).
+# Execute thirteen notebooks on tutorial images (downloads allowed, no model weights).
 python -m pytest tests/examples --run-notebooks --test-device=cpu \
     -m tutorial_data --notebook-timeout=600
 

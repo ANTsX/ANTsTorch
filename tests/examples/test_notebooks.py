@@ -46,6 +46,7 @@ def test_notebook_execution(path, request, tmp_path, monkeypatch):
     notebook = _read_notebook(path)
     _execute_notebook(notebook, request, tmp_path, monkeypatch)
     _assert_inline_figures(notebook)
+    _assert_runtime_summary(notebook)
 
 
 @pytest.mark.integration
@@ -72,6 +73,18 @@ def _assert_inline_figures(notebook):
                    for output in outputs), "Notebook uses a noninteractive Agg canvas"
     assert any({"image/png", "image/svg+xml"}.intersection(output.get("data", {}))
                for output in outputs), "Notebook produced no inline figures"
+
+
+def _assert_runtime_summary(notebook):
+    import re
+
+    text = "".join(output.get("text", "")
+                   for cell in notebook.cells if cell.cell_type == "code"
+                   for output in cell.get("outputs", []))
+    for label in ("Total elapsed time", "Timed operations"):
+        match = re.search(rf"{label}: ([0-9]+\.[0-9]+) s", text)
+        assert match is not None, f"Notebook did not report {label.lower()}"
+        assert float(match.group(1)) >= 0
 
 
 def _execute_notebook(notebook, request, tmp_path, monkeypatch):

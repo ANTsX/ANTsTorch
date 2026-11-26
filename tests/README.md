@@ -85,7 +85,10 @@ seconds per cell; override it with `--notebook-timeout`.
 Each notebook runs in a fresh `python3` kernel with a temporary working directory.
 Tests start with `MPLBACKEND=Agg`; notebook setup must activate inline plotting.
 Full execution must produce inline image outputs without the noninteractive
-`FigureCanvasAgg` warning. Separate plotting tests run only the setup cells and
+`FigureCanvasAgg` warning and report its measured total and operation durations.
+Notebook timers synchronize the selected CUDA/MPS device. The total includes
+downloads and any manual pauses, so use Run All for comparable measurements.
+Separate plotting tests run only the setup cells and
 a small plot for all notebooks, including data-dependent applications; these
 checks do not download data or run pretrained inference.
 Use installed package imports and obtain
@@ -93,9 +96,11 @@ data explicitly rather than relying on the repository working directory. Outputs
 are not saved back to source notebooks. The selected test device sets ANTsTorch's
 default in the kernel; explicit device arguments in cells still take precedence.
 Downloads may still populate the usual library caches. The collection includes
-23 data-dependent notebooks: seven marked `tutorial_data` (acquired images,
+29 data-dependent notebooks: thirteen marked `tutorial_data` (acquired images,
 no pretrained weights), and sixteen marked `slow` (pretrained workflows).
-All execution cases carry `requires_data`. The `tutorial_data` cases can be run
+All execution cases carry `requires_data`. The paired ANTsImage/tensor N4,
+denoising and DiReCT notebooks are included in `tutorial_data`: they use real r16,
+with Atropos tissue estimation for the two 2-D DiReCT interface examples. The `tutorial_data` cases can be run
 with `--run-notebooks -m tutorial_data --notebook-timeout=600`; image downloads
 are expected on first use. Format and plotting-setup tests remain download-free.
 
@@ -140,7 +145,7 @@ tutorial acquisitions. Local path overrides remain available; paired overrides
 must supply the same subject's matching images/masks.
 
 CI first validates formats and plotting setup without downloads. A separate
-pytest invocation executes the seven `tutorial_data` notebooks using real images.
+pytest invocation executes the thirteen `tutorial_data` notebooks using real images.
 The data preparation/cache job supplies ANTsTorch assets; ANTsPy sample images
 are obtained through `ants.get_ants_data`. Pretrained notebook inference remains
 opt-in and is not part of that lightweight execution step.

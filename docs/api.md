@@ -14,6 +14,25 @@ Registration-specific APIs can also be imported from their subpackages.
 | `antstorch.bspline_flows.n4_bias_field_correction_tensor` | Image tensor, domain, optional mask | Corrected image tensor or bias field |
 | `antstorch.bspline_flows.bspline_svf_registration` | Image tensors and physical domains | Warped image, displacement fields and optimization history |
 
+## Paired image and tensor interfaces
+
+| Method | ANTsImage entry | Tensor entry | Examples |
+| --- | --- | --- | --- |
+| N4 bias correction | `antstorch.n4_bias_field_correction` | `antstorch.bspline_flows.n4_bias_field_correction_tensor` | {download}`Image <../examples/n4_bias_correction_antsimage.ipynb>` · {download}`Tensor <../examples/n4_bias_correction_tensor.ipynb>` |
+| Denoising | `antstorch.denoise_image(ANTsImage, ...)` | `antstorch.denoise_image(Tensor, ...)` | {download}`Image <../examples/denoising_antsimage.ipynb>` · {download}`Tensor <../examples/denoising_tensor.ipynb>` |
+| DiReCT thickness engine | `antstorch.direct.kelly_kapowski` | `antstorch.direct.direct_cortical_thickness` | {download}`Image <../examples/direct_cortical_thickness_antsimage.ipynb>` · {download}`Tensor <../examples/direct_cortical_thickness_tensor.ipynb>` |
+
+N4's image wrapper preserves physical image metadata; its tensor engine takes
+an `ImageDomain` in physical x-y-z order. Denoising is a single polymorphic API:
+for tensor input, the `spacing` tuple follows the supplied spatial array axes.
+With `(N, C, Y, X)` input, pass `(spacing_y, spacing_x)`.
+
+DiReCT's image interface returns an ANTsImage; its tensor interface returns
+`DiReCTResult` with a thickness tensor, fields and energy history. The tensor
+engine is decorated with `torch.no_grad`; tensor input is not a guarantee of
+autograd support. The paired examples illustrate the actual public entry points,
+not a substitution of one registration/segmentation algorithm for another.
+
 ## Image geometry
 
 ANTs arrays use `(X, Y[, Z])`; PyTorch tensors use `(N, C, [Z,] Y, X)`.
