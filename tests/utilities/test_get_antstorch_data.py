@@ -12,6 +12,13 @@ data = importlib.import_module("antstorch.utilities.get_antstorch_data")
     ("siamV03", "siamV03.tar.gz", "71795392",
      "0a8e6964f1dbb9aab85b0041d70b26262bc1e261f9e9cbe1187f3a0b3ced641b"),
     ("kirby", "kirby.nii.gz", "25620107", None),
+    ("tutorialLungCT", "tutorialLungCT.nii.gz", "42934234", None),
+    ("tutorialLungProton", "tutorialLungProton.nii.gz", "42934228", None),
+    ("tutorialLungVentilation", "tutorialLungVentilation.nii.gz", "42934231", None),
+    ("tutorialWmhT1", "tutorialWmhT1.nii.gz", "40251796", None),
+    ("tutorialWmhFlair", "tutorialWmhFlair.nii.gz", "40251793", None),
+    ("tutorialMouseT2", "tutorialMouseT2.nii.gz", "45289309", None),
+    ("tutorialMra", "tutorialMra.nii.gz", "46406755", None),
     ("magetCerebellumxTemplate0GenericAffine",
      "magetCerebellumxTemplate0GenericAffine.mat", "41052575", None),
 ])
