@@ -235,8 +235,8 @@ def desikan_killiany_tourville_labeling(t1,
     from ..utilities import preprocess_brain_image
     from ..utilities import brain_extraction
     from ..utilities import deep_atropos
-
     from ..utilities.device_manager import get_default_device
+    from ._cache import get_cached_data, get_cached_model
 
     if device is None:
         device = get_default_device()
@@ -254,7 +254,10 @@ def desikan_killiany_tourville_labeling(t1,
 
     which_template = "hcpyaT1Template"
     template_transform_type = "antsRegistrationSyNQuick[a]"
-    template = ants.image_read(get_antstorch_data(which_template))
+    template = get_cached_data(
+        ("template_image", which_template),
+        lambda: ants.image_read(get_antstorch_data(which_template)),
+    ).clone()
 
     cropped_template_size = (160, 192, 160)
 
@@ -297,36 +300,34 @@ def desikan_killiany_tourville_labeling(t1,
 
     channel_size = 1
     number_of_classification_labels = len(labels)
-
-    # Base UNet
-    base_unet = create_unet_model_3d(input_channel_size=channel_size,
-        number_of_outputs=number_of_classification_labels, mode="classification",
-        number_of_filters=(16, 32, 64, 128), dropout_rate=0.0,
-        convolution_kernel_size=(3, 3, 3), deconvolution_kernel_size=(2, 2, 2))
-
-    # Attach one penultimate 1x1x1 sigmoid aux head using the shared multihead wrapper
-    unet_model = create_multihead_unet_model_3d(
-        base_unet,
-        n_aux_heads=1,
-        use_sigmoid=True,
-        n_main_outputs=number_of_classification_labels,
-    )
-
-    # Warmup once so the aux head(s) are materialized prior to loading weights
-    dummy = torch.zeros(1, 1, *cropped_template_size, dtype=torch.float32)
-    unet_model.warmup(dummy)
-
-    # Load converted weights (expects a multi-head state_dict if converter exported it;
-    # otherwise base weights load and aux head remains randomly initialized).
     weights_path = get_pretrained_network("DesikanKillianyTourvilleOuter_pytorch")
-    sd = torch.load(weights_path, map_location="cpu")
-    # Try strict, then fallback to non-strict to allow aux head if missing
-    missing, unexpected = unet_model.load_state_dict(sd, strict=False)
-    if verbose:
-        print(f"[ANTsTorch] load_state_dict: missing={len(missing)} unexpected={len(unexpected)}")
 
-    unet_model.eval()
-    unet_model.to(device)
+    def _build_dkt_outer_model():
+        base_unet = create_unet_model_3d(
+            input_channel_size=channel_size,
+            number_of_outputs=number_of_classification_labels,
+            mode="classification",
+            number_of_filters=(16, 32, 64, 128),
+            dropout_rate=0.0,
+            convolution_kernel_size=(3, 3, 3),
+            deconvolution_kernel_size=(2, 2, 2),
+        )
+        mdl = create_multihead_unet_model_3d(
+            base_unet,
+            n_aux_heads=1,
+            use_sigmoid=True,
+            n_main_outputs=number_of_classification_labels,
+        )
+        # Materialize lazy 1x1x1 aux head with a minimal 16^3 dummy tensor instead of a full 160x192x160 CPU pass
+        mdl.warmup(torch.zeros(1, 1, 16, 16, 16, dtype=torch.float32))
+        sd = torch.load(weights_path, map_location="cpu")
+        missing, unexpected = mdl.load_state_dict(sd, strict=False)
+        if verbose:
+            print(f"[ANTsTorch] load_state_dict: missing={len(missing)} unexpected={len(unexpected)}")
+        mdl.eval()
+        return mdl.to(device)
+
+    unet_model = get_cached_model(("dkt_outer", str(device)), _build_dkt_outer_model)
     ################################
     #
     # Do prediction and normalize to native space

@@ -100,6 +100,7 @@ def cerebellum_morphology(t1,
     from ..utilities.get_antstorch_data import get_antstorch_data
     from ..utilities.brain_extraction import brain_extraction
     from ..utilities.device_manager import get_default_device
+    from ._cache import get_cached_data, get_cached_model
 
     if device is None:
         device = get_default_device()
@@ -116,25 +117,46 @@ def cerebellum_morphology(t1,
     whichtoinvert = [True, False, True]
 
     ################################
-    # Get templates / masks / priors
+    # Get templates / masks / priors (cached across calls)
     ################################
-    t1_template = ants.image_read(get_antstorch_data("magetTemplate"))
-    t1_template_brain_mask = ants.image_read(get_antstorch_data("magetTemplateBrainMask"))
-    t1_template_brain = t1_template * t1_template_brain_mask
+    image_size = (240, 144, 144)
 
-    t1_cerebellum_template = ants.image_read(get_antstorch_data("magetCerebellumTemplate"))
-    t1_cerebellum_template = (
-        (t1_cerebellum_template - t1_cerebellum_template.min()) /
-        (t1_cerebellum_template.max() - t1_cerebellum_template.min())
-    )
-    cerebellum_x_template_xfrm = get_antstorch_data("magetCerebellumxTemplate0GenericAffine")
+    def _build_maget_static_assets():
+        t1_tpl = ants.image_read(get_antstorch_data("magetTemplate"))
+        t1_tpl_mask = ants.image_read(get_antstorch_data("magetTemplateBrainMask"))
+        t1_tpl_brain = t1_tpl * t1_tpl_mask
 
-    # Spatial priors (first 3: CSF, GM, WM; then regions)
-    priors_path = get_antstorch_data("magetCerebellumTemplatePriors")
-    spatial_priors = ants.image_read(priors_path)
-    priors_image_list = ants.ndimage_to_list(spatial_priors)
-    for i in range(len(priors_image_list)):
-        priors_image_list[i] = ants.copy_image_info(t1_cerebellum_template, priors_image_list[i])
+        t1_cer_tpl = ants.image_read(get_antstorch_data("magetCerebellumTemplate"))
+        t1_cer_tpl = (
+            (t1_cer_tpl - t1_cer_tpl.min()) /
+            (t1_cer_tpl.max() - t1_cer_tpl.min())
+        )
+        cer_xfrm = get_antstorch_data("magetCerebellumxTemplate0GenericAffine")
+
+        priors_p = get_antstorch_data("magetCerebellumTemplatePriors")
+        sp_priors = ants.image_read(priors_p)
+        pr_list = ants.ndimage_to_list(sp_priors)
+        cropped_pr_np = []
+        for idx_pr in range(len(pr_list)):
+            pr_img = ants.copy_image_info(t1_cer_tpl, pr_list[idx_pr])
+            pr_list[idx_pr] = pr_img
+            cropped_pr_np.append(
+                ants.pad_or_crop_image_to_size(pr_img, image_size).numpy().astype(np.float32)
+            )
+        cropped_tpl_np = ants.pad_or_crop_image_to_size(t1_cer_tpl, image_size).numpy().astype(np.float32)
+        return t1_tpl, t1_tpl_brain, t1_cer_tpl, cer_xfrm, cropped_tpl_np, cropped_pr_np
+
+    (
+        _t1_tpl_c,
+        _t1_tpl_brain_c,
+        _t1_cer_tpl_c,
+        cerebellum_x_template_xfrm,
+        cropped_cerebellum_template_np,
+        cropped_priors_np,
+    ) = get_cached_data(("cerebellum_morphology_maget_static", image_size), _build_maget_static_assets)
+    t1_template = _t1_tpl_c.clone()
+    t1_template_brain = _t1_tpl_brain_c.clone()
+    t1_cerebellum_template = _t1_cer_tpl_c.clone()
 
     ################################
     # Preprocess images
@@ -248,32 +270,36 @@ def cerebellum_morphology(t1,
             additional_options = ["attentionGating"]
 
         number_of_classification_labels = len(labels)
-        unet_model = create_unet_model_3d(
-            channel_size,
-            number_of_outputs=number_of_classification_labels, mode="classification",
-            number_of_filters=(32, 64, 96, 128, 256),
-            convolution_kernel_size=(3, 3, 3),
-            deconvolution_kernel_size=(2, 2, 2),
-            dropout_rate=0.0,
-            additional_options=additional_options
-        )
-
         if verbose:
             print("Processing " + network_name)
-
-        # Load weights
-        if verbose:
             print("Retrieving model weights.")
         weights_file_name = get_pretrained_network(network_name)
-        try:
-            state = torch.load(weights_file_name, map_location="cpu")
-            missing, unexpected = unet_model.load_state_dict(state, strict=False)
-            if verbose:
-                print(f"[ANTsTorch] load_state_dict: missing={len(missing)} unexpected={len(unexpected)}")
-        except Exception as e:
-            raise RuntimeError(f"Failed loading weights from {weights_file_name}: {e}")
 
-        unet_model.eval().to(device)
+        def _build_cerebellum_stage_model(
+            ch=channel_size,
+            n_out=number_of_classification_labels,
+            opts=tuple(additional_options) if additional_options is not None else None,
+            wf=weights_file_name,
+        ):
+            mdl = create_unet_model_3d(
+                ch,
+                number_of_outputs=n_out, mode="classification",
+                number_of_filters=(32, 64, 96, 128, 256),
+                convolution_kernel_size=(3, 3, 3),
+                deconvolution_kernel_size=(2, 2, 2),
+                dropout_rate=0.0,
+                additional_options=list(opts) if opts is not None else None,
+            )
+            try:
+                state = torch.load(wf, map_location="cpu")
+                missing, unexpected = mdl.load_state_dict(state, strict=False)
+                if verbose:
+                    print(f"[ANTsTorch] load_state_dict: missing={len(missing)} unexpected={len(unexpected)}")
+            except Exception as e:
+                raise RuntimeError(f"Failed loading weights from {wf}: {e}")
+            return mdl.eval().to(device)
+
+        unet_model = get_cached_model(("cerebellum_morphology", network_name, str(device)), _build_cerebellum_stage_model)
 
         # Prediction
         if verbose:
@@ -293,15 +319,12 @@ def cerebellum_morphology(t1,
         batchX[1, 0, :, :, :] = np.flip(t1_resamp, axis=0)
 
         if m == 0:
-            templ = ants.pad_or_crop_image_to_size(t1_cerebellum_template, image_size).numpy().astype(np.float32)
             for j in range(batchX.shape[0]):
-                batchX[j, 1, :, :, :] = templ
+                batchX[j, 1, :, :, :] = cropped_cerebellum_template_np
 
         if m > 0 and which_priors is not None:
             for i in range(len(which_priors)):
-                prior_np = ants.pad_or_crop_image_to_size(
-                    priors_image_list[which_priors[i]], image_size
-                ).numpy().astype(np.float32)
+                prior_np = cropped_priors_np[which_priors[i]]
                 for j in range(batchX.shape[0]):
                     batchX[j, i + 1, :, :, :] = prior_np
 

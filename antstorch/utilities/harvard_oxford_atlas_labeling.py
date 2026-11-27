@@ -108,6 +108,7 @@ def harvard_oxford_atlas_labeling(t1,
         preprocess_brain_image,
     )
     from ..utilities.device_manager import get_default_device
+    from ._cache import get_cached_data, get_cached_model
 
     if device is None:
         device = get_default_device()
@@ -130,7 +131,10 @@ def harvard_oxford_atlas_labeling(t1,
 
     which_template = "hcpyaT1Template"
     template_transform_type = "antsRegistrationSyNQuick[a]"
-    template = ants.image_read(get_antstorch_data(which_template))
+    template = get_cached_data(
+        ("template_image", which_template),
+        lambda: ants.image_read(get_antstorch_data(which_template)),
+    ).clone()
 
     cropped_template_size = (160, 176, 160)
 
@@ -161,36 +165,36 @@ def harvard_oxford_atlas_labeling(t1,
 
     channel_size = 1
     number_of_classification_labels = len(labels)
-
-    base_unet_model = create_unet_model_3d(
-        input_channel_size=channel_size,
-        number_of_outputs=number_of_classification_labels,
-        number_of_filters=(16, 32, 64, 128),
-        dropout_rate=0.0,
-        convolution_kernel_size=(3, 3, 3),
-        deconvolution_kernel_size=(2, 2, 2),
-        pool_size=(2, 2, 2),
-        strides=(2, 2, 2),
-        mode="classification",
-        pad_crop="keras",
-        additional_options=["kerasDeconvolutionStyle"],
-    )
-
-    unet_model = create_multihead_unet_model_3d(
-        base_unet=base_unet_model,
-        n_aux_heads=1,
-        use_sigmoid=True,
-        n_main_outputs=number_of_classification_labels,
-    )
-
-    with torch.no_grad():
-        _ = unet_model(torch.zeros(1, channel_size, *cropped_template_size))
-
     weights_path = get_pretrained_network("HarvardOxfordAtlasSubcortical_pytorch")
-    state = torch.load(weights_path, map_location="cpu")
-    unet_model.load_state_dict(state, strict=True)
-    unet_model.eval()
-    unet_model = unet_model.to(device)
+
+    def _build_hoa_model():
+        base_unet_model = create_unet_model_3d(
+            input_channel_size=channel_size,
+            number_of_outputs=number_of_classification_labels,
+            number_of_filters=(16, 32, 64, 128),
+            dropout_rate=0.0,
+            convolution_kernel_size=(3, 3, 3),
+            deconvolution_kernel_size=(2, 2, 2),
+            pool_size=(2, 2, 2),
+            strides=(2, 2, 2),
+            mode="classification",
+            pad_crop="keras",
+            additional_options=["kerasDeconvolutionStyle"],
+        )
+        mdl = create_multihead_unet_model_3d(
+            base_unet=base_unet_model,
+            n_aux_heads=1,
+            use_sigmoid=True,
+            n_main_outputs=number_of_classification_labels,
+        )
+        with torch.no_grad():
+            _ = mdl(torch.zeros(1, channel_size, 16, 16, 16))
+        state = torch.load(weights_path, map_location="cpu")
+        mdl.load_state_dict(state, strict=True)
+        mdl.eval()
+        return mdl.to(device)
+
+    unet_model = get_cached_model(("hoa_subcortical", str(device)), _build_hoa_model)
 
     if verbose:
         print("Model prediction using both the original and contralaterally flipped version.")

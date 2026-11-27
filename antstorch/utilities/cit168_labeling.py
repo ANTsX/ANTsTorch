@@ -101,6 +101,7 @@ def cit168_labeling(t1,
     from ..utilities import get_antstorch_data
     from ..architectures import create_unet_model_3d
     from ..utilities.device_manager import get_default_device
+    from ._cache import get_cached_data, get_cached_model
 
     if device is None:
         device = get_default_device()
@@ -110,10 +111,17 @@ def cit168_labeling(t1,
     if t1.dimension != 3:
         raise ValueError("Image dimension must be 3.")
 
-    template = ants.image_read(get_antstorch_data("CIT168_T1w_700um_pad_adni"))
-    template_small = ants.resample_image(template, [2, 2, 2])
-    template_large = ants.resample_image(template, [0.5, 0.5, 0.5])
-    template_seg = ants.image_read(get_antstorch_data("det_atlas_25_pad_LR_adni"))
+    def _build_cit168_templates():
+        tpl = ants.image_read(get_antstorch_data("CIT168_T1w_700um_pad_adni"))
+        tpl_s = ants.resample_image(tpl, [2, 2, 2])
+        tpl_l = ants.resample_image(tpl, [0.5, 0.5, 0.5])
+        tpl_seg = ants.image_read(get_antstorch_data("det_atlas_25_pad_LR_adni"))
+        return tpl_s, tpl_l, tpl_seg
+
+    _tpl_s_c, _tpl_l_c, _tpl_seg_c = get_cached_data(("cit168_templates_v1",), _build_cit168_templates)
+    template_small = _tpl_s_c.clone()
+    template_large = _tpl_l_c.clone()
+    template_seg = _tpl_seg_c.clone()
 
     cropped_template_size = [160, 160, 112]
 
@@ -195,33 +203,42 @@ def cit168_labeling(t1,
         number_of_outputs = len(group_labels)
         number_of_channels = len(group_labels)
 
-        # ---> AJOUT DES OPTIONS D'ARCHITECTURE KERAS EXACTE <---
-        unet0 = create_unet_model_3d(input_channel_size=number_of_channels,
-                                     number_of_outputs=1, 
-                                     number_of_filters=(32, 64, 128, 256), 
-                                     convolution_kernel_size=(3, 3, 3), 
-                                     deconvolution_kernel_size=(2, 2, 2),
-                                     pool_size=(2, 2, 2), strides=(2, 2, 2), 
-                                     dropout_rate=0.0,
-                                     mode="sigmoid",
-                                     additional_options=["nnUnetActivationStyle", "kerasDeconvolutionStyle"])
-        
-        unet1 = create_unet_model_3d(input_channel_size=2,
-                                     number_of_outputs=number_of_outputs,
-                                     number_of_filters=(32, 64, 96, 128, 256),
-                                     convolution_kernel_size=(3, 3, 3),
-                                     deconvolution_kernel_size=(2, 2, 2),
-                                     pool_size=(2, 2, 2), strides=(2, 2, 2),
-                                     dropout_rate=0.0,
-                                     mode="classification",
-                                     additional_options=["nnUnetActivationStyle", "kerasDeconvolutionStyle"])
+        def _build_cit168_net(
+            n_ch=number_of_channels,
+            n_out=number_of_outputs,
+            wf=cit168_weights,
+        ):
+            unet0 = create_unet_model_3d(
+                input_channel_size=n_ch,
+                number_of_outputs=1,
+                number_of_filters=(32, 64, 128, 256),
+                convolution_kernel_size=(3, 3, 3),
+                deconvolution_kernel_size=(2, 2, 2),
+                pool_size=(2, 2, 2),
+                strides=(2, 2, 2),
+                dropout_rate=0.0,
+                mode="sigmoid",
+                additional_options=["nnUnetActivationStyle", "kerasDeconvolutionStyle"],
+            )
+            unet1 = create_unet_model_3d(
+                input_channel_size=2,
+                number_of_outputs=n_out,
+                number_of_filters=(32, 64, 96, 128, 256),
+                convolution_kernel_size=(3, 3, 3),
+                deconvolution_kernel_size=(2, 2, 2),
+                pool_size=(2, 2, 2),
+                strides=(2, 2, 2),
+                dropout_rate=0.0,
+                mode="classification",
+                additional_options=["nnUnetActivationStyle", "kerasDeconvolutionStyle"],
+            )
+            mdl = CIT168Net(unet0, unet1)
+            state = torch.load(wf, map_location="cpu")
+            mdl.load_state_dict(state, strict=True)
+            mdl.eval()
+            return mdl.to(device)
 
-        unet_model = CIT168Net(unet0, unet1).to(device)
-        state = torch.load(cit168_weights, map_location=device)
-        
-        # ---> FORCER LA VÉRIFICATION STRICTE DES POIDS <---
-        unet_model.load_state_dict(state, strict=True)
-        unet_model.eval()
+        unet_model = get_cached_model(("cit168_net", bool(sn), str(device)), _build_cit168_net)
 
         ################################
         # Do prediction and normalize

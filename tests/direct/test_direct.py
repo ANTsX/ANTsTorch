@@ -175,3 +175,135 @@ def test_direct_inverse_matches_ants_stopping(amplitude):
     actual = _invert(tensor, torch.zeros_like(tensor), ImageDomain((n, n, n)), 20)
     np.testing.assert_allclose(actual.numpy()[0].transpose(3, 2, 1, 0), expected,
                                atol=1e-7, rtol=1e-5)
+
+
+def test_kelly_kapowski_foreground_crop_matches_uncropped_and_handles_empty():
+    ants = pytest.importorskip("ants")
+    seg_core, gray_core, white_core = _synthetic_tensors(size=12)
+    full_shape = (40, 44, 48)
+    sl = (slice(14, 26), slice(16, 28), slice(18, 30))
+
+    def embed(tensor):
+        arr = np.zeros(full_shape, dtype=np.float32)
+        arr[sl] = tensor.numpy()[0, 0].transpose(2, 1, 0)
+        return ants.from_numpy(arr, spacing=(0.9, 1.0, 1.1), origin=(-20.0, -30.0, 10.0))
+
+    seg_img, gray_img, white_img = embed(seg_core), embed(gray_core), embed(white_core)
+    cropped = kelly_kapowski(
+        seg_img, gray_img, white_img,
+        iterations=3, integration_points=3, crop_foreground=True, device="cpu",
+    )
+    uncropped = kelly_kapowski(
+        seg_img, gray_img, white_img,
+        iterations=3, integration_points=3, crop_foreground=False, device="cpu",
+    )
+    assert cropped.shape == full_shape
+    assert cropped.spacing == seg_img.spacing
+    assert cropped.origin == seg_img.origin
+    np.testing.assert_allclose(cropped.numpy(), uncropped.numpy(), atol=1e-5, rtol=1e-4)
+
+    empty_seg = ants.from_numpy(np.zeros((16, 16, 16), dtype=np.float32))
+    empty_out = kelly_kapowski(empty_seg, empty_seg, empty_seg, iterations=2, device="cpu")
+    assert float(np.abs(empty_out.numpy()).max()) == 0.0
+
+
+def test_kelly_kapowski_foreground_crop_matches_uncropped_oblique_mean_stopping():
+    import math
+
+    ants = pytest.importorskip("ants")
+    seg_core, gray_core, white_core = _synthetic_tensors(size=12)
+    full_shape = (40, 44, 48)
+    sl = (slice(14, 26), slice(16, 28), slice(18, 30))
+    th = 0.35
+    direction = np.array(
+        [
+            [math.cos(th), -math.sin(th), 0.0],
+            [math.sin(th), math.cos(th), 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+
+    def embed(tensor):
+        arr = np.zeros(full_shape, dtype=np.float32)
+        arr[sl] = tensor.numpy()[0, 0].transpose(2, 1, 0)
+        return ants.from_numpy(
+            arr,
+            spacing=(0.9, 1.0, 1.1),
+            origin=(-20.0, -30.0, 10.0),
+            direction=direction,
+        )
+
+    seg_img, gray_img, white_img = embed(seg_core), embed(gray_core), embed(white_core)
+    # gradient_step=0.2 triggers max_err > 0.1 so stopping depends on mean_err <= 0.001
+    cropped = kelly_kapowski(
+        seg_img,
+        gray_img,
+        white_img,
+        iterations=3,
+        integration_points=3,
+        gradient_step=0.2,
+        crop_foreground=True,
+        device="cpu",
+    )
+    uncropped = kelly_kapowski(
+        seg_img,
+        gray_img,
+        white_img,
+        iterations=3,
+        integration_points=3,
+        gradient_step=0.2,
+        crop_foreground=False,
+        device="cpu",
+    )
+    assert cropped.shape == full_shape
+    assert cropped.spacing == seg_img.spacing
+    assert cropped.origin == seg_img.origin
+    np.testing.assert_allclose(cropped.direction, seg_img.direction, atol=1e-7)
+    np.testing.assert_allclose(cropped.numpy(), uncropped.numpy(), atol=1e-5, rtol=1e-4)
+
+
+def test_direct_grid_context_oblique_direction_matches_spatial_transform():
+    import math
+    from antstorch.bspline_flows.spatial_transform import displacement_to_sampling_grid
+    from antstorch.direct.core import _DirectGridContext
+
+    th = 0.35
+    direction = (
+        (math.cos(th), -math.sin(th), 0.0),
+        (math.sin(th), math.cos(th), 0.0),
+        (0.0, 0.0, 1.0),
+    )
+    domain = ImageDomain((9, 11, 13), (0.8, 1.1, 1.3), (3.0, -5.0, 7.0), direction)
+    disp = torch.randn(1, 3, 13, 11, 9, dtype=torch.float32) * 0.4
+    ctx = _DirectGridContext(domain, disp.dtype, disp.device)
+    assert not ctx.is_diagonal
+    expected = displacement_to_sampling_grid(disp, domain, domain)
+    actual = ctx.sampling_grid(disp)
+    torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+
+
+def test_utility_cache_lru_and_clear():
+    from antstorch.utilities._cache import clear_utility_caches, get_cached_data, get_cached_model
+
+    clear_utility_caches()
+    calls = {"m": 0, "d": 0}
+
+    def build_m():
+        calls["m"] += 1
+        return torch.nn.Linear(2, 2).eval()
+
+    def build_d():
+        calls["d"] += 1
+        return np.ones((4, 4), dtype=np.float32)
+
+    m1 = get_cached_model(("test_m", "cpu"), build_m)
+    m2 = get_cached_model(("test_m", "cpu"), build_m)
+    assert m1 is m2 and calls["m"] == 1
+    d1 = get_cached_data(("test_d",), build_d)
+    d2 = get_cached_data(("test_d",), build_d)
+    assert d1 is d2 and calls["d"] == 1
+    clear_utility_caches()
+    _ = get_cached_model(("test_m", "cpu"), build_m)
+    assert calls["m"] == 2
+

@@ -73,6 +73,7 @@ def deep_atropos(
     from ..utilities import get_pretrained_network as _get_pretrained_network
     from ..utilities import brain_extraction as _brain_extraction
     from ..utilities.device_manager import get_default_device
+    from ._cache import get_cached_data, get_cached_model
     from .backend_ops import run_n4, run_registration
 
     if device is None:
@@ -119,10 +120,35 @@ def deep_atropos(
         truncated[image > q[1]] = q[1]
         return truncated
 
-    hcp_t1_template = ants.image_read(_get_antstorch_data("hcpinterT1Template"))
-    hcp_template_brain_mask = ants.image_read(_get_antstorch_data("hcpinterTemplateBrainMask"))
-    hcp_template_brain_segmentation = ants.image_read(_get_antstorch_data("hcpinterTemplateBrainSegmentation"))
-    hcp_t1_template = hcp_t1_template * hcp_template_brain_mask
+    patch_size = (192, 224, 192)
+
+    def _build_hcp_static_assets():
+        t1_tpl = ants.image_read(_get_antstorch_data("hcpinterT1Template"))
+        tpl_mask = ants.image_read(_get_antstorch_data("hcpinterTemplateBrainMask"))
+        tpl_seg = ants.image_read(_get_antstorch_data("hcpinterTemplateBrainSegmentation"))
+        t1_tpl_masked = t1_tpl * tpl_mask
+        s_len = (
+            t1_tpl_masked.shape[0] - patch_size[0],
+            t1_tpl_masked.shape[1] - patch_size[1],
+            t1_tpl_masked.shape[2] - patch_size[2],
+        )
+        priors_patches = []
+        for idx_p in range(6):
+            pr = ants.threshold_image(tpl_seg, idx_p + 1, idx_p + 1, 1, 0)
+            pr_sm = ants.smooth_image(pr, 1.0)
+            priors_patches.append(
+                ants.extract_image_patches(
+                    pr_sm,
+                    patch_size=patch_size,
+                    max_number_of_patches="all",
+                    stride_length=s_len,
+                    return_as_array=True,
+                )
+            )
+        return t1_tpl_masked, s_len, priors_patches
+
+    hcp_t1_cached, stride_length, prior_patches = get_cached_data(("deep_atropos_hcp_static", patch_size), _build_hcp_static_assets)
+    hcp_t1_template = hcp_t1_cached.clone()
 
     reg = None
     t1_mask = None
@@ -180,41 +206,16 @@ def deep_atropos(
             preprocessed_images.append(ants.iMath_normalize(img))
 
     # ----------------------------
-    # Build model and load weights
+    # Build model and load weights (cached per network variant & device)
     # ----------------------------
-    patch_size = (192, 224, 192)
-    stride_length = (hcp_t1_template.shape[0] - patch_size[0],
-                     hcp_t1_template.shape[1] - patch_size[1],
-                     hcp_t1_template.shape[2] - patch_size[2])
-
-    # Build template-derived priors (6 tissue priors)
-    hcp_template_priors = []
-    for i in range(6):
-        prior = ants.threshold_image(hcp_template_brain_segmentation, i + 1, i + 1, 1, 0)
-        prior_smooth = ants.smooth_image(prior, 1.0)
-        hcp_template_priors.append(prior_smooth)
-
     classes = ("background", "csf", "gray matter", "white matter",
                "deep gray matter", "brain stem", "cerebellum")
     n_classes = len(classes)
-    in_channels = len(preprocessed_images) + len(hcp_template_priors)  # modalities + priors
-
-    # ANTsTorch U-Net (generic 3D builder)
-    model = _create_unet_model_3d(
-        input_channel_size=in_channels,      # channels
-        number_of_outputs=n_classes,
-        mode="classification",
-        number_of_filters=(16, 32, 64, 128),
-        dropout_rate=0.0,
-        convolution_kernel_size=(3, 3, 3),
-        deconvolution_kernel_size=(2, 2, 2),
-        pad_crop="keras"
-    )
+    in_channels = len(preprocessed_images) + len(prior_patches)  # modalities + priors
 
     if verbose:
         print("DeepAtropos:  retrieving model weights.")
 
-    # Map to converted PyTorch weights (we follow the *_pytorch.pt convention)
     weights_key = {
         "t1": "DeepAtroposHcpT1Weights",
         "t1_t2": "DeepAtroposHcpT1T2Weights",
@@ -223,26 +224,34 @@ def deep_atropos(
     }[which_network]
     weights_path = _get_pretrained_network(weights_key + "_pytorch")
 
-    state = torch.load(weights_path, map_location=device)
-    if isinstance(state, dict) and "state_dict" in state:
-        state = state["state_dict"]
-    model.load_state_dict(state, strict=True)
-    model.eval()
-    model = model.to(device)
+    def _build_deep_atropos_model():
+        mdl = _create_unet_model_3d(
+            input_channel_size=in_channels,
+            number_of_outputs=n_classes,
+            mode="classification",
+            number_of_filters=(16, 32, 64, 128),
+            dropout_rate=0.0,
+            convolution_kernel_size=(3, 3, 3),
+            deconvolution_kernel_size=(2, 2, 2),
+            pad_crop="keras",
+        )
+        state = torch.load(weights_path, map_location="cpu")
+        if isinstance(state, dict) and "state_dict" in state:
+            state = state["state_dict"]
+        mdl.load_state_dict(state, strict=True)
+        mdl.eval()
+        return mdl.to(device)
+
+    model = get_cached_model(("deep_atropos", which_network, in_channels, str(device)), _build_deep_atropos_model)
 
     # ----------------------------
-    # Prediction (8 octant patches)
+    # Prediction (8 octant patches, batched by 2)
     # ----------------------------
     if verbose:
         print("Prediction.")
 
-    # Pre-allocate prediction array: (8, D, H, W, C_out)
     predicted_data = np.zeros((8, *patch_size, n_classes), dtype=np.float32)
 
-    # Working tensor (N=1, C, D, H, W)
-    batchX = np.zeros((in_channels, *patch_size), dtype=np.float32)
-
-    # Patches do not depend on the octant: extract them once instead of once per octant.
     modality_patches = [
         ants.extract_image_patches(
             img, patch_size=patch_size, max_number_of_patches="all",
@@ -250,28 +259,22 @@ def deep_atropos(
         )
         for img in preprocessed_images
     ]
-    prior_patches = [
-        ants.extract_image_patches(
-            prior, patch_size=patch_size, max_number_of_patches="all",
-            stride_length=stride_length, return_as_array=True
-        )
-        for prior in hcp_template_priors
-    ]
 
+    octant_batch_size = 2
+    batchX = np.empty((octant_batch_size, in_channels, *patch_size), dtype=np.float32)
     with torch.no_grad():
-        for h in range(8):
+        for h0 in range(0, 8, octant_batch_size):
+            b_len = min(octant_batch_size, 8 - h0)
             idx = 0
             for patches in modality_patches:
-                batchX[idx, :, :, :] = patches[h, :, :, :]
+                batchX[:b_len, idx] = patches[h0 : h0 + b_len]
                 idx += 1
             for patches in prior_patches:
-                batchX[idx, :, :, :] = patches[h, :, :, :]
+                batchX[:b_len, idx] = patches[h0 : h0 + b_len]
                 idx += 1
-
-            xt = torch.from_numpy(batchX[None, ...]).to(device)  # [1,C,D,H,W]
-            yt = model(xt).squeeze(0).permute(1, 2, 3, 0).cpu().numpy()  # [C_out,D,H,W]
-
-            predicted_data[h, ...] = yt
+            xt = torch.from_numpy(batchX[:b_len]).to(device)
+            yt = model(xt).permute(0, 2, 3, 4, 1).detach().cpu().numpy()
+            predicted_data[h0 : h0 + b_len] = yt
 
     # ----------------------------
     # Reconstruct prob maps and warp back if needed
